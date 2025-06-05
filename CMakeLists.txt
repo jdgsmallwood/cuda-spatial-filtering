@@ -21,6 +21,14 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+  # Save user choice in another variable
+  set(USER_BUILD_TESTING ${BUILD_TESTING})
+
+  # Disable testing for dependencies forcibly
+  set(BUILD_TESTING OFF CACHE BOOL "Disable tests for dependencies" FORCE)
+
+
+  find_package(CUDAToolkit)
   # Testing only available if this is the main app
   # Note this needs to be done in the main CMakeLists
   # since it calls enable_testing, which must be in the
@@ -57,10 +65,57 @@ add_subdirectory(src)
 # The executable code is here
 add_subdirectory(apps)
 
+message(STATUS "Including dependencies...")
+message(STATUS "cudawrappers...")
+#add_subdirectory(${PROJECT_SOURCE_DIR}/extern/cudawrappers)
+FetchContent_Declare(
+  cudawrappers
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/cudawrappers
+)
+
+FetchContent_MakeAvailable(cudawrappers)
+
+
+FetchContent_Declare(
+  xtl
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtl
+)
+FetchContent_MakeAvailable(xtl)
+
+FetchContent_Declare(
+  xtensor
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtensor
+)
+FetchContent_MakeAvailable(xtensor)
+message(STATUS "CMAKE_SOURCE: ${CMAKE_SOURCE_DIR}")
+
+FetchContent_Declare(
+  tcc
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/tcc
+)
+FetchContent_MakeAvailable(tcc)
+
+target_include_directories(tcc
+    INTERFACE
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/extern/tcc>
+        $<INSTALL_INTERFACE:include>
+)
+message(STATUS "ccglib")
+FetchContent_Declare(
+  ccglib
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/ccglib
+)
+FetchContent_MakeAvailable(ccglib)
+
+target_link_libraries(ccglib PRIVATE xtensor)
+# Restore user choice for own project tests
+set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
+message(STATUS "Testing build is ${BUILD_TESTING}")
 # Testing only available if this is the main app
 # Emergency override MODERN_CMAKE_BUILD_TESTING provided as well
 if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MODERN_CMAKE_BUILD_TESTING)
    AND BUILD_TESTING)
+   enable_testing()
   add_subdirectory(tests)
   add_subdirectory(${PROJECT_SOURCE_DIR}/extern/googletest)
 endif()

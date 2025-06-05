@@ -1,3 +1,18 @@
 [submodule "extern/googletest"]
 	path = extern/googletest
 	url = https://github.com/google/googletest.git
+[submodule "extern/tcc"]
+	path = extern/tcc
+	url = https://git.astron.nl/RD/tensor-core-correlator.git
+[submodule "extern/ccglib"]
+	path = extern/ccglib
+	url = https://git.astron.nl/RD/recruit/ccglib.git
+[submodule "extern/cudawrappers"]
+	path = extern/cudawrappers
+	url = https://github.com/nlesc-recruit/cudawrappers.git
+[submodule "extern/xtl"]
+	path = extern/xtl
+	url = https://github.com/xtensor-stack/xtl.git
+[submodule "extern/xtensor"]
+	path = extern/xtensor
+	url = https://github.com/xtensor-stack/xtensor.git

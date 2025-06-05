@@ -1,15 +1,18 @@
 #include "spatial/spatial.hpp"
 #include <cuda_runtime.h>
 
-__global__ void increment_kernel(int* data, int size) {
+__global__ void increment_kernel(int *data, int size)
+{
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < size) {
+    if (idx < size)
+    {
         data[idx]++;
     }
 }
 
-void incrementArray(int* data, int size) {
-    int* d_data = nullptr;
+void incrementArray(int *data, int size)
+{
+    int *d_data = nullptr;
     cudaMalloc(&d_data, size * sizeof(int));
     cudaMemcpy(d_data, data, size * sizeof(int), cudaMemcpyHostToDevice);
 
