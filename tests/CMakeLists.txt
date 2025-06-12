@@ -9,6 +9,7 @@ target_link_libraries(CUDASpatialFilteringTests
             GTest::gtest_main
             spatial
             cudart
+            ccglib
 )
 
 include(GoogleTest)

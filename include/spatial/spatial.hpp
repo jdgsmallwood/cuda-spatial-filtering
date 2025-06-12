@@ -15,8 +15,6 @@ typedef std::complex<float> Visibility;
 
 typedef Sample Samples[NR_CHANNELS][NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK][NR_RECEIVERS][NR_POLARIZATIONS][NR_TIMES_PER_BLOCK];
 typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS][NR_POLARIZATIONS];
-int add(int a, int b);
-void incrementArray(int *data, int size);
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A);
 void correlate(Samples *samples, Visibilities *visibilities);

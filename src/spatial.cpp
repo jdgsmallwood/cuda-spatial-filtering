@@ -10,11 +10,6 @@
 #include <complex>
 #include <cuda_fp16.h>
 
-int add(int a, int b)
-{
-    return a + b;
-}
-
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A)
 {
@@ -140,3 +135,5 @@ void correlate(Samples *samples, Visibilities *visibilities)
         std::cerr << error.what() << std::endl;
     }
 }
+
+

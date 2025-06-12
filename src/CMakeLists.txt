@@ -7,7 +7,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cu
 
 
 target_link_libraries(
-    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart
+    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib
 )
 
 
