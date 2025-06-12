@@ -38,6 +38,30 @@ TEST(EigenvalueDecompositionTest, SimpleValueTest)
 
 TEST(CorrelateTest, SimpleTest)
 {
-    correlate();
-    EXPECT_EQ(1, 1);
+    Samples *samples;
+
+    try {
+    std::cout << "Creating samples..." << std::endl;
+    checkCudaCall(cudaMallocHost(&samples, sizeof(Samples)));
+    (*samples)[1][1][4][0][0] = Sample(2, 3);
+    (*samples)[1][1][5][0][0] = Sample(4, 5);
+    std::cout << "Creating visibilities" << std::endl;
+    Visibilities *visibilities;
+    checkCudaCall(cudaMallocHost(&visibilities, sizeof(Visibilities)));
+    std::cout << "Starting correlation..." << std::endl; 
+    correlate(samples, visibilities);
+    std::cout << "Finished correlation..." << std::endl;
+    
+    print_nonzero_visibilities(visibilities);
+    
+    EXPECT_EQ((*visibilities)[2][19][0][0], Visibility(23, 2));
+    EXPECT_EQ((*visibilities)[2][14][0][0], Visibility(13, 0));
+    EXPECT_EQ((*visibilities)[2][20][0][0], Visibility(41,0));
+
+    checkCudaCall(cudaFreeHost(visibilities));
+
+    checkCudaCall(cudaFreeHost(samples));
+    } catch (std::exception &error) {
+        std::cerr << error.what() << std::endl;
+    }
 }

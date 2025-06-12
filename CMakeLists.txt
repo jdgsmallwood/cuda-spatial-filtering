@@ -104,9 +104,24 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(ccglib)
 
 target_link_libraries(ccglib PRIVATE xtensor)
+
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
+if(BUILD_TESTING) 
+  set(NR_CHANNELS 3)
+  set(NR_SAMPLES_PER_CHANNEL 8)
+  set(NR_RECEIVERS 8)
+  set(NR_POLARIZATIONS 2)
+  set(NR_RECEIVERS_PER_BLOCK 64)
+else() 
+  set(NR_RECEIVERS 576)
+  set(NR_CHANNELS 480)
+  set(NR_SAMPLES_PER_CHANNEL 3072)
+  set(NR_POLARIZATIONS 2)
+  set(NR_RECEIVERS_PER_BLOCK 64)
+endif() 
+configure_file(include/spatial/tcc_config.h.in ${PROJECT_SOURCE_DIR}/include/spatial/tcc_config.h @ONLY)
 # Testing only available if this is the main app
 # Emergency override MODERN_CMAKE_BUILD_TESTING provided as well
 if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MODERN_CMAKE_BUILD_TESTING)

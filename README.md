@@ -19,10 +19,8 @@ cmake --build .
 
 To Test:
 ```
+cd build
+cmake .. -DBUILD_TESTING=ON
+cmake --build .
 ctest
 ```
-
-
-## NB
-
-I've needed to update the paths to various header files in the submodules in order for this to work
