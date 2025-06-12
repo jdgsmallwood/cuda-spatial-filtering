@@ -27,7 +27,6 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   # Disable testing for dependencies forcibly
   set(BUILD_TESTING OFF CACHE BOOL "Disable tests for dependencies" FORCE)
 
-
   find_package(CUDAToolkit)
   # Testing only available if this is the main app
   # Note this needs to be done in the main CMakeLists
@@ -43,7 +42,8 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     message(STATUS "Doxygen not found, not building docs")
   endif()
 endif()
-
+message(STATUS "install prefix ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
 # FetchContent added in CMake 3.11, downloads during the configure step
 # FetchContent_MakeAvailable was added in CMake 3.14; simpler usage
 include(FetchContent)
@@ -95,11 +95,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(tcc)
 
-target_include_directories(tcc
-    INTERFACE
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/extern/tcc>
-        $<INSTALL_INTERFACE:include>
-)
+target_include_directories(tcc PRIVATE ${tcc_SOURCE_DIR})
 message(STATUS "ccglib")
 FetchContent_Declare(
   ccglib

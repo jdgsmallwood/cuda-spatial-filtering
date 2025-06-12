@@ -10,6 +10,14 @@
 #include <complex>
 #include <cuda_fp16.h>
 
+#define NR_BITS  8
+#define NR_RECEIVERS 576
+#define NR_CHANNELS  480
+#define NR_SAMPLES_PER_CHANNEL  3072
+#define NR_POLARIZATIONS  2
+#define NR_RECEIVERS_PER_BLOCK  64
+#define NR_TIMES_PER_BLOCK  128 / NR_BITS
+#define NR_BASELINES  NR_RECEIVERS * (NR_RECEIVERS + 1) / 2
 int add(int a, int b)
 {
     return a + b;
@@ -117,14 +125,6 @@ void correlate()
     typedef std::complex<__half> Sample;
     typedef std::complex<float> Visibility;
     constexpr tcc::Format inputFormat = tcc::Format::fp16;
-    int NR_BITS = 8;
-    int NR_RECEIVERS = 576;
-    int NR_CHANNELS = 480;
-    int NR_SAMPLES_PER_CHANNEL = 3072;
-    int NR_POLARIZATIONS = 2;
-    int NR_RECEIVERS_PER_BLOCK = 64;
-    int NR_TIMES_PER_BLOCK = 128 / NR_BITS;
-    int NR_BASELINES = NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
 
     typedef Sample Samples[NR_CHANNELS][NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK][NR_RECEIVERS][NR_POLARIZATIONS][NR_TIMES_PER_BLOCK];
     typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS][NR_POLARIZATIONS];
