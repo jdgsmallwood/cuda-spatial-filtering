@@ -319,3 +319,69 @@ TEST(CCGLIBTest, SimpleTestMatrixStructureDiffDimensions)
     checkCudaCall(cudaFreeHost(B));
     checkCudaCall(cudaFreeHost(C));
 }
+
+TEST(CCGLIBTest, SimpleTestMatrixStructureDiffDimensionsBatched)
+{
+    // Multiply 1 x 2 matrix by 2 x 1 matrix to get 1x1 matrix.
+    constexpr int n_row = 1;
+    constexpr int n_col = 1;
+    constexpr int n_inner = 2;
+    constexpr int batch_size = 2;
+    __half(*A);
+
+    checkCudaCall(cudaMallocHost(&A, sizeof(__half) * 2 * n_row * n_inner * batch_size));
+
+    __half(*B);
+
+    checkCudaCall(cudaMallocHost(&B, sizeof(__half) * 2 * n_inner * n_col * batch_size));
+
+    const int div = n_row * n_inner;
+    // First matrix Re / Im
+    A[0] = 1;
+    A[div + 0] = 2;
+    A[1] = 2;
+    A[div + 1] = 1;
+    // Second matrix Re / Im
+    A[2 * div + 0] = 1;
+    A[3 * div + 0] = 2;
+    A[2 * div + 1] = 4;
+    A[3 * div + 1] = 3;
+
+    // First matrix Re / Im
+    B[0] = 1;
+    B[div + 0] = 1;
+    B[1] = 2;
+    B[div + 1] = 4;
+
+    // Second matrix Re / Im
+    B[2 * div + 0] = 1;
+    B[3 * div + 0] = 0;
+    B[2 * div + 1] = -1;
+    B[3 * div + 1] = -4;
+
+    float(*C);
+
+    checkCudaCall(cudaMallocHost(&C, sizeof(float) * 2 * n_row * n_col * batch_size));
+
+    ccglib_mma(A, B, C, n_row, n_col, batch_size, n_inner);
+    // for debugging only.
+    for (auto i = 0; i < batch_size * 2 * n_row * n_col; i++)
+    {
+        std::cout << i << "i" << C[i] << std::endl;
+    }
+    // The first matrix "A" is row-major. The second matrix "B" is column-major so
+    // we end up doing a @ b.T.
+    // >>> import numpy as np
+    // >>> a = np.array([1 + 2j, 4 + 3j])
+    // >>> b = np.array([1, -1 - 4j])
+    // >>> a @ b.T
+    //  array([9.-17.j])
+
+    EXPECT_EQ(C[0], -1);
+    EXPECT_EQ(C[1], 13);
+    EXPECT_EQ(C[2], 9);
+    EXPECT_EQ(C[3], -17);
+    checkCudaCall(cudaFreeHost(A));
+    checkCudaCall(cudaFreeHost(B));
+    checkCudaCall(cudaFreeHost(C));
+}
