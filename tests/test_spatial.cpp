@@ -27,6 +27,24 @@ TEST(EigenvalueDecompositionTest, SimpleValueTest)
 
 TEST(CorrelateTest, SimpleTest)
 {
+    // Testing parameters are:
+    // NR_CHANNELS = 3
+    // NR_SAMPLES_PER_CHANNEL = 8
+    // NR_RECEIVERS = 8
+    // NR_POLARIZATIONS = 2
+    // NR_RECEIVERS_PER_BLOCK = 64
+
+    // Baselines will be
+    // 0-0 (1)
+    // 1-0 1-1 (2 + 1 =3 total)
+    // 2-0 2-1 2-2  (3 + 3 = 6 total)
+    // 3-0 3-1 3-2 3-3 (6 + 4 = 10 total)
+    // 4-0 4-1 4-2 4-3 4-4 (10 + 5 = 15 total)
+    // 5-0 5-1 5-2 5-3 5-4 5-5 (15 + 6 = 21 total)
+
+    // From above and using zero-indexing then the 4-4 term will be 14
+    // the 5-4 term will be 19 and 5-5 term will be 20 as seen below.
+    // So the output structure is lower triangular matrix (assuming row-major)
     Samples *samples;
 
     try

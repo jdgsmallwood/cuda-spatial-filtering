@@ -24,3 +24,8 @@ cmake .. -DBUILD_TESTING=ON
 cmake --build .
 ctest
 ```
+
+
+## Next Steps
+- [x] Understand the relationship between antenna & baseline in tcc.
+- [ ] Write code to get data from CODIF / DADA data into right format for correlator & beamformer.
