@@ -9,6 +9,8 @@
 #include <libtcc/Correlator.h>
 #include <complex>
 #include <cuda_fp16.h>
+#include <ccglib/ccglib.hpp>
+#include "ccglib/precision.h"
 
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A)
@@ -97,43 +99,84 @@ void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A)
 
 template void eigendecomposition<cuComplex>(float *h_eigenvalues, int n, const std::vector<cuComplex> *A);
 
-
 void correlate(Samples *samples, Visibilities *visibilities)
 {
-    try {
-    // Taken from simpleExample
-    std::cout << "Starting correlation inline" << std::endl;
-    checkCudaCall(cudaSetDevice(0)); // combine the CUDA runtime API and CUDA driver API
-    checkCudaCall(cudaFree(0));
-    constexpr tcc::Format inputFormat = tcc::Format::fp16;
-    std::cout << "Instantiating correlator..." << std::endl;
-    tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS, NR_SAMPLES_PER_CHANNEL, NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+    try
+    {
+        // Taken from simpleExample
+        std::cout << "Starting correlation inline" << std::endl;
+        checkCudaCall(cudaSetDevice(0)); // combine the CUDA runtime API and CUDA driver API
+        checkCudaCall(cudaFree(0));
+        constexpr tcc::Format inputFormat = tcc::Format::fp16;
+        std::cout << "Instantiating correlator..." << std::endl;
+        tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS, NR_SAMPLES_PER_CHANNEL, NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 
-    cudaStream_t stream;
-    checkCudaCall(cudaStreamCreate(&stream));
+        cudaStream_t stream;
+        checkCudaCall(cudaStreamCreate(&stream));
 
-    Samples *d_samples;
-    Visibilities *d_visibilities;
-    checkCudaCall(cudaMalloc(&d_samples, sizeof(Samples)));
-    checkCudaCall(cudaMalloc(&d_visibilities, sizeof(Visibilities)));
+        Samples *d_samples;
+        Visibilities *d_visibilities;
+        checkCudaCall(cudaMalloc(&d_samples, sizeof(Samples)));
+        checkCudaCall(cudaMalloc(&d_visibilities, sizeof(Visibilities)));
 
-    checkCudaCall(cudaMemcpyAsync(d_samples, samples, sizeof(Samples), cudaMemcpyHostToDevice, stream));
-    
+        checkCudaCall(cudaMemcpyAsync(d_samples, samples, sizeof(Samples), cudaMemcpyHostToDevice, stream));
 
-    std::cout << "Starting correlator" << std::endl;
-    correlator.launchAsync((CUstream)stream, (CUdeviceptr)d_visibilities, (CUdeviceptr)d_samples);
-    checkCudaCall(cudaMemcpyAsync(visibilities, d_visibilities, sizeof(Visibilities), cudaMemcpyDeviceToHost, stream));
-    std::cout << "Synchronizing..." << std::endl;
-    checkCudaCall(cudaStreamSynchronize(stream));
-    std::cout << "Synchronized" << std::endl;
-    
-    cudaFree(d_samples);
-    cudaFree(d_visibilities);
+        std::cout << "Starting correlator" << std::endl;
+        correlator.launchAsync((CUstream)stream, (CUdeviceptr)d_visibilities, (CUdeviceptr)d_samples);
+        checkCudaCall(cudaMemcpyAsync(visibilities, d_visibilities, sizeof(Visibilities), cudaMemcpyDeviceToHost, stream));
+        std::cout << "Synchronizing..." << std::endl;
+        checkCudaCall(cudaStreamSynchronize(stream));
+        std::cout << "Synchronized" << std::endl;
 
-    checkCudaCall(cudaStreamDestroy(stream));
-    } catch (std::exception &error) {
+        cudaFree(d_samples);
+        cudaFree(d_visibilities);
+
+        checkCudaCall(cudaStreamDestroy(stream));
+    }
+    catch (std::exception &error)
+    {
         std::cerr << error.what() << std::endl;
     }
 }
 
+void ccglib_mma(__half *A, __half *B, float *C, const int n_row, const int n_col, const int batch_size, int n_inner)
+{
+    if (n_inner == -1)
+    {
+        n_inner = n_row;
+    }
 
+    // The format of A is n_row x n_col of real parts of matrix and then n_row x n_col of imag parts of matrix.
+    cu::init();
+    cu::Device device(0);
+    cu::Context context(CU_CTX_SCHED_BLOCKING_SYNC, device);
+
+    __half(*d_A);
+    checkCudaCall(cudaMalloc(&d_A, sizeof(__half) * 2 * n_row * n_inner * batch_size));
+
+    __half(*d_B);
+    checkCudaCall(cudaMalloc(&d_B, sizeof(__half) * 2 * n_inner * n_col * batch_size));
+
+    float(*d_C);
+
+    checkCudaCall(cudaMalloc(&d_C, sizeof(float) * 2 * n_row * n_col * batch_size));
+    cudaStream_t stream;
+    checkCudaCall(cudaStreamCreate(&stream));
+    checkCudaCall(cudaMemcpyAsync(d_A, A, sizeof(__half) * 2 * n_row * n_inner * batch_size, cudaMemcpyHostToDevice, stream));
+    checkCudaCall(cudaMemcpyAsync(d_B, B, sizeof(__half) * 2 * n_inner * n_col * batch_size, cudaMemcpyHostToDevice, stream));
+
+    CUdevice cu_device;
+    cuDeviceGet(&cu_device, 0);
+    ccglib::mma::GEMM gemm_mma(batch_size, n_row, n_col, n_inner, cu_device,
+                               stream, ccglib::ValueType::float16,
+                               ccglib::mma::basic);
+
+    gemm_mma.Run((CUdeviceptr)d_A, (CUdeviceptr)d_B, (CUdeviceptr)d_C);
+    checkCudaCall(cudaMemcpyAsync(C, d_C, sizeof(float) * 2 * n_row * n_col * batch_size, cudaMemcpyDeviceToHost, stream));
+
+    checkCudaCall(cudaStreamSynchronize(stream));
+
+    checkCudaCall(cudaFree(d_A));
+    checkCudaCall(cudaFree(d_B));
+    checkCudaCall(cudaFree(d_C));
+}
