@@ -60,3 +60,5 @@ CMakeUserPresets.json
 #cmake-build-*
 
 extern/
+.sessions/
+.cache/

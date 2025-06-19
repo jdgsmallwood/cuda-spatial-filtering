@@ -105,6 +105,13 @@ FetchContent_MakeAvailable(ccglib)
 
 target_link_libraries(ccglib PRIVATE xtensor)
 
+FetchContent_Declare(
+  pcap
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/libpcap
+)
+FetchContent_MakeAvailable(pcap)
+
+
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
@@ -114,12 +121,21 @@ if(BUILD_TESTING)
   set(NR_RECEIVERS 8)
   set(NR_POLARIZATIONS 2)
   set(NR_RECEIVERS_PER_BLOCK 64)
+  set(NR_BITS 16)
+elseif(BUILD_TARGET STREQUAL "LAMBDA")
+  set(NR_CHANNELS 8)
+  set(NR_SAMPLES_PER_CHANNEL 6400)
+  set(NR_RECEIVERS 32)
+  set(NR_POLARIZATIONS 2)
+  set(NR_RECEIVERS_PER_BLOCK 32)
+  set(NR_BITS 8)
 else() 
   set(NR_RECEIVERS 576)
   set(NR_CHANNELS 480)
   set(NR_SAMPLES_PER_CHANNEL 3072)
   set(NR_POLARIZATIONS 2)
   set(NR_RECEIVERS_PER_BLOCK 64)
+  set(NR_BITS 16)
 endif() 
 configure_file(include/spatial/tcc_config.h.in ${PROJECT_SOURCE_DIR}/include/spatial/tcc_config.h @ONLY)
 # Testing only available if this is the main app

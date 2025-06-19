@@ -107,7 +107,6 @@ void correlate(Samples *samples, Visibilities *visibilities)
         std::cout << "Starting correlation inline" << std::endl;
         checkCudaCall(cudaSetDevice(0)); // combine the CUDA runtime API and CUDA driver API
         checkCudaCall(cudaFree(0));
-        constexpr tcc::Format inputFormat = tcc::Format::fp16;
         std::cout << "Instantiating correlator..." << std::endl;
         tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS, NR_SAMPLES_PER_CHANNEL, NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 

@@ -2,19 +2,42 @@
 #include <vector>
 #include <complex>
 #include <cuda.h>
-#include <cuda_fp16.h>
 #include <iostream>
+#include <pcap/pcap.h>
 
+#include <libtcc/Correlator.h>
 #include "spatial/tcc_config.h"
-#define NR_BITS 16
 #define NR_TIMES_PER_BLOCK (128 / NR_BITS)
 #define NR_BASELINES (NR_RECEIVERS * (NR_RECEIVERS + 1) / 2)
 
+#include <cuda_fp16.h>
+
+#if NR_BITS == 4
+typedef complex_int4_t Sample;
+typedef std::complex<int32_t> Visibility;
+constexpr tcc::Format inputFormat = tcc::Format::i4;
+#elif NR_BITS == 8
+typedef std::complex<int8_t> Sample;
+typedef std::complex<int32_t> Visibility;
+constexpr tcc::Format inputFormat = tcc::Format::i8;
+#elif NR_BITS == 16
 typedef std::complex<__half> Sample;
 typedef std::complex<float> Visibility;
+constexpr tcc::Format inputFormat = tcc::Format::fp16;
+#endif
 
 typedef Sample Samples[NR_CHANNELS][NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK][NR_RECEIVERS][NR_POLARIZATIONS][NR_TIMES_PER_BLOCK];
 typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS][NR_POLARIZATIONS];
+
+struct VisibilityFrame
+{
+    Visibilities data;
+};
+struct SampleFrame
+{
+    Samples data;
+};
+
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A);
 void correlate(Samples *samples, Visibilities *visibilities);
@@ -44,6 +67,30 @@ inline void print_nonzero_visibilities(const Visibilities *vis)
                     {
                         std::cout << "vis[" << ch << "][" << bl << "][" << pol1 << "][" << pol2
                                   << "] = (" << v.real() << ", " << v.imag() << ")\n";
+                    }
+                }
+            }
+        }
+    }
+}
+
+inline void print_nonzero_samples(const Samples *samps)
+{
+    for (int ch = 0; ch < NR_CHANNELS; ++ch)
+    {
+        for (int j = 0; j < NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK; ++j)
+        {
+            for (int k = 0; k < NR_RECEIVERS; k++)
+            {
+                for (int pol = 0; pol < NR_POLARIZATIONS; ++pol)
+                {
+                    for (int t = 0; t < NR_TIMES_PER_BLOCK; ++t)
+                    {
+                        const Sample s = (*samps)[ch][j][k][pol][t];
+                        if (s.real() != 0.0f || s.imag() != 0.0f)
+                        {
+                            std::cout << "samp[" << ch << "][" << j << "][" << k << "][" << pol << "][" << t << "] = (" << static_cast<int>(s.real()) << ", " << static_cast<int>(s.imag()) << ")\n";
+                        }
                     }
                 }
             }
