@@ -14,14 +14,13 @@
 #include <stdexcept>
 #include <vector>
 constexpr int g_FILTERBANKS = 5;
-constexpr int NR_BLOCKS_FOR_CORRELATION = 10;
+constexpr int NR_BLOCKS_FOR_CORRELATION = 50;
 constexpr int NUM_BUFFERS = 2;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
-struct PacketInfo {
-  uint64_t sample_count;
-  uint16_t freq_channel;
-};
+
+typedef int8_t Tin;
+typedef int16_t Tscale;
 
 struct LambdaWrapper {
   // This exists to allow calling of std::memcpy on host into buffer in async
@@ -29,27 +28,14 @@ struct LambdaWrapper {
   std::function<void()> func;
 
   static void launch(void *data) {
-    auto *wrapper = static_cast<LambdaWrapper *>(data);
+    std::unique_ptr<LambdaWrapper> wrapper(static_cast<LambdaWrapper *>(data));
     wrapper->func();
-    delete wrapper; // clean up
   }
 };
-PacketInfo get_packet_info(const u_char *packet, int size) {
-  if (size < 58) { // minimum header size (14+20+8+16)
-    printf("Packet too small\n");
-    throw std::runtime_error("Packet size too small!");
-  }
 
-  const CustomHeader *custom =
-      reinterpret_cast<const CustomHeader *>(packet + 42);
-
-  PacketInfo p = {custom->sample_count, custom->freq_channel};
-  return p;
-}
-
-void process_packet(const u_char *packet, int size,
-                    std::vector<SampleFrame> &agg_samples, int start_seq_id,
-                    int start_freq) {
+void process_packet(const u_char *packet, const int size,
+                    std::vector<SampleFrame> &agg_samples,
+                    const int start_seq_id, const int start_freq) {
   if (size < 58) { // minimum header size (14+20+8+16)
     printf("Packet too small\n");
     return;
@@ -72,10 +58,6 @@ void process_packet(const u_char *packet, int size,
   const CustomHeader *custom =
       reinterpret_cast<const CustomHeader *>(packet + 42);
 
-  // printf("FPGA ID: %u\n", custom->fpga_id);
-  // printf("Sample Count: %llu\n", (unsigned long long)custom->sample_count);
-  // printf("Frequency Channel: %u\n", custom->freq_channel);
-
   const int packet_num =
       (custom->sample_count - start_seq_id) / NR_TIME_STEPS_PER_PACKET;
   const int packet_num_in_frame = packet_num % NR_BLOCKS_FOR_CORRELATION;
@@ -88,17 +70,17 @@ void process_packet(const u_char *packet, int size,
          sample_frame_to_populate);
 
   // Scale factors start at offset 64
-  const uint16_t *scales = reinterpret_cast<const uint16_t *>(packet + 64);
+  const Tscale *scales = reinterpret_cast<const Tscale *>(packet + 64);
 
   // Filterbank samples after scales
-  const int8_t *samples = reinterpret_cast<const int8_t *>(
-      packet + 64 + g_FILTERBANKS * sizeof(uint16_t) * 4);
-  for (int k = 0; k < num_blocks_per_packet; k++) {
-    for (int i = 0; i < NR_TIMES_PER_BLOCK; i++) {
-      for (int j = 0; j < NR_ACTUAL_RECEIVERS; j++) {
-        agg_samples[sample_frame_to_populate]
-            .data[custom->freq_channel - start_freq]
-                 [num_blocks_per_packet * packet_num_in_frame + k][j][0][i] =
+  const Tin *samples = reinterpret_cast<const Tin *>(
+      packet + 64 + g_FILTERBANKS * sizeof(Tscale) * 4);
+  const int freq_idx = custom->freq_channel - start_freq;
+  for (auto k = 0; k < num_blocks_per_packet; ++k) {
+    int pkt_idx = num_blocks_per_packet * packet_num_in_frame + k;
+    for (auto i = 0; i < NR_TIMES_PER_BLOCK; ++i) {
+      for (auto j = 0; j < NR_ACTUAL_RECEIVERS; ++j) {
+        agg_samples[sample_frame_to_populate].data[freq_idx][pkt_idx][j][0][i] =
             Sample(scales[j] * samples[2 * NR_ACTUAL_RECEIVERS * i + 2 * j],
                    scales[j] *
                        samples[2 * NR_ACTUAL_RECEIVERS * i + 2 * j + 1]);
@@ -125,28 +107,24 @@ int main(int argc, char *argv[]) {
   int res;
 
   cudaStream_t streams[NUM_BUFFERS];
-  cudaEvent_t input_transfer_done[NUM_BUFFERS],
-      output_transfer_done[NUM_BUFFERS],
-      output_pinned_transfer_done[NUM_BUFFERS];
+  cudaEvent_t input_transfer_done[NUM_BUFFERS];
 
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaStreamCreate(&streams[i]);
     cudaEventCreate(&input_transfer_done[i]);
-    cudaEventCreate(&output_transfer_done[i]);
-    cudaEventCreate(&output_pinned_transfer_done[i]);
   }
 
   Samples *h_samples[NUM_BUFFERS];
   Visibilities *h_visibilities[NUM_BUFFERS];
 
-  for (auto i = 0; i < NUM_BUFFERS; i++) {
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaMallocHost(&h_samples[i], sizeof(Samples));
     cudaMallocHost(&h_visibilities[i], sizeof(Visibilities));
   }
 
   Samples *d_samples[NUM_BUFFERS];
   Visibilities *d_visibilities[NUM_BUFFERS];
-  for (int i = 0; i < NUM_BUFFERS; i++) {
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaMalloc(&d_samples[i], sizeof(Samples));
     cudaMalloc(&d_visibilities[i], sizeof(Visibilities));
   }
@@ -162,9 +140,6 @@ int main(int argc, char *argv[]) {
     if (res == 0)
       continue; // Timeout in live capture, ignore for offline
     num_packets_captured++;
-    //	printf("Timestamp: %u\n", header->ts);
-    //	printf("Packet length: %u\n", header->len);
-
     PacketInfo p = get_packet_info(data, header->len);
 
     if (first_packet) {
@@ -210,6 +185,7 @@ int main(int argc, char *argv[]) {
   // second pass to actually get the data
 
   pcap_close(handle);
+  // Reopen the file to return to the beginning of the file.
   handle = pcap_open_offline(argv[1], errbuf);
   std::vector<SampleFrame> aggregated_samples(number_of_aggregated_packets);
   std::vector<VisibilityFrame> aggregated_vis(number_of_aggregated_packets);
@@ -240,20 +216,20 @@ int main(int argc, char *argv[]) {
   pcap_close(handle);
 
   int current_buffer = 0;
+  // std::atomic is overkill right now but if we end up using multi-threading at
+  // some point this sidesteps a race condition.
   std::atomic<int> last_frame_processed = 0;
   bool processing = true;
 
   // start with these events in done state.
-  for (int i = 0; i < NUM_BUFFERS; ++i) {
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaEventRecord(input_transfer_done[i], streams[i]);
-    cudaEventRecord(output_transfer_done[i], streams[i]);
-    cudaEventRecord(output_pinned_transfer_done[i], streams[i]);
   }
 
+  printf("Initializing correlator\n");
   tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
                              NR_CHANNELS, NR_SAMPLES_PER_CHANNEL,
                              NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
-  printf("Initializing correlator\n");
   printf("NR_RECEIVERS: %u\n", NR_RECEIVERS);
   printf("NR_CHANNELS: %u\n", NR_CHANNELS);
   printf("NR_SAMPLES_PER_CHANNEL: %u\n", NR_SAMPLES_PER_CHANNEL);
@@ -274,9 +250,10 @@ int main(int argc, char *argv[]) {
       int buffer_value = current_buffer;
       if (next_frame_to_capture + 1 >= number_of_aggregated_packets) {
         processing = false;
-        printf("Finishing processing loop as next frame is %u which is greater "
-               "than or equal to the number of aggregated_packets %u\n",
-               next_frame_to_capture, number_of_aggregated_packets);
+        printf(
+            "Finishing processing loop as next frame is %u which +1 is greater "
+            "than or equal to the number of aggregated_packets %u\n",
+            next_frame_to_capture, number_of_aggregated_packets);
       }
 
       std::memcpy(h_samples[current_buffer],
@@ -286,6 +263,7 @@ int main(int argc, char *argv[]) {
       cudaMemcpyAsync(d_samples[current_buffer], h_samples[current_buffer],
                       sizeof(Samples), cudaMemcpyHostToDevice,
                       streams[current_buffer]);
+      // Now we can start preparing the next buffer for transport to the GPU.
       cudaEventRecord(input_transfer_done[current_buffer],
                       streams[current_buffer]);
 
@@ -296,17 +274,15 @@ int main(int argc, char *argv[]) {
           cudaMemcpyAsync(h_visibilities[current_buffer],
                           d_visibilities[current_buffer], sizeof(Visibilities),
                           cudaMemcpyDeviceToHost, streams[current_buffer]));
-      cudaEventRecord(output_transfer_done[current_buffer],
-                      streams[current_buffer]);
-      cudaLaunchHostFunc(
-          streams[current_buffer], LambdaWrapper::launch,
-          new LambdaWrapper{[next_frame_to_capture, buffer_value,
-                             &aggregated_vis, &h_visibilities]() {
+      auto lambda = std::make_unique<LambdaWrapper>(
+          LambdaWrapper{[next_frame_to_capture, buffer_value, &aggregated_vis,
+                         &h_visibilities]() {
             std::memcpy(&aggregated_vis[next_frame_to_capture].data,
                         h_visibilities[buffer_value], sizeof(Visibilities));
           }});
-      cudaEventRecord(output_pinned_transfer_done[current_buffer],
-                      streams[current_buffer]);
+
+      cudaLaunchHostFunc(streams[current_buffer], LambdaWrapper::launch,
+                         lambda.release());
     }
 
     current_buffer = (current_buffer + 1) % NUM_BUFFERS;
@@ -316,15 +292,17 @@ int main(int argc, char *argv[]) {
 
   printf("Starting to print visibilities...\n");
 
-  for (int i = 0; i < number_of_aggregated_packets; ++i) {
+  for (auto i = 0; i < number_of_aggregated_packets; ++i) {
     printf("Visibilities for %u:\n", i);
     print_nonzero_visibilities(&aggregated_vis[i].data);
   }
-  for (auto i = 0; i < NUM_BUFFERS; i++) {
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaFreeHost(h_samples[i]);
     cudaFreeHost(h_visibilities[i]);
     cudaFree(d_samples[i]);
     cudaFree(d_visibilities[i]);
+    cudaStreamDestroy(streams[i]);
+    cudaEventDestroy(input_transfer_done[i]);
   }
   return 0;
 }

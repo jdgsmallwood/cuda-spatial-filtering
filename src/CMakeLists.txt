@@ -3,6 +3,7 @@
 add_library(spatial 
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cu
+${CMAKE_CURRENT_SOURCE_DIR}/ethernet.cpp
 )
 
 
