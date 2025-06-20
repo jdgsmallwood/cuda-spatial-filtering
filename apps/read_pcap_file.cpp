@@ -136,10 +136,6 @@ int main(int argc, char *argv[]) {
   std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
   std::memset(h_visibilities, 0,
               number_of_aggregated_packets * sizeof(Visibilities));
-  printf("test - see nonzero samples\n");
-  print_nonzero_samples(&h_samples[0]);
-  printf("test - see nonzero visibilities\n");
-  print_nonzero_visibilities(&h_visibilities[0]);
   printf("Processing packets\n");
   while ((res = pcap_next_ex(handle, &header, &data)) >= 0) {
     if (res == 0)
