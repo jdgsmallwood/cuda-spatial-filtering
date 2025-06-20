@@ -16,6 +16,8 @@ constexpr int NUM_BUFFERS = 2;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
 
+constexpr int NR_ACTUAL_BASELINES =
+    NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
 int main(int argc, char *argv[]) {
   /* Read data from a PCAP file, run through the Tensor-Core Correlator and
    * output visibilities to stderr.
@@ -31,6 +33,11 @@ int main(int argc, char *argv[]) {
    * GPU.
    *
    * */
+
+  /*
+   * PCAP Formatting.
+   * */
+
   if (argc < 2) {
     printf("Usage: %s <pcap file>\n", argv[0]);
     return 1;
@@ -47,14 +54,7 @@ int main(int argc, char *argv[]) {
   const u_char *data;
   int res;
 
-  cudaStream_t streams[NUM_BUFFERS];
-  cudaEvent_t input_transfer_done[NUM_BUFFERS];
-
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaStreamCreate(&streams[i]);
-    cudaEventCreate(&input_transfer_done[i]);
-  }
-
+  // figure out what the data looks like.
   int start_freq_channel = -1;
   int end_freq_channel = -1;
 
@@ -115,6 +115,10 @@ int main(int argc, char *argv[]) {
   // Reopen the file to return to the beginning of the file.
   handle = pcap_open_offline(argv[1], errbuf);
 
+  /*
+   * PCAP Data Reading
+   * */
+
   // allocate pinned host memory
   Samples *h_samples;
   Visibilities *h_visibilities;
@@ -123,18 +127,9 @@ int main(int argc, char *argv[]) {
   cudaMallocHost(&h_visibilities,
                  number_of_aggregated_packets * sizeof(Visibilities));
 
-  Samples *d_samples[NUM_BUFFERS];
-  Visibilities *d_visibilities[NUM_BUFFERS];
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaMalloc(&d_samples[i], sizeof(Samples));
-    cudaMalloc(&d_visibilities[i], sizeof(Visibilities));
-  }
-
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
 
   Tscale *h_scales;
-  constexpr int NR_ACTUAL_BASELINES =
-      NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
   cudaMallocHost(&h_scales, NR_ACTUAL_BASELINES * sizeof(Tscale));
 
   printf("Setting h_samples & h_visibilities memory to zero\n");
@@ -168,6 +163,22 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // create CUDA streams
+  cudaStream_t streams[NUM_BUFFERS];
+  cudaEvent_t input_transfer_done[NUM_BUFFERS];
+
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+    cudaStreamCreate(&streams[i]);
+    cudaEventCreate(&input_transfer_done[i]);
+  }
+
+  // create device pointers
+  Samples *d_samples[NUM_BUFFERS];
+  Visibilities *d_visibilities[NUM_BUFFERS];
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+    cudaMalloc(&d_samples[i], sizeof(Samples));
+    cudaMalloc(&d_visibilities[i], sizeof(Visibilities));
+  }
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaEventRecord(input_transfer_done[i], streams[i]);
@@ -191,6 +202,8 @@ int main(int argc, char *argv[]) {
   // some point this sidesteps a race condition.
   std::atomic<int> last_frame_processed = 0;
   bool processing = true;
+
+  // Main processing loop.
   while (processing) {
     if (cudaEventQuery(input_transfer_done[current_buffer]) == cudaSuccess) {
       printf("Beginning new processing loop....\n");
@@ -227,8 +240,11 @@ int main(int argc, char *argv[]) {
   printf("Synchronizing...\n");
   cudaDeviceSynchronize();
 
-  printf("Starting to print visibilities...\n");
+  /*
+   * Output
+   * */
 
+  printf("Starting to print visibilities...\n");
   for (auto i = 0; i < number_of_aggregated_packets; ++i) {
     printf("Visibilities for %u:\n", i);
     print_nonzero_visibilities(&h_visibilities[i], h_scales);
