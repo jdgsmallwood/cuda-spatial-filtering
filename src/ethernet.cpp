@@ -19,10 +19,9 @@ PacketInfo get_packet_info(const u_char *packet, const int size) {
   PacketInfo p = {custom->sample_count, custom->freq_channel};
   return p;
 }
-void process_packet(const u_char *packet, const int size,
-                    std::vector<SampleFrame> &agg_samples,
-                    const int start_seq_id, const int start_freq,
-                    const int nr_time_steps_per_packet,
+void process_packet(const u_char *packet, const int size, Samples *agg_samples,
+                    std::vector<Tscale> &scales_output, const int start_seq_id,
+                    const int start_freq, const int nr_time_steps_per_packet,
                     const int nr_blocks_for_correlation,
                     const int nr_times_per_block,
                     const int nr_actual_receivers) {
@@ -58,9 +57,12 @@ void process_packet(const u_char *packet, const int size,
          custom->sample_count, start_seq_id);
   printf("Will write to block %u in frame %u\n", packet_num_in_frame,
          sample_frame_to_populate);
-
+  printf("Num blocks per packet is %u\n", num_blocks_per_packet);
   // Scale factors start at offset 64
   const Tscale *scales = reinterpret_cast<const Tscale *>(packet + 64);
+  for (auto j = 0; j < nr_actual_receivers; ++j) {
+    scales_output[j] = scales[j];
+  }
 
   // Filterbank samples after scales
   const Tin *samples = reinterpret_cast<const Tin *>(
@@ -70,10 +72,11 @@ void process_packet(const u_char *packet, const int size,
     int pkt_idx = num_blocks_per_packet * packet_num_in_frame + k;
     for (auto i = 0; i < nr_times_per_block; ++i) {
       for (auto j = 0; j < nr_actual_receivers; ++j) {
-        agg_samples[sample_frame_to_populate].data[freq_idx][pkt_idx][j][0][i] =
-            Sample(scales[j] * samples[2 * nr_actual_receivers * i + 2 * j],
-                   scales[j] *
-                       samples[2 * nr_actual_receivers * i + 2 * j + 1]);
+        agg_samples[sample_frame_to_populate][freq_idx][pkt_idx][j][0][i] =
+            Sample(samples[2 * k * nr_times_per_block * nr_actual_receivers +
+                           2 * nr_actual_receivers * i + 2 * j],
+                   samples[2 * k * nr_times_per_block * nr_actual_receivers +
+                           2 * nr_actual_receivers * i + 2 * j + 1]);
       }
     }
   }

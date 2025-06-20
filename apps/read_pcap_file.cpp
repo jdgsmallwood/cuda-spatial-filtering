@@ -1,31 +1,20 @@
 #include "spatial/ethernet.hpp"
 #include "spatial/spatial.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cuComplex.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cudawrappers/cu.hpp>
-#include <functional>
 #include <iostream>
 #include <libtcc/Correlator.h>
 #include <pcap/pcap.h>
 #include <stdexcept>
 #include <vector>
 constexpr int NR_BLOCKS_FOR_CORRELATION = 50;
-constexpr int NUM_BUFFERS = 10;
+constexpr int NUM_BUFFERS = 2;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
-
-struct LambdaWrapper {
-  // This exists to allow calling of std::memcpy on host into buffer in async
-  // pipeline.
-  std::function<void()> func;
-
-  static void launch(void *data) {
-    std::unique_ptr<LambdaWrapper> wrapper(static_cast<LambdaWrapper *>(data));
-    wrapper->func();
-  }
-};
 
 int main(int argc, char *argv[]) {
   /* Read data from a PCAP file, run through the Tensor-Core Correlator and
@@ -35,19 +24,12 @@ int main(int argc, char *argv[]) {
    * 1. Read through PCAP packets to get frequency channels, length of packets
    * etc.
    * 2. Read through again to store data.
-   * 3. Load data to aggregated_samples, aggregated_vis
+   * 3. Load data to h_samples, h_visibilities
    * 4. Run CUDA operations & print
    *
    * We use a multiple buffer / stream system to allow stream concurrency on the
    * GPU.
    *
-   * The PCAP file could potentially be quite large and allocating all as
-   * pageable memory may cause OOM errors. Therefore we save the input data
-   * initially in pageable memory and copy across to the input buffers when
-   * they're free. Similarly we move the output data from the pinned landing
-   * host memory to pageable memory.
-   *
-   *   *
    * */
   if (argc < 2) {
     printf("Usage: %s <pcap file>\n", argv[0]);
@@ -73,20 +55,6 @@ int main(int argc, char *argv[]) {
     cudaEventCreate(&input_transfer_done[i]);
   }
 
-  Samples *h_samples[NUM_BUFFERS];
-  Visibilities *h_visibilities[NUM_BUFFERS];
-
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaMallocHost(&h_samples[i], sizeof(Samples));
-    cudaMallocHost(&h_visibilities[i], sizeof(Visibilities));
-  }
-
-  Samples *d_samples[NUM_BUFFERS];
-  Visibilities *d_visibilities[NUM_BUFFERS];
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaMalloc(&d_samples[i], sizeof(Samples));
-    cudaMalloc(&d_visibilities[i], sizeof(Visibilities));
-  }
   int start_freq_channel = -1;
   int end_freq_channel = -1;
 
@@ -133,9 +101,9 @@ int main(int argc, char *argv[]) {
          end_seq_num);
 
   printf("Total packets captured is %u\n", num_packets_captured);
+  const int num_freq = end_freq_channel - start_freq_channel + 1;
   const int number_of_aggregated_packets =
-      num_packets_captured / NR_BLOCKS_FOR_CORRELATION /
-      (end_freq_channel - start_freq_channel + 1);
+      std::max(num_packets_captured / NR_BLOCKS_FOR_CORRELATION / num_freq, 1);
   printf("Storing in groups of 10. Number of aggregated packets is %u\n",
          number_of_aggregated_packets);
   if (res == -1) {
@@ -146,42 +114,44 @@ int main(int argc, char *argv[]) {
   pcap_close(handle);
   // Reopen the file to return to the beginning of the file.
   handle = pcap_open_offline(argv[1], errbuf);
-  std::vector<SampleFrame> aggregated_samples(number_of_aggregated_packets);
-  std::vector<VisibilityFrame> aggregated_vis(number_of_aggregated_packets);
-  printf("Setting aggregated_samples memory to zero\n");
-  for (auto &frame : aggregated_samples) {
-    std::memset(&frame, 0, sizeof(SampleFrame));
+
+  // allocate pinned host memory
+  Samples *h_samples;
+  Visibilities *h_visibilities;
+
+  cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
+  cudaMallocHost(&h_visibilities,
+                 number_of_aggregated_packets * sizeof(Visibilities));
+
+  Samples *d_samples[NUM_BUFFERS];
+  Visibilities *d_visibilities[NUM_BUFFERS];
+  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+    cudaMalloc(&d_samples[i], sizeof(Samples));
+    cudaMalloc(&d_visibilities[i], sizeof(Visibilities));
   }
 
+  std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
+
+  printf("Setting h_samples & h_visibilities memory to zero\n");
+  std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
+  std::memset(h_visibilities, 0,
+              number_of_aggregated_packets * sizeof(Visibilities));
   printf("test - see nonzero samples\n");
-  print_nonzero_samples(&aggregated_samples[0].data);
-  printf("Setting aggregated visibilities memory to zero\n");
-  for (auto &frame : aggregated_vis) {
-    std::memset(&frame, 0, sizeof(VisibilityFrame));
-  }
+  print_nonzero_samples(&h_samples[0]);
   printf("test - see nonzero visibilities\n");
-  print_nonzero_visibilities(&aggregated_vis[0].data);
+  print_nonzero_visibilities(&h_visibilities[0]);
   printf("Processing packets\n");
-  // TODO: Will need to sort out handling of not full packet parcels.
-  // will this just be fine and it will be handled by zero padding?
   while ((res = pcap_next_ex(handle, &header, &data)) >= 0) {
     if (res == 0)
       continue; // Timeout in live capture, ignore for offline
                 //  printf("Timestamp: %u\n", header->ts);
                 //  printf("Packet length: %u\n", header->len);
-    process_packet(data, header->len, aggregated_samples, start_seq_num,
+    process_packet(data, header->len, h_samples, scales, start_seq_num,
                    start_freq_channel, NR_TIME_STEPS_PER_PACKET,
                    NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
                    NR_ACTUAL_RECEIVERS);
   }
   pcap_close(handle);
-
-  int current_buffer = 0;
-  // std::atomic is overkill right now but if we end up using multi-threading at
-  // some point this sidesteps a race condition.
-  std::atomic<int> last_frame_processed = 0;
-  bool processing = true;
-
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaEventRecord(input_transfer_done[i], streams[i]);
@@ -200,16 +170,18 @@ int main(int argc, char *argv[]) {
   printf("NR_ACTUAL_RECEIVERS: %u\n", NR_ACTUAL_RECEIVERS);
   printf("NR_BITS: %u\n", NR_BITS);
   printf("Launching processing loop...\n");
+  int current_buffer = 0;
+  // std::atomic is overkill right now but if we end up using multi-threading at
+  // some point this sidesteps a race condition.
+  std::atomic<int> last_frame_processed = 0;
+  bool processing = true;
   while (processing) {
-    // h_samples[current_buffer] is no longer required, so we can queue up a new
-    // data file to run.
     if (cudaEventQuery(input_transfer_done[current_buffer]) == cudaSuccess) {
       printf("Beginning new processing loop....\n");
       int next_frame_to_capture = last_frame_processed.fetch_add(1);
       printf("Next frame to capture is %u for stream %u\n",
              next_frame_to_capture, current_buffer);
       // Use this for the lambda function to capture current value.
-      int buffer_value = current_buffer;
       if (next_frame_to_capture + 1 >= number_of_aggregated_packets) {
         processing = false;
         printf(
@@ -218,13 +190,9 @@ int main(int argc, char *argv[]) {
             next_frame_to_capture, number_of_aggregated_packets);
       }
 
-      std::memcpy(h_samples[current_buffer],
-                  &aggregated_samples[next_frame_to_capture].data,
-                  sizeof(Samples));
-
-      cudaMemcpyAsync(d_samples[current_buffer], h_samples[current_buffer],
-                      sizeof(Samples), cudaMemcpyHostToDevice,
-                      streams[current_buffer]);
+      cudaMemcpyAsync(d_samples[current_buffer],
+                      h_samples[next_frame_to_capture], sizeof(Samples),
+                      cudaMemcpyHostToDevice, streams[current_buffer]);
       // Now we can start preparing the next buffer for transport to the GPU.
       cudaEventRecord(input_transfer_done[current_buffer],
                       streams[current_buffer]);
@@ -233,22 +201,9 @@ int main(int argc, char *argv[]) {
                              (CUdeviceptr)d_visibilities[current_buffer],
                              (CUdeviceptr)d_samples[current_buffer]);
       checkCudaCall(
-          cudaMemcpyAsync(h_visibilities[current_buffer],
+          cudaMemcpyAsync(h_visibilities[next_frame_to_capture],
                           d_visibilities[current_buffer], sizeof(Visibilities),
                           cudaMemcpyDeviceToHost, streams[current_buffer]));
-      // This allows the memory copy out of the pinned output memory to be a
-      // part of the pipeline so that it doesn't get overwritten. Stream will be
-      // suspended during this operation so recommend having NUM_BUFFERS larger
-      // than normal.
-      auto lambda = std::make_unique<LambdaWrapper>(
-          LambdaWrapper{[next_frame_to_capture, buffer_value, &aggregated_vis,
-                         &h_visibilities]() {
-            std::memcpy(&aggregated_vis[next_frame_to_capture].data,
-                        h_visibilities[buffer_value], sizeof(Visibilities));
-          }});
-
-      cudaLaunchHostFunc(streams[current_buffer], LambdaWrapper::launch,
-                         lambda.release());
     }
 
     current_buffer = (current_buffer + 1) % NUM_BUFFERS;
@@ -260,15 +215,15 @@ int main(int argc, char *argv[]) {
 
   for (auto i = 0; i < number_of_aggregated_packets; ++i) {
     printf("Visibilities for %u:\n", i);
-    print_nonzero_visibilities(&aggregated_vis[i].data);
+    print_nonzero_visibilities(&h_visibilities[i]);
   }
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaFreeHost(h_samples[i]);
-    cudaFreeHost(h_visibilities[i]);
     cudaFree(d_samples[i]);
     cudaFree(d_visibilities[i]);
     cudaStreamDestroy(streams[i]);
     cudaEventDestroy(input_transfer_done[i]);
   }
+  cudaFreeHost(h_samples);
+  cudaFreeHost(h_visibilities);
   return 0;
 }
