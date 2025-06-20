@@ -263,5 +263,6 @@ int main(int argc, char *argv[]) {
   }
   cudaFreeHost(h_samples);
   cudaFreeHost(h_visibilities);
+  cudaFreeHost(h_scales);
   return 0;
 }
