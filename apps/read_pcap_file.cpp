@@ -132,6 +132,11 @@ int main(int argc, char *argv[]) {
 
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
 
+  Tscale *h_scales;
+  constexpr int NR_ACTUAL_BASELINES =
+      NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
+  cudaMallocHost(&h_scales, NR_ACTUAL_BASELINES * sizeof(Tscale));
+
   printf("Setting h_samples & h_visibilities memory to zero\n");
   std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
   std::memset(h_visibilities, 0,
@@ -152,6 +157,17 @@ int main(int argc, char *argv[]) {
                    NR_ACTUAL_RECEIVERS);
   }
   pcap_close(handle);
+
+  printf("h_scales:\n");
+  for (auto i = 0; i < NR_ACTUAL_RECEIVERS; ++i) {
+    for (auto j = 0; j <= i; ++j) {
+      int baseline = i * (i + 1) / 2 + j;
+      h_scales[baseline] = scales[i] * scales[j];
+      printf("baseline (%i, %i, %i): %u x %u = %u\n", i, j, baseline, scales[i],
+             scales[j], h_scales[baseline]);
+    }
+  }
+
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaEventRecord(input_transfer_done[i], streams[i]);
@@ -215,7 +231,7 @@ int main(int argc, char *argv[]) {
 
   for (auto i = 0; i < number_of_aggregated_packets; ++i) {
     printf("Visibilities for %u:\n", i);
-    print_nonzero_visibilities(&h_visibilities[i]);
+    print_nonzero_visibilities(&h_visibilities[i], h_scales);
   }
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaFree(d_samples[i]);

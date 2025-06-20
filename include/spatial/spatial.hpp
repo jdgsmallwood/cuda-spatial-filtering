@@ -29,6 +29,8 @@ typedef Sample Samples[NR_CHANNELS][NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK]
 typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS]
                                [NR_POLARIZATIONS];
 
+typedef int8_t Tin;
+typedef int16_t Tscale;
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A);
 void correlate(Samples *samples, Visibilities *visibilities);
@@ -52,6 +54,25 @@ inline void print_nonzero_visibilities(const Visibilities *vis) {
             std::cout << "vis[" << ch << "][" << bl << "][" << pol1 << "]["
                       << pol2 << "] = (" << v.real() << ", " << v.imag()
                       << ")\n";
+          }
+        }
+      }
+    }
+  }
+}
+
+inline void print_nonzero_visibilities(const Visibilities *vis,
+                                       const Tscale *scales) {
+  for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+    for (int bl = 0; bl < NR_BASELINES; ++bl) {
+      for (int pol1 = 0; pol1 < NR_POLARIZATIONS; ++pol1) {
+        for (int pol2 = 0; pol2 < NR_POLARIZATIONS; ++pol2) {
+          const Visibility v = (*vis)[ch][bl][pol1][pol2];
+          if (v.real() != 0.0f || v.imag() != 0.0f) {
+            std::cout << "vis[" << ch << "][" << bl << "][" << pol1 << "]["
+                      << pol2 << "] = (" << v.real() * scales[bl] << ", "
+                      << v.imag() * scales[bl] << ") where scale is "
+                      << scales[bl] << "\n";
           }
         }
       }

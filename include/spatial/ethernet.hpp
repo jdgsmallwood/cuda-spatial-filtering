@@ -39,8 +39,6 @@ struct CustomHeader {
 
 #pragma pack(pop)
 
-typedef int8_t Tin;
-typedef int16_t Tscale;
 struct PacketInfo {
   uint64_t sample_count;
   uint16_t freq_channel;
