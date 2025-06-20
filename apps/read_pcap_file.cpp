@@ -140,8 +140,6 @@ int main(int argc, char *argv[]) {
   while ((res = pcap_next_ex(handle, &header, &data)) >= 0) {
     if (res == 0)
       continue; // Timeout in live capture, ignore for offline
-                //  printf("Timestamp: %u\n", header->ts);
-                //  printf("Packet length: %u\n", header->len);
     process_packet(data, header->len, h_samples, scales, start_seq_num,
                    start_freq_channel, NR_TIME_STEPS_PER_PACKET,
                    NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
