@@ -19,36 +19,12 @@ constexpr int NR_TIME_STEPS_PER_PACKET = 64;
 constexpr int NR_ACTUAL_BASELINES =
     NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
 
-int main(int argc, char *argv[]) {
-  /* Read data from a PCAP file, run through the Tensor-Core Correlator and
-   * output visibilities to stderr.
-   *
-   * Structure:
-   * 1. Read through PCAP packets to get frequency channels, length of packets
-   * etc.
-   * 2. Read through again to store data.
-   * 3. Load data to h_samples, h_visibilities
-   * 4. Run CUDA operations & print
-   *
-   * We use a multiple buffer / stream system to allow stream concurrency on the
-   * GPU.
-   *
-   * */
-
-  /*
-   * PCAP Formatting.
-   * */
-
-  if (argc < 2) {
-    printf("Usage: %s <pcap file>\n", argv[0]);
-    return 1;
-  }
+PCAPInfo get_pcap_info(char *file_name) {
 
   char errbuf[PCAP_ERRBUF_SIZE];
-  pcap_t *handle = pcap_open_offline(argv[1], errbuf);
+  pcap_t *handle = pcap_open_offline(file_name, errbuf);
   if (!handle) {
     printf("pcap_open_offline failed: %s\n", errbuf);
-    return 1;
   }
 
   struct pcap_pkthdr *header;
@@ -96,26 +72,61 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  printf("Start freq channel is %u and end freq channel is %u\n",
-         start_freq_channel, end_freq_channel);
-  printf("Start seq num is %u and end seq num is %u\n", start_seq_num,
-         end_seq_num);
-
-  printf("Total packets captured is %u\n", num_packets_captured);
-  const int num_freq = end_freq_channel - start_freq_channel + 1;
-  const int number_of_aggregated_packets =
-      std::max(num_packets_captured / NR_BLOCKS_FOR_CORRELATION / num_freq, 1);
-  printf("Storing in groups of 10. Number of aggregated packets is %u\n",
-         number_of_aggregated_packets);
+  PCAPInfo p = {start_freq_channel, end_freq_channel, start_seq_num,
+                end_seq_num, num_packets_captured};
   if (res == -1) {
     printf("Error reading packets: %s\n", pcap_geterr(handle));
   }
+  pcap_close(handle);
+  return p;
+}
+
+int main(int argc, char *argv[]) {
+  /* Read data from a PCAP file, run through the Tensor-Core Correlator and
+   * output visibilities to stderr.
+   *
+   * Structure:
+   * 1. Read through PCAP packets to get frequency channels, length of packets
+   * etc.
+   * 2. Read through again to store data.
+   * 3. Load data to h_samples, h_visibilities
+   * 4. Run CUDA operations & print
+   *
+   * We use a multiple buffer / stream system to allow stream concurrency on the
+   * GPU.
+   *
+   * */
+
+  /*
+   * PCAP Formatting.
+   * */
+
+  if (argc < 2) {
+    printf("Usage: %s <pcap file>\n", argv[0]);
+    return 1;
+  }
+
+  PCAPInfo info = get_pcap_info(argv[1]);
+  printf("Start freq channel is %u and end freq channel is %u\n",
+         info.start_freq, info.end_freq);
+  printf("Start seq num is %u and end seq num is %u\n", info.start_seq,
+         info.end_seq);
+
+  printf("Total packets captured is %u\n", info.num_packets_captured);
+  const int num_freq = info.end_freq - info.start_freq + 1;
+  const int number_of_aggregated_packets = std::max(
+      info.num_packets_captured / NR_BLOCKS_FOR_CORRELATION / num_freq, 1);
+  printf("Storing in groups of 10. Number of aggregated packets is %u\n",
+         number_of_aggregated_packets);
   // second pass to actually get the data
 
-  pcap_close(handle);
   // Reopen the file to return to the beginning of the file.
-  handle = pcap_open_offline(argv[1], errbuf);
+  char errbuf[PCAP_ERRBUF_SIZE];
+  pcap_t *handle = pcap_open_offline(argv[1], errbuf);
 
+  struct pcap_pkthdr *header;
+  const u_char *data;
+  int res;
   /*
    * PCAP Data Reading
    * */
@@ -141,8 +152,8 @@ int main(int argc, char *argv[]) {
   while ((res = pcap_next_ex(handle, &header, &data)) >= 0) {
     if (res == 0)
       continue; // Timeout in live capture, ignore for offline
-    process_packet(data, header->len, h_samples, scales, start_seq_num,
-                   start_freq_channel, NR_TIME_STEPS_PER_PACKET,
+    process_packet(data, header->len, h_samples, scales, info.start_seq,
+                   info.start_freq, NR_TIME_STEPS_PER_PACKET,
                    NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
                    NR_ACTUAL_RECEIVERS);
   }
