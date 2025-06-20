@@ -40,12 +40,12 @@ ctest
 
 ## TODOs
 
-- Verify the visibilities from the test PCAP files.
-- Clean up the read_pcap file to move PCAP code out of main code file.
-- Do beamforming using ccglib.
-- Figure out how to do this capturing packets.
-- Output formats
-- Integrating on the GPU over time and then dumping out to disk.
-- Profile and check that things are running concurrently.
-- Decompose correlation matrix from lower-triangular form.
-- Begin writing spatial filtering algorithms.
+-[x] Verify the visibilities from the test PCAP files.
+-[x] Clean up the read_pcap file to move PCAP code out of main code file.
+-[] Do beamforming using ccglib.
+-[] Figure out how to do this capturing packets.
+-[] Output formats
+-[] Integrating on the GPU over time and then dumping out to disk.
+-[x] Profile and check that things are running concurrently.
+-[] Decompose correlation matrix from lower-triangular form.
+-[] Begin writing spatial filtering algorithms.
