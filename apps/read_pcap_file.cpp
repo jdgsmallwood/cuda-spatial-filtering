@@ -11,13 +11,14 @@
 #include <pcap/pcap.h>
 #include <stdexcept>
 #include <vector>
+
 constexpr int NR_BLOCKS_FOR_CORRELATION = 50;
 constexpr int NUM_BUFFERS = 2;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
-
 constexpr int NR_ACTUAL_BASELINES =
     NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
+
 int main(int argc, char *argv[]) {
   /* Read data from a PCAP file, run through the Tensor-Core Correlator and
    * output visibilities to stderr.
