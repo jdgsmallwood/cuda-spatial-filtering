@@ -1,7 +1,8 @@
 #pragma once
+#include "spatial/spatial.hpp"
 #include <cstdint>
 #include <pcap/pcap.h>
-
+#include <vector>
 #pragma pack(push, 1)
 struct EthernetHeader {
   uint8_t dst[6];
@@ -38,9 +39,18 @@ struct CustomHeader {
 
 #pragma pack(pop)
 
+typedef int8_t Tin;
+typedef int16_t Tscale;
 struct PacketInfo {
   uint64_t sample_count;
   uint16_t freq_channel;
 };
 
 PacketInfo get_packet_info(const u_char *packet, const int size);
+void process_packet(const u_char *packet, const int size,
+                    std::vector<SampleFrame> &agg_samples,
+                    const int start_seq_id, const int start_freq,
+                    const int nr_time_steps_per_packet,
+                    const int nr_blocks_for_correlation,
+                    const int nr_times_per_block,
+                    const int nr_actual_receivers);

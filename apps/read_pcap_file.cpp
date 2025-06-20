@@ -1,6 +1,5 @@
 #include "spatial/ethernet.hpp"
 #include "spatial/spatial.hpp"
-#include <arpa/inet.h>
 #include <atomic>
 #include <cuComplex.h>
 #include <cuda.h>
@@ -9,18 +8,13 @@
 #include <functional>
 #include <iostream>
 #include <libtcc/Correlator.h>
-#include <optional>
 #include <pcap/pcap.h>
 #include <stdexcept>
 #include <vector>
-constexpr int g_FILTERBANKS = 5;
 constexpr int NR_BLOCKS_FOR_CORRELATION = 50;
-constexpr int NUM_BUFFERS = 2;
+constexpr int NUM_BUFFERS = 10;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
-
-typedef int8_t Tin;
-typedef int16_t Tscale;
 
 struct LambdaWrapper {
   // This exists to allow calling of std::memcpy on host into buffer in async
@@ -33,63 +27,28 @@ struct LambdaWrapper {
   }
 };
 
-void process_packet(const u_char *packet, const int size,
-                    std::vector<SampleFrame> &agg_samples,
-                    const int start_seq_id, const int start_freq) {
-  if (size < 58) { // minimum header size (14+20+8+16)
-    printf("Packet too small\n");
-    return;
-  }
-
-  const EthernetHeader *eth = reinterpret_cast<const EthernetHeader *>(packet);
-  uint16_t ethertype = ntohs(eth->ethertype);
-  if (ethertype != 0x0800) {
-    printf("Not IPv4, skipping\n");
-    return;
-  }
-
-  const IPHeader *ip = reinterpret_cast<const IPHeader *>(packet + 14);
-  if ((ip->version_ihl >> 4) != 4) {
-    printf("Not IPv4, skipping\n");
-    return;
-  }
-
-  const UDPHeader *udp = reinterpret_cast<const UDPHeader *>(packet + 34);
-  const CustomHeader *custom =
-      reinterpret_cast<const CustomHeader *>(packet + 42);
-
-  const int packet_num =
-      (custom->sample_count - start_seq_id) / NR_TIME_STEPS_PER_PACKET;
-  const int packet_num_in_frame = packet_num % NR_BLOCKS_FOR_CORRELATION;
-  const int sample_frame_to_populate = packet_num / NR_BLOCKS_FOR_CORRELATION;
-  const int num_blocks_per_packet =
-      NR_TIME_STEPS_PER_PACKET / NR_TIMES_PER_BLOCK; // 8
-  printf("Packet number is %u. Seq is %u and start_seq was %u\n", packet_num,
-         custom->sample_count, start_seq_id);
-  printf("Will write to block %u in frame %u\n", packet_num_in_frame,
-         sample_frame_to_populate);
-
-  // Scale factors start at offset 64
-  const Tscale *scales = reinterpret_cast<const Tscale *>(packet + 64);
-
-  // Filterbank samples after scales
-  const Tin *samples = reinterpret_cast<const Tin *>(
-      packet + 64 + g_FILTERBANKS * sizeof(Tscale) * 4);
-  const int freq_idx = custom->freq_channel - start_freq;
-  for (auto k = 0; k < num_blocks_per_packet; ++k) {
-    int pkt_idx = num_blocks_per_packet * packet_num_in_frame + k;
-    for (auto i = 0; i < NR_TIMES_PER_BLOCK; ++i) {
-      for (auto j = 0; j < NR_ACTUAL_RECEIVERS; ++j) {
-        agg_samples[sample_frame_to_populate].data[freq_idx][pkt_idx][j][0][i] =
-            Sample(scales[j] * samples[2 * NR_ACTUAL_RECEIVERS * i + 2 * j],
-                   scales[j] *
-                       samples[2 * NR_ACTUAL_RECEIVERS * i + 2 * j + 1]);
-      }
-    }
-  }
-}
-
 int main(int argc, char *argv[]) {
+  /* Read data from a PCAP file, run through the Tensor-Core Correlator and
+   * output visibilities to stderr.
+   *
+   * Structure:
+   * 1. Read through PCAP packets to get frequency channels, length of packets
+   * etc.
+   * 2. Read through again to store data.
+   * 3. Load data to aggregated_samples, aggregated_vis
+   * 4. Run CUDA operations & print
+   *
+   * We use a multiple buffer / stream system to allow stream concurrency on the
+   * GPU.
+   *
+   * The PCAP file could potentially be quite large and allocating all as
+   * pageable memory may cause OOM errors. Therefore we save the input data
+   * initially in pageable memory and copy across to the input buffers when
+   * they're free. Similarly we move the output data from the pinned landing
+   * host memory to pageable memory.
+   *
+   *   *
+   * */
   if (argc < 2) {
     printf("Usage: %s <pcap file>\n", argv[0]);
     return 1;
@@ -211,7 +170,9 @@ int main(int argc, char *argv[]) {
                 //  printf("Timestamp: %u\n", header->ts);
                 //  printf("Packet length: %u\n", header->len);
     process_packet(data, header->len, aggregated_samples, start_seq_num,
-                   start_freq_channel);
+                   start_freq_channel, NR_TIME_STEPS_PER_PACKET,
+                   NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
+                   NR_ACTUAL_RECEIVERS);
   }
   pcap_close(handle);
 
@@ -240,7 +201,8 @@ int main(int argc, char *argv[]) {
   printf("NR_BITS: %u\n", NR_BITS);
   printf("Launching processing loop...\n");
   while (processing) {
-
+    // h_samples[current_buffer] is no longer required, so we can queue up a new
+    // data file to run.
     if (cudaEventQuery(input_transfer_done[current_buffer]) == cudaSuccess) {
       printf("Beginning new processing loop....\n");
       int next_frame_to_capture = last_frame_processed.fetch_add(1);
@@ -274,6 +236,10 @@ int main(int argc, char *argv[]) {
           cudaMemcpyAsync(h_visibilities[current_buffer],
                           d_visibilities[current_buffer], sizeof(Visibilities),
                           cudaMemcpyDeviceToHost, streams[current_buffer]));
+      // This allows the memory copy out of the pinned output memory to be a
+      // part of the pipeline so that it doesn't get overwritten. Stream will be
+      // suspended during this operation so recommend having NUM_BUFFERS larger
+      // than normal.
       auto lambda = std::make_unique<LambdaWrapper>(
           LambdaWrapper{[next_frame_to_capture, buffer_value, &aggregated_vis,
                          &h_visibilities]() {
