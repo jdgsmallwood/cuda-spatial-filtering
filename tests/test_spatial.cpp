@@ -4,8 +4,8 @@
 #include <cuComplex.h>
 #include <cuda_runtime.h>
 #include <ccglib/ccglib.hpp>
-#include "ccglib/precision.h"
-
+#include "ccglib/common/precision.h"
+#include "ccglib/common/complex_order.h"
 #include <cudawrappers/cu.hpp>
 TEST(EigenvalueDecompositionTest, SimpleValueTest)
 {
@@ -476,7 +476,7 @@ TEST(TestCCGLIBTranspose, TestTransposeSimple) {
 
 
     ccglib::transpose::Transpose transpose(
-    batch_size, n_row, n_col, tile_size_x, tile_size_y, precision, cu_device, stream, ccglib::transpose::ComplexAxisLocation::complex_last
+    batch_size, n_row, n_col, tile_size_x, tile_size_y, precision, cu_device, stream, ccglib::ComplexAxisLocation::complex_interleaved
     );
 
     transpose.Run((CUdeviceptr) d_input, (CUdeviceptr) d_output);

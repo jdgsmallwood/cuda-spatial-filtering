@@ -10,8 +10,8 @@
 #include <complex>
 #include <cuda_fp16.h>
 #include <ccglib/ccglib.hpp>
-#include "ccglib/precision.h"
-#include <ccglib/transpose/complex_order.h>
+#include "ccglib/common/precision.h"
+#include <ccglib/common/complex_order.h>
 #include <ccglib/transpose/transpose.h>
 
 template <typename T>
@@ -266,14 +266,14 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row, const int n
     
     ccglib::transpose::Transpose transpose_A(
           batch_size, n_row, n_inner, tile_size_x, tile_size_y, ccglib::Precision(ccglib::ValueType::float16).GetInputBits(), cu_device,
-          stream, ccglib::transpose::ComplexAxisLocation::complex_middle);
+          stream, ccglib::ComplexAxisLocation::complex_planar);
 
     transpose_A.Run((CUdeviceptr) d_A, (CUdeviceptr) d_A_T);
     
 
     ccglib::transpose::Transpose transpose_B(
           batch_size, n_inner, n_col, tile_size_x, tile_size_y, ccglib::Precision(ccglib::ValueType::float16).GetInputBits(), cu_device,
-          stream, ccglib::transpose::ComplexAxisLocation::complex_middle);
+          stream, ccglib::ComplexAxisLocation::complex_planar);
 
     transpose_B.Run((CUdeviceptr) d_B, (CUdeviceptr) d_B_T);
 
