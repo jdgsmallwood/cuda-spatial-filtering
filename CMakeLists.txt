@@ -63,7 +63,9 @@ include(FetchContent)
 add_subdirectory(src)
 
 # The executable code is here
+if(${USER_BUILD_TESTING} STREQUAL "OFF")
 add_subdirectory(apps)
+endif()
 
 message(STATUS "Including dependencies...")
 message(STATUS "cudawrappers...")

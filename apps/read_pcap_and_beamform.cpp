@@ -181,8 +181,8 @@ int main(int argc, char *argv[]) {
   // create device pointers
   Samples *d_samples[NUM_BUFFERS];
   Visibilities *d_visibilities[NUM_BUFFERS];
-    cudaMalloc((void**)&d_samples, NUM_BUFFERS * sizeof(Samples));
-    cudaMalloc((void**)&d_visibilities, NUM_BUFFERS * sizeof(Visibilities));
+    cudaMalloc(&d_samples, NUM_BUFFERS * sizeof(Samples));
+    cudaMalloc(&d_visibilities, NUM_BUFFERS * sizeof(Visibilities));
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaEventRecord(input_transfer_done[i], streams[i]);

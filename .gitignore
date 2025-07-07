@@ -64,3 +64,4 @@ extern/
 .cache/
 *.ncu-rep
 *.nsys-rep
+Dockerfile
