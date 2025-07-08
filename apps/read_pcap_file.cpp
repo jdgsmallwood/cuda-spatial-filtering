@@ -135,14 +135,14 @@ int main(int argc, char *argv[]) {
   Samples *h_samples;
   Visibilities *h_visibilities;
 
-  cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
-  cudaMallocHost(&h_visibilities,
-                 number_of_aggregated_packets * sizeof(Visibilities));
+    checkCudaCall(cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples)));
+    checkCudaCall(cudaMallocHost(&h_visibilities,
+                 number_of_aggregated_packets * sizeof(Visibilities)));
 
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
 
   Tscale *h_scales;
-  cudaMallocHost(&h_scales, NR_ACTUAL_BASELINES * sizeof(Tscale));
+    checkCudaCall(cudaMallocHost(&h_scales, NR_ACTUAL_BASELINES * sizeof(Tscale)));
 
   printf("Setting h_samples & h_visibilities memory to zero\n");
   std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
@@ -174,18 +174,19 @@ int main(int argc, char *argv[]) {
   cudaEvent_t input_transfer_done[NUM_BUFFERS];
 
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaStreamCreate(&streams[i]);
-    cudaEventCreate(&input_transfer_done[i]);
+        checkCudaCall(cudaStreamCreate(&streams[i]));
+        checkCudaCall(cudaEventCreate(&input_transfer_done[i]));
   }
 
   // create device pointers
   Samples *d_samples[NUM_BUFFERS];
   Visibilities *d_visibilities[NUM_BUFFERS];
-    cudaMalloc((void**)&d_samples, NUM_BUFFERS * sizeof(Samples));
-    cudaMalloc((void**)&d_visibilities, NUM_BUFFERS * sizeof(Visibilities));
+
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaEventRecord(input_transfer_done[i], streams[i]);
+        checkCudaCall(cudaMalloc((void**)&d_samples[i], sizeof(Samples)));
+        checkCudaCall(cudaMalloc((void**)&d_visibilities[i], sizeof(Visibilities)));
+        checkCudaCall(cudaEventRecord(input_transfer_done[i], streams[i]));
   }
 
   printf("Initializing correlator\n");
@@ -201,11 +202,14 @@ int main(int argc, char *argv[]) {
   printf("NR_ACTUAL_RECEIVERS: %u\n", NR_ACTUAL_RECEIVERS);
   printf("NR_BITS: %u\n", NR_BITS);
   printf("Launching processing loop...\n");
+printf("Total number of frames is %u\n", number_of_aggregated_packets);
   int current_buffer = 0;
   // std::atomic is overkill right now but if we end up using multi-threading at
   // some point this sidesteps a race condition.
   std::atomic<int> last_frame_processed = 0;
   bool processing = true;
+ 
+
 
   // Main processing loop.
   while (processing) {
@@ -223,12 +227,12 @@ int main(int argc, char *argv[]) {
             next_frame_to_capture, number_of_aggregated_packets);
       }
 
-      cudaMemcpyAsync(d_samples[current_buffer],
+            checkCudaCall(cudaMemcpyAsync(d_samples[current_buffer],
                       h_samples[next_frame_to_capture], sizeof(Samples),
-                      cudaMemcpyHostToDevice, streams[current_buffer]);
+                      cudaMemcpyDefault, streams[current_buffer]));
       // Now we can start preparing the next buffer for transport to the GPU.
-      cudaEventRecord(input_transfer_done[current_buffer],
-                      streams[current_buffer]);
+            checkCudaCall(cudaEventRecord(input_transfer_done[current_buffer],
+                      streams[current_buffer]));
 
       correlator.launchAsync((CUstream)streams[current_buffer],
                              (CUdeviceptr)d_visibilities[current_buffer],

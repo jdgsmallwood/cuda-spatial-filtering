@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
-
+#include <iostream>
 #include <cuda_runtime.h>
 #include <cutensor.h>
 
@@ -21,8 +21,7 @@ int main(int argc, char** argv)
     cutensorDataType_t typeC = CUTENSOR_R_32F;
     cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
 
-    printf("Include headers and define data types\n");
-
+    floatTypeCompute alpha = (floatTypeCompute)1.0f;
 
     std::vector<int> modeC{'c', 'w', 'h', 'n'};
     std::vector<int> modeA{'w', 'h', 'c', 'n'};
@@ -31,10 +30,10 @@ int main(int argc, char** argv)
     int nmodeC = modeC.size();
 
     std::unordered_map<int,int64_t> extent;
-    extent['h'] = 128;
-    extent['w'] = 32;
-    extent['c'] = 128;
-    extent['n'] = 128;
+    extent['h'] = 1;
+    extent['w'] = 4;
+    extent['c'] = 4;
+    extent['n'] = 1;
 
     std::vector<int64_t> extentA;
     for (auto mode: modeA)
@@ -65,6 +64,64 @@ int main(int argc, char** argv)
     floatTypeA *A, *C;
     cudaMallocHost((void**) &A, sizeof(floatTypeA) * elementsA);
     cudaMallocHost((void**) &C, sizeof(floatTypeC) * elementsC);
+
+
+    // initialize data
+    
+    for (auto i =0; i < elementsA; i++) {
+        A[i] = (((float) rand()) / RAND_MAX) * 100;
+    }
+    cudaMemcpy2DAsync(d_A, sizeA, A, sizeA, sizeA, 1, cudaMemcpyDefault, nullptr);
+
+
+    cutensorHandle_t handle;
+
+    cutensorCreate(&handle);
+
+    cutensorTensorDescriptor_t descA;
+    cutensorCreateTensorDescriptor(handle, &descA, nmodeA, extentA.data(), nullptr, typeA, kAlignment);
+
+    cutensorTensorDescriptor_t descC;
+    cutensorCreateTensorDescriptor(handle, &descC, nmodeC, extentC.data(), nullptr, typeC, kAlignment);
+
+    cutensorOperationDescriptor_t desc;
+    cutensorCreatePermutation(handle, &desc, descA, modeA.data(), CUTENSOR_OP_IDENTITY, descC, modeC.data(), descCompute);
+
+    const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+
+    cutensorPlanPreference_t planPref;
+    cutensorCreatePlanPreference(handle, &planPref, algo, CUTENSOR_JIT_MODE_NONE);
+
+    cutensorPlan_t plan;
+    cutensorCreatePlan(handle, &plan, desc, planPref, 0);
+    
+    cutensorPermute(handle, plan, &alpha, d_A, d_C, nullptr);
+  
+    cudaMemcpy(C, d_C, sizeC, cudaMemcpyDefault);
+    cudaDeviceSynchronize();
+
+    for (auto i = 0; i < elementsA; ++i) {
+      std::cout << i << ": " << A[i] << '\n';
+  }
+
+    for (auto i = 0; i < elementsC; ++i) {
+      std::cout << i << ": " << C[i] << '\n';
+  }
+    
+
+    cutensorDestroy(handle);
+    cutensorDestroyPlan(plan);
+    cutensorDestroyOperationDescriptor(desc);
+    cutensorDestroyPlanPreference(planPref);
+    cutensorDestroyTensorDescriptor(descA);
+    cutensorDestroyTensorDescriptor(descC);
+
+    cudaFreeHost(A);
+    cudaFreeHost(C);
+    cudaFree(d_A);
+    cudaFree(d_C);
+
+
 
     return 0;
 }
