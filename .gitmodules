@@ -6,7 +6,7 @@
 	url = https://git.astron.nl/RD/tensor-core-correlator.git
 [submodule "extern/ccglib"]
 	path = extern/ccglib
-	url = https://git.astron.nl/RD/recruit/ccglib.git
+	url = https://github.com/nlesc-recruit/ccglib.git
 [submodule "extern/cudawrappers"]
 	path = extern/cudawrappers
 	url = https://github.com/nlesc-recruit/cudawrappers.git
