@@ -180,9 +180,11 @@ int main(int argc, char *argv[]) {
 
   // create device pointers
   Samples *d_samples[NUM_BUFFERS];
+__half *d_samples_planar[NUM_BUFFERS];
   Visibilities *d_visibilities[NUM_BUFFERS];
-    cudaMalloc((void**)&d_samples, NUM_BUFFERS * sizeof(Samples));
-    cudaMalloc((void**)&d_visibilities, NUM_BUFFERS * sizeof(Visibilities));
+    cudaMalloc(&d_samples, NUM_BUFFERS * sizeof(Samples));
+    cudaMalloc(&d_samples_planar, NUM_BUFFERS * 2 * sizeof(__half));
+    cudaMalloc(&d_visibilities, NUM_BUFFERS * sizeof(Visibilities));
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaEventRecord(input_transfer_done[i], streams[i]);
@@ -192,6 +194,15 @@ int main(int argc, char *argv[]) {
   tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
                              NR_CHANNELS, NR_SAMPLES_PER_CHANNEL,
                              NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+
+    std::vector<ccglib::transpose::Transpose> transposes(NUM_BUFFERS);
+for (auto i =0; i < NUM_BUFFERS; ++i) {
+    transposes.emplace_back(batch_size, n_row, n_col, tile_size_x, tile_size_y, precision,cu_device, stream, ccglib::ComplexAxisLocation::complex_interleaved); 
+
+
+    }
+
+
   printf("NR_RECEIVERS: %u\n", NR_RECEIVERS);
   printf("NR_CHANNELS: %u\n", NR_CHANNELS);
   printf("NR_SAMPLES_PER_CHANNEL: %u\n", NR_SAMPLES_PER_CHANNEL);

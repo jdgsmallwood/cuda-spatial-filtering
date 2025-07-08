@@ -10,7 +10,9 @@
 #include <complex>
 #include <cuda_fp16.h>
 #include <ccglib/ccglib.hpp>
-#include "ccglib/precision.h"
+#include "ccglib/common/precision.h"
+#include <ccglib/common/complex_order.h>
+#include <ccglib/transpose/transpose.h>
 
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A)
@@ -138,6 +140,60 @@ void correlate(Samples *samples, Visibilities *visibilities)
     }
 }
 
+template <typename T, typename S>
+void beamform(std::complex<T> *data_matrix, std::complex<T> *weights, std::complex<S> *output_matrix, const int n_antennas, const int n_samples, const int n_beams)
+{
+   T *data_matrix_reshaped, *weights_reshaped, *d_data, *d_weights;
+    S* output_reshaped, *d_output;
+
+    cudaMallocHost((void**)&data_matrix_reshaped, n_antennas * n_samples * sizeof(T) * 2);
+    cudaMallocHost((void**)&weights_reshaped, n_beams * n_antennas * sizeof(T) * 2);
+    cudaMallocHost((void**)&output_reshaped, n_beams * n_samples * sizeof(S) * 2);
+
+    rearrange_matrix_to_ccglib_format<__half>(data_matrix, data_matrix_reshaped, n_antennas, n_samples, true);
+    rearrange_matrix_to_ccglib_format<__half>(weights, weights_reshaped, n_beams, n_antennas, true);
+    
+    cudaMalloc((void**)&d_data, n_antennas * n_samples * 2 * sizeof(T));
+    cudaMalloc((void**)&d_weights, n_beams * n_antennas * 2 * sizeof(T));
+    cudaMalloc((void**)&d_output, n_beams * n_samples * 2 * sizeof(S));
+
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    cudaMemcpyAsync(d_data, data_matrix_reshaped, n_antennas * n_samples * 2 * sizeof(T),cudaMemcpyDefault, stream);
+    cudaMemcpyAsync(d_weights, weights_reshaped, n_beams * n_antennas * 2 * sizeof(T), cudaMemcpyDefault, stream);
+
+    CUdevice cu_device;
+    cuDeviceGet(&cu_device, 0);
+    ccglib::mma::GEMM gemm_mma(1, n_beams, n_samples, n_antennas, cu_device,
+                               stream, ccglib::ValueType::float16,
+                               ccglib::mma::basic);
+
+    gemm_mma.Run((CUdeviceptr)d_weights, (CUdeviceptr)d_data, (CUdeviceptr)d_output);
+    
+    cudaMemcpyAsync(output_reshaped, d_output, n_beams * n_samples * 2 * sizeof(S), cudaMemcpyDefault, stream);
+
+    cudaStreamSynchronize(stream);
+    
+    rearrange_ccglib_matrix_to_compact_format(
+        output_reshaped, output_matrix, n_beams, n_samples
+    );
+    
+    cudaStreamDestroy(stream);
+    cudaFreeHost(data_matrix_reshaped);
+    cudaFreeHost(weights_reshaped);
+    cudaFreeHost(output_reshaped);
+
+    cudaFree(d_output);
+    cudaFree(d_weights);
+    cudaFree(d_data);
+
+    
+}
+
+template void beamform(std::complex<__half> *data_matrix, std::complex<__half> *weights, std::complex<float> *output_matrix, const int n_antennas, const int n_samples, const int n_beams);
+
 void ccglib_mma(__half *A, __half *B, float *C, const int n_row, const int n_col, const int batch_size, int n_inner)
 {
     if (n_inner == -1)
@@ -150,10 +206,9 @@ void ccglib_mma(__half *A, __half *B, float *C, const int n_row, const int n_col
     cu::Device device(0);
     cu::Context context(CU_CTX_SCHED_BLOCKING_SYNC, device);
 
-    __half(*d_A);
+    __half *d_A, *d_B;
     checkCudaCall(cudaMalloc(&d_A, sizeof(__half) * 2 * n_row * n_inner * batch_size));
 
-    __half(*d_B);
     checkCudaCall(cudaMalloc(&d_B, sizeof(__half) * 2 * n_inner * n_col * batch_size));
 
     float(*d_C);
@@ -179,3 +234,115 @@ void ccglib_mma(__half *A, __half *B, float *C, const int n_row, const int n_col
     checkCudaCall(cudaFree(d_B));
     checkCudaCall(cudaFree(d_C));
 }
+
+void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row, const int n_col, const int batch_size, int n_inner, const int tile_size_x, const int tile_size_y)
+{
+    if (n_inner == -1)
+    {
+        n_inner = n_row;
+    }
+
+    // The format of A is n_row x n_col of real parts of matrix and then n_row x n_col of imag parts of matrix.
+    cu::init();
+    cu::Device device(0);
+    cu::Context context(CU_CTX_SCHED_BLOCKING_SYNC, device);
+
+    __half *d_A, *d_B, *d_A_T, *d_B_T;
+    checkCudaCall(cudaMalloc(&d_A, sizeof(__half) * 2 * n_row * n_inner * batch_size));
+    checkCudaCall(cudaMalloc(&d_B, sizeof(__half) * 2 * n_inner * n_col * batch_size));
+    checkCudaCall(cudaMalloc(&d_A_T, sizeof(__half) * 2 * n_row * n_inner * batch_size));
+    checkCudaCall(cudaMalloc(&d_B_T, sizeof(__half) * 2 * n_inner * n_col * batch_size));
+    float *d_C;
+
+    checkCudaCall(cudaMalloc(&d_C, sizeof(float) * 2 * n_row * n_col * batch_size));
+    cudaStream_t stream;
+    checkCudaCall(cudaStreamCreate(&stream));
+    checkCudaCall(cudaMemcpyAsync(d_A, A, sizeof(__half) * 2 * n_row * n_inner * batch_size, cudaMemcpyHostToDevice, stream));
+    checkCudaCall(cudaMemcpyAsync(d_B, B, sizeof(__half) * 2 * n_inner * n_col * batch_size, cudaMemcpyHostToDevice, stream));
+
+    CUdevice cu_device;
+    cuDeviceGet(&cu_device, 0);
+    
+    
+    ccglib::transpose::Transpose transpose_A(
+          batch_size, n_row, n_inner, tile_size_x, tile_size_y, ccglib::Precision(ccglib::ValueType::float16).GetInputBits(), cu_device,
+          stream, ccglib::ComplexAxisLocation::complex_planar);
+
+    transpose_A.Run((CUdeviceptr) d_A, (CUdeviceptr) d_A_T);
+    
+
+    ccglib::transpose::Transpose transpose_B(
+          batch_size, n_inner, n_col, tile_size_x, tile_size_y, ccglib::Precision(ccglib::ValueType::float16).GetInputBits(), cu_device,
+          stream, ccglib::ComplexAxisLocation::complex_planar);
+
+    transpose_B.Run((CUdeviceptr) d_B, (CUdeviceptr) d_B_T);
+
+    ccglib::mma::GEMM gemm_mma(batch_size, n_row, n_col, n_inner, cu_device,
+                               stream, ccglib::ValueType::float16,
+                               ccglib::mma::opt);
+
+    gemm_mma.Run((CUdeviceptr)d_A_T, (CUdeviceptr)d_B_T, (CUdeviceptr)d_C);
+    checkCudaCall(cudaMemcpyAsync(C, d_C, sizeof(float) * 2 * n_row * n_col * batch_size, cudaMemcpyDeviceToHost, stream));
+
+    checkCudaCall(cudaStreamSynchronize(stream));
+    cudaStreamDestroy(stream);
+    checkCudaCall(cudaFree(d_A));
+    checkCudaCall(cudaFree(d_B));
+    checkCudaCall(cudaFree(d_C));
+}
+
+template <typename T>
+void rearrange_matrix_to_ccglib_format(const std::complex<T>* input_matrix, T* output_matrix, const int n_row, const int n_col, const bool row_major) {
+    /*
+        * This function will convert a matrix that is in form of std::complex<T> to the form where all the real parts are contiguous in memory and
+        * all the imaginary parts are contiguous in memory. 
+        * */
+    int n_major, n_minor;
+    if (row_major) {
+       n_major = n_row;
+        n_minor = n_col;
+
+    } else {
+        n_major = n_col;
+        n_minor = n_row;
+    }
+    const int total_elements = n_major * n_minor;
+    int idx;
+    for (int maj = 0; maj < n_major; ++maj) {
+       for (int min = 0; min < n_minor; ++min) {
+            idx = maj * n_minor + min;
+            std::complex<T> val = input_matrix[idx]; 
+        output_matrix[idx] = val.real();
+            output_matrix[total_elements + idx] = val.imag();
+
+
+        }
+    } 
+
+
+
+
+}
+
+template void rearrange_matrix_to_ccglib_format(const std::complex<__half> *input_matrix, __half *output_matrix, const int n_rows, const int n_cols, const bool row_major);
+
+
+template <typename T>
+void rearrange_ccglib_matrix_to_compact_format(const T *input_matrix, std::complex<T> *output_matrix, const int n_rows, const int n_cols ) {
+     
+
+   const int total_elements = n_rows * n_cols;
+
+    for (int i =0; i < n_rows; ++i) {
+       for (int j =0; j < n_cols; ++j) {
+            output_matrix[i * n_cols + j] = std::complex<T>(input_matrix[i * n_cols + j], input_matrix[total_elements + i * n_cols + j]);
+        }
+
+    }
+
+
+}
+
+template void rearrange_ccglib_matrix_to_compact_format(const float *input_matrix, std::complex<float> *output_matrix, const int n_row, const int n_col);
+
+

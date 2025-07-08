@@ -33,6 +33,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   # since it calls enable_testing, which must be in the
   # main CMakeLists.
   include(CTest)
+include(cmake/find_cutensor.cmake)
 
   # Docs only available if this is the main app
   find_package(Doxygen)
@@ -63,7 +64,9 @@ include(FetchContent)
 add_subdirectory(src)
 
 # The executable code is here
+if(${USER_BUILD_TESTING} STREQUAL "OFF")
 add_subdirectory(apps)
+endif()
 
 message(STATUS "Including dependencies...")
 message(STATUS "cudawrappers...")
