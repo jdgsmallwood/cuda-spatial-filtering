@@ -36,20 +36,32 @@ typedef int8_t Tin;
 typedef int16_t Tscale;
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A);
+template <typename T>
+void d_eigendecomposition(float *d_eigenvalues, const int n, T *d_A,
+                          cudaStream_t stream);
 void correlate(Samples *samples, Visibilities *visibilities);
 void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
-                const int n_col, const int batch_size,  int n_inner = -1);
+                const int n_col, const int batch_size, int n_inner = -1);
 
-void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row, const int n_col, const int batch_size,  int n_inner, const int tile_size_x, const int tile_size_y);
+void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
+                    const int n_col, const int batch_size, int n_inner,
+                    const int tile_size_x, const int tile_size_y);
 template <typename T, typename S>
-void beamform(std::complex<T> *data_matrix, std::complex<T> *weights, std::complex<S> *output_matrix, const int n_antennas, const int n_samples, const int n_beams);
+void beamform(std::complex<T> *data_matrix, std::complex<T> *weights,
+              std::complex<S> *output_matrix, const int n_antennas,
+              const int n_samples, const int n_beams);
 
 template <typename T>
-void rearrange_matrix_to_ccglib_format(const std::complex<T> *input_matrix, T *output_matrix, const int n_rows, const int n_cols, const bool row_major = true);
+void rearrange_matrix_to_ccglib_format(const std::complex<T> *input_matrix,
+                                       T *output_matrix, const int n_rows,
+                                       const int n_cols,
+                                       const bool row_major = true);
 
 template <typename T>
-void rearrange_ccglib_matrix_to_compact_format(const T *input_matrix, std::complex<T> *output_matrix, const int n_rows, const int n_cols);
-
+void rearrange_ccglib_matrix_to_compact_format(const T *input_matrix,
+                                               std::complex<T> *output_matrix,
+                                               const int n_rows,
+                                               const int n_cols);
 
 inline void checkCudaCall(cudaError_t error) {
   if (error != cudaSuccess) {
@@ -101,7 +113,8 @@ inline void print_nonzero_samples(const Samples *samps) {
         for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
           for (int t = 0; t < NR_TIMES_PER_BLOCK; ++t) {
             const Sample s = (*samps)[ch][j][k][pol][t];
-            if (CAST_TO_FLOAT(s.real()) != 0.0f || CAST_TO_FLOAT(s.imag()) != 0.0f) {
+            if (CAST_TO_FLOAT(s.real()) != 0.0f ||
+                CAST_TO_FLOAT(s.imag()) != 0.0f) {
               std::cout << "samp[" << ch << "][" << j << "][" << k << "]["
                         << pol << "][" << t << "] = ("
                         << static_cast<int>(s.real()) << ", "

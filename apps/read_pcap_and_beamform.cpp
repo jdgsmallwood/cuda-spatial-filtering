@@ -1,4 +1,5 @@
 #include "spatial/ethernet.hpp"
+#include "spatial/spatial.cuh"
 #include "spatial/spatial.hpp"
 #include <algorithm>
 #include <atomic>
@@ -6,16 +7,17 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cudawrappers/cu.hpp>
+#include <cutensor.h>
 #include <iostream>
 #include <libtcc/Correlator.h>
 #include <pcap/pcap.h>
 #include <stdexcept>
-#include <vector>
-#include <cutensor.h>
 #include <unordered_map>
+#include <vector>
 
 constexpr int NR_BLOCKS_FOR_CORRELATION = 50;
 constexpr int NUM_BUFFERS = 2;
+constexpr int NUM_BEAMS = 2;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
 constexpr int NR_ACTUAL_BASELINES =
@@ -131,15 +133,22 @@ int main(int argc, char *argv[]) {
   int res;
   /*
    * PCAP Data Reading
-  */
+   */
 
   // allocate pinned host memory
   Samples *h_samples;
   Visibilities *h_visibilities;
+  __half *h_weights;
 
   cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
   cudaMallocHost(&h_visibilities,
                  number_of_aggregated_packets * sizeof(Visibilities));
+  cudaMallocHost(&h_weights, NUM_BEAMS * NR_RECEIVERS * sizeof(__half) * 2);
+
+  for (auto i = 0; i < NUM_BEAMS * NR_RECEIVERS; ++i) {
+
+    h_weights[i] = 1;
+  }
 
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
 
@@ -182,90 +191,116 @@ int main(int argc, char *argv[]) {
 
   // create device pointers
   Samples *d_samples[NUM_BUFFERS];
+
+  // the planar data needs to be __half so if NR_BITS == 8 then
+  // we need to convert
+#if NR_BITS == 8
+  __half *d_samples_converted[NUM_BUFFERS];
+
+#endif
   __half *d_samples_planar[NUM_BUFFERS];
   Visibilities *d_visibilities[NUM_BUFFERS];
+  __half *d_weights[NUM_BUFFERS];
+  __half *d_weights_updated[NUM_BUFFERS];
+  float *d_eigenvalues[NUM_BUFFERS];
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaMalloc((void**)&d_samples[i],  sizeof(Samples));
-    cudaMalloc((void**)&d_samples_planar[i], sizeof(Samples));
-    cudaMalloc((void**)&d_visibilities[i],  sizeof(Visibilities));
+    cudaMalloc((void **)&d_samples[i], sizeof(Samples));
+    cudaMalloc((void **)&d_samples_planar[i], sizeof(Samples));
+    cudaMalloc((void **)&d_visibilities[i], sizeof(Visibilities));
+    cudaMalloc((void **)&d_weights[i], sizeof(__half) * NUM_BEAMS);
+    cudaMalloc((void **)&d_weights_updated[i], sizeof(__half) * NUM_BEAMS);
+    cudaMalloc((void **)&d_eigenvalues[i], sizeof(float) * NR_RECEIVERS);
+
+#if NR_BITS == 8
+    cudaMalloc((void **)&d_samples_converted[i],
+               sizeof(Samples) / sizeof(int8_t) * sizeof(__half));
+#endif
+
+    // transfer weights
+    cudaMemcpy(d_weights[i], h_weights,
+               sizeof(__half) * 2 * NUM_BEAMS * NR_RECEIVERS,
+               cudaMemcpyDefault);
     cudaEventRecord(input_transfer_done[i], streams[i]);
   }
 
   // Initialize cutensor
-  cutensorDataType_t type = CUTENSOR_R_8I;
-  cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_8I;
+  cutensorDataType_t type = CUTENSOR_R_16F;
+  cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_16F;
 
   const __half alpha = __float2half(1.0f);
 
-
- // c = channel
- // b = block
-    // r = receiver
-    // p = polarization
-    // t = time
-    // z = complex
+  // c = channel
+  // b = block
+  // r = receiver
+  // p = polarization
+  // t = time
+  // z = complex
   std::vector<int> modePacket{'c', 'b', 'r', 'p', 't', 'z'};
   std::vector<int> modePlanar{'z', 'c', 'p', 'r', 'b', 't'};
 
   int nmodePacket = modePacket.size();
-int nmodePlanar = modePlanar.size();
+  int nmodePlanar = modePlanar.size();
 
-    std::unordered_map<int,int64_t> extent;
-    extent['c'] = NR_CHANNELS;
-    extent['b'] = NR_BLOCKS_FOR_CORRELATION;
-    extent['r'] = NR_RECEIVERS;
-    extent['p'] = NR_POLARIZATIONS;
-    extent['t'] = NR_TIME_STEPS_PER_PACKET;
-    extent['z'] = 2; //real, imaginary
-    
-    std::vector<int64_t> extentPacket;
-    for (auto mode: modePacket)
-        extentPacket.push_back(extent[mode]);
+  std::unordered_map<int, int64_t> extent;
+  extent['c'] = NR_CHANNELS;
+  extent['b'] = NR_BLOCKS_FOR_CORRELATION;
+  extent['r'] = NR_RECEIVERS;
+  extent['p'] = NR_POLARIZATIONS;
+  extent['t'] = NR_TIME_STEPS_PER_PACKET;
+  extent['z'] = 2; // real, imaginary
 
-    std::vector<int64_t> extentPlanar;
-    for (auto mode: modePlanar)
-        extentPlanar.push_back(extent[mode]);
+  std::vector<int64_t> extentPacket;
+  for (auto mode : modePacket)
+    extentPacket.push_back(extent[mode]);
 
-    size_t elementsPacket = 1;
-    for (auto mode: modePacket)
-         elementsPacket *= extent[mode];
+  std::vector<int64_t> extentPlanar;
+  for (auto mode : modePlanar)
+    extentPlanar.push_back(extent[mode]);
 
-    size_t elementsPlanar = 1;
-    for (auto mode: modePlanar)
-        elementsPlanar *= extent[mode];
+  size_t elementsPacket = 1;
+  for (auto mode : modePacket)
+    elementsPacket *= extent[mode];
 
-    size_t sizePacket = sizeof(__half) * elementsPacket;
-    size_t sizePlanar = sizeof(__half) * elementsPlanar;
-    
-    uint32_t const kAlignment = 128;
+  size_t elementsPlanar = 1;
+  for (auto mode : modePlanar)
+    elementsPlanar *= extent[mode];
 
-    cutensorHandle_t tensorHandle;
-    cutensorCreate(&tensorHandle);
+  size_t sizePacket = sizeof(__half) * elementsPacket;
+  size_t sizePlanar = sizeof(__half) * elementsPlanar;
 
-    cutensorTensorDescriptor_t descPacket;
-        cutensorCreateTensorDescriptor(tensorHandle, &descPacket, nmodePacket, extentPacket.data(), nullptr, type, kAlignment);
+  uint32_t const kAlignment = 128;
 
-    cutensorTensorDescriptor_t descPlanar;
-        cutensorCreateTensorDescriptor(tensorHandle, &descPlanar, nmodePlanar, extentPlanar.data(), nullptr, type, kAlignment);
-    
-    cutensorOperationDescriptor_t desc;
-    cutensorCreatePermutation(tensorHandle, &desc, descPacket, modePacket.data(), CUTENSOR_OP_IDENTITY, descPlanar, modePlanar.data(), descCompute);
-    const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+  cutensorHandle_t tensorHandle;
+  cutensorCreate(&tensorHandle);
 
-    cutensorPlanPreference_t planPref;
-    cutensorCreatePlanPreference(tensorHandle, &planPref, algo, CUTENSOR_JIT_MODE_NONE);
+  cutensorTensorDescriptor_t descPacket;
+  cutensorCreateTensorDescriptor(tensorHandle, &descPacket, nmodePacket,
+                                 extentPacket.data(), nullptr, type,
+                                 kAlignment);
 
-    cutensorPlan_t plan;
-    cutensorCreatePlan(tensorHandle, &plan, desc,planPref, 0);
+  cutensorTensorDescriptor_t descPlanar;
+  cutensorCreateTensorDescriptor(tensorHandle, &descPlanar, nmodePlanar,
+                                 extentPlanar.data(), nullptr, type,
+                                 kAlignment);
 
+  cutensorOperationDescriptor_t desc;
+  cutensorCreatePermutation(tensorHandle, &desc, descPacket, modePacket.data(),
+                            CUTENSOR_OP_IDENTITY, descPlanar, modePlanar.data(),
+                            descCompute);
+  const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
 
+  cutensorPlanPreference_t planPref;
+  cutensorCreatePlanPreference(tensorHandle, &planPref, algo,
+                               CUTENSOR_JIT_MODE_NONE);
+
+  cutensorPlan_t plan;
+  cutensorCreatePlan(tensorHandle, &plan, desc, planPref, 0);
 
   printf("Initializing correlator\n");
   tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
                              NR_CHANNELS, NR_SAMPLES_PER_CHANNEL,
                              NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
-
 
   printf("NR_RECEIVERS: %u\n", NR_RECEIVERS);
   printf("NR_CHANNELS: %u\n", NR_CHANNELS);
@@ -282,6 +317,9 @@ int nmodePlanar = modePlanar.size();
   std::atomic<int> last_frame_processed = 0;
   bool processing = true;
 
+  // Ensure all copying is done before processing loop starts.
+  // This may not be necessary.
+  cudaDeviceSynchronize();
   // Main processing loop.
   while (processing) {
     if (cudaEventQuery(input_transfer_done[current_buffer]) == cudaSuccess) {
@@ -308,11 +346,28 @@ int nmodePlanar = modePlanar.size();
       correlator.launchAsync((CUstream)streams[current_buffer],
                              (CUdeviceptr)d_visibilities[current_buffer],
                              (CUdeviceptr)d_samples[current_buffer]);
-      cutensorPermute(tensorHandle, plan, &alpha, d_samples[current_buffer], d_samples_planar[current_buffer], streams[current_buffer]);
-      checkCudaCall(
-          cudaMemcpyAsync(h_visibilities[next_frame_to_capture],
-                          d_visibilities[current_buffer], sizeof(Visibilities),
-                          cudaMemcpyDeviceToHost, streams[current_buffer]));
+
+#if NR_BITS == 8
+      convert_int8_to_half((int8_t *)d_samples[current_buffer],
+                           d_samples_converted[current_buffer],
+                           sizeof(Samples) / sizeof(int8_t),
+                           streams[current_buffer]);
+      cutensorPermute(
+          tensorHandle, plan, &alpha, d_samples_converted[current_buffer],
+          d_samples_planar[current_buffer], streams[current_buffer]);
+#elif NR_BITS == 16
+      cutensorPermute(tensorHandle, plan, &alpha, d_samples[current_buffer],
+                      d_samples_planar[current_buffer],
+                      streams[current_buffer]);
+#endif
+      d_eigendecomposition(d_eigenvalues[current_buffer], NR_RECEIVERS,
+                           d_visibilities[current_buffer],
+                           streams[current_buffer]);
+      //      checkCudaCall(
+      //        cudaMemcpyAsync(h_visibilities[next_frame_to_capture],
+      //                      d_visibilities[current_buffer],
+      //                      sizeof(Visibilities),
+      //                    cudaMemcpyDeviceToHost, streams[current_buffer]));
     }
 
     current_buffer = (current_buffer + 1) % NUM_BUFFERS;
@@ -341,12 +396,11 @@ int nmodePlanar = modePlanar.size();
   cudaFreeHost(h_scales);
 
   cutensorDestroy(tensorHandle);
-    cutensorDestroyPlan(plan);
-    cutensorDestroyOperationDescriptor(desc);
-    cutensorDestroyPlanPreference(planPref);
-    cutensorDestroyTensorDescriptor(descPacket);
-    cutensorDestroyTensorDescriptor(descPlanar);
-
+  cutensorDestroyPlan(plan);
+  cutensorDestroyOperationDescriptor(desc);
+  cutensorDestroyPlanPreference(planPref);
+  cutensorDestroyTensorDescriptor(descPacket);
+  cutensorDestroyTensorDescriptor(descPlanar);
 
   return 0;
 }
