@@ -159,8 +159,9 @@ void d_eigendecomposition(float *d_eigenvalues, const int n, T *d_A,
   cusolverDnDestroy(solverHandle);
 }
 
-template void eigendecomposition<cuComplex>(float *h_eigenvalues, int n,
-                                            const std::vector<cuComplex> *A);
+template void d_eigendecomposition<cuComplex>(float *h_eigenvalues, const int n,
+                                              cuComplex *d_A,
+                                              cudaStream_t stream);
 
 void correlate(Samples *samples, Visibilities *visibilities) {
   try {
@@ -297,10 +298,10 @@ void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
   checkCudaCall(cudaStreamCreate(&stream));
   checkCudaCall(
       cudaMemcpyAsync(d_A, A, sizeof(__half) * 2 * n_row * n_inner * batch_size,
-                      cudaMemcpyHostToDevice, stream));
+                      cudaMemcpyDefault, stream));
   checkCudaCall(
       cudaMemcpyAsync(d_B, B, sizeof(__half) * 2 * n_inner * n_col * batch_size,
-                      cudaMemcpyHostToDevice, stream));
+                      cudaMemcpyDefault, stream));
 
   CUdevice cu_device;
   cuDeviceGet(&cu_device, 0);

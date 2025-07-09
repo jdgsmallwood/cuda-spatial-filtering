@@ -32,6 +32,9 @@ typedef Sample Samples[NR_CHANNELS][NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK]
 typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS]
                                [NR_POLARIZATIONS];
 
+typedef std::complex<float> BeamformedData[NR_CHANNELS][NR_POLARIZATIONS]
+                                          [NR_SAMPLES_PER_CHANNEL];
+
 typedef int8_t Tin;
 typedef int16_t Tscale;
 template <typename T>
