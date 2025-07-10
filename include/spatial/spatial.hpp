@@ -7,7 +7,8 @@
 #include <libtcc/Correlator.h>
 #define NR_TIMES_PER_BLOCK (128 / NR_BITS)
 #define NR_BASELINES (NR_RECEIVERS * (NR_RECEIVERS + 1) / 2)
-
+#define NUM_BEAMS 2
+#define NR_BLOCKS_FOR_CORRELATION 50
 #include <cuda_fp16.h>
 
 #if NR_BITS == 4
@@ -33,15 +34,16 @@ typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS]
                                [NR_POLARIZATIONS];
 
 typedef std::complex<float> BeamformedData[NR_CHANNELS][NR_POLARIZATIONS]
-                                          [NR_SAMPLES_PER_CHANNEL];
+                                          [NUM_BEAMS][NR_SAMPLES_PER_CHANNEL];
 
 typedef int8_t Tin;
 typedef int16_t Tscale;
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A);
 template <typename T>
-void d_eigendecomposition(float *d_eigenvalues, const int n, T *d_A,
-                          cudaStream_t stream);
+void d_eigendecomposition(float *d_eigenvalues, const int n,
+                          const int num_channels, const int num_polarizations,
+                          T *d_A, cudaStream_t stream);
 void correlate(Samples *samples, Visibilities *visibilities);
 void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
                 const int n_col, const int batch_size, int n_inner = -1);
@@ -124,6 +126,25 @@ inline void print_nonzero_samples(const Samples *samps) {
                         << static_cast<int>(s.imag()) << ")\n";
             }
           }
+        }
+      }
+    }
+  }
+}
+
+inline void print_nonzero_beams(const BeamformedData *data,
+                                const int num_channels,
+                                const int num_polarizations,
+                                const int num_beams, const int num_time_steps) {
+  for (int ch = 0; ch < num_channels; ++ch) {
+    for (int pol = 0; pol < num_polarizations; ++pol) {
+      for (int beam = 0; beam < num_beams; ++beam) {
+        for (int step = 0; step < num_time_steps; ++step) {
+
+          const std::complex<float> val = (*data)[ch][pol][beam][step];
+          std::cout << "data[" << ch << "][" << pol << "][" << beam << "]["
+                    << step << "] = " << val.real() << " + " << val.imag()
+                    << "i\n";
         }
       }
     }

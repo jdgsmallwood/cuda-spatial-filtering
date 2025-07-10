@@ -100,8 +100,9 @@ template void eigendecomposition<cuComplex>(float *h_eigenvalues, int n,
                                             const std::vector<cuComplex> *A);
 
 template <typename T>
-void d_eigendecomposition(float *d_eigenvalues, const int n, T *d_A,
-                          cudaStream_t stream) {
+void d_eigendecomposition(float *d_eigenvalues, const int n,
+                          const int num_channels, const int num_polarizations,
+                          T *d_A, cudaStream_t stream) {
   //// Create cuSOLVER handle
   cusolverDnHandle_t solverHandle;
   cusolverDnCreate(&solverHandle);
@@ -133,20 +134,30 @@ void d_eigendecomposition(float *d_eigenvalues, const int n, T *d_A,
   h_work = reinterpret_cast<void *>(malloc(workspaceInBytesOnHost));
 
   cusolverDnSetStream(solverHandle, stream);
-  cusolverDnXsyevd(
-      solverHandle, params,
-      jobz, // Mode - CUSOLVER_EIG_MODE_VECTOR = get eigenvalues & eigenvectors
-      uplo, // cublasFillMode_t
-      n,    // size of symmetric matrix
-      data_type,  // data type
-      d_A,        // what to decompose
-      n,          // lda
-      CUDA_R_32F, // data type output - should always be real for the eigenvalue
-                  // outputs.
-      d_eigenvalues, // array to store eigenvalues
-      data_type,     // data type of computation
-      d_work, workspaceInBytesOnDevice, h_work, workspaceInBytesOnHost,
-      d_info); //
+  for (auto i = 0; i < num_channels; ++i) {
+    for (auto j = 0; j < num_polarizations; ++j) {
+      cusolverDnXsyevd(
+          solverHandle, params,
+          jobz,      // Mode - CUSOLVER_EIG_MODE_VECTOR = get
+                     // eigenvalues & eigenvectors
+          uplo,      // cublasFillMode_t
+          n,         // size of symmetric matrix
+          data_type, // data type
+                     // this is almost certainly not right.
+          (T *)&d_A[i * num_polarizations * num_polarizations * NR_BASELINES +
+                    j * n * num_polarizations], // what to decompose
+          n,                                    // lda
+          CUDA_R_32F, // data type output - should always be real
+                      // for the eigenvalue outputs.
+          // This should be [CHANNEL][POLARIZATION][EIGENVALUES]
+          // This current index is almost certainly not right.
+          (float *)&d_eigenvalues[i * n * num_polarizations +
+                                  j * n], // array to store eigenvalues
+          data_type,                      // data type of computation
+          d_work, workspaceInBytesOnDevice, h_work, workspaceInBytesOnHost,
+          d_info); //
+    }
+  }
 
   //// Check for errors
   int h_info;
@@ -160,9 +171,14 @@ void d_eigendecomposition(float *d_eigenvalues, const int n, T *d_A,
 }
 
 template void d_eigendecomposition<cuComplex>(float *h_eigenvalues, const int n,
+                                              const int num_channels,
+                                              const int num_polarizations,
                                               cuComplex *d_A,
                                               cudaStream_t stream);
 
+template void d_eigendecomposition<std::complex<float>>(
+    float *h_eigenvalues, const int n, const int num_channels,
+    const int num_polarizations, std::complex<float> *d_A, cudaStream_t stream);
 void correlate(Samples *samples, Visibilities *visibilities) {
   try {
     // Taken from simpleExample

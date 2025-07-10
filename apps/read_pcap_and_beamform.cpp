@@ -1,6 +1,7 @@
 #include "spatial/ethernet.hpp"
 #include "spatial/spatial.cuh"
 #include "spatial/spatial.hpp"
+#include "spatial/tensor.hpp"
 #include <algorithm>
 #include <atomic>
 #include <ccglib/ccglib.hpp>
@@ -18,9 +19,9 @@
 #include <unordered_map>
 #include <vector>
 
-constexpr int NR_BLOCKS_FOR_CORRELATION = 50;
+#define DEBUG 1
+
 constexpr int NUM_BUFFERS = 2;
-constexpr int NUM_BEAMS = 2;
 constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int NR_TIME_STEPS_PER_PACKET = 64;
 constexpr int NR_ACTUAL_BASELINES =
@@ -104,6 +105,19 @@ int main(int argc, char *argv[]) {
    *
    * */
 
+  // Check if any padding
+  std::cout << "sizeof(__half): " << sizeof(__half) << std::endl;
+  std::cout << "sizeof(std::complex<__half>): " << sizeof(std::complex<__half>)
+            << std::endl;
+  static_assert(sizeof(std::complex<__half>) == 2 * sizeof(__half),
+                "Padding detected in std::complex<__half>");
+
+  std::cout << "sizeof(float): " << sizeof(float) << std::endl;
+  std::cout << "sizeof(std::complex<float>): " << sizeof(std::complex<float>)
+            << std::endl;
+  static_assert(sizeof(std::complex<float>) == 2 * sizeof(float),
+                "Padding detected in std::complex<float>");
+
   /*
    * PCAP Formatting.
    * */
@@ -141,22 +155,24 @@ int main(int argc, char *argv[]) {
   // allocate pinned host memory
   Samples *h_samples;
   Visibilities *h_visibilities;
-  __half *h_weights;
-  float *h_beamformed_data;
+  std::complex<__half> *h_weights;
+  BeamformedData *h_beamformed_data;
+
+  constexpr int num_weights =
+      NUM_BEAMS * NR_RECEIVERS * NR_POLARIZATIONS * NR_CHANNELS;
+
+  constexpr int num_eigen = NR_RECEIVERS * NR_CHANNELS * NR_POLARIZATIONS;
 
   cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
   cudaMallocHost(&h_visibilities,
                  number_of_aggregated_packets * sizeof(Visibilities));
-  cudaMallocHost(&h_weights,
-                 NUM_BEAMS * NR_RECEIVERS * sizeof(__half) * 2 * NR_CHANNELS);
+  cudaMallocHost(&h_weights, num_weights * sizeof(std::complex<__half>));
   // not sure about this memory allocation.
-  cudaMallocHost(&h_beamformed_data, number_of_aggregated_packets *
-                                         sizeof(float) * 2 * NR_CHANNELS *
-                                         NR_TIME_STEPS_PER_PACKET);
+  cudaMallocHost(&h_beamformed_data,
+                 number_of_aggregated_packets * sizeof(BeamformedData));
 
-  for (auto i = 0; i < NUM_BEAMS * NR_RECEIVERS; ++i) {
-
-    h_weights[i] = 1;
+  for (auto i = 0; i < num_weights; ++i) {
+    h_weights[i] = std::complex<__half>(__float2half(1.0f), __float2half(1.0f));
   }
 
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
@@ -194,7 +210,7 @@ int main(int argc, char *argv[]) {
   cudaEvent_t input_transfer_done[NUM_BUFFERS];
 
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
-    cudaStreamCreate(&streams[i]);
+    cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
     cudaEventCreate(&input_transfer_done[i]);
   }
 
@@ -209,21 +225,27 @@ int main(int argc, char *argv[]) {
 #endif
   __half *d_samples_planar[NUM_BUFFERS];
   Visibilities *d_visibilities[NUM_BUFFERS];
-  __half *d_weights[NUM_BUFFERS];
-  __half *d_weights_updated[NUM_BUFFERS];
+  std::complex<float> *d_visibilities_permuted[NUM_BUFFERS];
+  __half *d_weights[NUM_BUFFERS], *d_weights_updated[NUM_BUFFERS],
+      *d_weights_permuted[NUM_BUFFERS];
   float *d_eigenvalues[NUM_BUFFERS];
-  float *d_beamformed_data[NUM_BUFFERS];
+  BeamformedData *d_beamformed_data[NUM_BUFFERS],
+      *d_beamformed_data_output[NUM_BUFFERS];
   // start with these events in done state.
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaMalloc((void **)&d_samples[i], sizeof(Samples));
     cudaMalloc((void **)&d_samples_planar[i], sizeof(Samples));
     cudaMalloc((void **)&d_visibilities[i], sizeof(Visibilities));
+    cudaMalloc((void **)&d_visibilities_permuted[i], sizeof(Visibilities));
     cudaMalloc((void **)&d_weights[i],
-               sizeof(__half) * NUM_BEAMS * 2 * NR_RECEIVERS * NR_CHANNELS);
+               num_weights * sizeof(std::complex<__half>));
     cudaMalloc((void **)&d_weights_updated[i],
-               sizeof(__half) * 2 * NUM_BEAMS * NR_RECEIVERS * NR_CHANNELS);
-    cudaMalloc((void **)&d_eigenvalues[i], sizeof(float) * NR_RECEIVERS);
+               num_weights * sizeof(std::complex<__half>));
+    cudaMalloc((void **)&d_weights_permuted[i],
+               num_weights * sizeof(std::complex<__half>));
+    cudaMalloc((void **)&d_eigenvalues[i], sizeof(float) * num_eigen);
     cudaMalloc((void **)&d_beamformed_data[i], sizeof(BeamformedData));
+    cudaMalloc((void **)&d_beamformed_data_output[i], sizeof(BeamformedData));
 
 #if NR_BITS == 8
     cudaMalloc((void **)&d_samples_converted[i],
@@ -234,84 +256,75 @@ int main(int argc, char *argv[]) {
 
     // transfer weights
     cudaMemcpy(d_weights[i], h_weights,
-               sizeof(__half) * 2 * NUM_BEAMS * NR_RECEIVERS * NR_CHANNELS,
-               cudaMemcpyDefault);
+               sizeof(std::complex<__half>) * num_weights, cudaMemcpyDefault);
     cudaEventRecord(input_transfer_done[i], streams[i]);
   }
 
-  // Initialize cutensor
-  cutensorDataType_t type = CUTENSOR_R_16F;
-  cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_16F;
+#if DEBUG == 1
+  // allocate debug buffers
+  __half *h_weights_updated, *h_weights_permuted, *h_samples_planar,
+      *h_weights_check;
+
+  cudaMallocHost(&h_weights_updated,
+                 num_weights * sizeof(std::complex<__half>));
+  cudaMallocHost(&h_weights_permuted,
+                 num_weights * sizeof(std::complex<__half>));
+  cudaMallocHost(&h_samples_planar, sizeof(Samples));
+  cudaMallocHost(&h_weights_check, num_weights * sizeof(std::complex<__half>));
+#endif
 
   const __half alpha = __float2half(1.0f);
-
+  const float alpha_32 = 1.0f;
   // c = channel
   // b = block
   // r = receiver
   // p = polarization
   // t = time
   // z = complex
+  // l = baseline
+  // m = beam
   std::vector<int> modePacket{'c', 'b', 'r', 'p', 't', 'z'};
   std::vector<int> modePlanar{'c', 'p', 'z', 'r', 'b', 't'};
-
-  int nmodePacket = modePacket.size();
-  int nmodePlanar = modePlanar.size();
+  std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
+  std::vector<int> modeVisDecomp{'c', 'p', 'q', 'l', 'z'};
+  std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 'b', 't'};
+  std::vector<int> modeBeamOutput{'c', 'p', 'm', 'b', 't', 'z'};
+  std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r', 'z'};
+  std::vector<int> modeWeightsCCGLIB{'c', 'p', 'z', 'm', 'r'};
 
   std::unordered_map<int, int64_t> extent;
   extent['c'] = NR_CHANNELS;
   extent['b'] = NR_BLOCKS_FOR_CORRELATION;
   extent['r'] = NR_RECEIVERS;
   extent['p'] = NR_POLARIZATIONS;
-  extent['t'] = NR_TIME_STEPS_PER_PACKET;
+  extent['q'] = NR_POLARIZATIONS; // 2nd polarizations for baselines
+  extent['t'] = NR_TIMES_PER_BLOCK;
   extent['z'] = 2; // real, imaginary
+  extent['l'] = NR_BASELINES;
+  extent['m'] = NUM_BEAMS;
 
-  std::vector<int64_t> extentPacket;
-  for (auto mode : modePacket)
-    extentPacket.push_back(extent[mode]);
+  CutensorSetup tensor_16(extent, CUTENSOR_R_16F, 128);
+  CutensorSetup tensor_32(extent, CUTENSOR_R_32F, 128);
 
-  std::vector<int64_t> extentPlanar;
-  for (auto mode : modePlanar)
-    extentPlanar.push_back(extent[mode]);
+  tensor_16.addTensor(modePacket, "packet");
+  tensor_16.addTensor(modePlanar, "planar");
 
-  size_t elementsPacket = 1;
-  for (auto mode : modePacket)
-    elementsPacket *= extent[mode];
+  tensor_16.addTensor(modeWeightsInput, "weightsInput");
+  tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
+  tensor_32.addTensor(modeVisCorr, "visCorr");
+  tensor_32.addTensor(modeVisDecomp, "visDecomp");
 
-  size_t elementsPlanar = 1;
-  for (auto mode : modePlanar)
-    elementsPlanar *= extent[mode];
+  tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
+  tensor_32.addTensor(modeBeamOutput, "beamOutput");
 
-  size_t sizePacket = sizeof(__half) * elementsPacket;
-  size_t sizePlanar = sizeof(__half) * elementsPlanar;
-
-  uint32_t const kAlignment = 128;
-
-  cutensorHandle_t tensorHandle;
-  cutensorCreate(&tensorHandle);
-
-  cutensorTensorDescriptor_t descPacket;
-  cutensorCreateTensorDescriptor(tensorHandle, &descPacket, nmodePacket,
-                                 extentPacket.data(), nullptr, type,
-                                 kAlignment);
-
-  cutensorTensorDescriptor_t descPlanar;
-  cutensorCreateTensorDescriptor(tensorHandle, &descPlanar, nmodePlanar,
-                                 extentPlanar.data(), nullptr, type,
-                                 kAlignment);
-
-  cutensorOperationDescriptor_t desc;
-  cutensorCreatePermutation(tensorHandle, &desc, descPacket, modePacket.data(),
-                            CUTENSOR_OP_IDENTITY, descPlanar, modePlanar.data(),
-                            descCompute);
-  const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
-
-  cutensorPlanPreference_t planPref;
-  cutensorCreatePlanPreference(tensorHandle, &planPref, algo,
-                               CUTENSOR_JIT_MODE_NONE);
-
-  cutensorPlan_t plan;
-  cutensorCreatePlan(tensorHandle, &plan, desc, planPref, 0);
-
+  tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
+                           "packetToPlanar");
+  tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
+                           CUTENSOR_COMPUTE_DESC_16F, "weightsInputToCCGLIB");
+  tensor_32.addPermutation("visCorr", "visDecomp", CUTENSOR_COMPUTE_DESC_32F,
+                           "visCorrToDecomp");
+  tensor_32.addPermutation("beamCCGLIB", "beamOutput",
+                           CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
   printf("Initializing correlator\n");
   tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
                              NR_CHANNELS, NR_SAMPLES_PER_CHANNEL,
@@ -382,41 +395,88 @@ int main(int argc, char *argv[]) {
                            d_visibilities_converted[current_buffer],
                            sizeof(Visibilities) / sizeof(int),
                            streams[current_buffer]);
-      cutensorPermute(
-          tensorHandle, plan, &alpha, d_samples_converted[current_buffer],
+
+      tensor_16.runPermutation(
+          "packetToPlanar", alpha, d_samples_converted[current_buffer],
           d_samples_planar[current_buffer], streams[current_buffer]);
+
+      tensor_32.runPermutation(
+          "visCorrToDecomp", alpha_32,
+          (float *)d_visibilities_converted[current_buffer],
+          (float *)d_visibilities_permuted[current_buffer],
+          streams[current_buffer]);
 #elif NR_BITS == 16
-      cutensorPermute(tensorHandle, plan, &alpha, d_samples[current_buffer],
-                      d_samples_planar[current_buffer],
-                      streams[current_buffer]);
+      tensor_16.runPermutation(
+          "packetToPlanar", alpha, d_samples[current_buffer],
+          d_samples_planar[current_buffer], streams[current_buffer]);
+      tensor_32.runPermutation("visCorrToDecomp", alpha_32,
+                               (float *)d_visibilities[current_buffer],
+                               (float *)d_visibilities_permuted[current_buffer],
+                               streams[current_buffer]);
 #endif
+
       checkCudaCall(cudaMemcpyAsync(
           h_visibilities[next_frame_to_capture], d_visibilities[current_buffer],
           sizeof(Visibilities), cudaMemcpyDefault, streams[current_buffer]));
       // need to think how multiple channels / polarizations works here - do we
       // need to do multiple decompositions? Probably yes. We'll also need to
       // convert the visibilities from int32 -> float
-      //      d_eigendecomposition(d_eigenvalues[current_buffer], NR_RECEIVERS,
-      //                         d_visibilities[current_buffer],
-      //                       streams[current_buffer]);
+
+      // d_eigendecomposition(d_eigenvalues[current_buffer], NR_RECEIVERS,
+      //                      NR_CHANNELS, NR_POLARIZATIONS,
+      //                     d_visibilities_permuted[current_buffer],
+      //                   streams[current_buffer]);
 
 #if NR_BITS == 8
       update_weights(
           d_weights[current_buffer], d_weights_updated[current_buffer],
-          NUM_BEAMS, NR_RECEIVERS, NR_CHANNELS, d_eigenvalues[current_buffer],
+          NUM_BEAMS, NR_RECEIVERS, NR_CHANNELS, NR_POLARIZATIONS,
+          d_eigenvalues[current_buffer],
           d_visibilities_converted[current_buffer], streams[current_buffer]);
 
 #else
 
       update_weights(d_weights[current_buffer],
                      d_weights_updated[current_buffer], NUM_BEAMS, NR_RECEIVERS,
-                     NR_CHANNELS, d_eigenvalues[current_buffer],
+                     NR_CHANNELS, NR_POLARIZATIONS,
+                     d_eigenvalues[current_buffer],
                      d_visibilities[current_buffer], streams[current_buffer]);
 #endif
+
+      tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
+                               (__half *)d_weights_updated[current_buffer],
+                               d_weights_permuted[current_buffer],
+                               streams[current_buffer]);
+#if DEBUG == 1
+      cudaMemcpyAsync(h_weights_updated, d_weights_updated[current_buffer],
+                      sizeof(std::complex<__half>) * num_weights,
+                      cudaMemcpyDefault, streams[current_buffer]);
+      cudaMemcpyAsync(h_weights_permuted, d_weights_permuted[current_buffer],
+                      sizeof(std::complex<__half>) * num_weights,
+                      cudaMemcpyDefault, streams[current_buffer]);
+      cudaMemcpyAsync(h_samples_planar, d_samples_planar[current_buffer],
+                      sizeof(Samples), cudaMemcpyDefault,
+                      streams[current_buffer]);
+      cudaMemcpyAsync(h_weights_check, d_weights[current_buffer],
+                      sizeof(std::complex<__half>) * num_weights,
+                      cudaMemcpyDefault, streams[current_buffer]);
+#endif
+
       (*gemm_handles[current_buffer])
-          .Run((CUdeviceptr)d_weights_updated[current_buffer],
+          .Run((CUdeviceptr)d_weights_permuted[current_buffer],
                (CUdeviceptr)d_samples_planar[current_buffer],
                (CUdeviceptr)d_beamformed_data[current_buffer]);
+
+      tensor_32.runPermutation(
+          "beamCCGLIBToOutput", alpha_32,
+          (float *)d_beamformed_data[current_buffer],
+          (float *)d_beamformed_data_output[current_buffer],
+          streams[current_buffer]);
+
+      cudaMemcpyAsync(&h_beamformed_data[next_frame_to_capture],
+                      d_beamformed_data_output[current_buffer],
+                      sizeof(BeamformedData), cudaMemcpyDefault,
+                      streams[current_buffer]);
     }
 
     current_buffer = (current_buffer + 1) % NUM_BUFFERS;
@@ -432,13 +492,54 @@ int main(int argc, char *argv[]) {
   for (auto i = 0; i < number_of_aggregated_packets; ++i) {
     printf("Visibilities for %u:\n", i);
     print_nonzero_visibilities(&h_visibilities[i], h_scales);
+
+    printf("Beams for %u:\n", i);
+    print_nonzero_beams(&h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS,
+                        NUM_BEAMS,
+                        NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
   }
+
+#if DEBUG == 1
+  printf("weights original...\n");
+  for (auto i = 0; i < num_weights; ++i) {
+    const std::complex<__half> val = h_weights[i];
+    printf("%u: %f + %f j\n", i, __half2float(val.real()),
+           __half2float(val.imag()));
+  }
+
+  printf("weights check...\n");
+  for (auto i = 0; i < num_weights; ++i) {
+    const std::complex<__half> val = std::complex<__half>(
+        h_weights_check[2 * i], h_weights_check[2 * i + 1]);
+    printf("%u: %f + %f j\n", i, __half2float(val.real()),
+           __half2float(val.imag()));
+  }
+  printf("weights updated...\n");
+  for (auto i = 0; i < num_weights; ++i) {
+    const std::complex<__half> val = std::complex<__half>{
+        h_weights_updated[2 * i], h_weights_updated[2 * i + 1]};
+    printf("%u: %f + %f j\n", i, __half2float(val.real()),
+           __half2float(val.imag()));
+  }
+
+  printf("weights permuted...\n");
+
+  for (auto i = 0; i < num_weights * 2; ++i) {
+    const __half weight = h_weights_permuted[i];
+    printf("%u: %f\n", i, __half2float(weight));
+  }
+#endif
+
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
     cudaFree(d_samples[i]);
     cudaFree(d_samples_planar[i]);
     cudaFree(d_visibilities[i]);
     cudaFree(d_beamformed_data[i]);
+    cudaFree(d_beamformed_data_output[i]);
     cudaFree(d_eigenvalues[i]);
+    cudaFree(d_weights[i]);
+    cudaFree(d_weights_updated[i]);
+    cudaFree(d_weights_permuted[i]);
     cudaStreamDestroy(streams[i]);
     cudaEventDestroy(input_transfer_done[i]);
   }
@@ -446,13 +547,6 @@ int main(int argc, char *argv[]) {
   cudaFreeHost(h_visibilities);
   cudaFreeHost(h_scales);
   cudaFreeHost(h_beamformed_data);
-
-  cutensorDestroy(tensorHandle);
-  cutensorDestroyPlan(plan);
-  cutensorDestroyOperationDescriptor(desc);
-  cutensorDestroyPlanPreference(planPref);
-  cutensorDestroyTensorDescriptor(descPacket);
-  cutensorDestroyTensorDescriptor(descPlanar);
 
   return 0;
 }

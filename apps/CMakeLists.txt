@@ -22,6 +22,14 @@ add_executable(
 
 target_link_libraries(test_cutensor PRIVATE cudart cuda cutensor)
 
+add_executable(
+  test_cutensor_2
+  ${PROJECT_SOURCE_DIR}/apps/test_cutensor_2.cpp
+)
+
+target_link_libraries(test_cutensor_2 PRIVATE cudart cuda cutensor spatial)
+
+
 
 
 add_executable(
