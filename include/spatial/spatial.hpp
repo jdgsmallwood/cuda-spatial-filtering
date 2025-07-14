@@ -7,8 +7,16 @@
 #include <libtcc/Correlator.h>
 #define NR_TIMES_PER_BLOCK (128 / NR_BITS)
 #define NR_BASELINES (NR_RECEIVERS * (NR_RECEIVERS + 1) / 2)
-#define NUM_BEAMS 2
-#define NR_BLOCKS_FOR_CORRELATION 50
+#define NR_BEAMS 2
+#define NR_PACKETS_FOR_CORRELATION 16
+#define NR_TIME_STEPS_PER_PACKET 64
+#define NR_BLOCKS_FOR_CORRELATION                                              \
+  ((NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET) / NR_TIMES_PER_BLOCK)
+#define NR_TIME_STEPS_FOR_CORRELATION                                          \
+  (NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET)
+#define NR_ACTUAL_RECEIVERS 20
+#define NR_ACTUAL_BASELINES                                                    \
+  (NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2)
 #include <cuda_fp16.h>
 
 #if NR_BITS == 4
@@ -28,13 +36,14 @@ typedef std::complex<float> Visibility;
 constexpr tcc::Format inputFormat = tcc::Format::fp16;
 #endif
 
-typedef Sample Samples[NR_CHANNELS][NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK]
-                      [NR_RECEIVERS][NR_POLARIZATIONS][NR_TIMES_PER_BLOCK];
+typedef Sample Samples[NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][NR_RECEIVERS]
+                      [NR_POLARIZATIONS][NR_TIMES_PER_BLOCK];
 typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS]
                                [NR_POLARIZATIONS];
 
 typedef std::complex<float> BeamformedData[NR_CHANNELS][NR_POLARIZATIONS]
-                                          [NUM_BEAMS][NR_SAMPLES_PER_CHANNEL];
+                                          [NR_BEAMS]
+                                          [NR_TIME_STEPS_FOR_CORRELATION];
 
 typedef int8_t Tin;
 typedef int16_t Tscale;
@@ -113,7 +122,7 @@ inline void print_nonzero_visibilities(const Visibilities *vis,
 
 inline void print_nonzero_samples(const Samples *samps) {
   for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-    for (int j = 0; j < NR_SAMPLES_PER_CHANNEL / NR_TIMES_PER_BLOCK; ++j) {
+    for (int j = 0; j < NR_BLOCKS_FOR_CORRELATION; ++j) {
       for (int k = 0; k < NR_RECEIVERS; k++) {
         for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
           for (int t = 0; t < NR_TIMES_PER_BLOCK; ++t) {

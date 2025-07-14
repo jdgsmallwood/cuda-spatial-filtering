@@ -188,7 +188,8 @@ void correlate(Samples *samples, Visibilities *visibilities) {
     checkCudaCall(cudaFree(0));
     std::cout << "Instantiating correlator..." << std::endl;
     tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
-                               NR_CHANNELS, NR_SAMPLES_PER_CHANNEL,
+                               NR_CHANNELS,
+                               NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                                NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 
     cudaStream_t stream;

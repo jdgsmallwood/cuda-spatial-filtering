@@ -22,7 +22,7 @@ PacketInfo get_packet_info(const u_char *packet, const int size) {
 void process_packet(const u_char *packet, const int size, Samples *agg_samples,
                     std::vector<Tscale> &scales_output, const int start_seq_id,
                     const int start_freq, const int nr_time_steps_per_packet,
-                    const int nr_blocks_for_correlation,
+                    const int nr_packets_for_correlation,
                     const int nr_times_per_block,
                     const int nr_actual_receivers) {
   if (size < 58) { // minimum header size (14+20+8+16)
@@ -49,14 +49,14 @@ void process_packet(const u_char *packet, const int size, Samples *agg_samples,
 
   const int packet_num =
       (custom->sample_count - start_seq_id) / nr_time_steps_per_packet;
-  const int packet_num_in_frame = packet_num % nr_blocks_for_correlation;
-  const int sample_frame_to_populate = packet_num / nr_blocks_for_correlation;
+  const int packet_num_in_frame = packet_num % nr_packets_for_correlation;
+  const int sample_frame_to_populate = packet_num / nr_packets_for_correlation;
   const int num_blocks_per_packet =
       nr_time_steps_per_packet / nr_times_per_block; // 8
   printf("Packet number is %u. Seq is %u and start_seq was %u\n", packet_num,
          custom->sample_count, start_seq_id);
-  printf("Will write to block %u in frame %u\n", packet_num_in_frame,
-         sample_frame_to_populate);
+  printf("Will start to write at block %u in frame %u\n",
+         packet_num_in_frame * num_blocks_per_packet, sample_frame_to_populate);
   printf("Num blocks per packet is %u\n", num_blocks_per_packet);
   // Scale factors start at offset 64
   const Tscale *scales = reinterpret_cast<const Tscale *>(packet + 64);
@@ -69,10 +69,10 @@ void process_packet(const u_char *packet, const int size, Samples *agg_samples,
       packet + 64 + nr_actual_receivers * sizeof(Tscale));
   const int freq_idx = custom->freq_channel - start_freq;
   for (auto k = 0; k < num_blocks_per_packet; ++k) {
-    int pkt_idx = num_blocks_per_packet * packet_num_in_frame + k;
+    int blk_idx = num_blocks_per_packet * packet_num_in_frame + k;
     for (auto i = 0; i < nr_times_per_block; ++i) {
       for (auto j = 0; j < nr_actual_receivers; ++j) {
-        agg_samples[sample_frame_to_populate][freq_idx][pkt_idx][j][0][i] =
+        agg_samples[sample_frame_to_populate][freq_idx][blk_idx][j][0][i] =
             Sample(samples[2 * k * nr_times_per_block * nr_actual_receivers +
                            2 * nr_actual_receivers * i + 2 * j],
                    samples[2 * k * nr_times_per_block * nr_actual_receivers +
