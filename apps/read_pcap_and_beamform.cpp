@@ -296,13 +296,17 @@ int main(int argc, char *argv[]) {
   // m = beam
   // s = time consolidated <block x time>
   std::vector<int> modePacket{'c', 'b', 'r', 'p', 't', 'z'};
+  std::vector<int> modePlanar{'c', 'p', 'z', 'r', 'b', 't'};
   // We need the planar samples matrix to be in column-major memory layout
   // which is equivalent to transposing time and receiver structure here.
-  std::vector<int> modePlanar{'c', 'p', 'z', 'r', 'b', 't'};
+  // We also squash the b,t axes into s = block * time
+  // CCGLIB requires that we have BLOCK x COMPLEX x COL x ROW structure.
   std::vector<int> modePlanarCons = {'c', 'p', 'z', 'r', 's'};
   std::vector<int> modePlanarColMajCons = {'c', 'p', 'z', 's', 'r'};
   std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
   std::vector<int> modeVisDecomp{'c', 'p', 'q', 'l', 'z'};
+  // Convert back to interleaved instead of planar output.
+  // This is not strictly necessary to do in the pipeline.
   std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
   std::vector<int> modeBeamOutput{'c', 'p', 'm', 's', 'z'};
   std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r', 'z'};

@@ -28,7 +28,7 @@ ctest
 
 ## Next Steps
 - [x] Understand the relationship between antenna & baseline in tcc.
-- [ ] Write code to get data from PCAP / CODIF / DADA data into right format for correlator & beamformer.
+- [x] Write code to get data from PCAP / CODIF / DADA data into right format for correlator & beamformer.
 
 
 ## TCC Tips
@@ -40,11 +40,14 @@ ctest
 
 ## TODOs
 
+- [ ] Add multiple processing streams to de-couple processing of correlation matrix & transpositions.
+- [ ] Add integration tests around the current engine to make sure it doesn't get broken
+- [ ] Get rid of some of the original test code
 - [x] Verify the visibilities from the test PCAP files.
 - [x] Clean up the read_pcap file to move PCAP code out of main code file.
-- [ ] Do beamforming using ccglib.
+- [x] Do beamforming using ccglib.
 - [ ] Figure out how to do this capturing packets.
-- [ ] Output formats
+- [ ] Output formats for beams / debug information.
 - [ ] Integrating on the GPU over time and then dumping out to disk.
 - [x] Profile and check that things are running concurrently.
 - [ ] Decompose correlation matrix from lower-triangular form.
