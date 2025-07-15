@@ -25,9 +25,9 @@ int main(int argc, char **argv) {
   std::vector<int> modeA{'w', 'h', 'c', 'n'};
 
   std::unordered_map<int, int64_t> extent;
-  extent['h'] = 1;
+  extent['h'] = 3;
   extent['w'] = 4;
-  extent['c'] = 4;
+  extent['c'] = 2;
   extent['n'] = 1;
 
   CutensorSetup tensor(extent, CUTENSOR_R_32F, 128);

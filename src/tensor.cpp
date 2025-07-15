@@ -1,5 +1,6 @@
 
 #include "spatial/tensor.hpp"
+#include <algorithm>
 #include <cuda_fp16.h>
 #include <cutensor.h>
 #include <iostream>
@@ -55,13 +56,13 @@ void CutensorSetup::addTensor(const std::vector<int> &modes,
   if (tensors.find(name) != tensors.end()) {
     throw std::runtime_error("Tensor with name '" + name + "' already exists");
   }
-
+  std::vector<int> reversed_modes = modes;
+  std::reverse(reversed_modes.begin(), reversed_modes.end());
   auto meta = std::make_unique<TensorMeta>();
-  meta->modes = modes;
-
+  meta->modes = reversed_modes;
   // Calculate extents based on modes
-  meta->extents.reserve(modes.size());
-  for (int mode : modes) {
+  meta->extents.reserve(reversed_modes.size());
+  for (int mode : reversed_modes) {
     auto it = extentMap.find(mode);
     if (it == extentMap.end()) {
       throw std::runtime_error("Mode '" + std::to_string(mode) +
@@ -71,11 +72,11 @@ void CutensorSetup::addTensor(const std::vector<int> &modes,
   }
 
   // Calculate elements and size
-  meta->elements = calculateElements(modes);
-  meta->sizeBytes = calculateSizeBytes(modes);
+  meta->elements = calculateElements(reversed_modes);
+  meta->sizeBytes = calculateSizeBytes(reversed_modes);
 
   // Create tensor descriptor
-  createTensorDescriptor(*meta, modes);
+  createTensorDescriptor(*meta, reversed_modes);
 
   std::cout << "Tensor " << name << " created with " << meta->elements
             << " elements and size " << meta->sizeBytes << " bytes. Modes ";
@@ -115,7 +116,7 @@ void CutensorSetup::addPermutation(const std::string &fromTensorName,
 
   // Create permutation operation descriptor
   cutensorStatus_t status = cutensorCreatePermutation(
-      handle, &op->desc, fromIt->second->desc, fromIt->second->modes.data(),
+      handle, &(op->desc), fromIt->second->desc, fromIt->second->modes.data(),
       CUTENSOR_OP_IDENTITY, toIt->second->desc, toIt->second->modes.data(),
       computeType);
 
@@ -124,14 +125,24 @@ void CutensorSetup::addPermutation(const std::string &fromTensorName,
   }
 
   // Create execution plan
-  status = cutensorCreatePlan(handle, &op->plan, op->desc, planPref, 0);
+  status = cutensorCreatePlan(handle, &(op->plan), op->desc, planPref, 0);
   if (status != CUTENSOR_STATUS_SUCCESS) {
     throw std::runtime_error("Failed to create execution plan");
   }
 
   std::cout << "Created permutation from " << fromTensorName << " to "
             << toTensorName << " with " << fromIt->second->elements << ", "
-            << toIt->second->elements << " elements.\n";
+            << toIt->second->elements << " elements and shapes (";
+
+  for (auto &item : fromIt->second->modes) {
+    std::cout << extentMap[item] << ",";
+  }
+  std::cout << ") and (";
+
+  for (const auto &item : toIt->second->modes) {
+    std::cout << extentMap[item] << ",";
+  }
+  std::cout << ")\n";
 
   // Store the operation
   ops[opName] = std::move(op);
@@ -149,6 +160,8 @@ const PermutationOp *
 CutensorSetup::getPermutation(const std::string &name) const {
   auto it = ops.find(name);
   if (it == ops.end()) {
+
+    std::cerr << "Could not find permutation " << name << "!\n";
     return nullptr;
   }
   return it->second.get();
@@ -158,6 +171,7 @@ void CutensorSetup::runPermutation(const std::string &name, const __half &alpha,
                                    const __half *d_in, __half *d_out,
                                    cudaStream_t stream) {
   const PermutationOp *perm = getPermutation(name);
+  std::cout << "Running permutation " << name << "...\n";
 
   checkCutensorStatus(
       cutensorPermute(handle, perm->plan, &alpha, d_in, d_out, stream),

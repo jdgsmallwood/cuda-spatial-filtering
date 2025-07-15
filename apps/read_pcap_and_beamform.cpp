@@ -199,8 +199,8 @@ int main(int argc, char *argv[]) {
              scales[j], h_scales[baseline]);
     }
   }
-  printf("Printing samples...\n");
-  print_nonzero_samples(h_samples);
+  // printf("Printing samples...\n");
+  // print_nonzero_samples(h_samples);
 
   // create CUDA streams
   cudaStream_t streams[NUM_BUFFERS];
@@ -300,10 +300,11 @@ int main(int argc, char *argv[]) {
   // which is equivalent to transposing time and receiver structure here.
   std::vector<int> modePlanar{'c', 'p', 'z', 'r', 'b', 't'};
   std::vector<int> modePlanarCons = {'c', 'p', 'z', 'r', 's'};
-  std::vector<int> modePlanarColMajCons = {'c', 'p', 'z', 's', 'r'};
+  std::vector<int> modePlanarColMajCons = {'s', 'r', 'z', 'p', 'c'};
   std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
   std::vector<int> modeVisDecomp{'c', 'p', 'q', 'l', 'z'};
-  std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
+  // std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
+  std::vector<int> modeBeamCCGLIB{'s', 'm', 'z', 'p', 'c'};
   std::vector<int> modeBeamOutput{'c', 'p', 'm', 's', 'z'};
   std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r', 'z'};
   std::vector<int> modeWeightsCCGLIB{'c', 'p', 'z', 'm', 'r'};
@@ -496,7 +497,7 @@ int main(int argc, char *argv[]) {
 
       (*gemm_handles[current_buffer])
           .Run((CUdeviceptr)d_weights_permuted[current_buffer],
-               (CUdeviceptr)d_samples_planar_col_maj[current_buffer],
+               (CUdeviceptr)d_samples_planar[current_buffer],
                (CUdeviceptr)d_beamformed_data[current_buffer]);
 
       tensor_32.runPermutation(
@@ -506,9 +507,9 @@ int main(int argc, char *argv[]) {
           streams[current_buffer]);
 
       cudaMemcpyAsync(&h_beamformed_data[next_frame_to_capture],
-                      // d_beamformed_data_output[current_buffer],
-                      d_beamformed_data[current_buffer], sizeof(BeamformedData),
-                      cudaMemcpyDefault, streams[current_buffer]);
+                      d_beamformed_data_output[current_buffer],
+                      sizeof(BeamformedData), cudaMemcpyDefault,
+                      streams[current_buffer]);
     }
 
     current_buffer = (current_buffer + 1) % NUM_BUFFERS;
@@ -563,7 +564,7 @@ int main(int argc, char *argv[]) {
 
   printf("data from GPU...\n");
 
-  print_nonzero_samples(h_samples_check);
+  // print_nonzero_samples(h_samples_check);
 #endif
 
   for (auto i = 0; i < NUM_BUFFERS; ++i) {
