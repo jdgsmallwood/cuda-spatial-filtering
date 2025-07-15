@@ -43,6 +43,7 @@ ctest
 - [ ] Add multiple processing streams to de-couple processing of correlation matrix & transpositions.
 - [ ] Add integration tests around the current engine to make sure it doesn't get broken
 - [ ] Get rid of some of the original test code
+- [ ] Take h_scales into account with the data.
 - [x] Verify the visibilities from the test PCAP files.
 - [x] Clean up the read_pcap file to move PCAP code out of main code file.
 - [x] Do beamforming using ccglib.

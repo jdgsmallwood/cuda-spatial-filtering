@@ -20,8 +20,11 @@ add_executable(
 
 target_link_libraries(test_cutensor_2 PRIVATE cudart cuda cutensor spatial)
 
-
-
+add_executable(
+  beamform_spatial
+  ${PROJECT_SOURCE_DIR}/apps/beamform_spatial.cpp
+)
+target_link_libraries(beamform_spatial PRIVATE cudart cuda spatial cutensor pcap)
 
 add_executable(
   read_pcap_and_beamform

@@ -1,7 +1,17 @@
 #pragma once
 
+#ifndef NR_CHANNELS
 #define NR_CHANNELS @NR_CHANNELS@
+#endif
+#ifndef NR_RECEIVERS
 #define NR_RECEIVERS @NR_RECEIVERS@
+#endif
+#ifndef NR_POLARIZATIONS
 #define NR_POLARIZATIONS @NR_POLARIZATIONS@
+#endif
+#ifndef NR_RECEIVERS_PER_BLOCK
 #define NR_RECEIVERS_PER_BLOCK @NR_RECEIVERS_PER_BLOCK@
+#endif
+#ifndef NR_BITS
 #define NR_BITS @NR_BITS@
+#endif

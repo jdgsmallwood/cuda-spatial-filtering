@@ -21,7 +21,6 @@
 
 #define DEBUG 1
 
-constexpr int NUM_BUFFERS = 2;
 PCAPInfo get_pcap_info(char *file_name) {
 
   char errbuf[PCAP_ERRBUF_SIZE];
@@ -203,35 +202,35 @@ int main(int argc, char *argv[]) {
   // print_nonzero_samples(h_samples);
 
   // create CUDA streams
-  cudaStream_t streams[NUM_BUFFERS];
-  cudaEvent_t input_transfer_done[NUM_BUFFERS];
+  cudaStream_t streams[NR_BUFFERS];
+  cudaEvent_t input_transfer_done[NR_BUFFERS];
 
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
     cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
     cudaEventCreate(&input_transfer_done[i]);
   }
 
   // create device pointers
-  Samples *d_samples[NUM_BUFFERS];
+  Samples *d_samples[NR_BUFFERS];
 
   // the planar data needs to be __half so if NR_BITS == 8 then
   // we need to convert
 #if NR_BITS == 8
-  __half *d_samples_converted[NUM_BUFFERS];
-  float *d_visibilities_converted[NUM_BUFFERS];
+  __half *d_samples_converted[NR_BUFFERS];
+  float *d_visibilities_converted[NR_BUFFERS];
 #endif
-  __half *d_samples_planar[NUM_BUFFERS], *d_samples_planar_col_maj[NUM_BUFFERS];
-  Visibilities *d_visibilities[NUM_BUFFERS];
-  std::complex<float> *d_visibilities_permuted[NUM_BUFFERS];
-  __half *d_weights[NUM_BUFFERS], *d_weights_updated[NUM_BUFFERS],
-      *d_weights_permuted[NUM_BUFFERS];
-  float *d_eigenvalues[NUM_BUFFERS];
-  BeamformedData *d_beamformed_data[NUM_BUFFERS],
-      *d_beamformed_data_output[NUM_BUFFERS];
+  __half *d_samples_planar[NR_BUFFERS], *d_samples_planar_col_maj[NR_BUFFERS];
+  Visibilities *d_visibilities[NR_BUFFERS];
+  std::complex<float> *d_visibilities_permuted[NR_BUFFERS];
+  __half *d_weights[NR_BUFFERS], *d_weights_updated[NR_BUFFERS],
+      *d_weights_permuted[NR_BUFFERS];
+  float *d_eigenvalues[NR_BUFFERS];
+  BeamformedData *d_beamformed_data[NR_BUFFERS],
+      *d_beamformed_data_output[NR_BUFFERS];
 
   size_t size_d_samples_planar, size_d_visibilities_permuted;
   // start with these events in done state.
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
     cudaMalloc((void **)&d_samples[i], sizeof(Samples));
 #if NR_BITS == 8
     size_d_samples_planar = sizeof(Samples) * sizeof(__half) / sizeof(int8_t);
@@ -378,7 +377,7 @@ int main(int argc, char *argv[]) {
 
   std::vector<std::unique_ptr<ccglib::mma::GEMM>> gemm_handles;
 
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
     gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
         NR_CHANNELS * NR_POLARIZATIONS, NR_BEAMS,
         NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, NR_RECEIVERS, cu_device,
@@ -515,7 +514,7 @@ int main(int argc, char *argv[]) {
                       streams[current_buffer]);
     }
 
-    current_buffer = (current_buffer + 1) % NUM_BUFFERS;
+    current_buffer = (current_buffer + 1) % NR_BUFFERS;
   }
   printf("Synchronizing...\n");
   cudaDeviceSynchronize();
@@ -570,7 +569,7 @@ int main(int argc, char *argv[]) {
   // print_nonzero_samples(h_samples_check);
 #endif
 
-  for (auto i = 0; i < NUM_BUFFERS; ++i) {
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
     cudaFree(d_samples[i]);
     cudaFree(d_samples_planar[i]);
     cudaFree(d_samples_planar_col_maj[i]);
@@ -588,6 +587,15 @@ int main(int argc, char *argv[]) {
   cudaFreeHost(h_visibilities);
   cudaFreeHost(h_scales);
   cudaFreeHost(h_beamformed_data);
+
+#if DEBUG == 1
+  cudaFreeHost(h_samples_check);
+  cudaFreeHost(h_samples_planar);
+  cudaFreeHost(h_samples_planar_col_maj);
+  cudaFreeHost(h_weights_check);
+  cudaFreeHost(h_weights_updated);
+  cudaFreeHost(h_weights_permuted);
+#endif
 
   return 0;
 }

@@ -7,16 +7,27 @@
 #include <libtcc/Correlator.h>
 #define NR_TIMES_PER_BLOCK (128 / NR_BITS)
 #define NR_BASELINES (NR_RECEIVERS * (NR_RECEIVERS + 1) / 2)
+#ifndef NR_BEAMS
 #define NR_BEAMS 2
+#endif
+#ifndef NR_PACKETS_FOR_CORRELATION
 #define NR_PACKETS_FOR_CORRELATION 16
+#endif
+#ifndef NR_TIME_STEPS_PER_PACKET
 #define NR_TIME_STEPS_PER_PACKET 64
+#endif
 #define NR_BLOCKS_FOR_CORRELATION                                              \
   ((NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET) / NR_TIMES_PER_BLOCK)
 #define NR_TIME_STEPS_FOR_CORRELATION                                          \
   (NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET)
+#ifndef NR_ACTUAL_RECEIVERS
 #define NR_ACTUAL_RECEIVERS 20
+#endif
 #define NR_ACTUAL_BASELINES                                                    \
   (NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2)
+#ifndef NR_BUFFERS
+#define NR_BUFFERS 2
+#endif
 #include <cuda_fp16.h>
 
 #if NR_BITS == 4
@@ -60,11 +71,11 @@ void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
 void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
                     const int n_col, const int batch_size, int n_inner,
                     const int tile_size_x, const int tile_size_y);
-template <typename T, typename S>
-void beamform(std::complex<T> *data_matrix, std::complex<T> *weights,
-              std::complex<S> *output_matrix, const int n_antennas,
-              const int n_samples, const int n_beams);
-
+template <typename T, typename S, typename U>
+void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
+              std::complex<S> *h_beam_output,
+              std::complex<S> *h_visibilities_output,
+              const int nr_aggregated_packets);
 template <typename T>
 void rearrange_matrix_to_ccglib_format(const std::complex<T> *input_matrix,
                                        T *output_matrix, const int n_rows,
