@@ -300,11 +300,10 @@ int main(int argc, char *argv[]) {
   // which is equivalent to transposing time and receiver structure here.
   std::vector<int> modePlanar{'c', 'p', 'z', 'r', 'b', 't'};
   std::vector<int> modePlanarCons = {'c', 'p', 'z', 'r', 's'};
-  std::vector<int> modePlanarColMajCons = {'s', 'r', 'z', 'p', 'c'};
+  std::vector<int> modePlanarColMajCons = {'c', 'p', 'z', 's', 'r'};
   std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
   std::vector<int> modeVisDecomp{'c', 'p', 'q', 'l', 'z'};
-  // std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
-  std::vector<int> modeBeamCCGLIB{'s', 'm', 'z', 'p', 'c'};
+  std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
   std::vector<int> modeBeamOutput{'c', 'p', 'm', 's', 'z'};
   std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r', 'z'};
   std::vector<int> modeWeightsCCGLIB{'c', 'p', 'z', 'm', 'r'};
@@ -497,7 +496,7 @@ int main(int argc, char *argv[]) {
 
       (*gemm_handles[current_buffer])
           .Run((CUdeviceptr)d_weights_permuted[current_buffer],
-               (CUdeviceptr)d_samples_planar[current_buffer],
+               (CUdeviceptr)d_samples_planar_col_maj[current_buffer],
                (CUdeviceptr)d_beamformed_data[current_buffer]);
 
       tensor_32.runPermutation(
