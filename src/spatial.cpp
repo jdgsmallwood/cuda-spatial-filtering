@@ -468,7 +468,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
           streams[current_buffer]);
 #elif NR_BITS == 16
       tensor_16.runPermutation(
-          "packetToPlanar", alpha, d_samples[current_buffer],
+          "packetToPlanar", alpha, (__half *)d_samples[current_buffer],
           d_samples_planar[current_buffer], streams[current_buffer]);
       tensor_32.runPermutation("visCorrToDecomp", alpha_32,
                                (float *)d_visibilities[current_buffer],
@@ -501,11 +501,11 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 
 #else
 
-      update_weights(d_weights[current_buffer],
-                     d_weights_updated[current_buffer], NR_BEAMS, NR_RECEIVERS,
-                     NR_CHANNELS, NR_POLARIZATIONS,
-                     d_eigenvalues[current_buffer],
-                     d_visibilities[current_buffer], streams[current_buffer]);
+      update_weights(
+          d_weights[current_buffer], d_weights_updated[current_buffer],
+          NR_BEAMS, NR_RECEIVERS, NR_CHANNELS, NR_POLARIZATIONS,
+          d_eigenvalues[current_buffer],
+          (float *)d_visibilities[current_buffer], streams[current_buffer]);
 #endif
 
       tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
@@ -586,7 +586,6 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   }
 
   printf("data from GPU...\n");
-
   // print_nonzero_samples(h_samples_check);
 #endif
 
@@ -608,7 +607,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 #if DEBUG == 1
   cudaFreeHost(h_samples_check);
   cudaFreeHost(h_samples_planar);
-  cudaFreehost(h_samples_planar_col_maj);
+  cudaFreeHost(h_samples_planar_col_maj);
   cudaFreeHost(h_weights_check);
   cudaFreeHost(h_weights_updated);
   cudaFreeHost(h_weights_permuted);

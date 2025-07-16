@@ -515,5 +515,3 @@ TEST(TestSpatial, TestRearrangeCCGLIBMatrixToCompactFormat) {
     EXPECT_EQ(output_matrix[i], std::complex<float>(i + 1, i + 1));
   }
 }
-
-TEST(TestBeamform, TestBeamforming) {}

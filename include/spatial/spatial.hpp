@@ -52,6 +52,9 @@ typedef Sample Samples[NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][NR_RECEIVERS]
 typedef Visibility Visibilities[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS]
                                [NR_POLARIZATIONS];
 
+typedef std::complex<__half> BeamWeights[NR_CHANNELS][NR_POLARIZATIONS]
+                                        [NR_BEAMS][NR_RECEIVERS];
+
 typedef std::complex<float> BeamformedData[NR_CHANNELS][NR_POLARIZATIONS]
                                           [NR_BEAMS]
                                           [NR_TIME_STEPS_FOR_CORRELATION];
@@ -162,9 +165,11 @@ inline void print_nonzero_beams(const BeamformedData *data,
         for (int step = 0; step < num_time_steps; ++step) {
 
           const std::complex<float> val = (*data)[ch][pol][beam][step];
-          std::cout << "data[" << ch << "][" << pol << "][" << beam << "]["
-                    << step << "] = " << val.real() << " + " << val.imag()
-                    << "i\n";
+          if (val.real() != 0.0f || val.imag() != 0.0f) {
+            std::cout << "data[" << ch << "][" << pol << "][" << beam << "]["
+                      << step << "] = " << val.real() << " + " << val.imag()
+                      << "i\n";
+          }
         }
       }
     }

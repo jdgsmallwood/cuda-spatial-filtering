@@ -61,7 +61,7 @@ void convert_int_to_float(const int *d_input, float *d_output, const int n, cuda
 }
 
 
-void update_weights(const __half *d_weights, __half *d_weights_output, const int num_beams, const int num_receivers,const int num_channels, const int num_polarizations, const float *d_eigenvalues, const float *d_eigenvectors, cudaStream_t &stream) {
+void update_weights(const __half *d_weights, __half *d_weights_output, const int num_beams, const int num_receivers,const int num_channels, const int num_polarizations, const float *d_eigenvalues, float *d_eigenvectors, cudaStream_t &stream) {
 
     const int n = num_beams * num_receivers * num_channels * num_polarizations;
     const int num_blocks = std::min(4, n / 1024 + 1);

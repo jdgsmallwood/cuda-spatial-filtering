@@ -171,7 +171,7 @@ void CutensorSetup::runPermutation(const std::string &name, const __half &alpha,
                                    const __half *d_in, __half *d_out,
                                    cudaStream_t stream) {
   const PermutationOp *perm = getPermutation(name);
-  std::cout << "Running permutation " << name << "...\n";
+  std::cout << "Running permutation " << name << "..." << std::endl;
 
   checkCutensorStatus(
       cutensorPermute(handle, perm->plan, &alpha, d_in, d_out, stream),
@@ -182,7 +182,7 @@ void CutensorSetup::runPermutation(const std::string &name, const float &alpha,
                                    const float *d_in, float *d_out,
                                    cudaStream_t stream) {
   const PermutationOp *perm = getPermutation(name);
-
+  std::cout << "Running permutation " << name << "..." << std::endl;
   checkCutensorStatus(
       cutensorPermute(handle, perm->plan, &alpha, d_in, d_out, stream),
       "permutation float");
