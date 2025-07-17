@@ -50,20 +50,28 @@ TEST(TEST_SUITE_NAME(NAMESPACE, BeamformingTests), SimpleTest) {
            (std::complex<float> *)h_beamformed_data,
            (std::complex<float> *)h_visibilities, number_of_aggregated_packets);
 
-  /*
-   * Output
-   * */
+  // To check these figures:
+  // import numpy as np
 
-  printf("Starting to print visibilities...\n");
-  for (auto i = 0; i < number_of_aggregated_packets; ++i) {
-    printf("Visibilities for %u:\n", i);
-    print_nonzero_visibilities(&h_visibilities[i]);
-
-    printf("Beams for %u:\n", i);
-    print_nonzero_beams(&h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS,
-                        NR_BEAMS,
-                        NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
-  }
+  // data = np.array(
+  //[
+  //     [1 + 1j, 2 + 2j],
+  //     [2 + 2j,     1j]
+  //])
+  //
+  // weights = np.array([
+  //     [1 + 1j, 1 + 1j],
+  //     [2 + 2j, 2 + 2j],
+  //])
+  //
+  // np.dot(data[0], data[1].conj().T)
+  // > 6 - 2j
+  //
+  // weights @ data
+  // > np.array([
+  //  [0 +  6j, -1 +  5j],
+  //  [0 + 12j, -2 + 10j],
+  // ])
 
   EXPECT_EQ(h_visibilities[0][0][0][0][0], Visibility(10, 0));
   EXPECT_EQ(h_visibilities[0][0][1][0][0], Visibility(6, -2));

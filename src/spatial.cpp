@@ -148,7 +148,8 @@ void d_eigendecomposition(float *d_eigenvalues, const int n,
           n,         // size of symmetric matrix
           data_type, // data type
                      // this is almost certainly not right.
-          (T *)&d_A[i * num_polarizations * num_polarizations * NR_BASELINES +
+          (T *)&d_A[i * num_polarizations * num_polarizations *
+                        spatial::NR_BASELINES +
                     j * n * num_polarizations], // what to decompose
           n,                                    // lda
           CUDA_R_32F, // data type output - should always be real
@@ -170,6 +171,7 @@ void d_eigendecomposition(float *d_eigenvalues, const int n,
     std::cerr << "Eigenvalue decomposition failed!" << std::endl;
     return;
   }
+  free(h_work);
   //// Destroy cuSOLVER handle
   cusolverDnDestroy(solverHandle);
 }
@@ -191,10 +193,10 @@ void correlate(Samples *samples, Visibilities *visibilities) {
         cudaSetDevice(0)); // combine the CUDA runtime API and CUDA driver API
     checkCudaCall(cudaFree(0));
     std::cout << "Instantiating correlator..." << std::endl;
-    tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
-                               NR_CHANNELS,
-                               NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                               NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+    tcc::Correlator correlator(
+        cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
+        spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
+        NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 
     cudaStream_t stream;
     checkCudaCall(cudaStreamCreate(&stream));
@@ -348,15 +350,16 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 
   std::unordered_map<int, int64_t> extent;
   extent['c'] = NR_CHANNELS;
-  extent['b'] = NR_BLOCKS_FOR_CORRELATION;
+  extent['b'] = spatial::NR_BLOCKS_FOR_CORRELATION;
   extent['r'] = NR_RECEIVERS;
   extent['p'] = NR_POLARIZATIONS;
   extent['q'] = NR_POLARIZATIONS; // 2nd polarizations for baselines
-  extent['t'] = NR_TIMES_PER_BLOCK;
+  extent['t'] = spatial::NR_TIMES_PER_BLOCK;
   extent['z'] = 2; // real, imaginary
-  extent['l'] = NR_BASELINES;
+  extent['l'] = spatial::NR_BASELINES;
   extent['m'] = NR_BEAMS;
-  extent['s'] = NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK;
+  extent['s'] =
+      spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK;
 
   CutensorSetup tensor_16(extent, CUTENSOR_R_16F, 128);
   CutensorSetup tensor_32(extent, CUTENSOR_R_32F, 128);
@@ -388,16 +391,17 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   printf("NR_RECEIVERS: %u\n", NR_RECEIVERS);
   printf("NR_CHANNELS: %u\n", NR_CHANNELS);
   printf("NR_SAMPLES_PER_CHANNEL: %u\n",
-         NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
+         spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
   printf("NR_POLARIZATIONS: %u\n", NR_POLARIZATIONS);
   printf("NR_RECEIVERS_PER_BLOCK: %u\n", NR_RECEIVERS_PER_BLOCK);
-  tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
-                             NR_CHANNELS,
-                             NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                             NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+  tcc::Correlator correlator(
+      cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
+      spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
+      NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 
-  printf("NR_BLOCKS_FOR_CORRELATION: %u\n", NR_BLOCKS_FOR_CORRELATION);
-  printf("NR_TIMES_PER_BLOCK: %u\n", NR_TIMES_PER_BLOCK);
+  printf("spatial::NR_BLOCKS_FOR_CORRELATION: %u\n",
+         spatial::NR_BLOCKS_FOR_CORRELATION);
+  printf("spatial::NR_TIMES_PER_BLOCK: %u\n", spatial::NR_TIMES_PER_BLOCK);
   printf("NR_ACTUAL_RECEIVERS: %u\n", NR_ACTUAL_RECEIVERS);
   printf("NR_BITS: %u\n", NR_BITS);
   printf("Launching processing loop...\n");
@@ -415,8 +419,9 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   for (auto i = 0; i < NR_BUFFERS; ++i) {
     gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
         NR_CHANNELS * NR_POLARIZATIONS, NR_BEAMS,
-        NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, NR_RECEIVERS, cu_device,
-        streams[i], ccglib::ValueType::float16, ccglib::mma::basic));
+        spatial::NR_TIMES_PER_BLOCK * spatial::NR_BLOCKS_FOR_CORRELATION,
+        NR_RECEIVERS, cu_device, streams[i], ccglib::ValueType::float16,
+        ccglib::mma::basic));
   }
   // Ensure all copying is done before processing loop starts.
   // This may not be necessary.

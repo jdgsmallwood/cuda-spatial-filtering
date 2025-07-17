@@ -24,7 +24,7 @@ add_executable(
   beamform_spatial
   ${PROJECT_SOURCE_DIR}/apps/beamform_spatial.cpp
 )
-target_link_libraries(beamform_spatial PRIVATE cudart cuda spatial cutensor pcap)
+target_link_libraries(beamform_spatial PRIVATE cudart cuda spatial cutensor pcap HighFive::HighFive)
 
 add_executable(
   read_pcap_and_beamform

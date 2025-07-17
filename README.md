@@ -37,19 +37,28 @@ ctest
 - The number of receivers must be a multiple of 32. If there are fewer than 32 receivers then set NR_RECEIVERS to 32 and zero pad. 
 - NR_POLARIZATIONS must be 2 - if not then zero pad.
 
+## CCGLIB Tips
+
+- The second matrix in the calculation must be in column-major format only for the rows/columns sections.
+  The Batch / Complex sections are not column-major.
+
+## cuTENSOR Tips
+- cuTENSOR assumes that given modes are column-major. To deal with this in tensor.cpp I introduce a std::reverse
+  so that we can think in row-major geometries.
 
 ## TODOs
 
 - [ ] Add multiple processing streams to de-couple processing of correlation matrix & transpositions.
-- [ ] Add integration tests around the current engine to make sure it doesn't get broken
-- [ ] Get rid of some of the original test code
+- [x] Add integration tests around the current engine to make sure it doesn't get broken
+- [x] Get rid of some of the original test code
 - [ ] Take h_scales into account with the data.
 - [x] Verify the visibilities from the test PCAP files.
 - [x] Clean up the read_pcap file to move PCAP code out of main code file.
 - [x] Do beamforming using ccglib.
 - [ ] Figure out how to do this capturing packets.
-- [ ] Output formats for beams / debug information.
+- [x] Output formats for beams / debug information.
 - [ ] Integrating on the GPU over time and then dumping out to disk.
 - [x] Profile and check that things are running concurrently.
 - [ ] Decompose correlation matrix from lower-triangular form.
 - [ ] Begin writing spatial filtering algorithms.
+- [ ] Get benchmarks of initial work / slowest sections.

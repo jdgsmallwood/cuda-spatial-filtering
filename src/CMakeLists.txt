@@ -64,7 +64,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/tensor.cpp
 target_link_libraries(
     spatial_16bit PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor
 )
-  target_compile_definitions(spatial_16bit PRIVATE NR_RECEIVERS=32 NR_BITS=16 NR_RECEIVERS_PER_BLOCK=32 DEBUG=1)
+  target_compile_definitions(spatial_16bit PRIVATE NR_RECEIVERS=32 NR_BITS=16 NR_RECEIVERS_PER_BLOCK=32)
 
 target_include_directories(
     spatial_16bit

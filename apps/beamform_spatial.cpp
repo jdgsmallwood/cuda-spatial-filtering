@@ -3,20 +3,31 @@
 #include "spatial/spatial.hpp"
 #include "spatial/tensor.hpp"
 #include <algorithm>
-#include <atomic>
+#include <ctime>
 #include <cuComplex.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cudawrappers/cu.hpp>
+#include <highfive/highfive.hpp>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <pcap/pcap.h>
+#include <sstream>
 #include <stdexcept>
-#include <unordered_map>
+#include <string>
 #include <vector>
-
 #define DEBUG 1
 
+std::string make_filename_with_time(const std::string &prefix = "beamweights",
+                                    const std::string &ext = "h5") {
+  auto t = std::time(nullptr);
+  std::tm tm;
+  localtime_r(&t, &tm); // POSIX thread-safe version
+  std::ostringstream oss;
+  oss << prefix << "_" << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S") << "." << ext;
+  return oss.str();
+}
 PCAPInfo get_pcap_info(char *file_name) {
 
   char errbuf[PCAP_ERRBUF_SIZE];
@@ -95,19 +106,6 @@ int main(int argc, char *argv[]) {
    *
    * */
 
-  // Check if any padding
-  std::cout << "sizeof(__half): " << sizeof(__half) << std::endl;
-  std::cout << "sizeof(std::complex<__half>): " << sizeof(std::complex<__half>)
-            << std::endl;
-  static_assert(sizeof(std::complex<__half>) == 2 * sizeof(__half),
-                "Padding detected in std::complex<__half>");
-
-  std::cout << "sizeof(float): " << sizeof(float) << std::endl;
-  std::cout << "sizeof(std::complex<float>): " << sizeof(std::complex<float>)
-            << std::endl;
-  static_assert(sizeof(std::complex<float>) == 2 * sizeof(float),
-                "Padding detected in std::complex<float>");
-
   /*
    * PCAP Formatting.
    * */
@@ -145,7 +143,7 @@ int main(int argc, char *argv[]) {
   // allocate pinned host memory
   Samples *h_samples;
   Visibilities *h_visibilities;
-  std::complex<__half> *h_weights;
+  BeamWeights *h_weights;
   BeamformedData *h_beamformed_data;
 
   constexpr int num_weights =
@@ -156,19 +154,26 @@ int main(int argc, char *argv[]) {
   cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
   cudaMallocHost(&h_visibilities,
                  number_of_aggregated_packets * sizeof(Visibilities));
-  cudaMallocHost(&h_weights, num_weights * sizeof(std::complex<__half>));
+  cudaMallocHost(&h_weights, sizeof(BeamWeights));
   // not sure about this memory allocation.
   cudaMallocHost(&h_beamformed_data,
                  number_of_aggregated_packets * sizeof(BeamformedData));
 
-  for (auto i = 0; i < num_weights; ++i) {
-    h_weights[i] = std::complex<__half>(__float2half(1.0f), __float2half(1.0f));
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_BEAMS; ++k) {
+        for (auto m = 0; m < NR_RECEIVERS; ++m) {
+          h_weights[0][i][j][k][m] =
+              std::complex<__half>(__float2half(1.0f), __float2half(1.0f));
+        }
+      }
+    }
   }
 
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
 
   Tscale *h_scales;
-  cudaMallocHost(&h_scales, NR_ACTUAL_BASELINES * sizeof(Tscale));
+  cudaMallocHost(&h_scales, spatial::NR_ACTUAL_BASELINES * sizeof(Tscale));
 
   printf("Setting h_samples & h_visibilities memory to zero\n");
   std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
@@ -180,7 +185,7 @@ int main(int argc, char *argv[]) {
       continue; // Timeout in live capture, ignore for offline
     process_packet(data, header->len, h_samples, scales, info.start_seq,
                    info.start_freq, NR_TIME_STEPS_PER_PACKET,
-                   NR_PACKETS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
+                   NR_PACKETS_FOR_CORRELATION, spatial::NR_TIMES_PER_BLOCK,
                    NR_ACTUAL_RECEIVERS);
   }
   pcap_close(handle);
@@ -209,9 +214,20 @@ int main(int argc, char *argv[]) {
     print_nonzero_visibilities(&h_visibilities[i], h_scales);
 
     printf("Beams for %u:\n", i);
-    print_nonzero_beams(&h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS,
-                        NR_BEAMS,
-                        NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
+    print_nonzero_beams(
+        &h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
+        spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
+  }
+
+  std::string filename = make_filename_with_time("beamformed_data", "h5");
+  std::vector<hsize_t> shape = {NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
+                                NR_RECEIVERS}; // add the 2 for complex
+  HighFive::File file(filename, HighFive::File::Overwrite);
+  for (auto i = 0; i < number_of_aggregated_packets; ++i) {
+    std::string dset_name = "beamformed_data_" + std::to_string(i);
+    file.createDataSet<std::complex<float>>(dset_name,
+                                            HighFive::DataSpace(shape))
+        .write(h_beamformed_data[i]);
   }
 
   return 0;

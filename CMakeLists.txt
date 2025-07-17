@@ -114,6 +114,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(pcap)
 
+FetchContent_Declare(
+  HighFive
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/highfive
+)
+FetchContent_MakeAvailable(HighFive)
+
 
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)

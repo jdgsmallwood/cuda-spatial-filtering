@@ -172,7 +172,7 @@ int main(int argc, char *argv[]) {
   std::vector<Tscale> scales(NR_ACTUAL_RECEIVERS);
 
   Tscale *h_scales;
-  cudaMallocHost(&h_scales, NR_ACTUAL_BASELINES * sizeof(Tscale));
+  cudaMallocHost(&h_scales, spatial::NR_ACTUAL_BASELINES * sizeof(Tscale));
 
   printf("Setting h_samples & h_visibilities memory to zero\n");
   std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
@@ -184,7 +184,7 @@ int main(int argc, char *argv[]) {
       continue; // Timeout in live capture, ignore for offline
     process_packet(data, header->len, h_samples, scales, info.start_seq,
                    info.start_freq, NR_TIME_STEPS_PER_PACKET,
-                   NR_PACKETS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
+                   NR_PACKETS_FOR_CORRELATION, spatial::NR_TIMES_PER_BLOCK,
                    NR_ACTUAL_RECEIVERS);
   }
   pcap_close(handle);
@@ -313,15 +313,16 @@ int main(int argc, char *argv[]) {
 
   std::unordered_map<int, int64_t> extent;
   extent['c'] = NR_CHANNELS;
-  extent['b'] = NR_BLOCKS_FOR_CORRELATION;
+  extent['b'] = spatial::NR_BLOCKS_FOR_CORRELATION;
   extent['r'] = NR_RECEIVERS;
   extent['p'] = NR_POLARIZATIONS;
   extent['q'] = NR_POLARIZATIONS; // 2nd polarizations for baselines
-  extent['t'] = NR_TIMES_PER_BLOCK;
+  extent['t'] = spatial::NR_TIMES_PER_BLOCK;
   extent['z'] = 2; // real, imaginary
-  extent['l'] = NR_BASELINES;
+  extent['l'] = spatial::NR_BASELINES;
   extent['m'] = NR_BEAMS;
-  extent['s'] = NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK;
+  extent['s'] =
+      spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK;
 
   CutensorSetup tensor_16(extent, CUTENSOR_R_16F, 128);
   CutensorSetup tensor_32(extent, CUTENSOR_R_32F, 128);
@@ -353,16 +354,17 @@ int main(int argc, char *argv[]) {
   printf("NR_RECEIVERS: %u\n", NR_RECEIVERS);
   printf("NR_CHANNELS: %u\n", NR_CHANNELS);
   printf("NR_SAMPLES_PER_CHANNEL: %u\n",
-         NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
+         spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
   printf("NR_POLARIZATIONS: %u\n", NR_POLARIZATIONS);
   printf("NR_RECEIVERS_PER_BLOCK: %u\n", NR_RECEIVERS_PER_BLOCK);
-  tcc::Correlator correlator(cu::Device(0), inputFormat, NR_RECEIVERS,
-                             NR_CHANNELS,
-                             NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                             NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+  tcc::Correlator correlator(
+      cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
+      spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
+      NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 
-  printf("NR_BLOCKS_FOR_CORRELATION: %u\n", NR_BLOCKS_FOR_CORRELATION);
-  printf("NR_TIMES_PER_BLOCK: %u\n", NR_TIMES_PER_BLOCK);
+  printf("spatial::NR_BLOCKS_FOR_CORRELATION: %u\n",
+         spatial::NR_BLOCKS_FOR_CORRELATION);
+  printf("spatial::NR_TIMES_PER_BLOCK: %u\n", spatial::NR_TIMES_PER_BLOCK);
   printf("NR_ACTUAL_RECEIVERS: %u\n", NR_ACTUAL_RECEIVERS);
   printf("NR_BITS: %u\n", NR_BITS);
   printf("Launching processing loop...\n");
@@ -380,8 +382,9 @@ int main(int argc, char *argv[]) {
   for (auto i = 0; i < NR_BUFFERS; ++i) {
     gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
         NR_CHANNELS * NR_POLARIZATIONS, NR_BEAMS,
-        NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, NR_RECEIVERS, cu_device,
-        streams[i], ccglib::ValueType::float16, ccglib::mma::basic));
+        spatial::NR_TIMES_PER_BLOCK * spatial::NR_BLOCKS_FOR_CORRELATION,
+        NR_RECEIVERS, cu_device, streams[i], ccglib::ValueType::float16,
+        ccglib::mma::basic));
   }
   // Ensure all copying is done before processing loop starts.
   // This may not be necessary.
@@ -529,9 +532,9 @@ int main(int argc, char *argv[]) {
     print_nonzero_visibilities(&h_visibilities[i], h_scales);
 
     printf("Beams for %u:\n", i);
-    print_nonzero_beams(&h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS,
-                        NR_BEAMS,
-                        NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
+    print_nonzero_beams(
+        &h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
+        spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
   }
 
 #if DEBUG == 1
