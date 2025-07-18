@@ -98,6 +98,7 @@ void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A) {
 
   //// Destroy cuSOLVER handle
   cusolverDnDestroy(solverHandle);
+  free(h_work);
 }
 
 template void eigendecomposition<cuComplex>(float *h_eigenvalues, int n,
@@ -257,7 +258,8 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   float *d_visibilities_converted[NR_BUFFERS];
 #endif
   __half *d_samples_planar[NR_BUFFERS], *d_samples_planar_col_maj[NR_BUFFERS];
-  Visibilities *d_visibilities[NR_BUFFERS];
+  Visibilities *d_visibilities[NR_BUFFERS],
+      *d_visibilities_accumulator[NR_BUFFERS];
   std::complex<float> *d_visibilities_permuted[NR_BUFFERS];
   __half *d_weights[NR_BUFFERS], *d_weights_updated[NR_BUFFERS],
       *d_weights_permuted[NR_BUFFERS];
@@ -281,6 +283,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
     cudaMalloc((void **)&d_samples_planar[i], size_d_samples_planar);
     cudaMalloc((void **)&d_samples_planar_col_maj[i], size_d_samples_planar);
     cudaMalloc((void **)&d_visibilities[i], sizeof(Visibilities));
+    cudaMalloc((void **)&d_visibilities_accumulator[i], sizeof(Visibilities));
     cudaMalloc((void **)&d_visibilities_permuted[i],
                size_d_visibilities_permuted);
     cudaMalloc((void **)&d_weights[i],
@@ -409,6 +412,8 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   // std::atomic is overkill right now but if we end up using multi-threading at
   // some point this sidesteps a race condition.
   std::atomic<int> last_frame_processed = 0;
+  std::atomic<int> num_integrated_units_processed = 0;
+  std::atomic<int> num_correlation_units_integrated = 0;
   bool processing = true;
 
   CUdevice cu_device;
@@ -471,6 +476,10 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
           (float *)d_visibilities_converted[current_buffer],
           (float *)d_visibilities_permuted[current_buffer],
           streams[current_buffer]);
+      accumulate_visibilities(
+          (float *)d_visibilities_converted[current_buffer],
+          (float *)d_visibilities_accumulator[current_buffer],
+          2 * spatial::NR_BASELINES, streams[current_buffer]);
 #elif NR_BITS == 16
       tensor_16.runPermutation(
           "packetToPlanar", alpha, (__half *)d_samples[current_buffer],
@@ -479,15 +488,46 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
                                (float *)d_visibilities[current_buffer],
                                (float *)d_visibilities_permuted[current_buffer],
                                streams[current_buffer]);
+      accumulate_visibilities(
+          (float *)d_visibilities[current_buffer],
+          (float *)d_visibilities_accumulator[current_buffer],
+          2 * spatial::NR_BASELINES, streams[current_buffer]);
 #endif
+      int current_num_correlation_units_integrated =
+          num_correlation_units_integrated.fetch_add(1);
+
+      // Each buffer has its own visibilities and we need to combine them once
+      // it's done.
+
+      // Dump out integrated values to host
+      if (current_num_correlation_units_integrated >=
+          NR_CORRELATION_BLOCKS_TO_INTEGRATE) {
+        printf("Dumping correlations to host...\n");
+        cudaDeviceSynchronize();
+        // TODO: This will not work is NR_BUFFERS != 2.
+        accumulate_visibilities(
+            (float *)d_visibilities_accumulator[current_buffer],
+            (float *)
+                d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
+            spatial::NR_BASELINES * 2, streams[current_buffer]);
+
+        checkCudaCall(cudaMemcpyAsync(
+            (void *)&h_visibilities_output[num_integrated_units_processed
+                                               .fetch_add(1)],
+            d_visibilities_accumulator[current_buffer], sizeof(Visibilities),
+            cudaMemcpyDefault, streams[current_buffer]));
+        cudaMemsetAsync(d_visibilities_accumulator[current_buffer], 0,
+                        sizeof(Visibilities), streams[current_buffer]);
+        cudaMemsetAsync(
+            d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS], 0,
+            sizeof(Visibilities), streams[(current_buffer + 1) % NR_BUFFERS]);
+        cudaDeviceSynchronize();
+        num_correlation_units_integrated.store(0);
+      }
 
       tensor_16.runPermutation(
           "consToColMajCons", alpha, d_samples_planar[current_buffer],
           d_samples_planar_col_maj[current_buffer], streams[current_buffer]);
-      checkCudaCall(
-          cudaMemcpyAsync((void *)&h_visibilities_output[next_frame_to_capture],
-                          d_visibilities[current_buffer], sizeof(Visibilities),
-                          cudaMemcpyDefault, streams[current_buffer]));
       // need to think how multiple channels / polarizations works here - do we
       // need to do multiple decompositions? Probably yes. We'll also need to
       // convert the visibilities from int32 -> float
@@ -560,6 +600,18 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   printf("Synchronizing...\n");
   cudaDeviceSynchronize();
 
+  // multiply by 2 for complex
+  accumulate_visibilities(
+      (float *)d_visibilities_accumulator[current_buffer],
+      (float *)d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
+      spatial::NR_BASELINES * 2, streams[current_buffer]);
+
+  checkCudaCall(cudaMemcpyAsync(
+      (void *)&h_visibilities_output[num_integrated_units_processed.fetch_add(
+          1)],
+      d_visibilities_accumulator[current_buffer], sizeof(Visibilities),
+      cudaMemcpyDefault, streams[current_buffer]));
+  cudaDeviceSynchronize();
 #if DEBUG == 1
   printf("weights original...\n");
   for (auto i = 0; i < num_weights; ++i) {
@@ -599,6 +651,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
     cudaFree(d_samples_planar[i]);
     cudaFree(d_samples_planar_col_maj[i]);
     cudaFree(d_visibilities[i]);
+    cudaFree(d_visibilities_accumulator[i]);
     cudaFree(d_beamformed_data[i]);
     cudaFree(d_beamformed_data_output[i]);
     cudaFree(d_eigenvalues[i]);

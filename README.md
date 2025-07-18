@@ -57,7 +57,7 @@ ctest
 - [x] Do beamforming using ccglib.
 - [ ] Figure out how to do this capturing packets.
 - [x] Output formats for beams / debug information.
-- [ ] Integrating on the GPU over time and then dumping out to disk.
+- [ ] Integrating correlations on the GPU over time and then dumping out to disk.
 - [x] Profile and check that things are running concurrently.
 - [ ] Decompose correlation matrix from lower-triangular form.
 - [ ] Begin writing spatial filtering algorithms.
