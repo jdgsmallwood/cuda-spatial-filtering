@@ -258,9 +258,9 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   float *d_visibilities_converted[NR_BUFFERS];
 #endif
   __half *d_samples_planar[NR_BUFFERS], *d_samples_planar_col_maj[NR_BUFFERS];
-  Visibilities *d_visibilities[NR_BUFFERS],
+  Visibilities *d_visibilities[NR_BUFFERS];
+  std::complex<float> *d_visibilities_permuted[NR_BUFFERS],
       *d_visibilities_accumulator[NR_BUFFERS];
-  std::complex<float> *d_visibilities_permuted[NR_BUFFERS];
   __half *d_weights[NR_BUFFERS], *d_weights_updated[NR_BUFFERS],
       *d_weights_permuted[NR_BUFFERS];
   float *d_eigenvalues[NR_BUFFERS];
@@ -283,7 +283,8 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
     cudaMalloc((void **)&d_samples_planar[i], size_d_samples_planar);
     cudaMalloc((void **)&d_samples_planar_col_maj[i], size_d_samples_planar);
     cudaMalloc((void **)&d_visibilities[i], sizeof(Visibilities));
-    cudaMalloc((void **)&d_visibilities_accumulator[i], sizeof(Visibilities));
+    cudaMalloc((void **)&d_visibilities_accumulator[i],
+               size_d_visibilities_permuted);
     cudaMalloc((void **)&d_visibilities_permuted[i],
                size_d_visibilities_permuted);
     cudaMalloc((void **)&d_weights[i],
@@ -506,21 +507,23 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
         cudaDeviceSynchronize();
         // TODO: This will not work is NR_BUFFERS != 2.
         accumulate_visibilities(
-            (float *)d_visibilities_accumulator[current_buffer],
             (float *)
                 d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
+            (float *)d_visibilities_accumulator[current_buffer],
             spatial::NR_BASELINES * 2, streams[current_buffer]);
 
         checkCudaCall(cudaMemcpyAsync(
             (void *)&h_visibilities_output[num_integrated_units_processed
                                                .fetch_add(1)],
-            d_visibilities_accumulator[current_buffer], sizeof(Visibilities),
-            cudaMemcpyDefault, streams[current_buffer]));
+            d_visibilities_accumulator[current_buffer],
+            size_d_visibilities_permuted, cudaMemcpyDefault,
+            streams[current_buffer]));
         cudaMemsetAsync(d_visibilities_accumulator[current_buffer], 0,
-                        sizeof(Visibilities), streams[current_buffer]);
+                        size_d_visibilities_permuted, streams[current_buffer]);
         cudaMemsetAsync(
             d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS], 0,
-            sizeof(Visibilities), streams[(current_buffer + 1) % NR_BUFFERS]);
+            size_d_visibilities_permuted,
+            streams[(current_buffer + 1) % NR_BUFFERS]);
         cudaDeviceSynchronize();
         num_correlation_units_integrated.store(0);
       }
@@ -602,14 +605,14 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 
   // multiply by 2 for complex
   accumulate_visibilities(
-      (float *)d_visibilities_accumulator[current_buffer],
       (float *)d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
+      (float *)d_visibilities_accumulator[current_buffer],
       spatial::NR_BASELINES * 2, streams[current_buffer]);
 
   checkCudaCall(cudaMemcpyAsync(
       (void *)&h_visibilities_output[num_integrated_units_processed.fetch_add(
           1)],
-      d_visibilities_accumulator[current_buffer], sizeof(Visibilities),
+      d_visibilities_accumulator[current_buffer], size_d_visibilities_permuted,
       cudaMemcpyDefault, streams[current_buffer]));
   cudaDeviceSynchronize();
 #if DEBUG == 1

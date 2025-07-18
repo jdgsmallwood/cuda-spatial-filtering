@@ -22,3 +22,7 @@
 [submodule "extern/highfive"]
 	path = extern/highfive
 	url = https://github.com/highfive-devs/highfive.git
+[submodule "extern/hdf5"]
+	path = extern/hdf5
+	url = https://github.com/HDFGroup/hdf5.git
+  branch = snapshot-1.14

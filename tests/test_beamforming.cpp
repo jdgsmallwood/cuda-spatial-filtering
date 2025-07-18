@@ -14,7 +14,7 @@ typedef __half TestInputType;
 TEST(TEST_SUITE_NAME(NAMESPACE, BeamformingTests), SimpleTest) {
 
   Samples *h_samples;
-  Visibilities *h_visibilities;
+  FloatVisibilities *h_visibilities;
   BeamWeights *h_weights;
   BeamformedData *h_beamformed_data;
 
@@ -73,9 +73,9 @@ TEST(TEST_SUITE_NAME(NAMESPACE, BeamformingTests), SimpleTest) {
   //  [0 + 12j, -2 + 10j],
   // ])
 
-  EXPECT_EQ(h_visibilities[0][0][0][0][0], Visibility(10, 0));
-  EXPECT_EQ(h_visibilities[0][0][1][0][0], Visibility(6, -2));
-  EXPECT_EQ(h_visibilities[0][0][2][0][0], Visibility(9, 0));
+  EXPECT_EQ(h_visibilities[0][0][0][0][0], FloatVisibility(10, 0));
+  EXPECT_EQ(h_visibilities[0][0][1][0][0], FloatVisibility(6, -2));
+  EXPECT_EQ(h_visibilities[0][0][2][0][0], FloatVisibility(9, 0));
 
   EXPECT_EQ(h_beamformed_data[0][0][0][0][0], std::complex<float>(0, 6));
   EXPECT_EQ(h_beamformed_data[0][0][0][0][1], std::complex<float>(-1, 5));

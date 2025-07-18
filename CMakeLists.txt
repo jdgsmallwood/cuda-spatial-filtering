@@ -115,11 +115,18 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(pcap)
 
 FetchContent_Declare(
+  hdf5
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/hdf5
+)
+FetchContent_MakeAvailable(hdf5)
+# Tell HighFive *not* to use find_package(HDF5)
+set(HIGHFIVE_FIND_HDF5 OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
   HighFive
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/highfive
 )
 FetchContent_MakeAvailable(HighFive)
-
+#target_link_libraries(HighFive INTERFACE HDF5::HDF5)
 
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)

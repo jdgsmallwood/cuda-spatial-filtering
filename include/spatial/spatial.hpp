@@ -65,13 +65,15 @@ typedef float Tscale;
 #define CAST_TO_FLOAT(x) __half2float(x)
 constexpr tcc::Format inputFormat = tcc::Format::fp16;
 #endif
-
+typedef std::complex<float> FloatVisibility;
 typedef Sample Samples[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION]
                       [NR_RECEIVERS][NR_POLARIZATIONS]
                       [spatial::NR_TIMES_PER_BLOCK];
 typedef Visibility Visibilities[NR_CHANNELS][spatial::NR_BASELINES]
                                [NR_POLARIZATIONS][NR_POLARIZATIONS];
-
+typedef std::complex<float>
+    FloatVisibilities[NR_CHANNELS][spatial::NR_BASELINES][NR_POLARIZATIONS]
+                     [NR_POLARIZATIONS];
 typedef std::complex<__half> BeamWeights[NR_CHANNELS][NR_POLARIZATIONS]
                                         [NR_BEAMS][NR_RECEIVERS];
 

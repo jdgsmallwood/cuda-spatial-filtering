@@ -7,6 +7,7 @@
 #include <cudawrappers/cu.hpp>
 #include <gtest/gtest.h>
 #include <vector>
+
 TEST(EigenvalueDecompositionTest, SimpleValueTest) {
 
   const std::vector<cuComplex> A = {
