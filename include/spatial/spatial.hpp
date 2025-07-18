@@ -5,21 +5,31 @@
 
 #include "spatial/tcc_config.h"
 #include <libtcc/Correlator.h>
+
 #ifndef NR_BEAMS
 #define NR_BEAMS 2
 #endif
+
 #ifndef NR_PACKETS_FOR_CORRELATION
 #define NR_PACKETS_FOR_CORRELATION 16
 #endif
+
 #ifndef NR_TIME_STEPS_PER_PACKET
 #define NR_TIME_STEPS_PER_PACKET 64
 #endif
+
 #ifndef NR_ACTUAL_RECEIVERS
 #define NR_ACTUAL_RECEIVERS 20
 #endif
+
 #ifndef NR_BUFFERS
 #define NR_BUFFERS 2
 #endif
+
+#ifndef NR_CORRELATION_BLOCKS_TO_INTEGRATE
+#define NR_CORRELATION_BLOCKS_TO_INTEGRATE 10
+#endif
+
 #include <cuda_fp16.h>
 
 namespace spatial {
