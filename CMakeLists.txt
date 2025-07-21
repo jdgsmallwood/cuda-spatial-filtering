@@ -126,8 +126,13 @@ FetchContent_Declare(
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/highfive
 )
 FetchContent_MakeAvailable(HighFive)
-#target_link_libraries(HighFive INTERFACE HDF5::HDF5)
-
+target_link_libraries(HighFive INTERFACE hdf5)
+target_include_directories(HighFive INTERFACE  
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/hdf5/src>  
+)
+target_include_directories(HighFive INTERFACE  
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/hdf5/config>  
+)
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
