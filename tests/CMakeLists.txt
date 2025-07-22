@@ -8,7 +8,7 @@ target_link_libraries(CUDASpatialFilteringTests
         PRIVATE 
             GTest::gtest_main
             spatial
-            cudart
+            CUDA::cudart
             ccglib
 )
 
@@ -17,7 +17,7 @@ add_executable(
 )
 target_compile_definitions(BeamformingTests_8bit PRIVATE NR_BITS=8 NR_RECEIVERS=32)
 
-target_link_libraries(BeamformingTests_8bit PRIVATE GTest::gtest_main spatial_8bit cudart)
+target_link_libraries(BeamformingTests_8bit PRIVATE GTest::gtest_main spatial_8bit CUDA::cudart)
 
 
 add_executable(
@@ -25,7 +25,7 @@ add_executable(
 )
 target_compile_definitions(BeamformingTests_16bit PRIVATE NR_BITS=16 NR_RECEIVERS=32)
 
-target_link_libraries(BeamformingTests_16bit PRIVATE GTest::gtest_main spatial_16bit cudart)
+target_link_libraries(BeamformingTests_16bit PRIVATE GTest::gtest_main spatial_16bit CUDA::cudart)
 
 
 include(GoogleTest)

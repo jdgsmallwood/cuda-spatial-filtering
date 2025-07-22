@@ -53,7 +53,7 @@ void process_packet(const u_char *packet, const int size, Samples *agg_samples,
   const int sample_frame_to_populate = packet_num / nr_packets_for_correlation;
   const int num_blocks_per_packet =
       nr_time_steps_per_packet / nr_times_per_block; // 8
-  printf("Packet number is %u. Seq is %u and start_seq was %u\n", packet_num,
+  printf("Packet number is %u. Seq is %lu and start_seq was %u\n", packet_num,
          custom->sample_count, start_seq_id);
   printf("Will start to write at block %u in frame %u\n",
          packet_num_in_frame * num_blocks_per_packet, sample_frame_to_populate);

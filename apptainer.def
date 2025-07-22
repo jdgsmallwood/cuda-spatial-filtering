@@ -1,0 +1,58 @@
+BootStrap: docker
+From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+%post
+    # Update and install dependencies
+    apt-get update && apt-get install -y \
+        wget \
+        build-essential \
+        software-properties-common \
+        apt-transport-https \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        python3 \
+        python3-pip \
+        curl \
+        git \
+        flex \
+        bison
+
+    # Install HDF5 development libraries
+    apt-get install -y libhdf5-dev hdf5-tools
+
+    # Install cmake 3.29 from source
+    #cd /tmp
+    #wget https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8.tar.gz
+    #tar zxvf cmake-3.31.8.tar.gz
+    #cd cmake-3.31.8
+    #./bootstrap
+    #make -j$(nproc)
+    #make install
+    #cd /
+    #rm -rf /tmp/cmake-3.31.8*
+
+    test -f /usr/share/doc/kitware-archive-keyring/copyright || wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+    echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | tee /etc/apt/sources.list.d/kitware.list >/dev/null
+    apt-get update
+    test -f /usr/share/doc/kitware-archive-keyring/copyright || rm /usr/share/keyrings/kitware-archive-keyring.gpg
+    apt-get install -y kitware-archive-keyring
+    apt-get install -y cmake
+
+    # Install cuTENSOR (adjust the version as desired)
+    wget https://developer.download.nvidia.com/compute/cutensor/2.2.0/local_installers/cutensor-local-repo-ubuntu2404-2.2.0_1.0-1_amd64.deb
+    dpkg -i cutensor-local-repo-ubuntu2404-2.2.0_1.0-1_amd64.deb
+    cp /var/cutensor-local-repo-ubuntu2404-2.2.0/cutensor-*-keyring.gpg /usr/share/keyrings/
+    apt-get update
+    apt-get -y install libcutensor2 libcutensor-dev libcutensor-doc
+    
+%environment
+    export PATH=/usr/local/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/cutensor/lib:$LD_LIBRARY_PATH
+
+%runscript
+    exec /bin/bash
+
+%labels
+    Maintainer Jay Smallwood
+    Version v1

@@ -220,8 +220,8 @@ int main(int argc, char *argv[]) {
   }
 
   std::string filename = make_filename_with_time("beamformed_data", "h5");
-  std::vector<hsize_t> shape = {NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
-                                NR_RECEIVERS}; // add the 2 for complex
+  std::vector<size_t> shape = {NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
+                               NR_RECEIVERS};
   HighFive::File file(filename, HighFive::File::Overwrite);
   for (auto i = 0; i < number_of_aggregated_packets; ++i) {
     std::string dset_name = "beamformed_data_" + std::to_string(i);

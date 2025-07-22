@@ -27,7 +27,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   # Disable testing for dependencies forcibly
   set(BUILD_TESTING OFF CACHE BOOL "Disable tests for dependencies" FORCE)
 
-  find_package(CUDAToolkit)
+  find_package(CUDAToolkit REQUIRED)
   # Testing only available if this is the main app
   # Note this needs to be done in the main CMakeLists
   # since it calls enable_testing, which must be in the
@@ -114,25 +114,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(pcap)
 
-FetchContent_Declare(
-  hdf5
-  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/hdf5
-)
-FetchContent_MakeAvailable(hdf5)
-# Tell HighFive *not* to use find_package(HDF5)
-set(HIGHFIVE_FIND_HDF5 OFF CACHE BOOL "" FORCE)
+find_package(ZLIB REQUIRED)
+find_package(HDF5 REQUIRED COMPONENTS C)
+
+message(STATUS "HDF5_FOUND is ${HDF5_FOUND}")
+message(STATUS "HDF5_ROOT is ${HDF5_ROOT}")
+message(STATUS "HDF5_INCLUDE_DIRS is ${HDF5_INCLUDE_DIRS}")
+message(STATUS "ZLIB_LIBRARIES: ${ZLIB_LIBRARIES}")
+message(STATUS "ZLIB_INCLUDE_DIRS: ${ZLIB_INCLUDE_DIRS}")
+
+#include_directories(${ZLIB_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+
 FetchContent_Declare(
   HighFive
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/highfive
 )
 FetchContent_MakeAvailable(HighFive)
-target_link_libraries(HighFive INTERFACE hdf5)
-target_include_directories(HighFive INTERFACE  
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/hdf5/src>  
-)
-target_include_directories(HighFive INTERFACE  
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/extern/hdf5/config>  
-)
+
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
