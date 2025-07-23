@@ -86,7 +86,7 @@ TEST(TEST_SUITE_NAME(NAMESPACE, BeamformingTests), LongTest) {
   BeamWeights *h_weights;
   BeamformedData *h_beamformed_data;
 
-  constexpr int number_of_aggregated_packets = 50;
+  constexpr int number_of_aggregated_packets = 5000;
   cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
   cudaMallocHost(&h_visibilities,
                  number_of_aggregated_packets * sizeof(FloatVisibilities));

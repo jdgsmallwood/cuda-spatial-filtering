@@ -142,7 +142,7 @@ int main(int argc, char *argv[]) {
 
   // allocate pinned host memory
   Samples *h_samples;
-  Visibilities *h_visibilities;
+  FloatVisibilities *h_visibilities;
   BeamWeights *h_weights;
   BeamformedData *h_beamformed_data;
 
@@ -153,7 +153,7 @@ int main(int argc, char *argv[]) {
 
   cudaMallocHost(&h_samples, number_of_aggregated_packets * sizeof(Samples));
   cudaMallocHost(&h_visibilities,
-                 number_of_aggregated_packets * sizeof(Visibilities));
+                 number_of_aggregated_packets * sizeof(FloatVisibilities));
   cudaMallocHost(&h_weights, sizeof(BeamWeights));
   // not sure about this memory allocation.
   cudaMallocHost(&h_beamformed_data,
@@ -178,7 +178,7 @@ int main(int argc, char *argv[]) {
   printf("Setting h_samples & h_visibilities memory to zero\n");
   std::memset(h_samples, 0, number_of_aggregated_packets * sizeof(Samples));
   std::memset(h_visibilities, 0,
-              number_of_aggregated_packets * sizeof(Visibilities));
+              number_of_aggregated_packets * sizeof(FloatVisibilities));
   printf("Processing packets\n");
   while ((res = pcap_next_ex(handle, &header, &data)) >= 0) {
     if (res == 0)
@@ -200,24 +200,12 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  beamform((std::complex<int8_t> *)h_samples, (std::complex<__half> *)h_weights,
-           (std::complex<float> *)h_beamformed_data,
-           (std::complex<float> *)h_visibilities, number_of_aggregated_packets);
+  beamform(h_samples, (std::complex<__half> *)h_weights, h_beamformed_data,
+           h_visibilities, number_of_aggregated_packets);
 
   /*
    * Output
    * */
-
-  printf("Starting to print visibilities...\n");
-  for (auto i = 0; i < number_of_aggregated_packets; ++i) {
-    printf("Visibilities for %u:\n", i);
-    print_nonzero_visibilities(&h_visibilities[i], h_scales);
-
-    printf("Beams for %u:\n", i);
-    print_nonzero_beams(
-        &h_beamformed_data[i], NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
-        spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
-  }
 
   std::string filename = make_filename_with_time("beamformed_data", "h5");
   std::vector<size_t> shape = {NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,

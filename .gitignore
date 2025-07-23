@@ -66,3 +66,4 @@ extern/
 *.nsys-rep
 Dockerfile
 .DS*
+benchmarking/
