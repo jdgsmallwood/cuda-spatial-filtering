@@ -15,10 +15,11 @@ endif()
 if(NOT TARGET cutensor)
   add_library(cutensor SHARED IMPORTED)
   set(CUTENSOR_LIBRARY_NAME "libcutensor.so")
-      set(LIB_DIR "/lib/12")
+      set(LIB_DIR "12")
   set_target_properties(cutensor PROPERTIES
     IMPORTED_LOCATION "${CUTENSOR_ROOT}/${LIB_DIR}/${CUTENSOR_LIBRARY_NAME}"
     IMPORTED_IMPLIB "${CUTENSOR_ROOT}/${LIB_DIR}/${CUTENSOR_LIBRARY_DEF}"
-    INTERFACE_INCLUDE_DIRECTORIES "${CUTENSOR_ROOT}/include")
+ #   INTERFACE_INCLUDE_DIRECTORIES "${CUTENSOR_ROOT}/include"
+  )
 endif()
 

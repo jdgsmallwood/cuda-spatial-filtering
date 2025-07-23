@@ -229,10 +229,9 @@ void correlate(Samples *samples, Visibilities *visibilities) {
   }
 }
 
-template <typename T, typename S, typename U>
-void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
-              std::complex<S> *h_beam_output,
-              std::complex<S> *h_visibilities_output,
+void beamform(Samples *h_samples, std::complex<__half> *h_weights,
+              BeamformedData *h_beam_output,
+              FloatVisibilities *h_visibilities_output,
               const int nr_aggregated_packets) {
 
   constexpr int num_weights =
@@ -272,9 +271,8 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   for (auto i = 0; i < NR_BUFFERS; ++i) {
     cudaMalloc((void **)&d_samples[i], sizeof(Samples));
 #if NR_BITS == 8
-    size_d_samples_planar = sizeof(Samples) * sizeof(__half) / sizeof(int8_t);
-    size_d_visibilities_permuted =
-        sizeof(Visibilities) * sizeof(float) / sizeof(int32_t);
+    size_d_samples_planar = sizeof(HalfSamples);
+    size_d_visibilities_permuted = sizeof(FloatVisibilities);
 #else
 
     size_d_samples_planar = sizeof(Samples);
@@ -287,12 +285,9 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
                size_d_visibilities_permuted);
     cudaMalloc((void **)&d_visibilities_permuted[i],
                size_d_visibilities_permuted);
-    cudaMalloc((void **)&d_weights[i],
-               num_weights * sizeof(std::complex<__half>));
-    cudaMalloc((void **)&d_weights_updated[i],
-               num_weights * sizeof(std::complex<__half>));
-    cudaMalloc((void **)&d_weights_permuted[i],
-               num_weights * sizeof(std::complex<__half>));
+    cudaMalloc((void **)&d_weights[i], sizeof(BeamWeights));
+    cudaMalloc((void **)&d_weights_updated[i], sizeof(BeamWeights));
+    cudaMalloc((void **)&d_weights_permuted[i], sizeof(BeamWeights));
     cudaMalloc((void **)&d_eigenvalues[i], sizeof(float) * num_eigen);
     cudaMalloc((void **)&d_beamformed_data[i], sizeof(BeamformedData));
     cudaMalloc((void **)&d_beamformed_data_output[i], sizeof(BeamformedData));
@@ -304,8 +299,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 #endif
 
     // transfer weights
-    cudaMemcpy(d_weights[i], h_weights,
-               sizeof(std::complex<__half>) * num_weights, cudaMemcpyDefault);
+    cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights), cudaMemcpyDefault);
     cudaEventRecord(input_transfer_done[i], streams[i]);
   }
 
@@ -314,13 +308,11 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   __half *h_weights_updated, *h_weights_permuted, *h_samples_planar,
       *h_weights_check, *h_samples_planar_col_maj;
   Samples *h_samples_check;
-  cudaMallocHost(&h_weights_updated,
-                 num_weights * sizeof(std::complex<__half>));
-  cudaMallocHost(&h_weights_permuted,
-                 num_weights * sizeof(std::complex<__half>));
+  cudaMallocHost(&h_weights_updated, sizeof(BeamWeights));
+  cudaMallocHost(&h_weights_permuted, sizeof(BeamWeights));
   cudaMallocHost(&h_samples_planar, size_d_samples_planar);
   cudaMallocHost(&h_samples_planar_col_maj, size_d_samples_planar);
-  cudaMallocHost(&h_weights_check, num_weights * sizeof(std::complex<__half>));
+  cudaMallocHost(&h_weights_check, sizeof(BeamWeights));
   cudaMallocHost(&h_samples_check, sizeof(Samples));
 #endif
 
@@ -398,6 +390,8 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
          spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
   printf("NR_POLARIZATIONS: %u\n", NR_POLARIZATIONS);
   printf("NR_RECEIVERS_PER_BLOCK: %u\n", NR_RECEIVERS_PER_BLOCK);
+  printf("NR_CORRELATION_BLOCKS_TO_INTEGRATE: %u\n",
+         NR_CORRELATION_BLOCKS_TO_INTEGRATE);
   tcc::Correlator correlator(
       cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
       spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
@@ -502,8 +496,12 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 
       // Dump out integrated values to host
       if (current_num_correlation_units_integrated >=
-          NR_CORRELATION_BLOCKS_TO_INTEGRATE) {
+          NR_CORRELATION_BLOCKS_TO_INTEGRATE - 1) {
         printf("Dumping correlations to host...\n");
+        int current_num_integrated_units_processed =
+            num_integrated_units_processed.fetch_add(1);
+        printf("Current num integrated units processed is %u",
+               current_num_integrated_units_processed);
         cudaDeviceSynchronize();
         // TODO: This will not work is NR_BUFFERS != 2.
         accumulate_visibilities(
@@ -513,8 +511,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
             spatial::NR_BASELINES * 2, streams[current_buffer]);
 
         checkCudaCall(cudaMemcpyAsync(
-            (void *)&h_visibilities_output[num_integrated_units_processed
-                                               .fetch_add(1)],
+            h_visibilities_output[current_num_integrated_units_processed],
             d_visibilities_accumulator[current_buffer],
             size_d_visibilities_permuted, cudaMemcpyDefault,
             streams[current_buffer]));
@@ -592,7 +589,7 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
           (float *)d_beamformed_data_output[current_buffer],
           streams[current_buffer]);
 
-      cudaMemcpyAsync(&h_beam_output[next_frame_to_capture],
+      cudaMemcpyAsync(h_beam_output[next_frame_to_capture],
                       d_beamformed_data_output[current_buffer],
                       sizeof(BeamformedData), cudaMemcpyDefault,
                       streams[current_buffer]);
@@ -602,20 +599,25 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
   }
   printf("Synchronizing...\n");
   cudaDeviceSynchronize();
+  int last_integrated_units_processed = num_correlation_units_integrated.load();
+  if (last_integrated_units_processed > 0) {
+    printf("Doing final dump as last_integrated_units_processed is %u\n",
+           last_integrated_units_processed);
+    // multiply by 2 for complex
+    accumulate_visibilities(
+        (float *)d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
+        (float *)d_visibilities_accumulator[current_buffer],
+        spatial::NR_BASELINES * 2, streams[current_buffer]);
 
-  // multiply by 2 for complex
-  accumulate_visibilities(
-      (float *)d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
-      (float *)d_visibilities_accumulator[current_buffer],
-      spatial::NR_BASELINES * 2, streams[current_buffer]);
-
-  checkCudaCall(cudaMemcpyAsync(
-      (void *)&h_visibilities_output[num_integrated_units_processed.fetch_add(
-          1)],
-      d_visibilities_accumulator[current_buffer], size_d_visibilities_permuted,
-      cudaMemcpyDefault, streams[current_buffer]));
-  cudaDeviceSynchronize();
+    checkCudaCall(cudaMemcpyAsync(
+        h_visibilities_output[num_integrated_units_processed.fetch_add(1)],
+        d_visibilities_accumulator[current_buffer],
+        size_d_visibilities_permuted, cudaMemcpyDefault,
+        streams[current_buffer]));
+    cudaDeviceSynchronize();
+  }
 #if DEBUG == 1
+  printf("DEBUG info...\n");
   printf("weights original...\n");
   for (auto i = 0; i < num_weights; ++i) {
     const std::complex<__half> val = h_weights[i];
@@ -675,17 +677,6 @@ void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
 #endif
 }
 
-template void beamform(std::complex<__half> *h_samples,
-                       std::complex<__half> *h_weights,
-                       std::complex<float> *h_beam_output,
-                       std::complex<float> *h_visibilities_output,
-                       const int nr_aggregated_packets);
-
-template void beamform(std::complex<int8_t> *h_samples,
-                       std::complex<__half> *h_weights,
-                       std::complex<float> *h_beam_output,
-                       std::complex<float> *h_visibilities_output,
-                       const int nr_aggregated_packets);
 void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
                 const int n_col, const int batch_size, int n_inner) {
   if (n_inner == -1) {

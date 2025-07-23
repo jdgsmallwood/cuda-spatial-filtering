@@ -48,7 +48,8 @@ From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
     
 %environment
     export PATH=/usr/local/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/local/cutensor/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcutensor/12:$LD_LIBRARY_PATH
+    export CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
 
 %runscript
     exec /bin/bash

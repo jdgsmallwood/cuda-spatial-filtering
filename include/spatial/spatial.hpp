@@ -69,6 +69,9 @@ typedef std::complex<float> FloatVisibility;
 typedef Sample Samples[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION]
                       [NR_RECEIVERS][NR_POLARIZATIONS]
                       [spatial::NR_TIMES_PER_BLOCK];
+typedef std::complex<__half>
+    HalfSamples[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION][NR_RECEIVERS]
+               [NR_POLARIZATIONS][spatial::NR_TIMES_PER_BLOCK];
 typedef Visibility Visibilities[NR_CHANNELS][spatial::NR_BASELINES]
                                [NR_POLARIZATIONS][NR_POLARIZATIONS];
 typedef std::complex<float>
@@ -94,10 +97,9 @@ void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
 void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
                     const int n_col, const int batch_size, int n_inner,
                     const int tile_size_x, const int tile_size_y);
-template <typename T, typename S, typename U>
-void beamform(std::complex<T> *h_samples, std::complex<U> *h_weights,
-              std::complex<S> *h_beam_output,
-              std::complex<S> *h_visibilities_output,
+void beamform(Samples *h_samples, std::complex<__half> *h_weights,
+              BeamformedData *h_beam_output,
+              FloatVisibilities *h_visibilities_output,
               const int nr_aggregated_packets);
 template <typename T>
 void rearrange_matrix_to_ccglib_format(const std::complex<T> *input_matrix,
