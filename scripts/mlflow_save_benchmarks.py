@@ -64,21 +64,21 @@ def run_benchmarks_and_save(params: dict, run_description: str):
     
     logger.info("Creating slurm script")
     slurm_script = f"""#!/bin/bash
-    #
-    #SBATCH --job-name=profile
-    #SBATCH --output={params["JOB_OUTPUT_FILE_NAME"]}
-    #
-    #SBATCH --ntasks=1
-    #SBATCH --time=10:00
-    #SBATCH --mem=8g
-    #SBATCH --gres=gpu:1
-    
-    srun apptainer exec --nv /fred/oz002/jsmallwo/apptainer.sif /bin/bash -c "cd {params["REMOTE_PATH"]} && \\
-        cmake -DBUILD_TESTING=OFF -DBENCHMARKING=1 -DBUILD_TARGET=LAMBDA -DNR_CHANNELS={params["NR_CHANNELS"]} -DNR_RECEIVERS={params["NR_RECEIVERS"]} .. && cmake --build . && \\
-        cd apps && {params['REMOTE_EXEC']}  &&
-        ncu -f --set full --target-processes all --export {params["PROFILE_OUTPUT"]} {params["REMOTE_EXEC_NCU"]} && \\
-        ncu --import {params["PROFILE_OUTPUT"]}.ncu-rep --csv --page details > {params["PROFILE_OUTPUT"]}.csv && \\
-        nsys profile -t cuda,nvtx -o {params["NSYS_PROFILE_OUTPUT"]} --stats=true --force-overwrite true {params["REMOTE_EXEC"]}"
+#
+#SBATCH --job-name=profile
+#SBATCH --output={params["JOB_OUTPUT_FILE_NAME"]}
+#
+#SBATCH --ntasks=1
+#SBATCH --time=10:00
+#SBATCH --mem=8g
+#SBATCH --gres=gpu:1
+
+srun apptainer exec --nv /fred/oz002/jsmallwo/apptainer.sif /bin/bash -c "cd {params["REMOTE_PATH"]} && \\
+    cmake -DBUILD_TESTING=OFF -DBENCHMARKING=1 -DBUILD_TARGET=LAMBDA -DNR_CHANNELS={params["NR_CHANNELS"]} -DNR_RECEIVERS={params["NR_RECEIVERS"]} .. && cmake --build . && \\
+    cd apps && {params['REMOTE_EXEC']}  &&
+    ncu -f --set full --target-processes all --export {params["PROFILE_OUTPUT"]} {params["REMOTE_EXEC_NCU"]} && \\
+    ncu --import {params["PROFILE_OUTPUT"]}.ncu-rep --csv --page details > {params["PROFILE_OUTPUT"]}.csv && \\
+    nsys profile -t cuda,nvtx -o {params["NSYS_PROFILE_OUTPUT"]} --stats=true --force-overwrite true {params["REMOTE_EXEC"]}"
     """
     logger.info("Writing to file")
     # Write to file
