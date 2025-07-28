@@ -17,6 +17,13 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#if BENCHMARKING == 1
+#include <chrono>
+#include <fstream>
+using Clock = std::chrono::steady_clock;
+#endif
+
 #define DEBUG 1
 
 std::string make_filename_with_time(const std::string &prefix = "beamweights",
@@ -106,6 +113,12 @@ int main(int argc, char *argv[]) {
    *
    * */
 
+#if BENCHMARKING == 1
+  printf("Benchmarking is on!");
+  std::map<std::string, double> timings;
+  timings["begin"] = 0.0;
+  auto start = Clock::now();
+#endif
   /*
    * PCAP Formatting.
    * */
@@ -140,6 +153,12 @@ int main(int argc, char *argv[]) {
    * PCAP Data Reading
    */
 
+#if BENCHMARKING == 1
+  timings["checkpoint_begin_cuda_processing"] =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                              Clock::now() - start)
+                              .count());
+#endif
   // allocate pinned host memory
   Samples *h_samples;
   FloatVisibilities *h_visibilities;
@@ -190,6 +209,13 @@ int main(int argc, char *argv[]) {
   }
   pcap_close(handle);
 
+#if BENCHMARKING == 1
+  timings["checkpoint_finished_pcap_loading"] =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                              Clock::now() - start)
+                              .count());
+#endif
+
   printf("h_scales:\n");
   for (auto i = 0; i < NR_ACTUAL_RECEIVERS; ++i) {
     for (auto j = 0; j <= i; ++j) {
@@ -199,10 +225,20 @@ int main(int argc, char *argv[]) {
              scales[j], h_scales[baseline]);
     }
   }
-
+#if BENCHMARKING == 1
+  timings["checkpoint_begin_beamforming"] =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                              Clock::now() - start)
+                              .count());
+#endif
   beamform(h_samples, (std::complex<__half> *)h_weights, h_beamformed_data,
            h_visibilities, number_of_aggregated_packets);
-
+#if BENCHMARKING == 1
+  timings["checkpoint_end_beamforming"] =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                              Clock::now() - start)
+                              .count());
+#endif
   /*
    * Output
    * */
@@ -218,5 +254,27 @@ int main(int argc, char *argv[]) {
         .write(h_beamformed_data[i]);
   }
 
+#if BENCHMARKING == 1
+  timings["end"] =
+      static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                              Clock::now() - start)
+                              .count());
+  std::ofstream outfile(argv[2]);
+  if (!outfile) {
+    std::cerr << "Failed to open output file\n";
+    return 1;
+  }
+  outfile << "{\n";
+  for (auto it = timings.begin(); it != timings.end(); ++it) {
+    outfile << "  \"" << it->first << "\": " << it->second;
+    if (std::next(it) != timings.end())
+      outfile << ",";
+    outfile << "\n";
+  }
+  outfile << "}\n";
+  outfile.close();
+
+  std::cout << "All timings saved in timing.json\n";
+#endif
   return 0;
 }

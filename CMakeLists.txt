@@ -134,25 +134,43 @@ FetchContent_MakeAvailable(HighFive)
 # Restore user choice for own project tests
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
+
+# Add defaults but allow these to be defined & overwritten via -D
 if(BUILD_TESTING) 
-  set(NR_CHANNELS 3)
-  set(NR_RECEIVERS 8)
-  set(NR_POLARIZATIONS 2)
-  set(NR_RECEIVERS_PER_BLOCK 32)
-  set(NR_BITS 16)
+  set(default_NR_CHANNELS 3)
+  set(default_NR_RECEIVERS 8)
+  set(default_NR_POLARIZATIONS 2)
+  set(default_NR_RECEIVERS_PER_BLOCK 32)
+  set(default_NR_BITS 16)
 elseif(BUILD_TARGET STREQUAL "LAMBDA")
-  set(NR_CHANNELS 8)
-  set(NR_RECEIVERS 32)
-  set(NR_POLARIZATIONS 2)
-  set(NR_RECEIVERS_PER_BLOCK 32)
-  set(NR_BITS 8)
+  set(default_NR_CHANNELS 8)
+  set(default_NR_RECEIVERS 32)
+  set(default_NR_POLARIZATIONS 2)
+  set(default_NR_RECEIVERS_PER_BLOCK 32)
+  set(default_NR_BITS 8)
 else() 
-  set(NR_RECEIVERS 576)
-  set(NR_CHANNELS 480)
-  set(NR_POLARIZATIONS 2)
-  set(NR_RECEIVERS_PER_BLOCK 64)
-  set(NR_BITS 16)
+  set(default_NR_RECEIVERS 576)
+  set(default_NR_CHANNELS 480)
+  set(default_NR_POLARIZATIONS 2)
+  set(default_NR_RECEIVERS_PER_BLOCK 64)
+  set(default_NR_BITS 16)
 endif() 
+
+set(vars NR_CHANNELS NR_RECEIVERS NR_POLARIZATIONS NR_RECEIVERS_PER_BLOCK NR_BITS)
+
+# Loop and set variables only if not already defined
+foreach(var IN LISTS vars)
+  # Compose the name of the default variable, e.g. default_NR_CHANNELS
+  set(default_var "default_${var}")
+
+  # Check if variable is defined or cached
+  if(NOT DEFINED ${var})
+    # Set the variable to the default value
+    set(${var} ${${default_var}})
+  endif()
+endforeach()
+
+
 configure_file(include/spatial/tcc_config.h.in ${PROJECT_SOURCE_DIR}/include/spatial/tcc_config.h @ONLY)
 # Testing only available if this is the main app
 # Emergency override MODERN_CMAKE_BUILD_TESTING provided as well

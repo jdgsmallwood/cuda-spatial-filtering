@@ -26,6 +26,12 @@ add_executable(
 )
 target_link_libraries(beamform_spatial PRIVATE CUDA::cudart cuda spatial cutensor pcap HighFive::HighFive ${HDF5_LIBRARIES} ${ZLIB_LIBRARIES})
 
+message(STATUS "Benchmarking is $BENCHMARKING")
+
+if(BENCHMARKING EQUAL 1)
+  target_compile_definitions(beamform_spatial PRIVATE BENCHMARKING=1)
+endif()
+
 add_executable(
   read_pcap_and_beamform
   ${PROJECT_SOURCE_DIR}/apps/read_pcap_and_beamform.cpp

@@ -67,3 +67,9 @@ extern/
 Dockerfile
 .DS*
 benchmarking/
+**/.ipynb_checkpoints/**
+scripts/**/*.txt
+scripts/**/*.json
+scripts/**/*.pcap
+scripts/**/*.csv
+scripts/**/*.sh
