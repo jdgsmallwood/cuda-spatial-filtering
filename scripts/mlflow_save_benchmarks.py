@@ -71,7 +71,7 @@ def run_benchmarks_and_save(params: dict, run_description: str):
 #
 #SBATCH --ntasks=1
 #SBATCH --time=10:00
-#SBATCH --mem=8g
+#SBATCH --mem=4g
 #SBATCH --gres=gpu:1
 
 srun apptainer exec --nv /fred/oz002/jsmallwo/apptainer.sif /bin/bash -c "cd {params["REMOTE_PATH"]} && \\
