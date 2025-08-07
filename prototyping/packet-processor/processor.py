@@ -105,6 +105,7 @@ async def producer(buffers: list[RingBuffer], channels: int) -> None:
         # keep track of where we're up to for each channel.
         seqs[c] += 1
 
+        # Have some stochastic chance of dropping a packet
         if random.random() >= DROP_PROB:
             buffers[c].add(pkt)
 
