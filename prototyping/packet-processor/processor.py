@@ -1,3 +1,25 @@
+"""
+Author: Jay Smallwood
+Email: jsmallwood@swin.edu.au
+
+RDMA Packet simulator on GPU.
+
+Assumptions & Decisions:
+ - Packets cannot arrive out-of-order.
+ - It is possible to drop packets.
+ - If packets are dropped, replace missing data with zeroes.
+ - Each packet contains data for one channel & all receivers.
+ - Have one ring buffer per channel.
+ - Sequence numbers for different channels will be aligned on timestamp (i.e. seq 10 is the same time period for all channels)
+ - Written in a C++/CUDA style - i.e. don't use any Python-specific collections or functionality.
+ - Use a secondary boolean array to keep track of where new packets have been written.
+ - Initial base sequence numbers for each ring buffer is set by the first packet that arrives for any ring buffer, to sync up the blocks between channels.
+
+Main Questions:
+ - Even though this is using async it is still single-threaded. Are there race conditions to consider in the RDMA context?
+ - How to scale this if not all receivers are within each packet (i.e. some subset. Is that the time to go to receiver/channel combination buffers?)
+"""
+
 import asyncio
 import random
 from typing import Union
@@ -10,17 +32,16 @@ DROP_PROB = 0.001
 
 
 class Packet:
-    def __init__(self, receiver: int, channel: int, seq: int):
-        self.receiver = receiver
+    def __init__(self, channel: int, seq: int):
         self.channel = channel
         self.seq = seq
 
     def __repr__(self):
-        return f"Pkt(r={self.receiver}, c={self.channel}, seq={self.seq})"
+        return f"Pkt(c={self.channel}, seq={self.seq})"
 
 
 class RingBuffer:
-    def __init__(self, size: int, block_size: int, receiver: int, channel: int):
+    def __init__(self, size: int, block_size: int, channel: int):
         self.size = size
         self.data = [None] * size
         self.packet_arrived = [0] * size
@@ -29,7 +50,6 @@ class RingBuffer:
         self.current_seq = 0  # current block sequence number
         self.last_arrived_seq = 0
         self.block_size = block_size
-        self.receiver = receiver
         self.channel = channel
 
     def add(self, pkt: Packet) -> None:
@@ -38,7 +58,7 @@ class RingBuffer:
 
         if pkt.seq < self.current_seq:
             print(
-                f"Dropping packet with seq num {pkt.seq} as it is behind the current block head {self.current_seq} for receiver {self.receiver} and channel {self.channel}."
+                f"Dropping packet with seq num {pkt.seq} as it is behind the current block head {self.current_seq} for channel {self.channel}."
             )
 
         if pkt.seq - self.current_seq > self.size:
@@ -75,59 +95,51 @@ class RingBuffer:
             return None
 
 
-async def producer(
-    buffers: list[list[RingBuffer]], receivers: int, channels: int
-) -> None:
-    seqs = [[0 for _ in range(channels)] for _ in range(receivers)]
+async def producer(buffers: list[RingBuffer], channels: int) -> None:
+    seqs = [0 for _ in range(channels)]
     first_packet = True
     while True:
-        r = random.randint(0, receivers - 1)
         c = random.randint(0, channels - 1)
-        pkt = Packet(r, c, seqs[r][c])
-        seqs[r][c] += 1
+        pkt = Packet(c, seqs[c])
+
+        # keep track of where we're up to for each channel.
+        seqs[c] += 1
 
         if random.random() >= DROP_PROB:
-            buffers[r][c].add(pkt)
+            buffers[c].add(pkt)
 
             # Set the initial packet seq for all ring buffers to be the
             # same as the first packet that arrives across any channel.
             # This is simple but may drop a few initial packets
             if first_packet:
                 first_packet = False
-                for r in range(receivers):
-                    for c in range(channels):
-                        buffers[r][c].current_seq = pkt.seq
+                for c in range(channels):
+                    buffers[c].current_seq = pkt.seq
         else:
-            print(f"Dropping packet {pkt.seq} for receiver {r} and channel {c}.")
+            print(f"Dropping packet {pkt.seq} for channel {c}.")
 
         await asyncio.sleep(0.01)
 
 
-async def consumer(
-    buffers: list[list[RingBuffer]], receivers: int, channels: int
-) -> None:
+async def consumer(buffers: list[list[RingBuffer]], channels: int) -> None:
     while True:
-        for r in range(receivers):
-            for c in range(channels):
-                block = buffers[r][c].get_block()
-                if block:
-                    print(f"Sending block for receiver {r}, channel {c}:", block)
+        for c in range(channels):
+            block = buffers[c].get_block()
+            if block:
+                # Send off to correlation / beamforming kernels
+                print(f"Sending block for channel {c}: {block}")
         await asyncio.sleep(0.05)
 
 
 async def main(
-    receivers: int = 4,
     channels: int = 3,
     buffer_size: int = BUFFER_SIZE,
     block_size: int = BLOCK_SIZE,
 ):
-    buffers = [
-        [RingBuffer(buffer_size, block_size, r, c) for c in range(channels)]
-        for r in range(receivers)
-    ]
+    buffers = [RingBuffer(buffer_size, block_size, c) for c in range(channels)]
     await asyncio.gather(
-        producer(buffers, receivers, channels),
-        consumer(buffers, receivers, channels),
+        producer(buffers, channels),
+        consumer(buffers, channels),
     )
 
 
