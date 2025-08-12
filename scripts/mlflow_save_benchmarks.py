@@ -22,10 +22,10 @@ REMOTE_HOST = "ozstar"
 
 def run_benchmarks_and_save(params: dict, run_description: str):
 
-    
+    local = not REMOTE_HOST    
     logger.info("Setting up MlFlow")
     mlflow.set_tracking_uri("http://localhost:5000")
-    mlflow.set_experiment("2025-beamforming-cuda-optimization")
+    mlflow.set_experiment("2025-xbengine-benchmarks")
     
     
     job_id = str(uuid.uuid4())
@@ -60,8 +60,10 @@ def run_benchmarks_and_save(params: dict, run_description: str):
     )
     subprocess.run(cmd, shell=True, check=True, executable='/bin/bash')
     
-    
-    subprocess.run(['rsync', '-avz', os.path.join(job_id, params["GENERATED_INPUT_FILE_NAME"]), f"{REMOTE_HOST}:{params['REMOTE_PATH']}/{job_id}/"], executable='/bin/bash')
+    if local:
+        subprocess.run(['cp', os.path.join(job_id, params["GENERATED_INPUT_FILE_NAME"]), f"{params['REMOTE_PATH']}/{job_id}/"
+    else:
+        subprocess.run(['rsync', '-avz', os.path.join(job_id, params["GENERATED_INPUT_FILE_NAME"]), f"{REMOTE_HOST}:{params['REMOTE_PATH']}/{job_id}/"], check=True)
     
     logger.info("Creating slurm script")
     slurm_script = f"""#!/bin/bash
@@ -90,62 +92,110 @@ srun apptainer exec --nv /fred/oz002/jsmallwo/apptainer.sif /bin/bash -c "cd {pa
     
     
     # === Step 6: Sync slurm script to server ===
-    logger.info("Syncing slurm script to remote...")
-    subprocess.run(["rsync", "-avz", SLURM_FILE_NAME, f"{REMOTE_HOST}:{params['REMOTE_PATH']}"])
+    if not local:
+        logger.info("Syncing slurm script to remote...")
+        subprocess.run(["rsync", "-avz", SLURM_FILE_NAME, f"{REMOTE_HOST}:{params['REMOTE_PATH']}"])
     
     
     # === Step 7: Compile and profile remotely ===
     logger.info("Submitting slurm job...")
-    subprocess.run(
+    if local:
+        subprocess.run(
+            f"cd {params["REMOTE_PATH"]} && sbatch -W submit_job.sh", shell=True, check=True
+        )
+    else:
+        subprocess.run(
         f'ssh {REMOTE_HOST} -t "cd {params["REMOTE_PATH"]} && sbatch -W submit_job.sh"',
         shell=True,
     )
     
     logger.info("Pulling back results...")
     os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
-    subprocess.run(
+    
+    if local:
+        subprocess.run(
+            ["cp",
+             f"{params['REMOTE_PATH']}/apps/{params['PROFILE_OUTPUT']}.csv",
+             LOCAL_OUTPUT_DIR
+            ], check=True
+        )
+         subprocess.run(
+        [
+            "cp",
+            f"{params['REMOTE_PATH']}/apps/{params['PROFILE_OUTPUT']}.ncu-rep",
+            LOCAL_OUTPUT_DIR,
+        ], check=True
+    )
+    
+        subprocess.run(
+        [
+            "cp",
+            f"{params['REMOTE_PATH']}/apps/{params['NSYS_PROFILE_OUTPUT']}.nsys-rep",
+            LOCAL_OUTPUT_DIR,
+        ], check=True
+    )
+    
+        subprocess.run(
+        [
+            "cp",
+            f"{params['REMOTE_PATH']}/{params['JOB_OUTPUT_FILE_NAME']}",
+            LOCAL_OUTPUT_DIR,
+        ], check=True
+    )
+    
+        subprocess.run(
+        [
+            "cp",
+            f"{params['REMOTE_PATH']}/apps/{benchmark_file_name}",
+            LOCAL_OUTPUT_DIR,
+        ], check=True
+    )
+
+        
+    else:
+        subprocess.run(
         [
             "rsync",
             "-avz",
             f"{REMOTE_HOST}:{params['REMOTE_PATH']}/apps/{params['PROFILE_OUTPUT']}.csv",
             LOCAL_OUTPUT_DIR,
-        ]
+        ], check=True
     )
     
-    subprocess.run(
+        subprocess.run(
         [
             "rsync",
             "-avz",
             f"{REMOTE_HOST}:{params['REMOTE_PATH']}/apps/{params['PROFILE_OUTPUT']}.ncu-rep",
             LOCAL_OUTPUT_DIR,
-        ]
+        ], check=True
     )
     
-    subprocess.run(
+        subprocess.run(
         [
             "rsync",
             "-avz",
             f"{REMOTE_HOST}:{params['REMOTE_PATH']}/apps/{params['NSYS_PROFILE_OUTPUT']}.nsys-rep",
             LOCAL_OUTPUT_DIR,
-        ]
+        ], check=True
     )
     
-    subprocess.run(
+        subprocess.run(
         [
             "rsync",
             "-avz",
             f"{REMOTE_HOST}:{params['REMOTE_PATH']}/{params['JOB_OUTPUT_FILE_NAME']}",
             LOCAL_OUTPUT_DIR,
-        ]
+        ], check=True
     )
     
-    subprocess.run(
+        subprocess.run(
         [
             "rsync",
             "-avz",
             f"{REMOTE_HOST}:{params['REMOTE_PATH']}/apps/{benchmark_file_name}",
             LOCAL_OUTPUT_DIR,
-        ]
+        ], check=True
     )
     
     
@@ -191,3 +241,4 @@ srun apptainer exec --nv /fred/oz002/jsmallwo/apptainer.sif /bin/bash -c "cd {pa
     f"ssh {REMOTE_HOST} rm -r {params['REMOTE_PATH']}/{job_id}/", shell=True
     )
     subprocess.run(f"rm -r {job_id}", shell=True)
+

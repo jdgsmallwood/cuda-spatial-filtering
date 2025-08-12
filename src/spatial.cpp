@@ -503,24 +503,20 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
         printf("Current num integrated units processed is %u",
                current_num_integrated_units_processed);
         cudaDeviceSynchronize();
-        // TODO: This will not work is NR_BUFFERS != 2.
-        accumulate_visibilities(
-            (float *)
-                d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
-            (float *)d_visibilities_accumulator[current_buffer],
-            spatial::NR_BASELINES * 2, streams[current_buffer]);
-
+        for (auto i = 1; i < NR_BUFFERS; ++i) {
+          accumulate_visibilities((float *)d_visibilities_accumulator[i],
+                                  (float *)d_visibilities_accumulator[0],
+                                  spatial::NR_BASELINES * 2,
+                                  streams[current_buffer]);
+        }
         checkCudaCall(cudaMemcpyAsync(
             h_visibilities_output[current_num_integrated_units_processed],
-            d_visibilities_accumulator[current_buffer],
-            size_d_visibilities_permuted, cudaMemcpyDefault,
-            streams[current_buffer]));
-        cudaMemsetAsync(d_visibilities_accumulator[current_buffer], 0,
-                        size_d_visibilities_permuted, streams[current_buffer]);
-        cudaMemsetAsync(
-            d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS], 0,
-            size_d_visibilities_permuted,
-            streams[(current_buffer + 1) % NR_BUFFERS]);
+            d_visibilities_accumulator[0], size_d_visibilities_permuted,
+            cudaMemcpyDefault, streams[current_buffer]));
+        for (auto i = 0; i < NR_BUFFERS; ++i) {
+          cudaMemsetAsync(d_visibilities_accumulator[i], 0,
+                          size_d_visibilities_permuted, streams[i]);
+        }
         cudaDeviceSynchronize();
         num_correlation_units_integrated.store(0);
       }
@@ -604,16 +600,16 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
     printf("Doing final dump as last_integrated_units_processed is %u\n",
            last_integrated_units_processed);
     // multiply by 2 for complex
-    accumulate_visibilities(
-        (float *)d_visibilities_accumulator[(current_buffer + 1) % NR_BUFFERS],
-        (float *)d_visibilities_accumulator[current_buffer],
-        spatial::NR_BASELINES * 2, streams[current_buffer]);
-
+    for (auto i = 1; i < NR_BUFFERS; ++i) {
+      accumulate_visibilities((float *)d_visibilities_accumulator[i],
+                              (float *)d_visibilities_accumulator[0],
+                              spatial::NR_BASELINES * 2,
+                              streams[current_buffer]);
+    }
     checkCudaCall(cudaMemcpyAsync(
         h_visibilities_output[num_integrated_units_processed.fetch_add(1)],
-        d_visibilities_accumulator[current_buffer],
-        size_d_visibilities_permuted, cudaMemcpyDefault,
-        streams[current_buffer]));
+        d_visibilities_accumulator[0], size_d_visibilities_permuted,
+        cudaMemcpyDefault, streams[current_buffer]));
     cudaDeviceSynchronize();
   }
 #if DEBUG == 1
