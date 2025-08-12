@@ -73,4 +73,5 @@ scripts/**/*.json
 scripts/**/*.pcap
 scripts/**/*.csv
 scripts/**/*.sh
+scripts/.venv
 **/__pycache__/*

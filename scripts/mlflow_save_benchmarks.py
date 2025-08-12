@@ -18,14 +18,14 @@ def get_git_commit():
 
 
 
-REMOTE_HOST = "nt"
+REMOTE_HOST = "ozstar"
 
 def run_benchmarks_and_save(params: dict, run_description: str):
 
     
     logger.info("Setting up MlFlow")
     mlflow.set_tracking_uri("http://localhost:5000")
-    mlflow.set_experiment("2025-beamforming-cuda-optimization-test")
+    mlflow.set_experiment("2025-beamforming-cuda-optimization")
     
     
     job_id = str(uuid.uuid4())
@@ -58,10 +58,10 @@ def run_benchmarks_and_save(params: dict, run_description: str):
         f'--number_packets {params["NR_PACKETS_TOTAL"]} '
         f'--number_channels {params["NR_CHANNELS"]}'
     )
-    subprocess.run(cmd, shell=True, check=True)
+    subprocess.run(cmd, shell=True, check=True, executable='/bin/bash')
     
     
-    subprocess.run(['rsync', '-avz', os.path.join(job_id, params["GENERATED_INPUT_FILE_NAME"]), f"{REMOTE_HOST}:{params['REMOTE_PATH']}/{job_id}/"])
+    subprocess.run(['rsync', '-avz', os.path.join(job_id, params["GENERATED_INPUT_FILE_NAME"]), f"{REMOTE_HOST}:{params['REMOTE_PATH']}/{job_id}/"], executable='/bin/bash')
     
     logger.info("Creating slurm script")
     slurm_script = f"""#!/bin/bash
