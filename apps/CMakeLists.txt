@@ -37,3 +37,10 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/apps/read_pcap_and_beamform.cpp
 )
 target_link_libraries(read_pcap_and_beamform PRIVATE spatial pcap CUDA::cudart tcc cuda cutensor ccglib)
+
+
+add_executable(
+  packet_processor
+  ${PROJECT_SOURCE_DIR}/apps/packet_processor.cpp
+)
+target_link_libraries(packet_processor PRIVATE spatial CUDA::cudart cuda cutensor)
