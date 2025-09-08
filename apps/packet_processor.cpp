@@ -35,14 +35,75 @@ typedef Sample PacketSamples[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
 typedef Packet Packets[NR_TOTAL_FRAMES_PER_CHANNEL];
 typedef bool SampleOccupancy[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION]
                             [NR_RECEIVERS];
-
+struct PacketData {
+  Packet data;
+};
 struct PacketInfo {
   int source;
   int packet_seq_number;
   int channel;
 };
 
-int main() {
+struct BufferState {
+  bool is_ready;
+  int start_seq;
+  int end_seq;
+  std::array<bool, NR_CHANNELS> is_populated{};
+};
+
+struct ProcessorState {
+  PacketSamples *d_samples[NR_BUFFERS];
+  Packets *d_packet_data[NR_CHANNELS];
+  PacketInfo h_packet_info[NR_CHANNELS][NR_TOTAL_FRAMES_PER_CHANNEL];
+  bool h_packet_info_filled[NR_CHANNELS][NR_TOTAL_FRAMES_PER_CHANNEL] = {false};
+  std::array<BufferState, NR_BUFFERS> buffers;
+  int latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
+  int next_frame_for_channel[NR_CHANNELS] = {0};
+  int current_buffer = 0;
+};
+
+struct GeneratorState {
+
+  int last_generated_seq_num_for_channel_and_source[NR_CHANNELS]
+                                                   [NR_FPGA_SOURCES] = {};
+};
+
+PacketData create_packet(const int channel, const int seq, const int source) {
+
+  PacketData packet;
+
+  for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        packet.data[i][j][k] = Sample(channel + seq, source + j);
+      }
+    }
+  }
+  return packet;
+}
+
+void print_packet_sample(const PacketSamples &packet_sample) {
+  std::cout << "Packet Data:" << std::endl;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
+      for (auto k = 0; k < NR_RECEIVERS; ++k) {
+        for (auto l = 0; l < NR_POLARIZATIONS; ++l) {
+          for (auto m = 0; m < NR_TIME_STEPS_PER_PACKET; ++m) {
+            std::cout << "channel: " << i << ", packet: " << j
+                      << ", receiver: " << k << ", polarization: " << l
+                      << ", time: " << m << ", val: "
+                      << __half2float(packet_sample[i][j][k][l][m].real())
+                      << " + "
+                      << __half2float(packet_sample[i][j][k][l][m].imag())
+                      << "j" << std::endl;
+          }
+        }
+      }
+    }
+  }
+}
+
+void print_startup_info() {
 
   // Startup debug info
   std::cout << "NR_CHANNELS: " << NR_CHANNELS << std::endl;
@@ -56,228 +117,211 @@ int main() {
             << std::endl;
   std::cout << "NR_PACKETS_FOR_CORRELATION: " << NR_PACKETS_FOR_CORRELATION
             << std::endl;
+}
 
-  Packet example_packet;
-  for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
-    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
-      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
-        example_packet[i][j][k] = Sample(i, j);
+void initialize_memory(ProcessorState &state) {
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    state.d_packet_data[i] = (Packets *)calloc(1, sizeof(Packets));
+  }
+
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
+    state.d_samples[i] = (PacketSamples *)calloc(1, sizeof(PacketSamples));
+  }
+}
+
+void initialize_buffers(ProcessorState &state) {
+
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
+    state.buffers[i].start_seq = i * NR_PACKETS_FOR_CORRELATION;
+    state.buffers[i].end_seq = (i + 1) * NR_PACKETS_FOR_CORRELATION - 1;
+    state.buffers[i].is_ready = true;
+  }
+}
+
+void check_buffer_completion(ProcessorState &state) {
+  for (auto channel = 0; channel < NR_CHANNELS; ++channel) {
+    std::cout << "Check if buffers are complete for channel " << channel
+              << std::endl;
+
+    if (std::all_of(std::begin(state.latest_packet_received[channel]),
+                    std::end(state.latest_packet_received[channel]),
+                    [&state](int x) {
+                      return x >= state.buffers[state.current_buffer].end_seq;
+                    })) {
+      state.buffers[state.current_buffer].is_populated[channel] = true;
+      std::cout << "Buffer is complete for channel " << channel << ".\n";
+    } else {
+      std::cout << "Buffer is not complete for channel " << channel
+                << " as end_seq is "
+                << state.buffers[state.current_buffer].end_seq
+                << " and latest_packet_receives are ";
+      for (int check = 0; check < NR_FPGA_SOURCES; ++check) {
+        std::cout << state.latest_packet_received[channel][check] << ", ";
+      }
+      std::cout << std::endl;
+    }
+  }
+}
+
+void advance_to_next_buffer(ProcessorState &state) {
+  state.buffers[state.current_buffer].is_ready = false;
+
+  // Process current buffer
+  print_packet_sample(*state.d_samples[state.current_buffer]);
+
+  state.buffers[state.current_buffer].is_ready = true;
+  int old_buffer = state.current_buffer;
+  int end_current_buffer_seq = state.buffers[old_buffer].end_seq;
+
+  // Move to next buffer
+  state.current_buffer = (state.current_buffer + 1) % NR_BUFFERS;
+
+  std::cout << "current_buffer is " << state.current_buffer
+            << " and is it ready? "
+            << state.buffers[state.current_buffer].is_ready << std::endl;
+
+  while (!state.buffers[state.current_buffer].is_ready) {
+    std::cout << "Waiting for buffer to be ready..." << std::endl;
+  }
+
+  // Reset new current buffer
+  std::memset(std::begin(state.buffers[state.current_buffer].is_populated),
+              (int)false, NR_CHANNELS);
+  state.buffers[state.current_buffer].start_seq = end_current_buffer_seq + 1;
+  state.buffers[state.current_buffer].end_seq =
+      state.buffers[state.current_buffer].start_seq +
+      NR_PACKETS_FOR_CORRELATION - 1;
+
+  // Update old buffer for future use
+  int max_end_seq_in_buffers = 0;
+  for (auto i = 0; i < NR_BUFFERS; ++i) {
+    max_end_seq_in_buffers =
+        std::max(max_end_seq_in_buffers, state.buffers[i].end_seq);
+  }
+  state.buffers[old_buffer].start_seq = max_end_seq_in_buffers + 1;
+  state.buffers[old_buffer].end_seq =
+      state.buffers[old_buffer].start_seq + NR_PACKETS_FOR_CORRELATION - 1;
+
+  std::cout
+      << "Current buffer is all complete. Moving to next buffer which is #"
+      << state.current_buffer << std::endl;
+  std::cout << "New buffer starts at packet "
+            << state.buffers[state.current_buffer].start_seq << " and ends at "
+            << state.buffers[state.current_buffer].end_seq << "\n";
+}
+
+void generate_packet(ProcessorState &state, GeneratorState &gen_state) {
+
+  // Receive packets
+  int channel = randomChannel();
+  int source = randomSource();
+  gen_state.last_generated_seq_num_for_channel_and_source[channel][source]++;
+  int seq =
+      gen_state.last_generated_seq_num_for_channel_and_source[channel][source];
+  PacketInfo info;
+  info.source = source;
+  info.channel = channel;
+  info.packet_seq_number = seq;
+  PacketData constructed_packet = create_packet(channel, seq, source);
+  state.h_packet_info[channel][state.next_frame_for_channel[channel]] = info;
+  std::memcpy(
+      &((*state.d_packet_data[channel])[state.next_frame_for_channel[channel]]),
+      &constructed_packet.data, sizeof(Packet));
+  state.h_packet_info_filled[channel][state.next_frame_for_channel[channel]] =
+      true;
+  int gate_check{0};
+  while (state.h_packet_info_filled[channel]
+                                   [state.next_frame_for_channel[channel]]) {
+    state.next_frame_for_channel[channel] =
+        (state.next_frame_for_channel[channel] + 1) %
+        NR_TOTAL_FRAMES_PER_CHANNEL;
+    gate_check++;
+    if (gate_check > NR_TOTAL_FRAMES_PER_CHANNEL) {
+      throw std::runtime_error(
+          "We ate our own tail - no frames left for this channel.");
+    }
+  }
+}
+
+void copy_data_to_input_buffer_if_able(ProcessorState &state,
+                                       const int channel) {
+
+  std::cout << "Update latest numbers for channel " << channel << std::endl;
+  for (auto j = 0; j < NR_TOTAL_FRAMES_PER_CHANNEL; ++j) {
+    if (!state.h_packet_info_filled[channel][j])
+      continue;
+
+    PacketInfo packet_info = state.h_packet_info[channel][j];
+    state.latest_packet_received[channel][packet_info.source] =
+        std::max(state.latest_packet_received[channel][packet_info.source],
+                 packet_info.packet_seq_number);
+
+    // copy to correct place or leave it.
+    for (int buffer = 0; buffer < NR_BUFFERS; ++buffer) {
+      int buffer_index = (state.current_buffer + buffer) % NR_BUFFERS;
+      int packet_index =
+          packet_info.packet_seq_number - state.buffers[buffer_index].start_seq;
+
+      if (buffer == 0 && packet_index < 0) {
+        // This means that this packet is less than the lowest possible
+        // start token. Maybe an out-of-order packet that's coming in?
+        // Regardless we can't do anything with this.
+        std::cout << "Discarding packet as it is before current buffer "
+                     "with begin_seq "
+                  << state.buffers[state.current_buffer].start_seq
+                  << " actually has packet_index "
+                  << packet_info.packet_seq_number << std::endl;
+        state.h_packet_info_filled[channel][j] = false;
+        break;
+      }
+
+      if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
+        int receiver_index = packet_info.source * NR_RECEIVERS_PER_PACKET;
+        std::cout << "Copying data from frame " << j << " of channel "
+                  << channel << " to packet_index " << packet_index
+                  << " and receiver index " << receiver_index << " of buffer "
+                  << (state.current_buffer + buffer_index) % NR_BUFFERS
+                  << std::endl;
+        std::memcpy(&(*state.d_samples[buffer_index])[channel][packet_index]
+                                                     [receiver_index],
+                    &(*state.d_packet_data[channel])[j], sizeof(Packet));
+        state.h_packet_info_filled[channel][j] = false;
+        break;
       }
     }
   }
+}
 
-  PacketSamples *d_samples[NR_BUFFERS];
-  Packets *d_packet_data[NR_CHANNELS];
+int main() {
+  print_startup_info();
 
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
-    d_packet_data[i] = (Packets *)calloc(1, sizeof(Packets));
-  }
+  ProcessorState state;
+  GeneratorState gen_state;
+  initialize_memory(state);
 
-  for (auto i = 0; i < NR_BUFFERS; ++i) {
-    d_samples[i] = (PacketSamples *)calloc(1, sizeof(PacketSamples));
-  }
-
-  int current_buffer{0};
-  PacketInfo h_packet_info[NR_CHANNELS][NR_TOTAL_FRAMES_PER_CHANNEL];
-  bool h_packet_info_filled[NR_CHANNELS][NR_TOTAL_FRAMES_PER_CHANNEL] = {false};
-  int h_input_buffer_start_seq[NR_BUFFERS] = {};
-  int h_input_buffer_end_seq[NR_BUFFERS] = {NR_PACKETS_FOR_CORRELATION - 1};
-
-  bool h_is_buffer_ready[NR_BUFFERS];
-  bool h_is_input_buffer_populated[NR_BUFFERS][NR_CHANNELS] = {false};
-  int latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
   // Receive n packets
 
-  int last_generated_seq_num_for_channel_and_source[NR_CHANNELS]
-                                                   [NR_FPGA_SOURCES] = {};
-
-  bool h_capture_buffer_slot_available[NR_CHANNELS]
-                                      [NR_TOTAL_FRAMES_PER_CHANNEL]{true};
-
-  int next_frame_for_channel[NR_CHANNELS] = {0};
-
-  // make all buffers ready
-  std::fill(std::begin(h_is_buffer_ready), std::end(h_is_buffer_ready), true);
-
-  for (auto i = 0; i < NR_BUFFERS; ++i) {
-    h_input_buffer_start_seq[i] = i * NR_PACKETS_FOR_CORRELATION;
-    h_input_buffer_end_seq[i] = (i + 1) * NR_PACKETS_FOR_CORRELATION - 1;
-  }
+  initialize_buffers(state);
 
   for (auto iter = 0; iter < NUM_ITERATIONS; ++iter) {
     std::cout << "Starting iteration " << iter << std::endl;
     // Generate some packets and put it in the buffer.
     std::cout << "Randomly generate data..." << std::endl;
     for (auto i = 0; i < NUM_FRAMES_PER_ITERATION; ++i) {
-
-      // Receive packets
-      int channel = randomChannel();
-      int source = randomSource();
-      last_generated_seq_num_for_channel_and_source[channel][source]++;
-      int seq = last_generated_seq_num_for_channel_and_source[channel][source];
-      std::cout << "packet " << i << ", channel: " << channel
-                << ", source: " << source << ", seq: " << seq << std::endl;
-      PacketInfo info;
-      info.source = source;
-      info.channel = channel;
-      info.packet_seq_number = seq;
-      h_packet_info[channel][next_frame_for_channel[channel]] = info;
-      std::memcpy(&((*d_packet_data[channel])[next_frame_for_channel[channel]]),
-                  &example_packet, sizeof(Packet));
-      h_packet_info_filled[channel][next_frame_for_channel[channel]] = true;
-      int gate_check{0};
-      while (h_packet_info_filled[channel][next_frame_for_channel[channel]]) {
-        next_frame_for_channel[channel] =
-            (next_frame_for_channel[channel] + 1) % NR_TOTAL_FRAMES_PER_CHANNEL;
-        gate_check++;
-        if (gate_check > NR_TOTAL_FRAMES_PER_CHANNEL) {
-          throw std::runtime_error(
-              "We ate our own tail - no frames left for this channel.");
-        }
-      }
+      generate_packet(state, gen_state);
     }
 
-    // Debug: print packet info
-    std::cout << "printing packet info..." << std::endl;
-    for (auto i = 0; i < NR_CHANNELS; ++i) {
-      for (auto j = 0; j < NR_TOTAL_FRAMES_PER_CHANNEL; ++j) {
-        if (h_packet_info_filled[i][j]) {
-          PacketInfo info = h_packet_info[i][j];
-          std::cout << i << "," << j << ": " << info.packet_seq_number << ", "
-                    << info.channel << ", " << info.source << std::endl;
-        }
-      }
-    }
-    /*
-    // Debug: print packet data
-    std::cout << "h_packet_data" << std::endl;
-
-    for (auto i = 0; i < NR_CHANNELS; ++i) {
-      for (auto j = 0; j < NUM_FRAMES; ++j) {
-        for (auto k = 0; k < NR_RECEIVERS_PER_PACKET; ++k) {
-          for (auto l = 0; l < NR_POLARIZATIONS; ++l) {
-            for (auto m = 0; m < NR_TIME_STEPS_PER_PACKET; ++m) {
-
-              std::cout << "i,j,k,l,m" << i << j << k << l << m << ": "
-                        << __half2float((*d_packet_data[i])[j][k][l][m].real())
-                        << __half2float((*d_packet_data[i])[j][k][l][m].imag())
-                        << std::endl;
-            }
-          }
-        }
-      }
-    }
-  */
     // Copy in data to correct place
     for (auto i = 0; i < NR_CHANNELS; ++i) {
-      std::cout << "Update latest numbers for channel " << i << std::endl;
-      for (auto j = 0; j < NR_TOTAL_FRAMES_PER_CHANNEL; ++j) {
-        if (!h_packet_info_filled[i][j])
-          continue;
-
-        //        std::cout << "i: " << i << ", j: " << j << std::endl;
-        PacketInfo packet_info = h_packet_info[i][j];
-        latest_packet_received[i][packet_info.source] =
-            std::max(latest_packet_received[i][packet_info.source],
-                     packet_info.packet_seq_number);
-
-        // copy to correct place or leave it.
-        for (int buffer = 0; buffer < NR_BUFFERS; ++buffer) {
-          int buffer_index = (current_buffer + buffer) % NR_BUFFERS;
-          int packet_index = packet_info.packet_seq_number -
-                             h_input_buffer_start_seq[buffer_index];
-
-          if (buffer == 0 && packet_index < 0) {
-            // This means that this packet is less than the lowest possible
-            // start token. Maybe an out-of-order packet that's coming in?
-            // Regardless we can't do anything with this.
-            std::cout << "Discarding packet as it is before current buffer "
-                         "with begin_seq "
-                      << h_input_buffer_start_seq[current_buffer]
-                      << " actually has packet_index "
-                      << packet_info.packet_seq_number << std::endl;
-            h_packet_info_filled[i][j] = false;
-            break;
-          }
-
-          if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
-            int receiver_index = packet_info.source * NR_RECEIVERS_PER_PACKET;
-            std::cout << "Copying data from frame " << j << " of channel " << i
-                      << " to packet_index " << packet_index
-                      << " and receiver index " << receiver_index
-                      << " of buffer "
-                      << (current_buffer + buffer_index) % NR_BUFFERS
-                      << std::endl;
-            std::memcpy(
-                &(*d_samples[buffer_index])[i][packet_index][receiver_index],
-                &(*d_packet_data[i])[j], sizeof(Packet));
-            h_packet_info_filled[i][j] = false;
-            break;
-          }
-        }
-      }
-
-      std::cout << "Check if buffers are complete for channel " << i
-                << std::endl;
-      if (std::all_of(std::begin(latest_packet_received[i]),
-                      std::end(latest_packet_received[i]),
-                      [current_buffer, &h_input_buffer_end_seq](int x) {
-                        std::cout << x << ", "
-                                  << h_input_buffer_end_seq[current_buffer]
-                                  << std::endl;
-                        return x >= h_input_buffer_end_seq[current_buffer];
-                      })) {
-        h_is_input_buffer_populated[current_buffer][i] = true;
-        std::cout << "Buffer is complete for channel " << i << ".\n";
-      } else {
-        std::cout << "Buffer is not complete for channel " << i
-                  << " as end_seq is " << h_input_buffer_end_seq[current_buffer]
-                  << " and latest_packet_receives are ";
-        for (int check = 0; check < NR_FPGA_SOURCES; ++check) {
-          std::cout << latest_packet_received[i][check] << ", ";
-        }
-        std::cout << std::endl;
-      }
+      copy_data_to_input_buffer_if_able(state, i);
+      check_buffer_completion(state);
     }
-    if (std::all_of(std::begin(h_is_input_buffer_populated[current_buffer]),
-                    std::end(h_is_input_buffer_populated[current_buffer]),
-                    [](bool i) { return i; })) {
-      h_is_buffer_ready[current_buffer] = false;
-      // Call onward processing.
-      h_is_buffer_ready[current_buffer] = true;
-      int old_buffer = current_buffer;
-      int end_current_buffer_seq = h_input_buffer_end_seq[old_buffer];
-      current_buffer = (current_buffer + 1) % NR_BUFFERS;
-      std::cout << "current_buffer is " << current_buffer
-                << " and is it ready? " << h_is_buffer_ready[current_buffer]
-                << std::endl;
-      while (!h_is_buffer_ready[current_buffer]) {
-        std::cout << "Waiting for buffer to be ready..." << std::endl;
-      }
-      std::memset(std::begin(h_is_input_buffer_populated[current_buffer]),
-                  (int)false, NR_CHANNELS);
-      h_input_buffer_start_seq[current_buffer] = end_current_buffer_seq + 1;
-      h_input_buffer_end_seq[current_buffer] =
-          h_input_buffer_start_seq[current_buffer] +
-          NR_PACKETS_FOR_CORRELATION - 1;
-
-      // This bit probably happens somewhere else but is included here for now -
-      // initializes other input buffer to have new packet bracket.
-      int max_end_seq_in_buffers = 0;
-      for (auto i = 0; i < NR_BUFFERS; ++i) {
-        max_end_seq_in_buffers =
-            std::max(max_end_seq_in_buffers, h_input_buffer_end_seq[i]);
-      }
-      h_input_buffer_start_seq[old_buffer] = max_end_seq_in_buffers + 1;
-      h_input_buffer_end_seq[old_buffer] =
-          h_input_buffer_start_seq[old_buffer] + NR_PACKETS_FOR_CORRELATION - 1;
-
-      std::cout
-          << "Current buffer is all complete. Moving to next buffer which is #"
-          << current_buffer << std::endl;
-      std::cout << "New buffer starts at packet "
-                << h_input_buffer_start_seq[current_buffer] << " and ends at "
-                << h_input_buffer_end_seq[current_buffer] << "\n";
+    if (std::all_of(
+            std::begin(state.buffers[state.current_buffer].is_populated),
+            std::end(state.buffers[state.current_buffer].is_populated),
+            [](bool i) { return i; })) {
+      advance_to_next_buffer(state);
     }
   }
   return 0;
