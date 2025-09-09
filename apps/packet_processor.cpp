@@ -60,6 +60,57 @@ struct ProcessorState {
   int latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
   int next_frame_for_channel[NR_CHANNELS] = {0};
   int current_buffer = 0;
+
+  ProcessorState() {
+    std::fill_n(d_packet_data, NR_CHANNELS, nullptr);
+    std::fill_n(d_samples, NR_BUFFERS, nullptr);
+    try {
+      // This will eventually be replaced by cuda calls.
+      for (auto i = 0; i < NR_CHANNELS; ++i) {
+        d_packet_data[i] = (Packets *)calloc(1, sizeof(Packets));
+        if (!d_packet_data[i]) {
+          throw std::bad_alloc();
+        }
+      }
+
+      for (auto i = 0; i < NR_BUFFERS; ++i) {
+        d_samples[i] = (PacketSamples *)calloc(1, sizeof(PacketSamples));
+        if (!d_samples[i]) {
+          throw std::bad_alloc();
+        }
+      }
+    } catch (...) {
+      cleanup();
+      throw;
+    }
+  }
+
+  ~ProcessorState() { cleanup(); }
+
+  // removing copy / move possibilities.
+  ProcessorState(const ProcessorState &) = delete;
+  ProcessorState &operator=(const ProcessorState &) = delete;
+  ProcessorState(const ProcessorState &&) = delete;
+  ProcessorState &operator=(ProcessorState &&) = delete;
+
+private:
+  void cleanup() {
+
+    // This will eventually be replaced by cuda calls.
+    for (auto i = 0; i < NR_CHANNELS; ++i) {
+      if (d_packet_data[i]) {
+        free(d_packet_data[i]);
+        d_packet_data[i] = nullptr;
+      }
+    }
+
+    for (auto i = 0; i < NR_BUFFERS; ++i) {
+      if (d_samples[i]) {
+        free(d_samples[i]);
+        d_samples[i] = nullptr;
+      }
+    }
+  }
 };
 
 struct GeneratorState {
@@ -119,17 +170,6 @@ void print_startup_info() {
             << std::endl;
 }
 
-void initialize_memory(ProcessorState &state) {
-
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
-    state.d_packet_data[i] = (Packets *)calloc(1, sizeof(Packets));
-  }
-
-  for (auto i = 0; i < NR_BUFFERS; ++i) {
-    state.d_samples[i] = (PacketSamples *)calloc(1, sizeof(PacketSamples));
-  }
-}
-
 void initialize_buffers(ProcessorState &state) {
 
   for (auto i = 0; i < NR_BUFFERS; ++i) {
@@ -181,6 +221,8 @@ void advance_to_next_buffer(ProcessorState &state) {
             << " and is it ready? "
             << state.buffers[state.current_buffer].is_ready << std::endl;
 
+  // this is kinda assuming there's an async callback that will
+  // ready the buffer after the data has been transferred out.
   while (!state.buffers[state.current_buffer].is_ready) {
     std::cout << "Waiting for buffer to be ready..." << std::endl;
   }
@@ -298,9 +340,6 @@ int main() {
 
   ProcessorState state;
   GeneratorState gen_state;
-  initialize_memory(state);
-
-  // Receive n packets
 
   initialize_buffers(state);
 
@@ -317,10 +356,9 @@ int main() {
       copy_data_to_input_buffer_if_able(state, i);
       check_buffer_completion(state);
     }
-    if (std::all_of(
-            std::begin(state.buffers[state.current_buffer].is_populated),
-            std::end(state.buffers[state.current_buffer].is_populated),
-            [](bool i) { return i; })) {
+    if (std::all_of(state.buffers[state.current_buffer].is_populated.begin(),
+                    state.buffers[state.current_buffer].is_populated.end(),
+                    [](bool i) { return i; })) {
       advance_to_next_buffer(state);
     }
   }
