@@ -343,10 +343,15 @@ int main() {
 
   initialize_buffers(state);
 
+  // NUM_ITERATIONS should probably be a runtime argument rather than a define /
+  // hardcode.
   for (auto iter = 0; iter < NUM_ITERATIONS; ++iter) {
     std::cout << "Starting iteration " << iter << std::endl;
     // Generate some packets and put it in the buffer.
     std::cout << "Randomly generate data..." << std::endl;
+    // In future this will be generating post_recv requests
+    // for empty portions of memory.
+    // NUM_FRAMES_PER_ITERATION should also be a runtime argument.
     for (auto i = 0; i < NUM_FRAMES_PER_ITERATION; ++i) {
       generate_packet(state, gen_state);
     }
@@ -359,6 +364,8 @@ int main() {
     if (std::all_of(state.buffers[state.current_buffer].is_populated.begin(),
                     state.buffers[state.current_buffer].is_populated.end(),
                     [](bool i) { return i; })) {
+      // Send off data to be processed by CUDA pipeline.
+      // Then advance to next buffer and keep iterating.
       advance_to_next_buffer(state);
     }
   }
