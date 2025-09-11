@@ -50,3 +50,10 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cpp
 )
 target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor)
+
+
+add_executable(
+  udp_sender
+  ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp
+)
+target_link_libraries(udp_sender PRIVATE pcap)

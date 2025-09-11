@@ -27,19 +27,7 @@ constexpr int NUM_FRAMES_PER_ITERATION = 100;
 constexpr int NR_TOTAL_FRAMES_PER_CHANNEL = 5 * NUM_FRAMES_PER_ITERATION;
 constexpr int NR_FPGA_SOURCES = 4;
 constexpr int NR_RECEIVERS_PER_PACKET = NR_RECEIVERS / NR_FPGA_SOURCES;
-
-int randomChannel() {
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  std::uniform_int_distribution<int> dist(0, NR_CHANNELS - 1);
-  return dist(gen);
-}
-int randomSource() {
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  std::uniform_int_distribution<int> dist(0, NR_FPGA_SOURCES - 1);
-  return dist(gen);
-}
+constexpr int NR_INPUT_BUFFERS = 5;
 
 // typedef Sample Packet[NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS]
 //                      [NR_TIME_STEPS_PER_PACKET];
@@ -98,16 +86,17 @@ struct ProcessedPacket {
 };
 
 struct ProcessorState {
-  PacketSamples *d_samples[NR_BUFFERS];
+  PacketSamples *d_samples[NR_INPUT_BUFFERS];
   PacketEntry *d_packet_data[RING_BUFFER_SIZE];
-  std::array<BufferState, NR_BUFFERS> buffers;
+  std::array<BufferState, NR_INPUT_BUFFERS> buffers;
   uint64_t latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
   // what is this one used for again?
   int current_buffer = 0;
   int write_index = 0;
+  std::vector<uint32_t> fpga_ids{};
 
   ProcessorState() {
-    std::fill_n(d_samples, NR_BUFFERS, nullptr);
+    std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     try {
       // This will eventually be replaced by cuda calls.
@@ -118,7 +107,7 @@ struct ProcessorState {
         }
       }
 
-      for (auto i = 0; i < NR_BUFFERS; ++i) {
+      for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
         d_samples[i] = (PacketSamples *)calloc(1, sizeof(PacketSamples));
         if (!d_samples[i]) {
           throw std::bad_alloc();
@@ -146,7 +135,7 @@ private:
       free(d_packet_data[i]);
     }
 
-    for (auto i = 0; i < NR_BUFFERS; ++i) {
+    for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       if (d_samples[i]) {
         free(d_samples[i]);
         d_samples[i] = nullptr;
@@ -172,7 +161,7 @@ void get_next_write_index(ProcessorState &state) {
 
 void store_packet(uint8_t *data, int length, struct sockaddr_in *sender,
                   ProcessorState &state) {
-  std::lock_guard<std::mutex> lock(buffer_mutex);
+  //  std::lock_guard<std::mutex> lock(buffer_mutex);
 
   PacketEntry *entry = state.d_packet_data[state.write_index];
   memcpy(entry->data, data, length);
@@ -219,13 +208,22 @@ ProcessedPacket parse_custom_packet(PacketEntry *entry) {
 void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
                                        ProcessorState &state) {
 
-  state.latest_packet_received[pkt.freq_channel][pkt.fpga_id] =
-      std::max(state.latest_packet_received[pkt.freq_channel][pkt.fpga_id],
+  auto it =
+      std::find(state.fpga_ids.begin(), state.fpga_ids.end(), pkt.fpga_id);
+  size_t fpga_index;
+  if (it != state.fpga_ids.end()) {
+    fpga_index = std::distance(state.fpga_ids.begin(), it);
+  } else {
+    state.fpga_ids.push_back(pkt.fpga_id);
+    fpga_index = state.fpga_ids.size() - 1;
+  }
+  state.latest_packet_received[pkt.freq_channel][fpga_index] =
+      std::max(state.latest_packet_received[pkt.freq_channel][fpga_index],
                pkt.sample_count);
 
   // copy to correct place or leave it.
-  for (int buffer = 0; buffer < NR_BUFFERS; ++buffer) {
-    int buffer_index = (state.current_buffer + buffer) % NR_BUFFERS;
+  for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
+    int buffer_index = (state.current_buffer + buffer) % NR_INPUT_BUFFERS;
     int packet_index = pkt.sample_count - state.buffers[buffer_index].start_seq;
 
     if (buffer == 0 && packet_index < 0) {
@@ -242,10 +240,10 @@ void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
     }
 
     if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
-      int receiver_index = pkt.fpga_id * NR_RECEIVERS_PER_PACKET;
+      int receiver_index = fpga_index * NR_RECEIVERS_PER_PACKET;
       std::cout << "Copying data to packet_index " << packet_index
                 << " and receiver index " << receiver_index << " of buffer "
-                << (state.current_buffer + buffer_index) % NR_BUFFERS
+                << (state.current_buffer + buffer_index) % NR_INPUT_BUFFERS
                 << std::endl;
       std::memcpy(
           &(*state.d_samples[buffer_index])[pkt.freq_channel][packet_index]
@@ -284,7 +282,7 @@ void advance_to_next_buffer(ProcessorState &state) {
   int end_current_buffer_seq = state.buffers[old_buffer].end_seq;
 
   // Move to next buffer
-  state.current_buffer = (state.current_buffer + 1) % NR_BUFFERS;
+  state.current_buffer = (state.current_buffer + 1) % NR_INPUT_BUFFERS;
 
   std::cout << "current_buffer is " << state.current_buffer
             << " and is it ready? "
@@ -306,7 +304,7 @@ void advance_to_next_buffer(ProcessorState &state) {
 
   // Update old buffer for future use
   int max_end_seq_in_buffers = 0;
-  for (auto i = 0; i < NR_BUFFERS; ++i) {
+  for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
     max_end_seq_in_buffers =
         std::max(max_end_seq_in_buffers, state.buffers[i].end_seq);
   }
@@ -413,11 +411,12 @@ void print_startup_info() {
             << std::endl;
   std::cout << "NR_PACKETS_FOR_CORRELATION: " << NR_PACKETS_FOR_CORRELATION
             << std::endl;
+  std::cout << "NR_INPUT_BUFFERS: " << NR_INPUT_BUFFERS << std::endl;
 }
 
 void initialize_buffers(ProcessorState &state) {
 
-  for (auto i = 0; i < NR_BUFFERS; ++i) {
+  for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
     state.buffers[i].start_seq = i * NR_PACKETS_FOR_CORRELATION;
     state.buffers[i].end_seq = (i + 1) * NR_PACKETS_FOR_CORRELATION - 1;
     state.buffers[i].is_ready = true;
