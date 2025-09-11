@@ -99,7 +99,7 @@ struct ProcessedPacket {
 
 struct ProcessorState {
   PacketSamples *d_samples[NR_BUFFERS];
-  PacketEntry *d_packet_data;
+  PacketEntry *d_packet_data[RING_BUFFER_SIZE];
   std::array<BufferState, NR_BUFFERS> buffers;
   uint64_t latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
   // what is this one used for again?
@@ -111,9 +111,11 @@ struct ProcessorState {
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     try {
       // This will eventually be replaced by cuda calls.
-      d_packet_data = (PacketEntry *)calloc(1, sizeof(Packets));
-      if (!d_packet_data) {
-        throw std::bad_alloc();
+      for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
+        d_packet_data[i] = (PacketEntry *)calloc(1, sizeof(PacketEntry));
+        if (!d_packet_data[i]) {
+          throw std::bad_alloc();
+        }
       }
 
       for (auto i = 0; i < NR_BUFFERS; ++i) {
@@ -140,7 +142,9 @@ private:
   void cleanup() {
 
     // This will eventually be replaced by cuda calls.
-    free(d_packet_data);
+    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
+      free(d_packet_data[i]);
+    }
 
     for (auto i = 0; i < NR_BUFFERS; ++i) {
       if (d_samples[i]) {
@@ -247,7 +251,7 @@ void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
           &(*state.d_samples[buffer_index])[pkt.freq_channel][packet_index]
                                            [receiver_index],
           // this is almost certainly not right.
-          &(*state.d_packet_data), sizeof(Packet));
+          pkt.payload->data, sizeof(PacketDataStructure));
       *pkt.original_packet_processed = true;
       break;
     }
@@ -375,7 +379,7 @@ void processor_thread(ProcessorState &state) {
     for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
       PacketEntry *entry = state.d_packet_data[i];
 
-      if (entry == nullptr || entry->processed == true) {
+      if (entry->length == 0 || entry->processed == true) {
         continue;
       }
 
