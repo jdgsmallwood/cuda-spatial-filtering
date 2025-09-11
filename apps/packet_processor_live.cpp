@@ -99,7 +99,7 @@ struct ProcessedPacket {
 
 struct ProcessorState {
   PacketSamples *d_samples[NR_BUFFERS];
-  PacketEntry *d_packet_data[1000];
+  PacketEntry *d_packet_data;
   std::array<BufferState, NR_BUFFERS> buffers;
   uint64_t latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
   // what is this one used for again?
@@ -108,7 +108,7 @@ struct ProcessorState {
 
   ProcessorState() {
     std::fill_n(d_samples, NR_BUFFERS, nullptr);
-    std::fill_n(d_packet_data[0], RING_BUFFER_SIZE, nullptr);
+    std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     try {
       // This will eventually be replaced by cuda calls.
       d_packet_data = (PacketEntry *)calloc(1, sizeof(Packets));
