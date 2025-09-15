@@ -8,7 +8,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
-#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -144,7 +143,6 @@ private:
   }
 };
 // Global ring buffer
-static std::mutex buffer_mutex;
 static int running = 1;
 
 // Statistics
@@ -153,22 +151,22 @@ static std::atomic<unsigned long long> packets_processed = 0;
 
 void get_next_write_index(ProcessorState &state) {
   state.write_index = (state.write_index + 1) % RING_BUFFER_SIZE;
-  while (state.d_packet_data[state.write_index] == nullptr ||
+  while (state.d_packet_data[state.write_index] != nullptr &&
          !state.d_packet_data[state.write_index]->processed) {
     state.write_index = (state.write_index + 1) % RING_BUFFER_SIZE;
   };
+  std::cout << "Next write index is... " << state.write_index << std::endl;
 }
 
 void store_packet(uint8_t *data, int length, struct sockaddr_in *sender,
                   ProcessorState &state) {
-  //  std::lock_guard<std::mutex> lock(buffer_mutex);
 
   PacketEntry *entry = state.d_packet_data[state.write_index];
   memcpy(entry->data, data, length);
   entry->length = length;
   entry->sender_addr = *sender;
   gettimeofday(&entry->timestamp, NULL);
-  entry->processed = 0;
+  entry->processed = false;
 
   get_next_write_index(state);
   packets_received.fetch_add(1, std::memory_order_relaxed);
@@ -250,7 +248,12 @@ void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
                                            [receiver_index],
           // this is almost certainly not right.
           pkt.payload->data, sizeof(PacketDataStructure));
-      *pkt.original_packet_processed = true;
+      std::cout << "Setting original_packet_processed as true...\n";
+      std::cout << "DEBUG: original_packet_processed_before="
+                << *pkt.original_packet_processed << std::endl;
+      *(pkt.original_packet_processed) = true;
+      std::cout << "DEBUG: original_packet_processed_after="
+                << *pkt.original_packet_processed << std::endl;
       break;
     }
   }
