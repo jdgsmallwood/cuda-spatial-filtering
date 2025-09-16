@@ -24,9 +24,11 @@
 constexpr int NUM_ITERATIONS = 10;
 constexpr int NUM_FRAMES_PER_ITERATION = 100;
 constexpr int NR_TOTAL_FRAMES_PER_CHANNEL = 5 * NUM_FRAMES_PER_ITERATION;
-constexpr int NR_FPGA_SOURCES = 4;
+constexpr int NR_FPGA_SOURCES = 1;
 constexpr int NR_RECEIVERS_PER_PACKET = NR_RECEIVERS / NR_FPGA_SOURCES;
 constexpr int NR_INPUT_BUFFERS = 5;
+constexpr int NR_BETWEEN_SAMPLES = 64;
+constexpr int MIN_FREQ_CHANNEL = 252; // this is assuming I know this...
 
 // typedef Sample Packet[NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS]
 //                      [NR_TIME_STEPS_PER_PACKET];
@@ -93,6 +95,7 @@ struct ProcessorState {
   int current_buffer = 0;
   int write_index = 0;
   std::vector<uint32_t> fpga_ids{};
+  bool buffers_initialized = false;
 
   ProcessorState() {
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
@@ -215,14 +218,18 @@ void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
     state.fpga_ids.push_back(pkt.fpga_id);
     fpga_index = state.fpga_ids.size() - 1;
   }
-  state.latest_packet_received[pkt.freq_channel][fpga_index] =
-      std::max(state.latest_packet_received[pkt.freq_channel][fpga_index],
-               pkt.sample_count);
+
+  int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
+
+  state.latest_packet_received[freq_channel][fpga_index] = std::max(
+      state.latest_packet_received[freq_channel][fpga_index], pkt.sample_count);
 
   // copy to correct place or leave it.
   for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
     int buffer_index = (state.current_buffer + buffer) % NR_INPUT_BUFFERS;
-    int packet_index = pkt.sample_count - state.buffers[buffer_index].start_seq;
+    int packet_index =
+        (pkt.sample_count - state.buffers[buffer_index].start_seq) /
+        NR_BETWEEN_SAMPLES;
 
     if (buffer == 0 && packet_index < 0) {
       // This means that this packet is less than the lowest possible
@@ -240,14 +247,14 @@ void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
     if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
       int receiver_index = fpga_index * NR_RECEIVERS_PER_PACKET;
       std::cout << "Copying data to packet_index " << packet_index
+                << " and channel index " << freq_channel
                 << " and receiver index " << receiver_index << " of buffer "
                 << (state.current_buffer + buffer_index) % NR_INPUT_BUFFERS
                 << std::endl;
-      std::memcpy(
-          &(*state.d_samples[buffer_index])[pkt.freq_channel][packet_index]
-                                           [receiver_index],
-          // this is almost certainly not right.
-          pkt.payload->data, sizeof(PacketDataStructure));
+      std::memcpy(&(*state.d_samples[buffer_index])[freq_channel][packet_index]
+                                                   [receiver_index],
+                  // this is almost certainly not right.
+                  pkt.payload->data, sizeof(PacketDataStructure));
       std::cout << "Setting original_packet_processed as true...\n";
       std::cout << "DEBUG: original_packet_processed_before="
                 << *pkt.original_packet_processed << std::endl;
@@ -258,6 +265,19 @@ void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt,
     }
   }
 }
+
+void initialize_buffers(ProcessorState &state, int first_count) {
+
+  for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+    state.buffers[i].start_seq =
+        first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
+    state.buffers[i].end_seq =
+        first_count +
+        ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+    state.buffers[i].is_ready = true;
+  }
+}
+
 void process_packet_data(PacketEntry *pkt, ProcessorState &state) {
   // This is where you'd do your actual processing
   // For now, just print the info and simulate some work
@@ -270,6 +290,11 @@ void process_packet_data(PacketEntry *pkt, ProcessorState &state) {
 
   printf("First data point...%i + %i i\n", parsed.payload->data[0][0].real(),
          parsed.payload->data[0][0].imag());
+
+  if (!state.buffers_initialized) {
+    initialize_buffers(state, parsed.sample_count);
+    state.buffers_initialized = true;
+  }
   // Simulate processing time
   copy_data_to_input_buffer_if_able(parsed, state);
   if (*parsed.original_packet_processed) {
@@ -300,10 +325,11 @@ void advance_to_next_buffer(ProcessorState &state) {
   // Reset new current buffer
   std::memset(std::begin(state.buffers[state.current_buffer].is_populated),
               (int)false, NR_CHANNELS);
-  state.buffers[state.current_buffer].start_seq = end_current_buffer_seq + 1;
+  state.buffers[state.current_buffer].start_seq =
+      end_current_buffer_seq + NR_BETWEEN_SAMPLES;
   state.buffers[state.current_buffer].end_seq =
       state.buffers[state.current_buffer].start_seq +
-      NR_PACKETS_FOR_CORRELATION - 1;
+      (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
 
   // Update old buffer for future use
   int max_end_seq_in_buffers = 0;
@@ -311,9 +337,11 @@ void advance_to_next_buffer(ProcessorState &state) {
     max_end_seq_in_buffers =
         std::max(max_end_seq_in_buffers, state.buffers[i].end_seq);
   }
-  state.buffers[old_buffer].start_seq = max_end_seq_in_buffers + 1;
+  state.buffers[old_buffer].start_seq =
+      max_end_seq_in_buffers + 1 * NR_BETWEEN_SAMPLES;
   state.buffers[old_buffer].end_seq =
-      state.buffers[old_buffer].start_seq + NR_PACKETS_FOR_CORRELATION - 1;
+      state.buffers[old_buffer].start_seq +
+      (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
 
   std::cout
       << "Current buffer is all complete. Moving to next buffer which is #"
@@ -417,21 +445,11 @@ void print_startup_info() {
   std::cout << "NR_INPUT_BUFFERS: " << NR_INPUT_BUFFERS << std::endl;
 }
 
-void initialize_buffers(ProcessorState &state) {
-
-  for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-    state.buffers[i].start_seq = i * NR_PACKETS_FOR_CORRELATION;
-    state.buffers[i].end_seq = (i + 1) * NR_PACKETS_FOR_CORRELATION - 1;
-    state.buffers[i].is_ready = true;
-  }
-}
-
 int main() {
   print_startup_info();
 
   ProcessorState state;
 
-  initialize_buffers(state);
   int sockfd;
   struct sockaddr_in server_addr;
 
