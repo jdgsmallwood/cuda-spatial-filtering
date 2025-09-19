@@ -166,7 +166,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Small delay between packets
-    usleep(100000); // 100ms
+    usleep(50); // 100us
   }
 
   if (res == -1) {

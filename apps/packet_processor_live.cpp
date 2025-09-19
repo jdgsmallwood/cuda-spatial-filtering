@@ -7,6 +7,7 @@
 #include <cuComplex.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <highfive/highfive.hpp>
 #include <iostream>
 #include <random>
 #include <stdexcept>
@@ -18,7 +19,7 @@
 
 #define PORT 12345
 #define BUFFER_SIZE 4096
-#define RING_BUFFER_SIZE 1000
+#define RING_BUFFER_SIZE 10000
 #define MIN_PCAP_HEADER_SIZE 64
 
 constexpr int NUM_ITERATIONS = 10;
@@ -26,7 +27,7 @@ constexpr int NUM_FRAMES_PER_ITERATION = 100;
 constexpr int NR_TOTAL_FRAMES_PER_CHANNEL = 5 * NUM_FRAMES_PER_ITERATION;
 constexpr int NR_FPGA_SOURCES = 1;
 constexpr int NR_RECEIVERS_PER_PACKET = NR_RECEIVERS / NR_FPGA_SOURCES;
-constexpr int NR_INPUT_BUFFERS = 5;
+constexpr int NR_INPUT_BUFFERS = 50;
 constexpr int NR_BETWEEN_SAMPLES = 64;
 constexpr int MIN_FREQ_CHANNEL = 252; // this is assuming I know this...
 
@@ -158,7 +159,7 @@ void get_next_write_index(ProcessorState &state) {
          !state.d_packet_data[state.write_index]->processed) {
     state.write_index = (state.write_index + 1) % RING_BUFFER_SIZE;
   };
-  std::cout << "Next write index is... " << state.write_index << std::endl;
+  printf("Next write index is...%i ", state.write_index);
 }
 
 void store_packet(uint8_t *data, int length, struct sockaddr_in *sender,
@@ -292,6 +293,7 @@ void process_packet_data(PacketEntry *pkt, ProcessorState &state) {
          parsed.payload->data[0][0].imag());
 
   if (!state.buffers_initialized) {
+    printf("Initializing buffers as this is the first packet...\n");
     initialize_buffers(state, parsed.sample_count);
     state.buffers_initialized = true;
   }
@@ -377,6 +379,10 @@ void receiver_thread(int sockfd, ProcessorState &state) {
 }
 
 void check_buffer_completion(ProcessorState &state) {
+  if (!state.buffers_initialized) {
+    return;
+  }
+
   for (auto channel = 0; channel < NR_CHANNELS; ++channel) {
     std::cout << "Check if buffers are complete for channel " << channel
               << std::endl;
@@ -400,11 +406,37 @@ void check_buffer_completion(ProcessorState &state) {
     }
   }
 }
+
+void write_buffer_to_hdf5(ProcessorState &state, int buffer_index,
+                          const std::string &filename) {
+  using namespace HighFive;
+
+  // Create / overwrite file
+  File file(filename, File::Overwrite);
+
+  // Pointer to your samples
+  PacketSamples *samples = state.d_samples[buffer_index];
+
+  // Dataset shape
+  std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
+                              NR_RECEIVERS, NR_POLARIZATIONS,
+                              NR_TIME_STEPS_PER_PACKET};
+
+  // Create dataset of complex<int8_t> (or whatever Sample is)
+  DataSet dataset =
+      file.createDataSet<Sample>("packet_samples", DataSpace(dims));
+
+  // Write buffer
+  dataset.write(*samples);
+}
+
 // Processor thread - continuously processes packets
 void processor_thread(ProcessorState &state) {
   printf("Processor thread started\n");
-
+  static bool first_written = false;
+  bool any_packet_processed = false;
   while (running) {
+    any_packet_processed = false;
     for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
       PacketEntry *entry = state.d_packet_data[i];
 
@@ -413,13 +445,19 @@ void processor_thread(ProcessorState &state) {
       }
 
       process_packet_data(entry, state);
-
+      any_packet_processed = true;
+    }
+    if (any_packet_processed) {
       check_buffer_completion(state);
       if (std::all_of(state.buffers[state.current_buffer].is_populated.begin(),
                       state.buffers[state.current_buffer].is_populated.end(),
                       [](bool i) { return i; })) {
         // Send off data to be processed by CUDA pipeline.
         // Then advance to next buffer and keep iterating.
+        if (!first_written) {
+          write_buffer_to_hdf5(state, state.current_buffer,
+                               "first_buffer.hdf5");
+        }
         advance_to_next_buffer(state);
       }
     }

@@ -49,7 +49,7 @@ add_executable(
   packet_processor_live
   ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cpp
 )
-target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor)
+target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive )
 
 
 add_executable(
