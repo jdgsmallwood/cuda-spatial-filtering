@@ -35,14 +35,9 @@ constexpr int MIN_FREQ_CHANNEL = 252; // this is assuming I know this...
 //                      [NR_TIME_STEPS_PER_PACKET];
 typedef Sample Packet[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET];
 typedef Sample PacketSamples[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
-                            [NR_RECEIVERS][NR_POLARIZATIONS]
-                            [NR_TIME_STEPS_PER_PACKET];
+                            [NR_TIME_STEPS_PER_PACKET][NR_ACTUAL_RECEIVERS];
 typedef bool SampleOccupancy[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION]
                             [NR_RECEIVERS];
-struct PacketData {
-  Packet data;
-};
-
 struct BufferState {
   bool is_ready;
   int start_seq;
@@ -419,8 +414,7 @@ void write_buffer_to_hdf5(ProcessorState &state, int buffer_index,
 
   // Dataset shape
   std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
-                              NR_RECEIVERS, NR_POLARIZATIONS,
-                              NR_TIME_STEPS_PER_PACKET};
+                              NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS};
 
   // Create dataset of complex<int8_t> (or whatever Sample is)
   DataSet dataset =
@@ -457,6 +451,7 @@ void processor_thread(ProcessorState &state) {
         if (!first_written) {
           write_buffer_to_hdf5(state, state.current_buffer,
                                "first_buffer.hdf5");
+          first_written = true;
         }
         advance_to_next_buffer(state);
       }
@@ -481,6 +476,10 @@ void print_startup_info() {
   std::cout << "NR_PACKETS_FOR_CORRELATION: " << NR_PACKETS_FOR_CORRELATION
             << std::endl;
   std::cout << "NR_INPUT_BUFFERS: " << NR_INPUT_BUFFERS << std::endl;
+  std::cout << "PacketDataStructure size is " << sizeof(PacketDataStructure)
+            << std::endl;
+  std::cout << "PacketScaleStructure size is " << sizeof(PacketScaleStructure)
+            << std::endl;
 }
 
 int main() {
