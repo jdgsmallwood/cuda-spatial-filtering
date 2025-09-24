@@ -54,7 +54,7 @@ __global__ void accumulate_visibilities_kernel(const float *d_visibilities, floa
 }
 void convert_int8_to_half(const int8_t *d_input, __half *d_output, const int n, cudaStream_t stream) {
     
-    const int num_blocks = std::min(4, n / 1024 + 1);
+    const int num_blocks = std::min(8, n / 1024 + 1);
 
     convert_int8_to_half_kernel<<<num_blocks, 1024, 0, stream>>>(d_input, d_output, n);
 
@@ -63,7 +63,7 @@ void convert_int8_to_half(const int8_t *d_input, __half *d_output, const int n, 
 
 void convert_int_to_float(const int *d_input, float *d_output, const int n, cudaStream_t stream) {
     
-    const int num_blocks = std::min(4, n / 1024 + 1);
+    const int num_blocks = std::min(8, n / 1024 + 1);
 
     convert_int_to_float_kernel<<<num_blocks, 1024, 0, stream>>>(d_input, d_output, n);
 
@@ -74,14 +74,14 @@ void convert_int_to_float(const int *d_input, float *d_output, const int n, cuda
 void update_weights(const __half *d_weights, __half *d_weights_output, const int num_beams, const int num_receivers,const int num_channels, const int num_polarizations, const float *d_eigenvalues, float *d_eigenvectors, cudaStream_t &stream) {
 
     const int n = num_beams * num_receivers * num_channels * num_polarizations;
-    const int num_blocks = std::min(4, n / 1024 + 1);
+    const int num_blocks = std::min(8, n / 1024 + 1);
 
     update_weights_kernel<<<num_blocks, 1024, 0, stream>>>(d_weights, d_weights_output, num_beams, num_receivers, num_channels, num_polarizations);
 }
 
 void accumulate_visibilities(const float *d_visibilities, float *d_visibilities_accumulated, const int n, cudaStream_t stream) {
 
-    const int num_blocks = std::min(4, n / 1024 + 1);
+    const int num_blocks = std::min(8, n / 1024 + 1);
 
     accumulate_visibilities_kernel<<<num_blocks, 1024, 0, stream>>>(d_visibilities, d_visibilities_accumulated, n);
     

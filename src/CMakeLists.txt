@@ -5,11 +5,12 @@ ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cu
 ${CMAKE_CURRENT_SOURCE_DIR}/ethernet.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/tensor.cpp
+${CMAKE_CURRENT_SOURCE_DIR}/packet_formats.cpp
 )
 
 
 target_link_libraries(
-    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor
+    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor HighFive::HighFive
 )
 
 
@@ -32,11 +33,12 @@ ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cu
 ${CMAKE_CURRENT_SOURCE_DIR}/ethernet.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/tensor.cpp
+${CMAKE_CURRENT_SOURCE_DIR}/packet_formats.cpp
 )
 
 
 target_link_libraries(
-    spatial_8bit PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor
+    spatial_8bit PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor HighFive::HighFive
 )
   target_compile_definitions(spatial_8bit PRIVATE NR_RECEIVERS=32 NR_BITS=8 NR_RECEIVERS_PER_BLOCK=32 NR_CORRELATION_BLOCKS_TO_INTEGRATE=1 DEBUG=1)
 
@@ -58,11 +60,12 @@ ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cu
 ${CMAKE_CURRENT_SOURCE_DIR}/ethernet.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/tensor.cpp
+${CMAKE_CURRENT_SOURCE_DIR}/packet_formats.cpp
 )
 
 
 target_link_libraries(
-    spatial_16bit PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor
+    spatial_16bit PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor HighFive::HighFive
 )
   target_compile_definitions(spatial_16bit PRIVATE NR_RECEIVERS=32 NR_BITS=16 NR_RECEIVERS_PER_BLOCK=32 NR_CORRELATION_BLOCKS_TO_INTEGRATE=1 DEBUG=1)
 

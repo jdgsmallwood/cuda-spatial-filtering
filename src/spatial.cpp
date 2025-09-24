@@ -1,5 +1,7 @@
 #include "spatial/spatial.hpp"
 #include "ccglib/common/precision.h"
+#include "spatial/ethernet.hpp"
+#include "spatial/packet_formats.hpp"
 #include "spatial/spatial.cuh"
 #include "spatial/tensor.hpp"
 #include <atomic>
@@ -15,9 +17,12 @@
 #include <cusolverDn.h>
 #include <iostream>
 #include <libtcc/Correlator.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
+#include <highfive/highfive.hpp>
 template <typename T>
 void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T> *A) {
   T *d_A;
@@ -847,3 +852,116 @@ template void
 rearrange_ccglib_matrix_to_compact_format(const float *input_matrix,
                                           std::complex<float> *output_matrix,
                                           const int n_row, const int n_col);
+
+ProcessorState::ProcessorState() {
+  std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
+  std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
+  try {
+    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
+      d_packet_data[i] = (PacketEntry *)calloc(1, sizeof(PacketEntry));
+      if (!d_packet_data[i])
+        throw std::bad_alloc();
+      d_packet_data[i]->processed = true;
+    }
+
+    for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+      d_samples[i] = (PacketSamples *)calloc(1, sizeof(PacketSamples));
+      if (!d_samples[i])
+        throw std::bad_alloc();
+    }
+  } catch (...) {
+    cleanup();
+    throw;
+  }
+}
+
+ProcessorState::~ProcessorState() { cleanup(); }
+
+void ProcessorState::get_next_write_index() {
+  write_index = (write_index + 1) % RING_BUFFER_SIZE;
+  while (d_packet_data[write_index] != nullptr &&
+         !d_packet_data[write_index]->processed) {
+    write_index = (write_index + 1) % RING_BUFFER_SIZE;
+  }
+  printf("Next write index is...%i ", write_index);
+}
+
+void ProcessorState::cleanup() {
+  for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
+    free(d_packet_data[i]);
+    d_packet_data[i] = nullptr;
+  }
+
+  for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+    free(d_samples[i]);
+    d_samples[i] = nullptr;
+  }
+}
+
+void KernelSocketPacketCapture::get_packets(ProcessorState &state) {
+
+  struct sockaddr_in client_addr;
+  socklen_t client_len = sizeof(client_addr);
+
+  printf("Receiver thread started\n");
+
+  while (state.running) {
+    int received =
+        recvfrom(sockfd, &(state.d_packet_data[state.write_index]->data),
+                 buffer_size, 0, (struct sockaddr *)&client_addr, &client_len);
+    if (received < 0) {
+      if (errno == EINTR)
+        continue;
+      perror("recvfrom");
+      break;
+    }
+
+    state.d_packet_data[state.write_index]->length = received;
+    state.d_packet_data[state.write_index]->sender_addr = client_addr;
+    state.d_packet_data[state.write_index]->processed = false;
+    gettimeofday(&state.d_packet_data[state.write_index]->timestamp, NULL);
+    state.get_next_write_index();
+    state.packets_received += 1;
+    // Store in ring buffer
+    // store_packet(buffer, received, &client_addr, state);
+  }
+
+  printf("Receiver thread exiting\n");
+}
+
+KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size)
+    : port(port), buffer_size(buffer_size) {
+
+  printf("UDP Server with concurrent processing starting on port %d...\n",
+         port);
+  // Create UDP socket
+  sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sockfd < 0) {
+    perror("socket");
+  }
+  // Allow address reuse
+  int reuse = 1;
+  if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+    perror("setsockopt");
+  }
+
+  // Setup server address
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = htons(port);
+
+  // Bind socket
+  if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    perror("bind");
+    close(sockfd);
+  }
+
+  printf("Size of PacketPayload is %lu bytes...\n", sizeof(PacketPayload));
+  printf("Server listening on 0.0.0.0:%d\n", port);
+  printf("Press Ctrl+C to stop\n\n");
+}
+
+KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
+
+// int ProcessorState::running = 1;
