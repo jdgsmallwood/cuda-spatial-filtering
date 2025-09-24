@@ -100,6 +100,7 @@ struct ProcessorState {
       // This will eventually be replaced by cuda calls.
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
         d_packet_data[i] = (PacketEntry *)calloc(1, sizeof(PacketEntry));
+        d_packet_data[i]->processed = true;
         if (!d_packet_data[i]) {
           throw std::bad_alloc();
         }
@@ -145,7 +146,8 @@ private:
 static int running = 1;
 
 // Statistics
-static std::atomic<unsigned long long> packets_received = 0;
+static unsigned long long packets_received = 0;
+
 static std::atomic<unsigned long long> packets_processed = 0;
 
 void get_next_write_index(ProcessorState &state) {
@@ -157,25 +159,12 @@ void get_next_write_index(ProcessorState &state) {
   printf("Next write index is...%i ", state.write_index);
 }
 
-void store_packet(uint8_t *data, int length, struct sockaddr_in *sender,
-                  ProcessorState &state) {
-
-  PacketEntry *entry = state.d_packet_data[state.write_index];
-  memcpy(entry->data, data, length);
-  entry->length = length;
-  entry->sender_addr = *sender;
-  gettimeofday(&entry->timestamp, NULL);
-  entry->processed = false;
-
-  get_next_write_index(state);
-  packets_received.fetch_add(1, std::memory_order_relaxed);
-}
-
 ProcessedPacket parse_custom_packet(PacketEntry *entry) {
   ProcessedPacket result = {0};
 
   if (entry->length < MIN_PCAP_HEADER_SIZE) {
     printf("Packet too small for custom headers\n");
+    entry->processed = true;
     return result;
   }
 
@@ -279,6 +268,10 @@ void process_packet_data(PacketEntry *pkt, ProcessorState &state) {
   // For now, just print the info and simulate some work
 
   ProcessedPacket parsed = parse_custom_packet(pkt);
+
+  if (pkt->processed) {
+    return;
+  }
   printf("Processing packet: sample_count=%lu, freq_channel=%u, fpga_id=%u, "
          "payload=%d bytes\n",
          parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
@@ -349,16 +342,15 @@ void advance_to_next_buffer(ProcessorState &state) {
 }
 // Receiver thread - continuously receives packets
 void receiver_thread(int sockfd, ProcessorState &state) {
-  uint8_t buffer[BUFFER_SIZE];
   struct sockaddr_in client_addr;
   socklen_t client_len = sizeof(client_addr);
 
   printf("Receiver thread started\n");
 
   while (running) {
-    int received = recvfrom(sockfd, buffer, BUFFER_SIZE, 0,
-                            (struct sockaddr *)&client_addr, &client_len);
-
+    int received =
+        recvfrom(sockfd, &(state.d_packet_data[state.write_index]->data),
+                 BUFFER_SIZE, 0, (struct sockaddr *)&client_addr, &client_len);
     if (received < 0) {
       if (errno == EINTR)
         continue;
@@ -366,8 +358,14 @@ void receiver_thread(int sockfd, ProcessorState &state) {
       break;
     }
 
+    state.d_packet_data[state.write_index]->length = received;
+    state.d_packet_data[state.write_index]->sender_addr = client_addr;
+    state.d_packet_data[state.write_index]->processed = false;
+    gettimeofday(&state.d_packet_data[state.write_index]->timestamp, NULL);
+    get_next_write_index(state);
+    packets_received += 1;
     // Store in ring buffer
-    store_packet(buffer, received, &client_addr, state);
+    // store_packet(buffer, received, &client_addr, state);
   }
 
   printf("Receiver thread exiting\n");
@@ -533,8 +531,7 @@ int main() {
   while (running) {
     sleep(5);
     printf(
-        "Stats: Received=%llu, Processed=%llu\n",
-        (unsigned long long)packets_received.load(std::memory_order_relaxed),
+        "Stats: Received=%llu, Processed=%llu\n", packets_received,
         (unsigned long long)packets_processed.load(std::memory_order_relaxed));
   }
 
