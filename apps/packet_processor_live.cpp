@@ -1,4 +1,5 @@
 #include "spatial/ethernet.hpp"
+#include "spatial/packet_formats.hpp"
 #include "spatial/spatial.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -42,7 +43,7 @@ void print_startup_info() {
 int main() {
   print_startup_info();
 
-  ProcessorState state;
+  ProcessorState<LambdaPacketStructure> state;
   int port = 12345;
   KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
   printf("Ring buffer size: %d packets\n\n", RING_BUFFER_SIZE);

@@ -1,6 +1,10 @@
 #pragma once
+#include <cstdint>
 #include <unistd.h>
 
+#include <complex>
+#include <netinet/in.h>
+#include <sys/time.h>
 #define BUFFER_SIZE 4096
 #define MIN_PCAP_HEADER_SIZE 64
 
@@ -40,20 +44,25 @@ struct CustomHeader {
 
 #pragma pack(pop)
 
-// Packet storage for ring buffer
-struct PacketEntry {
-  uint8_t data[BUFFER_SIZE];
-  int length;
-  struct sockaddr_in sender_addr;
-  struct timeval timestamp;
-  bool processed; // 0 = unprocessed, 1 = processed
+constexpr int NR_LAMBDA_CHANNELS = 8;
+constexpr int NR_LAMBDA_PACKETS_FOR_CORRELATION = 16;
+constexpr int NR_LAMBDA_TIME_STEPS_PER_PACKET = 64;
+constexpr int NR_LAMBDA_ACTUAL_RECEIVERS = 20;
+constexpr int NR_LAMBDA_RECEIVERS_PER_PACKET = 20;
 
-  virtual ProcessedPacket parse() = 0;
-};
+typedef std::complex<int8_t> LambdaSample;
+typedef LambdaSample LambdaPacket[NR_LAMBDA_TIME_STEPS_PER_PACKET]
+                                 [NR_LAMBDA_RECEIVERS_PER_PACKET];
+typedef LambdaSample LambdaPacketSamples[NR_LAMBDA_CHANNELS]
+                                        [NR_LAMBDA_PACKETS_FOR_CORRELATION]
+                                        [NR_LAMBDA_TIME_STEPS_PER_PACKET]
+                                        [NR_LAMBDA_ACTUAL_RECEIVERS];
 
-struct LambdaPacketEntry : public PacketEntry {
-  ProcessedPacket parse() override;
-};
+using PacketDataStructure =
+    std::complex<int8_t>[NR_LAMBDA_TIME_STEPS_PER_PACKET]
+                        [NR_LAMBDA_ACTUAL_RECEIVERS];
+
+using PacketScaleStructure = int16_t[NR_LAMBDA_ACTUAL_RECEIVERS];
 
 struct PacketPayload {
   PacketScaleStructure scales;
@@ -71,21 +80,30 @@ struct ProcessedPacket {
   bool *original_packet_processed;
 };
 
-class PacketInterface {
-public:
-  virtual ~PacketInterface() = default;
+// Packet storage for ring buffer
+struct PacketEntry {
+  uint8_t data[BUFFER_SIZE];
+  int length;
+  struct sockaddr_in sender_addr;
+  struct timeval timestamp;
+  bool processed; // 0 = unprocessed, 1 = processed
 
-  virtual ProcessedPacket parse(PacketEntry *pkt) = 0;
+  virtual ProcessedPacket parse() {
+    printf("Hey!");
+    return ProcessedPacket();
+  };
 };
 
-class LambdaPacket : public PacketInterface {
-
-  static ProcessedPacket parse(PacketEntry *pkt);
+struct LambdaPacketEntry : public PacketEntry {
+  ProcessedPacket parse() override;
 };
 
 struct LambdaPacketStructure {
-  using PacketPayloadType = LambdaPacketPayload;
+  using Sample = LambdaSample;
+  using PacketPayloadType = PacketPayload;
   using PacketSamplesType = LambdaPacketSamples;
-  using ProcessedPacketType = LambdaProcessedPacket;
+  using ProcessedPacketType = ProcessedPacket;
   using Packet = LambdaPacket;
-}
+  using PacketEntryType = LambdaPacketEntry;
+  using PacketSamples = LambdaPacketSamples;
+};

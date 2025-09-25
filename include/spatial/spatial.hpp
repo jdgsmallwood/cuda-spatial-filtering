@@ -1,13 +1,16 @@
 #pragma once
+#include "spatial/packet_formats.hpp"
+#include "spatial/tcc_config.h"
 #include <complex>
 #include <cuda.h>
+#include <highfive/highfive.hpp>
 #include <iostream>
-
-#include "spatial/tcc_config.h"
 #include <libtcc/Correlator.h>
 #include <netinet/in.h>
 // #include <sys/socket.h>
+#include <atomic>
 
+#include <sys/time.h>
 #ifndef NR_BEAMS
 #define NR_BEAMS 2
 #endif
@@ -33,7 +36,7 @@
 #endif
 
 #define MIN_PCAP_HEADER_SIZE 64
-#define RING_BUFFER_SIZE 10000
+#define RING_BUFFER_SIZE 1000
 #define BUFFER_SIZE 4096
 #include <cuda_fp16.h>
 
@@ -220,11 +223,6 @@ constexpr int NR_TIMES_PER_PACKET = 64;
 // constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int COMPLEX = 2;
 
-using PacketDataStructure =
-    std::complex<Tin>[NR_TIMES_PER_PACKET][NR_ACTUAL_RECEIVERS];
-
-using PacketScaleStructure = Tscale[NR_ACTUAL_RECEIVERS];
-
 typedef Sample Packet[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET];
 typedef Sample PacketSamples[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                             [NR_TIME_STEPS_PER_PACKET][NR_ACTUAL_RECEIVERS];
@@ -239,19 +237,27 @@ struct BufferState {
 
 typedef PacketEntry Packets[RING_BUFFER_SIZE];
 
-template <typename T> struct ProcessorState {
-  // Public member variables
-  typename T::PacketSamplesType *d_samples[NR_INPUT_BUFFERS];
-  typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
+struct ProcessorStateBase {
+public:
+  int current_buffer = 0;
+  std::atomic<int> write_index = 0;
+  std::atomic<int> read_index = 0;
   std::array<BufferState, NR_INPUT_BUFFERS> buffers;
   uint64_t latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
-  int current_buffer = 0;
-  int write_index = 0;
   std::vector<uint32_t> fpga_ids{};
   bool buffers_initialized = false;
   int running = 1;
   unsigned long long packets_received = 0;
   unsigned long long packets_processed = 0;
+  virtual void *get_next_write_pointer() = 0;
+  virtual void *get_current_write_pointer() = 0;
+  virtual void add_received_packet_metadata(const int length,
+                                            const sockaddr_in &client_addr) = 0;
+};
+template <typename T> struct ProcessorState : public ProcessorStateBase {
+  // Public member variables
+  typename T::PacketSamplesType *d_samples[NR_INPUT_BUFFERS];
+  typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
 
   // Constructor / Destructor
   ProcessorState() {
@@ -260,8 +266,7 @@ template <typename T> struct ProcessorState {
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     try {
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-        d_packet_data[i] = (typename T::PacketEntryType *)calloc(
-            1, sizeof(typename T::PacketEntryType));
+        d_packet_data[i] = new typename T::PacketEntryType();
         if (!d_packet_data[i])
           throw std::bad_alloc();
         d_packet_data[i]->processed = true;
@@ -281,14 +286,20 @@ template <typename T> struct ProcessorState {
   ~ProcessorState() { cleanup(); };
 
   // Methods
-  void get_next_write_index() {
-
-    write_index = (write_index + 1) % RING_BUFFER_SIZE;
-    while (d_packet_data[write_index] != nullptr &&
-           !d_packet_data[write_index]->processed) {
-      write_index = (write_index + 1) % RING_BUFFER_SIZE;
+  bool get_next_write_index() {
+    int next_write_index =
+        (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
+    if (next_write_index == read_index.load(std::memory_order_acquire)) {
+      printf("Ring buffer is full!! Dropping packets...\n");
+      return false;
     }
-    printf("Next write index is...%i ", write_index);
+    write_index.store(next_write_index, std::memory_order_release);
+    // while (d_packet_data[write_index] != nullptr &&
+    //        !d_packet_data[write_index]->processed) {
+    //   write_index = (write_index + 1) % RING_BUFFER_SIZE;
+    // }
+    printf("Next write index is...%i ", next_write_index);
+    return true;
   };
   void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt) {
 
@@ -434,117 +445,145 @@ template <typename T> struct ProcessorState {
               << buffers[current_buffer].start_seq << " and ends at "
               << buffers[current_buffer].end_seq << "\n";
   }
-};
-void check_buffer_completion() {
 
-  if (!buffers_initialized) {
-    return;
-  }
+  void check_buffer_completion() {
 
-  for (auto channel = 0; channel < NR_CHANNELS; ++channel) {
-    std::cout << "Check if buffers are complete for channel " << channel
-              << std::endl;
-
-    if (std::all_of(std::begin(latest_packet_received[channel]),
-                    std::end(latest_packet_received[channel]), [this](int x) {
-                      return x >= buffers[current_buffer].end_seq;
-                    })) {
-      buffers[current_buffer].is_populated[channel] = true;
-      std::cout << "Buffer is complete for channel " << channel << ".\n";
-    } else {
-      std::cout << "Buffer is not complete for channel " << channel
-                << " as end_seq is " << buffers[current_buffer].end_seq
-                << " and latest_packet_receives are ";
-      for (int check = 0; check < NR_FPGA_SOURCES; ++check) {
-        std::cout << latest_packet_received[channel][check] << ", ";
-      }
-      std::cout << std::endl;
+    if (!buffers_initialized) {
+      return;
     }
-  }
-};
 
-void write_buffer_to_hdf5(const int buffer_index, const std::string &filename) {
+    for (auto channel = 0; channel < NR_CHANNELS; ++channel) {
+      std::cout << "Check if buffers are complete for channel " << channel
+                << std::endl;
 
-  using namespace HighFive;
+      if (std::all_of(std::begin(latest_packet_received[channel]),
+                      std::end(latest_packet_received[channel]), [this](int x) {
+                        return x >= buffers[current_buffer].end_seq;
+                      })) {
+        buffers[current_buffer].is_populated[channel] = true;
+        std::cout << "Buffer is complete for channel " << channel << ".\n";
+      } else {
+        std::cout << "Buffer is not complete for channel " << channel
+                  << " as end_seq is " << buffers[current_buffer].end_seq
+                  << " and latest_packet_receives are ";
+        for (int check = 0; check < NR_FPGA_SOURCES; ++check) {
+          std::cout << latest_packet_received[channel][check] << ", ";
+        }
+        std::cout << std::endl;
+      }
+    }
+  };
 
-  // Create / overwrite file
-  File file(filename, File::Overwrite);
+  void write_buffer_to_hdf5(const int buffer_index,
+                            const std::string &filename) {
 
-  // Pointer to your samples
-  PacketSamples *samples = d_samples[buffer_index];
+    using namespace HighFive;
 
-  // Dataset shape
-  std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
-                              NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS};
+    // Create / overwrite file
+    File file(filename, File::Overwrite);
 
-  // Create dataset of complex<int8_t> (or whatever Sample is)
-  DataSet dataset =
-      file.createDataSet<Sample>("packet_samples", DataSpace(dims));
+    // Pointer to your samples
+    PacketSamples *samples = d_samples[buffer_index];
 
-  // Write buffer
-  dataset.write(*samples);
-};
-void process_packets() {
+    // Dataset shape
+    std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
+                                NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS};
 
-  printf("Processor thread started\n");
-  static bool first_written = false;
-  bool any_packet_processed = false;
-  while (running) {
-    any_packet_processed = false;
-    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-      typename T::PacketEntryType *entry = d_packet_data[i];
+    // Create dataset of complex<int8_t> (or whatever Sample is)
+    DataSet dataset =
+        file.createDataSet<Sample>("packet_samples", DataSpace(dims));
+
+    // Write buffer
+    dataset.write(*samples);
+  };
+  void process_packets() {
+
+    printf("Processor thread started\n");
+    static bool first_written = false;
+    int packets_processed_before_completion_check = 0;
+    int current_read_index;
+    while (running) {
+      while (true) {
+        current_read_index = read_index.load(std::memory_order_relaxed);
+
+        if (current_read_index != write_index.load(std::memory_order_acquire)) {
+          break;
+        }
+      }
+      typename T::PacketEntryType *entry = d_packet_data[current_read_index];
 
       if (entry->length == 0 || entry->processed == true) {
         continue;
       }
 
       process_packet_data(entry);
-      any_packet_processed = true;
-    }
-    if (any_packet_processed) {
-      check_buffer_completion();
-      if (std::all_of(buffers[current_buffer].is_populated.begin(),
-                      buffers[current_buffer].is_populated.end(),
-                      [](bool i) { return i; })) {
-        // Send off data to be processed by CUDA pipeline.
-        // Then advance to next buffer and keep iterating.
-        if (!first_written) {
-          write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
-          first_written = true;
+      read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
+                       std::memory_order_release);
+      packets_processed_before_completion_check += 1;
+      if (packets_processed_before_completion_check > 100) {
+        printf("Checking buffer completion...\n");
+        check_buffer_completion();
+        if (std::all_of(buffers[current_buffer].is_populated.begin(),
+                        buffers[current_buffer].is_populated.end(),
+                        [](bool i) { return i; })) {
+          // Send off data to be processed by CUDA pipeline.
+          // Then advance to next buffer and keep iterating.
+          if (!first_written) {
+            write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
+            first_written = true;
+          }
+          advance_to_next_buffer();
         }
-        advance_to_next_buffer();
+        packets_processed_before_completion_check = 0;
       }
     }
+
+    printf("Processor thread exiting\n");
+  };
+
+  void *get_current_write_pointer() {
+    return (void *)&(d_packet_data[write_index]->data);
+  }
+  void *get_next_write_pointer() {
+    while (!get_next_write_index()) {
+      printf("Waiting for next pointer....\n");
+    };
+    return get_current_write_pointer();
   }
 
-  printf("Processor thread exiting\n");
-};
+  void add_received_packet_metadata(const int length,
+                                    const sockaddr_in &client_addr) {
 
-// Delete copy/move
-ProcessorState(const ProcessorState &) = delete;
-ProcessorState &operator=(const ProcessorState &) = delete;
-ProcessorState(const ProcessorState &&) = delete;
-ProcessorState &operator=(ProcessorState &&) = delete;
+    d_packet_data[write_index]->length = length;
+    d_packet_data[write_index]->sender_addr = client_addr;
+    d_packet_data[write_index]->processed = false;
+    gettimeofday(&d_packet_data[write_index]->timestamp, NULL);
+  }
+
+  // Delete copy/move
+  ProcessorState<T>(const ProcessorState<T> &) = delete;
+  ProcessorState<T> &operator=(const ProcessorState<T> &) = delete;
+  ProcessorState<T>(const ProcessorState<T> &&) = delete;
+  ProcessorState<T> &operator=(ProcessorState<T> &&) = delete;
 
 private:
-void cleanup() {
+  void cleanup() {
 
-  for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-    free(d_packet_data[i]);
-    d_packet_data[i] = nullptr;
-  }
+    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
+      free(d_packet_data[i]);
+      d_packet_data[i] = nullptr;
+    }
 
-  for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-    free(d_samples[i]);
-    d_samples[i] = nullptr;
-  }
+    for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+      free(d_samples[i]);
+      d_samples[i] = nullptr;
+    }
+  };
 };
-}
-;
 
 class PacketInput {
 public:
-  virtual void get_packets(ProcessorState &state) = 0;
+  virtual void get_packets(ProcessorStateBase &state) = 0;
 
   virtual ~PacketInput() = default;
 };
@@ -554,7 +593,32 @@ public:
   KernelSocketPacketCapture(int port, int buffer_size);
   ~KernelSocketPacketCapture();
 
-  void get_packets(ProcessorState &state) override;
+  void get_packets(ProcessorStateBase &state) override {
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    printf("Receiver thread started\n");
+    void *next_write_pointer = state.get_current_write_pointer();
+    while (state.running) {
+      int received = recvfrom(sockfd, next_write_pointer, buffer_size, 0,
+                              (struct sockaddr *)&client_addr, &client_len);
+      if (received < 0) {
+        if (errno == EINTR)
+          continue;
+        perror("recvfrom");
+        break;
+      }
+
+      state.add_received_packet_metadata(received, client_addr);
+      state.packets_received += 1;
+      next_write_pointer = state.get_next_write_pointer();
+      // Store in ring buffer
+      // store_packet(buffer, received, &client_addr, state);
+    }
+
+    printf("Receiver thread exiting\n");
+  };
 
 private:
   int sockfd;
