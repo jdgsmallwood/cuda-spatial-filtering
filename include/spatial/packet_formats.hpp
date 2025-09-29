@@ -88,10 +88,7 @@ struct PacketEntry {
   struct timeval timestamp;
   bool processed; // 0 = unprocessed, 1 = processed
 
-  virtual ProcessedPacket parse() {
-    printf("Hey!");
-    return ProcessedPacket();
-  };
+  virtual ProcessedPacket parse() = 0;
 };
 
 struct LambdaPacketEntry : public PacketEntry {

@@ -10,6 +10,7 @@ target_link_libraries(CUDASpatialFilteringTests
             spatial
             CUDA::cudart
             ccglib
+            HighFive::HighFive
 )
 
 add_executable(
@@ -17,7 +18,7 @@ add_executable(
 )
 target_compile_definitions(BeamformingTests_8bit PRIVATE NR_BITS=8 NR_RECEIVERS=32)
 
-target_link_libraries(BeamformingTests_8bit PRIVATE GTest::gtest_main spatial_8bit CUDA::cudart)
+target_link_libraries(BeamformingTests_8bit PRIVATE GTest::gtest_main spatial_8bit CUDA::cudart HighFive::HighFive)
 
 
 add_executable(
@@ -25,10 +26,18 @@ add_executable(
 )
 target_compile_definitions(BeamformingTests_16bit PRIVATE NR_BITS=16 NR_RECEIVERS=32)
 
-target_link_libraries(BeamformingTests_16bit PRIVATE GTest::gtest_main spatial_16bit CUDA::cudart)
+target_link_libraries(BeamformingTests_16bit PRIVATE GTest::gtest_main spatial_16bit CUDA::cudart HighFive::HighFive)
+
+
+add_executable(
+  CUDASpatialFilteringCPUTests test_packet_formats.cpp
+)
+target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE GTest::gtest_main spatial HighFive::HighFive)
+
 
 
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(BeamformingTests_16bit)
 gtest_discover_tests(BeamformingTests_8bit)
+gtest_discover_tests(CUDASpatialFilteringCPUTests)
