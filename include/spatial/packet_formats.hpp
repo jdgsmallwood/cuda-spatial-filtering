@@ -49,14 +49,45 @@ constexpr int NR_LAMBDA_PACKETS_FOR_CORRELATION = 16;
 constexpr int NR_LAMBDA_TIME_STEPS_PER_PACKET = 64;
 constexpr int NR_LAMBDA_ACTUAL_RECEIVERS = 20;
 constexpr int NR_LAMBDA_RECEIVERS_PER_PACKET = 20;
+constexpr int NR_LAMBDA_FPGAS = 1;
 
 typedef std::complex<int8_t> LambdaSample;
 typedef LambdaSample LambdaPacket[NR_LAMBDA_TIME_STEPS_PER_PACKET]
                                  [NR_LAMBDA_RECEIVERS_PER_PACKET];
+
 typedef LambdaSample LambdaPacketSamples[NR_LAMBDA_CHANNELS]
                                         [NR_LAMBDA_PACKETS_FOR_CORRELATION]
                                         [NR_LAMBDA_TIME_STEPS_PER_PACKET]
                                         [NR_LAMBDA_ACTUAL_RECEIVERS];
+
+struct FinalPacketData {
+  size_t start_seq_id;
+  size_t end_seq_id;
+  size_t buffer_index;
+
+  virtual void *get_samples_ptr() = 0;
+  virtual size_t get_samples_elements_size() = 0;
+
+  virtual void *get_scales_ptr() = 0;
+  virtual size_t get_scales_element_size() = 0;
+
+  virtual bool *get_arrivals_ptr() = 0;
+};
+
+struct LambdaFinalPacketData : public FinalPacketData {
+  LambdaPacketSamples samples;
+  int16_t scales[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
+                [NR_LAMBDA_ACTUAL_RECEIVERS];
+  bool arrivals[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
+               [NR_LAMBDA_FPGAS];
+
+  void *get_samples_ptr() override { return (void *)&samples; };
+  void *get_scales_ptr() override { return (void *)&scales; };
+  bool *get_arrivals_ptr() override { return &arrivals[0][0][0]; };
+
+  size_t get_samples_elements_size() { return sizeof(LambdaPacketSamples); };
+  size_t get_scales_element_size() { return sizeof(scales); };
+};
 
 using PacketDataStructure =
     std::complex<int8_t>[NR_LAMBDA_TIME_STEPS_PER_PACKET]
@@ -102,5 +133,5 @@ struct LambdaPacketStructure {
   using ProcessedPacketType = ProcessedPacket;
   using Packet = LambdaPacket;
   using PacketEntryType = LambdaPacketEntry;
-  using PacketSamples = LambdaPacketSamples;
+  using PacketFinalDataType = LambdaFinalPacketData;
 };

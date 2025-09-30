@@ -49,11 +49,11 @@ add_executable(
   packet_processor_live
   ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cpp
 )
-target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive )
+target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog)
 
 
 add_executable(
   udp_sender
   ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp
 )
-target_link_libraries(udp_sender PRIVATE pcap)
+target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)

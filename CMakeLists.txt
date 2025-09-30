@@ -114,6 +114,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(pcap)
 
+FetchContent_Declare(
+  spdlog
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/spdlog
+)
+FetchContent_MakeAvailable(spdlog)
+target_include_directories(spdlog PRIVATE ${spdlog_SOURCE_DIR})
+
 find_package(ZLIB REQUIRED)
 find_package(HDF5 REQUIRED COMPONENTS C)
 

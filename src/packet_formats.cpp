@@ -1,11 +1,12 @@
 #include "spatial/packet_formats.hpp"
+#include "spatial/logging.hpp"
 
 ProcessedPacket LambdaPacketEntry::parse() {
-  printf("Entering parser...\n");
+  LOG_INFO("Entering parser...\n");
   ProcessedPacket result = {0};
 
   if (length < MIN_PCAP_HEADER_SIZE) {
-    printf("Packet too small for custom headers\n");
+    LOG_WARN("Packet too small for custom headers\n");
     processed = true;
     return result;
   }
@@ -13,7 +14,7 @@ ProcessedPacket LambdaPacketEntry::parse() {
   // Parse your custom packet structure
   const EthernetHeader *eth = (const EthernetHeader *)data;
   if (ntohs(eth->ethertype) != 0x0800) {
-    printf("Not IPv4 packet\n");
+    LOG_ERROR("Not IPv4 packet\n");
     return result;
   }
 

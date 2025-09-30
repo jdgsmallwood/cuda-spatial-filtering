@@ -1,3 +1,4 @@
+#include "spdlog/spdlog.h"
 #include <arpa/inet.h>
 #include <pcap/pcap.h>
 #include <stdint.h>
@@ -57,20 +58,20 @@ PacketInfo get_packet_info(const u_char *packet, const int size) {
   PacketInfo info = {0};
 
   if (size < MIN_PCAP_HEADER_SIZE) {
-    printf("Packet too small (%d bytes)\n", size);
+    spdlog::warn("Packet too small ({} bytes)", size);
     return info;
   }
 
   // Parse headers
   const EthernetHeader *eth = (const EthernetHeader *)packet;
   if (ntohs(eth->ethertype) != 0x0800) {
-    printf("Not IPv4 packet\n");
+    spdlog::warn("Not IPv4 packet");
     return info;
   }
 
   const IPHeader *ip = (const IPHeader *)(packet + 14);
   if ((ip->version_ihl >> 4) != 4) {
-    printf("Not IPv4\n");
+    spdlog::warn("Not IPv4");
     return info;
   }
 
@@ -86,18 +87,20 @@ PacketInfo get_packet_info(const u_char *packet, const int size) {
 }
 
 int send_custom_packet(int sockfd, struct sockaddr_in *server_addr,
-                       const u_char *packet_data, int packet_len) {
+                       const u_char *packet_data, int packet_len,
+                       const int packet_count) {
 
   PacketInfo info = get_packet_info(packet_data, packet_len);
   if (info.payload_size <= 0) {
-    printf("No payload or invalid packet\n");
+    spdlog::error("No payload or invalid packet\n");
     return -1;
   }
-
-  printf("Packet info: sample_count=%lu, freq_channel=%u, fpga_id=%u, "
-         "payload_size=%d\n",
-         info.sample_count, info.freq_channel, info.fpga_id, info.payload_size);
-
+  if (packet_count % 100 == 0) {
+    spdlog::info("Packet info: sample_count=%lu, freq_channel=%u, fpga_id=%u, "
+                 "payload_size=%d\n",
+                 info.sample_count, info.freq_channel, info.fpga_id,
+                 info.payload_size);
+  };
   // Send the entire packet (headers + payload)
   ssize_t sent = sendto(sockfd, packet_data, packet_len, 0,
                         (struct sockaddr *)server_addr, sizeof(*server_addr));
@@ -106,8 +109,9 @@ int send_custom_packet(int sockfd, struct sockaddr_in *server_addr,
     perror("sendto");
     return -1;
   }
-
-  printf("Sent complete packet (%zd bytes)\n", sent);
+  if (packet_count % 100 == 0) {
+    spdlog::info("Sent complete packet (%zd bytes)\n", sent);
+  };
   return 0;
 }
 
@@ -124,19 +128,19 @@ int main(int argc, char *argv[]) {
   int res;
 
   if (argc < 2) {
-    printf("Usage: %s <pcap_file>\n", argv[0]);
+    spdlog::error("Usage: %s <pcap_file>\n", argv[0]);
     return 1;
   }
-
+  spdlog::info("SPDLOG LIVES");
   // Open pcap file using libpcap
   handle = pcap_open_offline(argv[1], errbuf);
   if (!handle) {
-    fprintf(stderr, "pcap_open_offline failed: %s\n", errbuf);
+    spdlog::error("pcap_open_offline failed: {}", errbuf);
     return 1;
   }
 
-  printf("Reading pcap file: %s\n", argv[1]);
-  printf("Sending packets to %s:%d\n\n", server_ip, UDP_PORT);
+  spdlog::info("Reading pcap file: {}", argv[1]);
+  spdlog::info("Sending packets to {}:{}", server_ip, UDP_PORT);
 
   // Create UDP socket for sending
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -158,24 +162,26 @@ int main(int argc, char *argv[]) {
       continue; // Timeout (shouldn't happen with offline files)
 
     packet_count++;
-    printf("\n--- Packet #%d (%d bytes) ---\n", packet_count, header->len);
-
+    if (packet_count % 100 == 0) {
+      spdlog::info("--- Packet #{} ({} bytes) ---", packet_count, header->len);
+    };
     // Process and send the packet
-    if (send_custom_packet(sockfd, &server_addr, packet, header->len) == 0) {
+    if (send_custom_packet(sockfd, &server_addr, packet, header->len,
+                           packet_count) == 0) {
       custom_packet_count++;
     }
 
     // Small delay between packets
-    usleep(20); // 100us
+    usleep(20); // 20us
   }
 
   if (res == -1) {
-    fprintf(stderr, "Error reading packets: %s\n", pcap_geterr(handle));
+    spdlog::error("Error reading packets: {}", pcap_geterr(handle));
   }
 
-  printf("\n=== Summary ===\n");
-  printf("Total packets read: %d\n", packet_count);
-  printf("Custom packets sent: %d\n", custom_packet_count);
+  spdlog::info("\n=== Summary ===");
+  spdlog::info("Total packets read: {}", packet_count);
+  spdlog::info("Custom packets sent: {}", custom_packet_count);
 
   close(sockfd);
   pcap_close(handle);

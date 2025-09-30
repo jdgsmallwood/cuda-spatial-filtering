@@ -1,5 +1,7 @@
 #pragma once
+#include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
+#include "spatial/pipeline.hpp"
 #include "spatial/tcc_config.h"
 #include <complex>
 #include <cuda.h>
@@ -9,6 +11,7 @@
 #include <netinet/in.h>
 // #include <sys/socket.h>
 #include <atomic>
+#include <mutex>
 
 #include <sys/time.h>
 #ifndef NR_BEAMS
@@ -237,6 +240,8 @@ struct BufferState {
 
 typedef PacketEntry Packets[RING_BUFFER_SIZE];
 
+// forward declaration of GPUPipeline.
+class GPUPipeline;
 struct ProcessorStateBase {
 public:
   int current_buffer = 0;
@@ -253,15 +258,18 @@ public:
   virtual void *get_current_write_pointer() = 0;
   virtual void add_received_packet_metadata(const int length,
                                             const sockaddr_in &client_addr) = 0;
+  virtual void release_buffer(const int buffer_index) = 0;
+  virtual void set_pipeline(GPUPipeline *pipeline) = 0;
 };
 template <typename T> struct ProcessorState : public ProcessorStateBase {
   // Public member variables
-  typename T::PacketSamplesType *d_samples[NR_INPUT_BUFFERS];
+  typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
 
+  mutable std::mutex buffer_index_mutex;
+  GPUPipeline *pipeline_;
   // Constructor / Destructor
   ProcessorState() {
-
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     try {
@@ -273,8 +281,8 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
       }
 
       for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-        d_samples[i] = (typename T::PacketSamplesType *)calloc(
-            1, sizeof(typename T::PacketSamples));
+        d_samples[i] = new typename T::PacketFinalDataType();
+        d_samples[i]->buffer_index = i;
         if (!d_samples[i])
           throw std::bad_alloc();
       }
@@ -284,13 +292,17 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     }
   };
   ~ProcessorState() { cleanup(); };
+  ProcessorState(const ProcessorState &) = delete;
+  ProcessorState &operator=(const ProcessorState &) = delete;
 
-  // Methods
+  ProcessorState(ProcessorState &&) = delete;
+  ProcessorState &operator=(ProcessorState &&) = delete;
+  void set_pipeline(GPUPipeline *pipeline) { pipeline_ = pipeline; };
   bool get_next_write_index() {
     int next_write_index =
         (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
     if (next_write_index == read_index.load(std::memory_order_acquire)) {
-      printf("Ring buffer is full!! Dropping packets...\n");
+      LOG_INFO("Ring buffer is full!! Dropping packets...");
       return false;
     }
     write_index.store(next_write_index, std::memory_order_release);
@@ -298,7 +310,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     //        !d_packet_data[write_index]->processed) {
     //   write_index = (write_index + 1) % RING_BUFFER_SIZE;
     // }
-    printf("Next write index is...%i ", next_write_index);
+    LOG_INFO("Next write index is...{}", next_write_index);
     return true;
   };
   void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt) {
@@ -327,32 +339,34 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
         // This means that this packet is less than the lowest possible
         // start token. Maybe an out-of-order packet that's coming in?
         // Regardless we can't do anything with this.
-        std::cout << "Discarding packet as it is before current buffer "
-                     "with begin_seq "
-                  << buffers[current_buffer].start_seq
-                  << " actually has packet_index " << pkt.sample_count
-                  << std::endl;
+        LOG_INFO("Discarding packet as it is before current buffer with "
+                 "begin_seq {} actually has packet_index {}",
+                 buffers[current_buffer].start_seq, pkt.sample_count);
         *pkt.original_packet_processed = true;
         break;
       }
 
       if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
         int receiver_index = fpga_index * NR_RECEIVERS_PER_PACKET;
-        std::cout << "Copying data to packet_index " << packet_index
-                  << " and channel index " << freq_channel
-                  << " and receiver index " << receiver_index << " of buffer "
-                  << (current_buffer + buffer_index) % NR_INPUT_BUFFERS
-                  << std::endl;
-        std::memcpy(&(*d_samples[buffer_index])[freq_channel][packet_index]
-                                               [receiver_index],
-                    // this is almost certainly not right.
+        LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
+                  "receiver_index {} of buffer {}",
+                  packet_index, freq_channel, receiver_index,
+                  (current_buffer + buffer_index) % NR_INPUT_BUFFERS);
+        std::memcpy(&(*d_samples[buffer_index])
+                         .samples[freq_channel][packet_index][receiver_index],
                     pkt.payload->data, sizeof(PacketDataStructure));
-        std::cout << "Setting original_packet_processed as true...\n";
-        std::cout << "DEBUG: original_packet_processed_before="
-                  << *pkt.original_packet_processed << std::endl;
+        std::memcpy(&(*d_samples[buffer_index])
+                         .scales[freq_channel][packet_index][receiver_index],
+                    pkt.payload->scales, sizeof(PacketScaleStructure));
+        d_samples[buffer_index]
+            ->arrivals[freq_channel][packet_index][fpga_index] = true;
+        LOG_DEBUG("Setting original_packet_processed as true...");
+        LOG_DEBUG("original_packet_processed_before={}",
+                  *pkt.original_packet_processed);
         *(pkt.original_packet_processed) = true;
-        std::cout << "DEBUG: original_packet_processed_after="
-                  << *pkt.original_packet_processed << std::endl;
+        LOG_DEBUG("DEBUG: original_packet_processed_after={}",
+                  *pkt.original_packet_processed);
+
         break;
       }
     }
@@ -378,16 +392,16 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     if (pkt->processed) {
       return;
     }
-    printf("Processing packet: sample_count=%lu, freq_channel=%u, fpga_id=%u, "
-           "payload=%d bytes\n",
-           parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
-           parsed.payload_size);
+    LOG_INFO("Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
+             "payload={} bytes",
+             parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
+             parsed.payload_size);
 
-    printf("First data point...%i + %i i\n", parsed.payload->data[0][0].real(),
-           parsed.payload->data[0][0].imag());
+    LOG_INFO("First data point...{} + {} i", parsed.payload->data[0][0].real(),
+             parsed.payload->data[0][0].imag());
 
     if (!buffers_initialized) {
-      printf("Initializing buffers as this is the first packet...\n");
+      LOG_INFO("Initializing buffers as this is the first packet...");
       initialize_buffers(parsed.sample_count);
       buffers_initialized = true;
     }
@@ -397,53 +411,85 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
       packets_processed += 1;
     }
   };
-  void advance_to_next_buffer() {
 
-    buffers[current_buffer].is_ready = false;
+  void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
-    buffers[current_buffer].is_ready = true;
-    int old_buffer = current_buffer;
-    int end_current_buffer_seq = buffers[old_buffer].end_seq;
-
-    // Move to next buffer
-    current_buffer = (current_buffer + 1) % NR_INPUT_BUFFERS;
-
-    std::cout << "current_buffer is " << current_buffer << " and is it ready? "
-              << buffers[current_buffer].is_ready << std::endl;
-
-    // this is kinda assuming there's an async callback that will
-    // ready the buffer after the data has been transferred out.
-    while (!buffers[current_buffer].is_ready) {
-      std::cout << "Waiting for buffer to be ready..." << std::endl;
-    }
-
-    // Reset new current buffer
-    std::memset(std::begin(buffers[current_buffer].is_populated), (int)false,
-                NR_CHANNELS);
-    buffers[current_buffer].start_seq =
-        end_current_buffer_seq + NR_BETWEEN_SAMPLES;
-    buffers[current_buffer].end_seq =
-        buffers[current_buffer].start_seq +
-        (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-
+  void release_buffer(const int buffer_index) {
+    // I'm imagining this will be called once data has been transferred
+    // to the GPU. I don't know exactly how but we'll figure that out I guess.
     // Update old buffer for future use
+    //
+    // We may well need a mutex or lock here so that multiple GPU threads do not
+    // compete.
+    std::lock_guard<std::mutex> lock(buffer_index_mutex);
     int max_end_seq_in_buffers = 0;
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       max_end_seq_in_buffers =
           std::max(max_end_seq_in_buffers, buffers[i].end_seq);
     }
-    buffers[old_buffer].start_seq =
+    buffers[buffer_index].start_seq =
         max_end_seq_in_buffers + 1 * NR_BETWEEN_SAMPLES;
-    buffers[old_buffer].end_seq =
-        buffers[old_buffer].start_seq +
+    buffers[buffer_index].end_seq =
+        buffers[buffer_index].start_seq +
         (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+    std::memset(std::begin(d_samples[buffer_index]->arrivals), false,
+                sizeof(d_samples[buffer_index]->arrivals));
+    buffers[buffer_index].is_ready = true;
+  };
 
-    std::cout
-        << "Current buffer is all complete. Moving to next buffer which is #"
-        << current_buffer << std::endl;
-    std::cout << "New buffer starts at packet "
-              << buffers[current_buffer].start_seq << " and ends at "
-              << buffers[current_buffer].end_seq << "\n";
+  void advance_to_next_buffer(const int current_buffer_start_seq) {
+
+    // Move to next buffer
+    // This is not necessarily the next buffer as the buffers can be
+    // updated in any order. This will be the buffer that has the next
+    // highest start_seq.
+    LOG_INFO("advancing to next buffer...");
+    int next_highest_start_seq = -1;
+    int next_highest_buffer = -1;
+    LOG_INFO("Current buffer start seq is {}",
+             buffers[current_buffer].start_seq);
+    while (next_highest_start_seq < 0) {
+      for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+        LOG_INFO("buffer {} start seq is {}.", i, buffers[i].start_seq);
+        if (buffers[i].start_seq <= current_buffer_start_seq) {
+          LOG_INFO("Continuing...");
+          continue;
+        };
+
+        if (buffers[i].start_seq < next_highest_start_seq ||
+            next_highest_start_seq < 0) {
+          LOG_INFO("Buffer {} has higher start_seq {}", i,
+                   buffers[i].start_seq);
+          next_highest_start_seq = buffers[i].start_seq;
+          next_highest_buffer = i;
+        };
+      }
+    };
+    current_buffer = next_highest_buffer;
+
+    LOG_INFO(
+        "next current_buffer is {} and has start_seq {} and is it ready? {}",
+        current_buffer, buffers[current_buffer].start_seq,
+        buffers[current_buffer].is_ready);
+
+    // this is kinda assuming there's an async callback that will
+    // ready the buffer after the data has been transferred out.
+    // This async callback will come from the GPUPipeline class.
+    while (!buffers[current_buffer].is_ready) {
+      LOG_INFO("Waiting for buffer to be ready...");
+    }
+
+    // Reset new current buffer
+    // This is just NR_CHANNELS booleans that tell us if the current
+    // buffer has all the data it needs.
+    std::memset(std::begin(buffers[current_buffer].is_populated), (int)false,
+                NR_CHANNELS);
+    LOG_INFO(
+        "Current buffer is all complete. Moving to next buffer which is #{}",
+        current_buffer);
+    LOG_INFO("New buffer starts at packet {} and ends at {}",
+             buffers[current_buffer].start_seq,
+             buffers[current_buffer].end_seq);
   }
 
   void check_buffer_completion() {
@@ -453,23 +499,22 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     }
 
     for (auto channel = 0; channel < NR_CHANNELS; ++channel) {
-      std::cout << "Check if buffers are complete for channel " << channel
-                << std::endl;
+      LOG_INFO("Check if buffers are complete for channel {}", channel);
 
       if (std::all_of(std::begin(latest_packet_received[channel]),
                       std::end(latest_packet_received[channel]), [this](int x) {
                         return x >= buffers[current_buffer].end_seq;
                       })) {
         buffers[current_buffer].is_populated[channel] = true;
-        std::cout << "Buffer is complete for channel " << channel << ".\n";
+        LOG_INFO("Buffer is complete for channel {}", channel);
       } else {
-        std::cout << "Buffer is not complete for channel " << channel
-                  << " as end_seq is " << buffers[current_buffer].end_seq
-                  << " and latest_packet_receives are ";
+        LOG_INFO("Buffer is not complete for channel {} as end_seq is {} and "
+                 "latest_packet_receives are:",
+                 channel, buffers[current_buffer].end_seq);
         for (int check = 0; check < NR_FPGA_SOURCES; ++check) {
-          std::cout << latest_packet_received[channel][check] << ", ";
+          LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
+                   latest_packet_received[channel][check]);
         }
-        std::cout << std::endl;
       }
     }
   };
@@ -483,7 +528,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     File file(filename, File::Overwrite);
 
     // Pointer to your samples
-    PacketSamples *samples = d_samples[buffer_index];
+    PacketSamples *samples = &d_samples[buffer_index]->samples;
 
     // Dataset shape
     std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
@@ -498,7 +543,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
   };
   void process_packets() {
 
-    printf("Processor thread started\n");
+    LOG_INFO("Processor thread started");
     static bool first_written = false;
     int packets_processed_before_completion_check = 0;
     int current_read_index;
@@ -521,7 +566,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
                        std::memory_order_release);
       packets_processed_before_completion_check += 1;
       if (packets_processed_before_completion_check > 100) {
-        printf("Checking buffer completion...\n");
+        LOG_INFO("Checking buffer completion...");
         check_buffer_completion();
         if (std::all_of(buffers[current_buffer].is_populated.begin(),
                         buffers[current_buffer].is_populated.end(),
@@ -532,13 +577,27 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
             write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
             first_written = true;
           }
-          advance_to_next_buffer();
+          if (pipeline_ == nullptr) {
+            throw std::logic_error(
+                "Pipeline has not been set. Ensure that set_pipeline has been "
+                "called on ProcessorState class.");
+          }
+
+          buffers[current_buffer].is_ready = false;
+          // order here is important. As the pipeline can async update
+          // the start/end seqs we need to capture the
+          // start_seq, then execute the pipeline, then advance using
+          // the saved copy of the start_seq.
+          const int current_buffer_start_seq =
+              buffers[current_buffer].start_seq;
+          pipeline_->execute_pipeline(d_samples[current_buffer]);
+          advance_to_next_buffer(current_buffer_start_seq);
         }
         packets_processed_before_completion_check = 0;
       }
     }
 
-    printf("Processor thread exiting\n");
+    LOG_INFO("Processor thread exiting");
   };
 
   void *get_current_write_pointer() {
@@ -546,7 +605,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
   }
   void *get_next_write_pointer() {
     while (!get_next_write_index()) {
-      printf("Waiting for next pointer....\n");
+      LOG_DEBUG("Waiting for next pointer....");
     };
     return get_current_write_pointer();
   }
@@ -559,12 +618,6 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     d_packet_data[write_index]->processed = false;
     gettimeofday(&d_packet_data[write_index]->timestamp, NULL);
   }
-
-  // Delete copy/move
-  ProcessorState<T>(const ProcessorState<T> &) = delete;
-  ProcessorState<T> &operator=(const ProcessorState<T> &) = delete;
-  ProcessorState<T>(const ProcessorState<T> &&) = delete;
-  ProcessorState<T> &operator=(ProcessorState<T> &&) = delete;
 
 private:
   void cleanup() {
@@ -598,7 +651,7 @@ public:
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    printf("Receiver thread started\n");
+    LOG_INFO("Receiver thread started");
     void *next_write_pointer = state.get_current_write_pointer();
     while (state.running) {
       int received = recvfrom(sockfd, next_write_pointer, buffer_size, 0,
@@ -617,7 +670,7 @@ public:
       // store_packet(buffer, received, &client_addr, state);
     }
 
-    printf("Receiver thread exiting\n");
+    LOG_INFO("Receiver thread exiting");
   };
 
 private:

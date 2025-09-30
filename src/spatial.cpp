@@ -1,6 +1,7 @@
 #include "spatial/spatial.hpp"
 #include "ccglib/common/precision.h"
 #include "spatial/ethernet.hpp"
+#include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/spatial.cuh"
 #include "spatial/tensor.hpp"
@@ -194,11 +195,11 @@ template void d_eigendecomposition<std::complex<float>>(
 void correlate(Samples *samples, Visibilities *visibilities) {
   try {
     // Taken from simpleExample
-    std::cout << "Starting correlation inline" << std::endl;
+    LOG_INFO("Starting correlation inline");
     checkCudaCall(
         cudaSetDevice(0)); // combine the CUDA runtime API and CUDA driver API
     checkCudaCall(cudaFree(0));
-    std::cout << "Instantiating correlator..." << std::endl;
+    LOG_INFO("Instantiating correlator...");
     tcc::Correlator correlator(
         cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
         spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
@@ -215,22 +216,22 @@ void correlate(Samples *samples, Visibilities *visibilities) {
     checkCudaCall(cudaMemcpyAsync(d_samples, samples, sizeof(Samples),
                                   cudaMemcpyHostToDevice, stream));
 
-    std::cout << "Starting correlator" << std::endl;
+    LOG_INFO("Starting correlator");
     correlator.launchAsync((CUstream)stream, (CUdeviceptr)d_visibilities,
                            (CUdeviceptr)d_samples);
     checkCudaCall(cudaMemcpyAsync(visibilities, d_visibilities,
                                   sizeof(Visibilities), cudaMemcpyDeviceToHost,
                                   stream));
-    std::cout << "Synchronizing..." << std::endl;
+    LOG_INFO("Synchronizing...");
     checkCudaCall(cudaStreamSynchronize(stream));
-    std::cout << "Synchronized" << std::endl;
+    LOG_INFO("Synchronized");
 
     cudaFree(d_samples);
     cudaFree(d_visibilities);
 
     checkCudaCall(cudaStreamDestroy(stream));
   } catch (std::exception &error) {
-    std::cerr << error.what() << std::endl;
+    LOG_ERROR("{}", error.what());
   }
 }
 
@@ -388,26 +389,26 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
                            "visCorrToDecomp");
   tensor_32.addPermutation("beamCCGLIB", "beamOutput",
                            CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
-  printf("Initializing correlator\n");
-  printf("NR_RECEIVERS: %u\n", NR_RECEIVERS);
-  printf("NR_CHANNELS: %u\n", NR_CHANNELS);
-  printf("NR_SAMPLES_PER_CHANNEL: %u\n",
-         spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
-  printf("NR_POLARIZATIONS: %u\n", NR_POLARIZATIONS);
-  printf("NR_RECEIVERS_PER_BLOCK: %u\n", NR_RECEIVERS_PER_BLOCK);
-  printf("NR_CORRELATION_BLOCKS_TO_INTEGRATE: %u\n",
-         NR_CORRELATION_BLOCKS_TO_INTEGRATE);
+  LOG_INFO("Initializing correlator\n");
+  LOG_INFO("NR_RECEIVERS: {}", NR_RECEIVERS);
+  LOG_INFO("NR_CHANNELS: {}", NR_CHANNELS);
+  LOG_INFO("NR_SAMPLES_PER_CHANNEL: {}",
+           spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
+  LOG_INFO("NR_POLARIZATIONS: {}", NR_POLARIZATIONS);
+  LOG_INFO("NR_RECEIVERS_PER_BLOCK: {}", NR_RECEIVERS_PER_BLOCK);
+  LOG_INFO("NR_CORRELATION_BLOCKS_TO_INTEGRATE: {}",
+           NR_CORRELATION_BLOCKS_TO_INTEGRATE);
   tcc::Correlator correlator(
       cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
       spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
       NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
 
-  printf("spatial::NR_BLOCKS_FOR_CORRELATION: %u\n",
-         spatial::NR_BLOCKS_FOR_CORRELATION);
-  printf("spatial::NR_TIMES_PER_BLOCK: %u\n", spatial::NR_TIMES_PER_BLOCK);
-  printf("NR_ACTUAL_RECEIVERS: %u\n", NR_ACTUAL_RECEIVERS);
-  printf("NR_BITS: %u\n", NR_BITS);
-  printf("Launching processing loop...\n");
+  LOG_INFO("spatial::NR_BLOCKS_FOR_CORRELATION: {}",
+           spatial::NR_BLOCKS_FOR_CORRELATION);
+  LOG_INFO("spatial::NR_TIMES_PER_BLOCK: {}", spatial::NR_TIMES_PER_BLOCK);
+  LOG_INFO("NR_ACTUAL_RECEIVERS: {}", NR_ACTUAL_RECEIVERS);
+  LOG_INFO("NR_BITS: {}", NR_BITS);
+  LOG_INFO("Launching processing loop...");
   int current_buffer = 0;
   // std::atomic is overkill right now but if we end up using multi-threading at
   // some point this sidesteps a race condition.
@@ -434,16 +435,16 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
   // Main processing loop.
   while (processing) {
     if (cudaEventQuery(input_transfer_done[current_buffer]) == cudaSuccess) {
-      printf("Beginning new processing loop....\n");
+      LOG_INFO("Beginning new processing loop....");
       int next_frame_to_capture = last_frame_processed.fetch_add(1);
-      printf("Next frame to capture is %u for stream %u\n",
-             next_frame_to_capture, current_buffer);
+      LOG_INFO("Next frame to capture is {} for stream {}",
+               next_frame_to_capture, current_buffer);
       // Use this for the lambda function to capture current value.
       if (next_frame_to_capture + 1 >= nr_aggregated_packets) {
         processing = false;
-        printf(
-            "Finishing processing loop as next frame is %u which +1 is greater "
-            "than or equal to the number of aggregated_packets %u\n",
+        LOG_INFO(
+            "Finishing processing loop as next frame is {} which +1 is greater "
+            "than or equal to the number of aggregated_packets {}",
             next_frame_to_capture, nr_aggregated_packets);
       }
 
@@ -502,11 +503,11 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
       // Dump out integrated values to host
       if (current_num_correlation_units_integrated >=
           NR_CORRELATION_BLOCKS_TO_INTEGRATE - 1) {
-        printf("Dumping correlations to host...\n");
+        LOG_INFO("Dumping correlations to host...");
         int current_num_integrated_units_processed =
             num_integrated_units_processed.fetch_add(1);
-        printf("Current num integrated units processed is %u",
-               current_num_integrated_units_processed);
+        LOG_INFO("Current num integrated units processed is {}",
+                 current_num_integrated_units_processed);
         cudaDeviceSynchronize();
         for (auto i = 1; i < NR_BUFFERS; ++i) {
           accumulate_visibilities((float *)d_visibilities_accumulator[i],
@@ -598,12 +599,12 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
 
     current_buffer = (current_buffer + 1) % NR_BUFFERS;
   }
-  printf("Synchronizing...\n");
+  LOG_INFO("Synchronizing...");
   cudaDeviceSynchronize();
   int last_integrated_units_processed = num_correlation_units_integrated.load();
   if (last_integrated_units_processed > 0) {
-    printf("Doing final dump as last_integrated_units_processed is %u\n",
-           last_integrated_units_processed);
+    LOG_INFO("Doing final dump as last_integrated_units_processed is {}",
+             last_integrated_units_processed);
     // multiply by 2 for complex
     for (auto i = 1; i < NR_BUFFERS; ++i) {
       accumulate_visibilities((float *)d_visibilities_accumulator[i],
@@ -856,8 +857,8 @@ rearrange_ccglib_matrix_to_compact_format(const float *input_matrix,
 KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size)
     : port(port), buffer_size(buffer_size) {
 
-  printf("UDP Server with concurrent processing starting on port %d...\n",
-         port);
+  LOG_INFO("UDP Server with concurrent processing starting on port {}...",
+           port);
   // Create UDP socket
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
   if (sockfd < 0) {
@@ -881,11 +882,9 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size)
     close(sockfd);
   }
 
-  printf("Size of PacketPayload is %lu bytes...\n", sizeof(PacketPayload));
-  printf("Server listening on 0.0.0.0:%d\n", port);
-  printf("Press Ctrl+C to stop\n\n");
+  LOG_INFO("Size of PacketPayload is {} bytes...", sizeof(PacketPayload));
+  LOG_INFO("Server listening on 0.0.0.0:{}", port);
+  LOG_INFO("Press Ctrl+C to stop\n");
 }
 
 KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
-
-// int ProcessorState::running = 1;
