@@ -72,6 +72,8 @@ struct FinalPacketData {
   virtual size_t get_scales_element_size() = 0;
 
   virtual bool *get_arrivals_ptr() = 0;
+
+  virtual void zero_missing_packets() = 0;
 };
 
 struct LambdaFinalPacketData : public FinalPacketData {
@@ -87,6 +89,8 @@ struct LambdaFinalPacketData : public FinalPacketData {
 
   size_t get_samples_elements_size() { return sizeof(LambdaPacketSamples); };
   size_t get_scales_element_size() { return sizeof(scales); };
+
+  void zero_missing_packets() override;
 };
 
 using PacketDataStructure =

@@ -66,8 +66,9 @@ int main() {
   // Print statistics periodically
   while (state.running) {
     sleep(5);
-    LOG_INFO("Stats: Received={}, Processed={}", state.packets_received,
-             state.packets_processed);
+    // This is nice to see outside of log files.
+    std::cout << "Stats: Received=" << state.packets_received
+              << ", Processed=" << state.packets_processed << std::endl;
   }
 
   // Cleanup

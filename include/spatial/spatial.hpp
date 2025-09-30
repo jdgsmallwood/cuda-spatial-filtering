@@ -306,10 +306,6 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
       return false;
     }
     write_index.store(next_write_index, std::memory_order_release);
-    // while (d_packet_data[write_index] != nullptr &&
-    //        !d_packet_data[write_index]->processed) {
-    //   write_index = (write_index + 1) % RING_BUFFER_SIZE;
-    // }
     LOG_INFO("Next write index is...{}", next_write_index);
     return true;
   };
@@ -584,6 +580,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
           }
 
           buffers[current_buffer].is_ready = false;
+          d_samples[current_buffer]->zero_missing_packets();
           // order here is important. As the pipeline can async update
           // the start/end seqs we need to capture the
           // start_seq, then execute the pipeline, then advance using

@@ -11,13 +11,11 @@ project(
 # Only do these if this is the main project, and not if it is included through add_subdirectory
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
-  # Optionally set things like CMAKE_CXX_STANDARD, CMAKE_POSITION_INDEPENDENT_CODE here
-
   # Let's ensure -std=c++xx instead of -std=g++xx
   set(CMAKE_CXX_EXTENSIONS OFF)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_EXTENSIONS OFF)
-
+  #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 

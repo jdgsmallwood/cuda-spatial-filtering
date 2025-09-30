@@ -90,12 +90,12 @@ int send_custom_packet(int sockfd, struct sockaddr_in *server_addr,
                        const u_char *packet_data, int packet_len,
                        const int packet_count) {
 
-  PacketInfo info = get_packet_info(packet_data, packet_len);
-  if (info.payload_size <= 0) {
-    spdlog::error("No payload or invalid packet\n");
-    return -1;
-  }
   if (packet_count % 100 == 0) {
+    PacketInfo info = get_packet_info(packet_data, packet_len);
+    if (info.payload_size <= 0) {
+      spdlog::error("No payload or invalid packet\n");
+      return -1;
+    }
     spdlog::info("Packet info: sample_count=%lu, freq_channel=%u, fpga_id=%u, "
                  "payload_size=%d\n",
                  info.sample_count, info.freq_channel, info.fpga_id,
@@ -131,7 +131,6 @@ int main(int argc, char *argv[]) {
     spdlog::error("Usage: %s <pcap_file>\n", argv[0]);
     return 1;
   }
-  spdlog::info("SPDLOG LIVES");
   // Open pcap file using libpcap
   handle = pcap_open_offline(argv[1], errbuf);
   if (!handle) {
@@ -172,7 +171,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Small delay between packets
-    usleep(20); // 20us
+    usleep(5); // 5us
   }
 
   if (res == -1) {

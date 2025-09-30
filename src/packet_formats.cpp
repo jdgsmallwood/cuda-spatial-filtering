@@ -33,3 +33,17 @@ ProcessedPacket LambdaPacketEntry::parse() {
 
   return result;
 }
+
+void LambdaFinalPacketData::zero_missing_packets() {
+  for (auto i = 0; i < NR_LAMBDA_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_LAMBDA_PACKETS_FOR_CORRELATION; ++j) {
+      for (auto k = 0; k < NR_LAMBDA_FPGAS; ++k) {
+        if (arrivals[i][j][k] == 0) {
+          for (auto m = 0; m < NR_LAMBDA_RECEIVERS_PER_PACKET; ++m) {
+            scales[i][j][k * NR_LAMBDA_RECEIVERS_PER_PACKET + m] = 0;
+          }
+        }
+      }
+    }
+  }
+};
