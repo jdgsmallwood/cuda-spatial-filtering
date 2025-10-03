@@ -1,5 +1,10 @@
 #include "spatial/packet_formats.hpp"
 #include "spatial/logging.hpp"
+#include <arpa/inet.h>
+#include <cuda_runtime.h>
+#include <driver_types.h>
+#include <stdexcept>
+#include <string>
 
 ProcessedPacket LambdaPacketEntry::parse() {
   LOG_INFO("Entering parser...\n");
@@ -34,13 +39,36 @@ ProcessedPacket LambdaPacketEntry::parse() {
   return result;
 }
 
+LambdaFinalPacketData::LambdaFinalPacketData() {
+  // allocate samples
+  cudaError_t err = cudaHostAlloc(
+      (void **)&samples, sizeof(LambdaPacketSamples), cudaHostAllocDefault);
+  if (err != cudaSuccess) {
+    throw std::runtime_error("cudaHostAlloc failed for samples: " +
+                             std::string(cudaGetErrorString(err)));
+  }
+
+  // allocated scales
+  err = cudaHostAlloc((void **)&scales, sizeof(LambdaScales),
+                      cudaHostAllocDefault);
+  if (err != cudaSuccess) {
+    throw std::runtime_error("cudaHostAlloc failed for scales: " +
+                             std::string(cudaGetErrorString(err)));
+  }
+};
+
+LambdaFinalPacketData::~LambdaFinalPacketData() {
+  cudaFreeHost(samples);
+  cudaFreeHost(scales);
+};
+
 void LambdaFinalPacketData::zero_missing_packets() {
   for (auto i = 0; i < NR_LAMBDA_CHANNELS; ++i) {
     for (auto j = 0; j < NR_LAMBDA_PACKETS_FOR_CORRELATION; ++j) {
       for (auto k = 0; k < NR_LAMBDA_FPGAS; ++k) {
         if (arrivals[i][j][k] == 0) {
           for (auto m = 0; m < NR_LAMBDA_RECEIVERS_PER_PACKET; ++m) {
-            scales[i][j][k * NR_LAMBDA_RECEIVERS_PER_PACKET + m] = 0;
+            *scales[i][j][k * NR_LAMBDA_RECEIVERS_PER_PACKET + m] = 0;
           }
         }
       }

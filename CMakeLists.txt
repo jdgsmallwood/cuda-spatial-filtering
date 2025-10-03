@@ -15,7 +15,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   set(CMAKE_CXX_EXTENSIONS OFF)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_EXTENSIONS OFF)
-  #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
+  set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 

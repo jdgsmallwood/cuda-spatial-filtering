@@ -242,7 +242,8 @@ typedef PacketEntry Packets[RING_BUFFER_SIZE];
 
 // forward declaration of GPUPipeline.
 class GPUPipeline;
-struct ProcessorStateBase {
+
+class ProcessorStateBase {
 public:
   int current_buffer = 0;
   std::atomic<int> write_index = 0;
@@ -261,8 +262,9 @@ public:
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
 };
-template <typename T> struct ProcessorState : public ProcessorStateBase {
+template <typename T> class ProcessorState : public ProcessorStateBase {
   // Public member variables
+public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
 
@@ -348,11 +350,12 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
                   "receiver_index {} of buffer {}",
                   packet_index, freq_channel, receiver_index,
                   (current_buffer + buffer_index) % NR_INPUT_BUFFERS);
-        std::memcpy(&(*d_samples[buffer_index])
-                         .samples[freq_channel][packet_index][receiver_index],
-                    pkt.payload->data, sizeof(PacketDataStructure));
-        std::memcpy(&(*d_samples[buffer_index])
-                         .scales[freq_channel][packet_index][receiver_index],
+        std::memcpy(
+            &(*(*d_samples[buffer_index])
+                   .samples)[freq_channel][packet_index][receiver_index],
+            pkt.payload->data, sizeof(PacketDataStructure));
+        std::memcpy(&(*(*d_samples[buffer_index])
+                           .scales)[freq_channel][packet_index][receiver_index],
                     pkt.payload->scales, sizeof(PacketScaleStructure));
         d_samples[buffer_index]
             ->arrivals[freq_channel][packet_index][fpga_index] = true;
@@ -442,8 +445,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     LOG_INFO("advancing to next buffer...");
     int next_highest_start_seq = -1;
     int next_highest_buffer = -1;
-    LOG_INFO("Current buffer start seq is {}",
-             buffers[current_buffer].start_seq);
+    LOG_INFO("Current buffer start seq is {}", current_buffer_start_seq);
     while (next_highest_start_seq < 0) {
       for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
         LOG_INFO("buffer {} start seq is {}.", i, buffers[i].start_seq);
@@ -524,7 +526,7 @@ template <typename T> struct ProcessorState : public ProcessorStateBase {
     File file(filename, File::Overwrite);
 
     // Pointer to your samples
-    PacketSamples *samples = &d_samples[buffer_index]->samples;
+    PacketSamples *samples = d_samples[buffer_index]->samples;
 
     // Dataset shape
     std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,

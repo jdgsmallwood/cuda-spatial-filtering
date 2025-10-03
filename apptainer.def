@@ -19,7 +19,7 @@ From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
         bison \
         gdb \
         tmux \
-        include-what-you-use
+        iwyu
 
     # Install HDF5 development libraries
     apt-get install -y libhdf5-dev hdf5-tools

@@ -77,20 +77,27 @@ struct FinalPacketData {
 };
 
 struct LambdaFinalPacketData : public FinalPacketData {
-  LambdaPacketSamples samples;
-  int16_t scales[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
-                [NR_LAMBDA_ACTUAL_RECEIVERS];
+  LambdaPacketSamples *samples = nullptr;
+
+  using LambdaScales =
+      int16_t[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
+             [NR_LAMBDA_ACTUAL_RECEIVERS];
+  LambdaScales *scales = nullptr;
   bool arrivals[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
                [NR_LAMBDA_FPGAS];
 
-  void *get_samples_ptr() override { return (void *)&samples; };
-  void *get_scales_ptr() override { return (void *)&scales; };
+  void *get_samples_ptr() override { return (void *)samples; };
+  void *get_scales_ptr() override { return (void *)scales; };
   bool *get_arrivals_ptr() override { return &arrivals[0][0][0]; };
 
-  size_t get_samples_elements_size() { return sizeof(LambdaPacketSamples); };
-  size_t get_scales_element_size() { return sizeof(scales); };
+  size_t get_samples_elements_size() override {
+    return sizeof(LambdaPacketSamples);
+  };
+  size_t get_scales_element_size() override { return sizeof(scales); };
 
   void zero_missing_packets() override;
+  LambdaFinalPacketData();
+  ~LambdaFinalPacketData();
 };
 
 using PacketDataStructure =
