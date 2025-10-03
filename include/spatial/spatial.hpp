@@ -1,7 +1,6 @@
 #pragma once
 #include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
-#include "spatial/pipeline.hpp"
 #include "spatial/tcc_config.h"
 #include <complex>
 #include <cuda.h>
@@ -42,6 +41,16 @@
 #define RING_BUFFER_SIZE 1000
 #define BUFFER_SIZE 4096
 #include <cuda_fp16.h>
+
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = (call);                                                  \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr, "CUDA error in %s at %s:%d: %s\n", #call, __FILE__,      \
+              __LINE__, cudaGetErrorString(err));                              \
+      std::exit(EXIT_FAILURE);                                                 \
+    }                                                                          \
+  } while (0)
 
 namespace spatial {
 

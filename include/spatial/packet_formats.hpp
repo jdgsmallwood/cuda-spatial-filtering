@@ -60,6 +60,9 @@ typedef LambdaSample LambdaPacketSamples[NR_LAMBDA_CHANNELS]
                                         [NR_LAMBDA_TIME_STEPS_PER_PACKET]
                                         [NR_LAMBDA_ACTUAL_RECEIVERS];
 
+typedef int16_t LambdaScales[NR_LAMBDA_CHANNELS]
+                            [NR_LAMBDA_PACKETS_FOR_CORRELATION]
+                            [NR_LAMBDA_ACTUAL_RECEIVERS];
 struct FinalPacketData {
   size_t start_seq_id;
   size_t end_seq_id;
@@ -79,9 +82,6 @@ struct FinalPacketData {
 struct LambdaFinalPacketData : public FinalPacketData {
   LambdaPacketSamples *samples = nullptr;
 
-  using LambdaScales =
-      int16_t[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
-             [NR_LAMBDA_ACTUAL_RECEIVERS];
   LambdaScales *scales = nullptr;
   bool arrivals[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
                [NR_LAMBDA_FPGAS];
