@@ -9,6 +9,7 @@
 #include "ccglib/common/precision.h"
 #include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
+#include "spatial/pipeline_base.hpp"
 #include "spatial/spatial.cuh"
 #include "spatial/tensor.hpp"
 #include <atomic>
@@ -30,21 +31,6 @@
 #include <vector>
 
 #include <highfive/highfive.hpp>
-
-// Forward declaration of this.
-class ProcessorStateBase;
-struct FinalPacketData;
-
-class GPUPipeline {
-  // At some point in this class, we need to call release_buffer on
-  // ProcessorState
-public:
-  void set_state(ProcessorStateBase *state) { state_ = state; };
-  virtual void execute_pipeline(FinalPacketData *packet_data) = 0;
-
-protected:
-  ProcessorStateBase *state_;
-};
 
 template <int NR_LAMBDA_BITS, int NR_LAMBDA_TIME_STEPS_PER_PACKET,
           int NR_LAMBDA_PACKETS_FOR_CORRELATION, int NR_LAMBDA_RECEIVERS,
@@ -150,7 +136,8 @@ private:
       d_visibilities_accumulator;
   std::vector<LambdaBeamformerInput *> d_beamformer_input;
   std::vector<LambdaBeamformerOutput *> d_beamformer_output;
-  std::vector<__half *> d_samples_converted, d_weights, d_weights_updated;
+  std::vector<__half *> d_samples_converted, d_samples_converted_col_maj,
+      d_weights, d_weights_updated, d_weights_permuted;
   std::vector<LambdaScales *> d_scales;
   std::vector<float *> d_eigenvalues;
 
@@ -164,21 +151,22 @@ public:
       std::logic_error("State has not been set on GPUPipeline object!");
     }
 
-    cudaMemcpyAsync(d_samples[current_buffer], (void *)&packet_data->samples,
+    cudaMemcpyAsync(d_samples_entry[current_buffer],
+                    (void *)packet_data->get_samples_ptr(),
                     sizeof(LambdaPacketSamples), cudaMemcpyDefault,
-                    streams[current_buffer])
+                    streams[current_buffer]);
 
-        cudaLaunchHostFunc(
-            streams[current_buffer],
-            [&state_, &packet_data]() {
-              LOG_INFO("Releasing buffer #{}", packet_data->buffer_index);
-              state_->release_buffer(packet_data->buffer_index);
-            },
-            nullptr);
+    cudaLaunchHostFunc(
+        streams[current_buffer, &packet_data],
+        [this]() {
+          LOG_INFO("Releasing buffer #{}", packet_data->buffer_index);
+          state_->release_buffer(packet_data->buffer_index);
+        },
+        nullptr);
 
     correlator.launchAsync((CUstream)streams[current_buffer],
-                           (CUdeviceptr)d_visibilities[current_buffer],
-                           (CUdeviceptr)d_samples[current_buffer]);
+                           (CUdeviceptr)d_correlator_output[current_buffer],
+                           (CUdeviceptr)d_samples_entry[current_buffer]);
 
     convert_int8_to_half(
         (int8_t *)d_samples_entry[current_buffer],
@@ -186,14 +174,14 @@ public:
         /* number of samples (2x complex) */ sizeof(LambdaPacketSamples) /
             sizeof(int8_t),
         streams[current_buffer]);
-    convert_int_to_float((int *)d_visibilities[current_buffer],
+    convert_int_to_float((int *)d_correlator_output[current_buffer],
                          d_visibilities_converted[current_buffer],
                          sizeof(Visibilities) / sizeof(int32_t),
                          streams[current_buffer]);
 
     tensor_16.runPermutation(
         "packetToPlanar", alpha, d_samples_converted[current_buffer],
-        d_samples_planar[current_buffer], streams[current_buffer]);
+        d_samples_scaled[current_buffer], streams[current_buffer]);
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
                              (float *)d_visibilities_converted[current_buffer],
                              (float *)d_visibilities_permuted[current_buffer],
@@ -235,8 +223,8 @@ public:
     }
 
     tensor_16.runPermutation(
-        "consToColMajCons", alpha, d_samples_planar[current_buffer],
-        d_samples_planar_col_maj[current_buffer], streams[current_buffer]);
+        "consToColMajCons", alpha, d_samples_scaled[current_buffer],
+        d_samples_scaled_col_maj[current_buffer], streams[current_buffer]);
 
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    NR_LAMBDA_BEAMS, NR_LAMBDA_RECEIVERS, NR_LAMBDA_CHANNELS,
@@ -251,7 +239,7 @@ public:
 
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
-             (CUdeviceptr)d_samples_planar_col_maj[current_buffer],
+             (CUdeviceptr)d_samples_scaled_col_maj[current_buffer],
              (CUdeviceptr)d_beamformer_output[current_buffer]);
 
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
@@ -275,6 +263,8 @@ LambdaGPUPipeline(const int num_buffers, const LambdaBeamWeights *h_weights)
 
   streams.resize(num_buffers);
   d_weights.resize(num_buffers);
+  d_weights_update.resize(num_buffers);
+  d_weights_permuted.resize(num_buffers);
   d_samples_entry.resize(num_buffers);
   d_scales.resize(num_buffers);
   d_samples_scaled.resize(num_buffers);
@@ -290,6 +280,9 @@ LambdaGPUPipeline(const int num_buffers, const LambdaBeamWeights *h_weights)
         cudaMalloc((void **)&d_samples_scaled[i], sizeof(LambdaPacketSamples)));
     CUDA_CHECK(cudaMalloc((void **)&d_scales[i], sizeof(LambdaScales)));
     CUDA_CHECK(cudaMalloc((void **)&d_weights[i], sizeof(BeamWeights)));
+    CUDA_CHECK(
+        cudaMalloc((void **)&d_weights_permuted[i], sizeof(BeamWeights)));
+    CUDA_CHECK(cudaMalloc((void **)&d_weights_updated[i], sizeof(BeamWeights)));
     CUDA_CHECK(cudaMalloc((void **)&d_correlator_input[i],
                           sizeof(LambdaCorrelatorInput)));
     CUDA_CHECK(cudaMalloc((void **)&d_correlator_output[i],
@@ -360,6 +353,14 @@ LambdaGPUPipeline(const int num_buffers, const LambdaBeamWeights *h_weights)
   }
 
   for (auto weight : d_weights) {
+    cudaFree(weight);
+  }
+
+  for (auto weight : d_weights_updated) {
+    cudaFree(weight);
+  }
+
+  for (auto weight : d_weights_permuted) {
     cudaFree(weight);
   }
 

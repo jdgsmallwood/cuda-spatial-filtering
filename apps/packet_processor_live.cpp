@@ -1,4 +1,3 @@
-#include "spatial/ethernet.hpp"
 #include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline.hpp"
