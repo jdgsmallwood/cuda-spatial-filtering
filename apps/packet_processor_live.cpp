@@ -24,12 +24,12 @@
 void print_startup_info() {
 
   // Startup debug info
-  LOG_INFO("NR_CHANNELS: {}", NR_CHANNELS);
+  LOG_INFO("NR_CHANNELS: {}", NR_CHANNELS_DEF);
   LOG_INFO("NUM_FRAMES_PER_ITERATION: {}", NUM_FRAMES_PER_ITERATION);
   LOG_INFO("NR_TOTAL_FRAMES_PER_CHANNEL: {}", NR_TOTAL_FRAMES_PER_CHANNEL);
   LOG_INFO("NR_FPGA_SOURCES: {}", NR_FPGA_SOURCES);
-  LOG_INFO("NR_RECEIVERS: {}", NR_RECEIVERS);
-  LOG_INFO("NR_RECEIVERS_PER_PACKET: {}", NR_RECEIVERS_PER_PACKET);
+  LOG_INFO("NR_RECEIVERS: {}", NR_RECEIVERS_DEF);
+  LOG_INFO("NR_RECEIVERS_PER_PACKET: {}", NR_RECEIVERS_DEF_PER_PACKET);
   LOG_INFO("NR_PACKETS_FOR_CORRELATION: {}", NR_PACKETS_FOR_CORRELATION);
   LOG_INFO("NR_INPUT_BUFFERS: {}", NR_INPUT_BUFFERS);
   LOG_INFO("PacketDataStructure size is {}", sizeof(PacketDataStructure));
@@ -47,7 +47,27 @@ int main() {
   print_startup_info();
 
   ProcessorState<LambdaPacketStructure> state;
-  LambdaGPUPipeline pipeline;
+
+  int num_buffers = 2;
+  constexpr int num_lambda_channels = 8;
+  constexpr int nr_lambda_polarizations = 2;
+  constexpr int nr_lambda_receivers = 20;
+  constexpr int nr_lambda_beams = 8;
+  BeamWeights<num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations,
+              nr_lambda_beams>
+      h_weights;
+
+  LambdaGPUPipeline<
+      /* bits */ 8,
+      /* channels */ num_lambda_channels,
+      /* time steps per packet */ 64,
+      /* packets for correlation */ 16,
+      /*nr receivers */ 20,
+      /* padded receivers (round up to * of 32) */ 32,
+      /* nr polarizations */ 2,
+      /* nr beams */ 8,
+      /* receivers per block */ 20>
+      pipeline(num_buffers, &h_weights);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
@@ -55,11 +75,9 @@ int main() {
   KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
   LOG_INFO("Ring buffer size: {} packets\n", RING_BUFFER_SIZE);
 
-  // Start receiver thread
   std::thread receiver(
       [&socket_capture, &state]() { socket_capture.get_packets(state); });
 
-  // Start processor thread
   std::thread processor([&state]() { state.process_packets(); });
 
   // Print statistics periodically

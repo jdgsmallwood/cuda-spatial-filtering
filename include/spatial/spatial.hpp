@@ -14,8 +14,8 @@
 #include <mutex>
 
 #include <sys/time.h>
-#ifndef NR_BEAMS
-#define NR_BEAMS 2
+#ifndef NR_BEAMS_DEF
+#define NR_BEAMS_DEF 2
 #endif
 
 #ifndef NR_PACKETS_FOR_CORRELATION
@@ -55,8 +55,8 @@
 
 namespace spatial {
 
-constexpr int NR_TIMES_PER_BLOCK = 128 / NR_BITS;
-constexpr int NR_BASELINES = NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
+constexpr int NR_TIMES_PER_BLOCK = 128 / NR_BITS_DEF;
+constexpr int NR_BASELINES = NR_RECEIVERS_DEF * (NR_RECEIVERS_DEF + 1) / 2;
 constexpr int NR_ACTUAL_BASELINES =
     NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
 constexpr int NR_BLOCKS_FOR_CORRELATION =
@@ -66,19 +66,19 @@ constexpr int NR_TIME_STEPS_FOR_CORRELATION =
 
 } // namespace spatial
 
-#if NR_BITS == 4
+#if NR_BITS_DEF == 4
 typedef complex_int4_t Sample;
 typedef std::complex<int32_t> Visibility;
 constexpr tcc::Format inputFormat = tcc::Format::i4;
 #define CAST_TO_FLOAT(x) (x)
-#elif NR_BITS == 8
+#elif NR_BITS_DEF == 8
 typedef std::complex<int8_t> Sample;
 typedef std::complex<int32_t> Visibility;
 typedef int8_t Tin;
 typedef int16_t Tscale;
 constexpr tcc::Format inputFormat = tcc::Format::i8;
 #define CAST_TO_FLOAT(x) (x)
-#elif NR_BITS == 16
+#elif NR_BITS_DEF == 16
 typedef std::complex<__half> Sample;
 typedef std::complex<float> Visibility;
 typedef __half Tin;
@@ -87,22 +87,24 @@ typedef float Tscale;
 constexpr tcc::Format inputFormat = tcc::Format::fp16;
 #endif
 typedef std::complex<float> FloatVisibility;
-typedef Sample Samples[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION]
-                      [NR_RECEIVERS][NR_POLARIZATIONS]
+typedef Sample Samples[NR_CHANNELS_DEF][spatial::NR_BLOCKS_FOR_CORRELATION]
+                      [NR_RECEIVERS_DEF][NR_POLARIZATIONS_DEF]
                       [spatial::NR_TIMES_PER_BLOCK];
-typedef std::complex<__half>
-    HalfSamples[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION][NR_RECEIVERS]
-               [NR_POLARIZATIONS][spatial::NR_TIMES_PER_BLOCK];
-typedef Visibility Visibilities[NR_CHANNELS][spatial::NR_BASELINES]
-                               [NR_POLARIZATIONS][NR_POLARIZATIONS];
+typedef std::complex<__half> HalfSamples[NR_CHANNELS_DEF]
+                                        [spatial::NR_BLOCKS_FOR_CORRELATION]
+                                        [NR_RECEIVERS_DEF][NR_POLARIZATIONS_DEF]
+                                        [spatial::NR_TIMES_PER_BLOCK];
+typedef Visibility Visibilities[NR_CHANNELS_DEF][spatial::NR_BASELINES]
+                               [NR_POLARIZATIONS_DEF][NR_POLARIZATIONS_DEF];
 typedef std::complex<float>
-    FloatVisibilities[NR_CHANNELS][spatial::NR_BASELINES][NR_POLARIZATIONS]
-                     [NR_POLARIZATIONS];
-typedef std::complex<__half> BeamWeights[NR_CHANNELS][NR_POLARIZATIONS]
-                                        [NR_BEAMS][NR_RECEIVERS];
+    FloatVisibilities[NR_CHANNELS_DEF][spatial::NR_BASELINES]
+                     [NR_POLARIZATIONS_DEF][NR_POLARIZATIONS_DEF];
+typedef std::complex<__half> BeamWeightsDef[NR_CHANNELS_DEF]
+                                           [NR_POLARIZATIONS_DEF][NR_BEAMS_DEF]
+                                           [NR_RECEIVERS_DEF];
 
 typedef std::complex<float>
-    BeamformedData[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+    BeamformedData[NR_CHANNELS_DEF][NR_POLARIZATIONS_DEF][NR_BEAMS_DEF]
                   [spatial::NR_TIME_STEPS_FOR_CORRELATION];
 
 template <typename T>
@@ -142,10 +144,10 @@ inline void checkCudaCall(cudaError_t error) {
 }
 
 inline void print_nonzero_visibilities(const Visibilities *vis) {
-  for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+  for (int ch = 0; ch < NR_CHANNELS_DEF; ++ch) {
     for (int bl = 0; bl < spatial::NR_BASELINES; ++bl) {
-      for (int pol1 = 0; pol1 < NR_POLARIZATIONS; ++pol1) {
-        for (int pol2 = 0; pol2 < NR_POLARIZATIONS; ++pol2) {
+      for (int pol1 = 0; pol1 < NR_POLARIZATIONS_DEF; ++pol1) {
+        for (int pol2 = 0; pol2 < NR_POLARIZATIONS_DEF; ++pol2) {
           const Visibility v = (*vis)[ch][bl][pol1][pol2];
           if (v.real() != 0.0f || v.imag() != 0.0f) {
             std::cout << "vis[" << ch << "][" << bl << "][" << pol1 << "]["
@@ -160,10 +162,10 @@ inline void print_nonzero_visibilities(const Visibilities *vis) {
 
 inline void print_nonzero_visibilities(const Visibilities *vis,
                                        const Tscale *scales) {
-  for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+  for (int ch = 0; ch < NR_CHANNELS_DEF; ++ch) {
     for (int bl = 0; bl < spatial::NR_BASELINES; ++bl) {
-      for (int pol1 = 0; pol1 < NR_POLARIZATIONS; ++pol1) {
-        for (int pol2 = 0; pol2 < NR_POLARIZATIONS; ++pol2) {
+      for (int pol1 = 0; pol1 < NR_POLARIZATIONS_DEF; ++pol1) {
+        for (int pol2 = 0; pol2 < NR_POLARIZATIONS_DEF; ++pol2) {
           const Visibility v = (*vis)[ch][bl][pol1][pol2];
           if (v.real() != 0.0f || v.imag() != 0.0f) {
             std::cout << "vis[" << ch << "][" << bl << "][" << pol1 << "]["
@@ -178,10 +180,10 @@ inline void print_nonzero_visibilities(const Visibilities *vis,
 }
 
 inline void print_nonzero_samples(const Samples *samps) {
-  for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+  for (int ch = 0; ch < NR_CHANNELS_DEF; ++ch) {
     for (int j = 0; j < spatial::NR_BLOCKS_FOR_CORRELATION; ++j) {
-      for (int k = 0; k < NR_RECEIVERS; k++) {
-        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+      for (int k = 0; k < NR_RECEIVERS_DEF; k++) {
+        for (int pol = 0; pol < NR_POLARIZATIONS_DEF; ++pol) {
           for (int t = 0; t < spatial::NR_TIMES_PER_BLOCK; ++t) {
             const Sample s = (*samps)[ch][j][k][pol][t];
             if (CAST_TO_FLOAT(s.real()) != 0.0f ||
@@ -223,12 +225,12 @@ constexpr int NUM_ITERATIONS = 10;
 constexpr int NUM_FRAMES_PER_ITERATION = 100;
 constexpr int NR_TOTAL_FRAMES_PER_CHANNEL = 5 * NUM_FRAMES_PER_ITERATION;
 constexpr int NR_FPGA_SOURCES = 1;
-constexpr int NR_RECEIVERS_PER_PACKET = NR_RECEIVERS / NR_FPGA_SOURCES;
+constexpr int NR_RECEIVERS_DEF_PER_PACKET = NR_RECEIVERS_DEF / NR_FPGA_SOURCES;
 constexpr int NR_INPUT_BUFFERS = 50;
 constexpr int NR_BETWEEN_SAMPLES = 64;
 constexpr int MIN_FREQ_CHANNEL = 252; // this is assuming I know this...
 
-// typedef Sample Packet[NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS]
+// typedef Sample Packet[NR_RECEIVERS_DEF_PER_PACKET][NR_POLARIZATIONS_DEF]
 //                      [NR_TIME_STEPS_PER_PACKET];
 // using Tin = int8_t;
 // using Tscale = int16_t;
@@ -236,16 +238,17 @@ constexpr int NR_TIMES_PER_PACKET = 64;
 // constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int COMPLEX = 2;
 
-typedef Sample Packet[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET];
-typedef Sample PacketSamples[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+typedef Sample Packet[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_DEF_PER_PACKET];
+typedef Sample PacketSamples[NR_CHANNELS_DEF][NR_PACKETS_FOR_CORRELATION]
                             [NR_TIME_STEPS_PER_PACKET][NR_ACTUAL_RECEIVERS];
-typedef bool SampleOccupancy[NR_CHANNELS][spatial::NR_BLOCKS_FOR_CORRELATION]
-                            [NR_RECEIVERS];
+typedef bool SampleOccupancy[NR_CHANNELS_DEF]
+                            [spatial::NR_BLOCKS_FOR_CORRELATION]
+                            [NR_RECEIVERS_DEF];
 struct BufferState {
   bool is_ready;
   int start_seq;
   int end_seq;
-  std::array<bool, NR_CHANNELS> is_populated{};
+  std::array<bool, NR_CHANNELS_DEF> is_populated{};
 };
 
 typedef PacketEntry Packets[RING_BUFFER_SIZE];
@@ -259,7 +262,7 @@ public:
   std::atomic<int> write_index = 0;
   std::atomic<int> read_index = 0;
   std::array<BufferState, NR_INPUT_BUFFERS> buffers;
-  uint64_t latest_packet_received[NR_CHANNELS][NR_FPGA_SOURCES] = {};
+  uint64_t latest_packet_received[NR_CHANNELS_DEF][NR_FPGA_SOURCES] = {};
   std::vector<uint32_t> fpga_ids{};
   bool buffers_initialized = false;
   int running = 1;
@@ -355,7 +358,7 @@ public:
       }
 
       if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
-        int receiver_index = fpga_index * NR_RECEIVERS_PER_PACKET;
+        int receiver_index = fpga_index * NR_RECEIVERS_DEF_PER_PACKET;
         LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
                   "receiver_index {} of buffer {}",
                   packet_index, freq_channel, receiver_index,
@@ -488,10 +491,10 @@ public:
     }
 
     // Reset new current buffer
-    // This is just NR_CHANNELS booleans that tell us if the current
+    // This is just NR_CHANNELS_DEF booleans that tell us if the current
     // buffer has all the data it needs.
     std::memset(std::begin(buffers[current_buffer].is_populated), (int)false,
-                NR_CHANNELS);
+                NR_CHANNELS_DEF);
     LOG_INFO(
         "Current buffer is all complete. Moving to next buffer which is #{}",
         current_buffer);
@@ -506,7 +509,7 @@ public:
       return;
     }
 
-    for (auto channel = 0; channel < NR_CHANNELS; ++channel) {
+    for (auto channel = 0; channel < NR_CHANNELS_DEF; ++channel) {
       LOG_INFO("Check if buffers are complete for channel {}", channel);
 
       if (std::all_of(std::begin(latest_packet_received[channel]),
@@ -539,7 +542,7 @@ public:
     PacketSamples *samples = d_samples[buffer_index]->samples;
 
     // Dataset shape
-    std::vector<size_t> dims = {NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
+    std::vector<size_t> dims = {NR_CHANNELS_DEF, NR_PACKETS_FOR_CORRELATION,
                                 NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS};
 
     // Create dataset of complex<int8_t> (or whatever Sample is)

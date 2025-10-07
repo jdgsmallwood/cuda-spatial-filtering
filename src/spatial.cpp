@@ -201,9 +201,9 @@ void correlate(Samples *samples, Visibilities *visibilities) {
     checkCudaCall(cudaFree(0));
     LOG_INFO("Instantiating correlator...");
     tcc::Correlator correlator(
-        cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
+        cu::Device(0), inputFormat, NR_RECEIVERS_DEF, NR_CHANNELS_DEF,
         spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
-        NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+        NR_POLARIZATIONS_DEF, NR_RECEIVERS_PER_BLOCK_DEF);
 
     cudaStream_t stream;
     checkCudaCall(cudaStreamCreate(&stream));
@@ -241,9 +241,10 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
               const int nr_aggregated_packets) {
 
   constexpr int num_weights =
-      NR_BEAMS * NR_RECEIVERS * NR_POLARIZATIONS * NR_CHANNELS;
+      NR_BEAMS_DEF * NR_RECEIVERS_DEF * NR_POLARIZATIONS_DEF * NR_CHANNELS_DEF;
 
-  constexpr int num_eigen = NR_RECEIVERS * NR_CHANNELS * NR_POLARIZATIONS;
+  constexpr int num_eigen =
+      NR_RECEIVERS_DEF * NR_CHANNELS_DEF * NR_POLARIZATIONS_DEF;
   // create CUDA streams
   cudaStream_t streams[NR_BUFFERS];
   cudaEvent_t input_transfer_done[NR_BUFFERS];
@@ -256,9 +257,9 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
   // create device pointers
   Samples *d_samples[NR_BUFFERS];
 
-  // the planar data needs to be __half so if NR_BITS == 8 then
+  // the planar data needs to be __half so if NR_BITS_DEF == 8 then
   // we need to convert
-#if NR_BITS == 8
+#if NR_BITS_DEF == 8
   __half *d_samples_converted[NR_BUFFERS];
   float *d_visibilities_converted[NR_BUFFERS];
 #endif
@@ -276,7 +277,7 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
   // start with these events in done state.
   for (auto i = 0; i < NR_BUFFERS; ++i) {
     cudaMalloc((void **)&d_samples[i], sizeof(Samples));
-#if NR_BITS == 8
+#if NR_BITS_DEF == 8
     size_d_samples_planar = sizeof(HalfSamples);
     size_d_visibilities_permuted = sizeof(FloatVisibilities);
 #else
@@ -291,21 +292,22 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
                size_d_visibilities_permuted);
     cudaMalloc((void **)&d_visibilities_permuted[i],
                size_d_visibilities_permuted);
-    cudaMalloc((void **)&d_weights[i], sizeof(BeamWeights));
-    cudaMalloc((void **)&d_weights_updated[i], sizeof(BeamWeights));
-    cudaMalloc((void **)&d_weights_permuted[i], sizeof(BeamWeights));
+    cudaMalloc((void **)&d_weights[i], sizeof(BeamWeightsDef));
+    cudaMalloc((void **)&d_weights_updated[i], sizeof(BeamWeightsDef));
+    cudaMalloc((void **)&d_weights_permuted[i], sizeof(BeamWeightsDef));
     cudaMalloc((void **)&d_eigenvalues[i], sizeof(float) * num_eigen);
     cudaMalloc((void **)&d_beamformed_data[i], sizeof(BeamformedData));
     cudaMalloc((void **)&d_beamformed_data_output[i], sizeof(BeamformedData));
 
-#if NR_BITS == 8
+#if NR_BITS_DEF == 8
     cudaMalloc((void **)&d_samples_converted[i], size_d_samples_planar);
     cudaMalloc((void **)&d_visibilities_converted[i],
                size_d_visibilities_permuted);
 #endif
 
     // transfer weights
-    cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights), cudaMemcpyDefault);
+    cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeightsDef),
+               cudaMemcpyDefault);
     cudaEventRecord(input_transfer_done[i], streams[i]);
   }
 
@@ -314,11 +316,11 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
   __half *h_weights_updated, *h_weights_permuted, *h_samples_planar,
       *h_weights_check, *h_samples_planar_col_maj;
   Samples *h_samples_check;
-  cudaMallocHost(&h_weights_updated, sizeof(BeamWeights));
-  cudaMallocHost(&h_weights_permuted, sizeof(BeamWeights));
+  cudaMallocHost(&h_weights_updated, sizeof(BeamWeightsDef));
+  cudaMallocHost(&h_weights_permuted, sizeof(BeamWeightsDef));
   cudaMallocHost(&h_samples_planar, size_d_samples_planar);
   cudaMallocHost(&h_samples_planar_col_maj, size_d_samples_planar);
-  cudaMallocHost(&h_weights_check, sizeof(BeamWeights));
+  cudaMallocHost(&h_weights_check, sizeof(BeamWeightsDef));
   cudaMallocHost(&h_samples_check, sizeof(Samples));
 #endif
 
@@ -351,15 +353,15 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
   std::vector<int> modeWeightsCCGLIB{'c', 'p', 'z', 'm', 'r'};
 
   std::unordered_map<int, int64_t> extent;
-  extent['c'] = NR_CHANNELS;
+  extent['c'] = NR_CHANNELS_DEF;
   extent['b'] = spatial::NR_BLOCKS_FOR_CORRELATION;
-  extent['r'] = NR_RECEIVERS;
-  extent['p'] = NR_POLARIZATIONS;
-  extent['q'] = NR_POLARIZATIONS; // 2nd polarizations for baselines
+  extent['r'] = NR_RECEIVERS_DEF;
+  extent['p'] = NR_POLARIZATIONS_DEF;
+  extent['q'] = NR_POLARIZATIONS_DEF; // 2nd polarizations for baselines
   extent['t'] = spatial::NR_TIMES_PER_BLOCK;
   extent['z'] = 2; // real, imaginary
   extent['l'] = spatial::NR_BASELINES;
-  extent['m'] = NR_BEAMS;
+  extent['m'] = NR_BEAMS_DEF;
   extent['s'] =
       spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK;
 
@@ -390,24 +392,24 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
   tensor_32.addPermutation("beamCCGLIB", "beamOutput",
                            CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
   LOG_INFO("Initializing correlator\n");
-  LOG_INFO("NR_RECEIVERS: {}", NR_RECEIVERS);
-  LOG_INFO("NR_CHANNELS: {}", NR_CHANNELS);
+  LOG_INFO("NR_RECEIVERS_DEF: {}", NR_RECEIVERS_DEF);
+  LOG_INFO("NR_CHANNELS_DEF: {}", NR_CHANNELS_DEF);
   LOG_INFO("NR_SAMPLES_PER_CHANNEL: {}",
            spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK);
-  LOG_INFO("NR_POLARIZATIONS: {}", NR_POLARIZATIONS);
-  LOG_INFO("NR_RECEIVERS_PER_BLOCK: {}", NR_RECEIVERS_PER_BLOCK);
+  LOG_INFO("NR_POLARIZATIONS_DEF: {}", NR_POLARIZATIONS_DEF);
+  LOG_INFO("NR_RECEIVERS_PER_BLOCK_DEF: {}", NR_RECEIVERS_PER_BLOCK_DEF);
   LOG_INFO("NR_CORRELATION_BLOCKS_TO_INTEGRATE: {}",
            NR_CORRELATION_BLOCKS_TO_INTEGRATE);
   tcc::Correlator correlator(
-      cu::Device(0), inputFormat, NR_RECEIVERS, NR_CHANNELS,
+      cu::Device(0), inputFormat, NR_RECEIVERS_DEF, NR_CHANNELS_DEF,
       spatial::NR_BLOCKS_FOR_CORRELATION * spatial::NR_TIMES_PER_BLOCK,
-      NR_POLARIZATIONS, NR_RECEIVERS_PER_BLOCK);
+      NR_POLARIZATIONS_DEF, NR_RECEIVERS_PER_BLOCK_DEF);
 
   LOG_INFO("spatial::NR_BLOCKS_FOR_CORRELATION: {}",
            spatial::NR_BLOCKS_FOR_CORRELATION);
   LOG_INFO("spatial::NR_TIMES_PER_BLOCK: {}", spatial::NR_TIMES_PER_BLOCK);
   LOG_INFO("NR_ACTUAL_RECEIVERS: {}", NR_ACTUAL_RECEIVERS);
-  LOG_INFO("NR_BITS: {}", NR_BITS);
+  LOG_INFO("NR_BITS_DEF: {}", NR_BITS_DEF);
   LOG_INFO("Launching processing loop...");
   int current_buffer = 0;
   // std::atomic is overkill right now but if we end up using multi-threading at
@@ -424,9 +426,9 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
 
   for (auto i = 0; i < NR_BUFFERS; ++i) {
     gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
-        NR_CHANNELS * NR_POLARIZATIONS, NR_BEAMS,
+        NR_CHANNELS_DEF * NR_POLARIZATIONS_DEF, NR_BEAMS_DEF,
         spatial::NR_TIMES_PER_BLOCK * spatial::NR_BLOCKS_FOR_CORRELATION,
-        NR_RECEIVERS, cu_device, streams[i], ccglib::ValueType::float16,
+        NR_RECEIVERS_DEF, cu_device, streams[i], ccglib::ValueType::float16,
         ccglib::mma::basic));
   }
   // Ensure all copying is done before processing loop starts.
@@ -459,7 +461,7 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
                              (CUdeviceptr)d_visibilities[current_buffer],
                              (CUdeviceptr)d_samples[current_buffer]);
 
-#if NR_BITS == 8
+#if NR_BITS_DEF == 8
       convert_int8_to_half((int8_t *)d_samples[current_buffer],
                            d_samples_converted[current_buffer],
                            sizeof(Samples) / sizeof(int8_t),
@@ -481,7 +483,7 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
           (float *)d_visibilities_converted[current_buffer],
           (float *)d_visibilities_accumulator[current_buffer],
           2 * spatial::NR_BASELINES, streams[current_buffer]);
-#elif NR_BITS == 16
+#elif NR_BITS_DEF == 16
       tensor_16.runPermutation(
           "packetToPlanar", alpha, (__half *)d_samples[current_buffer],
           d_samples_planar[current_buffer], streams[current_buffer]);
@@ -534,15 +536,15 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
       // need to do multiple decompositions? Probably yes. We'll also need to
       // convert the visibilities from int32 -> float
 
-      // d_eigendecomposition(d_eigenvalues[current_buffer], NR_RECEIVERS,
-      //                      NR_CHANNELS, NR_POLARIZATIONS,
+      // d_eigendecomposition(d_eigenvalues[current_buffer], NR_RECEIVERS_DEF,
+      //                      NR_CHANNELS_DEF, NR_POLARIZATIONS_DEF,
       //                     d_visibilities_permuted[current_buffer],
       //                   streams[current_buffer]);
 
-#if NR_BITS == 8
+#if NR_BITS_DEF == 8
       update_weights(
           d_weights[current_buffer], d_weights_updated[current_buffer],
-          NR_BEAMS, NR_RECEIVERS, NR_CHANNELS, NR_POLARIZATIONS,
+          NR_BEAMS_DEF, NR_RECEIVERS_DEF, NR_CHANNELS_DEF, NR_POLARIZATIONS_DEF,
           d_eigenvalues[current_buffer],
           d_visibilities_converted[current_buffer], streams[current_buffer]);
 
@@ -550,7 +552,7 @@ void beamform(Samples *h_samples, std::complex<__half> *h_weights,
 
       update_weights(
           d_weights[current_buffer], d_weights_updated[current_buffer],
-          NR_BEAMS, NR_RECEIVERS, NR_CHANNELS, NR_POLARIZATIONS,
+          NR_BEAMS_DEF, NR_RECEIVERS_DEF, NR_CHANNELS_DEF, NR_POLARIZATIONS_DEF,
           d_eigenvalues[current_buffer],
           (float *)d_visibilities[current_buffer], streams[current_buffer]);
 #endif
