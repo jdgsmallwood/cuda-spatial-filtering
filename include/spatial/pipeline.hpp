@@ -108,13 +108,22 @@ private:
   // c = channel
   // b = block
   // r = receiver
+  // d = padded receivers
   // p = polarization
+  // q = second polarization
   // t = time
   // z = complex
   // l = baseline
   // m = beam
   // s = time consolidated <block x time>
-  inline static const std::vector<int> modePacket{'c', 'b', 'r', 'p', 't', 'z'};
+  inline static const std::vector<int> modePacket{'c', 'b', 't', 'r', 'p', 'z'};
+
+  inline static const std::vector<int> modePacketPadding{'r', 'c', 'b',
+                                                         't', 'p', 'z'};
+  inline static const std::vector<int> modePacketPadded{'d', 'c', 'b',
+                                                        't', 'p', 'z'};
+  inline static const std::vector<int> modeCorrelatorInput{'c', 'b', 'd',
+                                                           'p', 't', 'z'};
   inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'r', 'b', 't'};
   // We need the planar samples matrix to be in column-major memory layout
   // which is equivalent to transposing time and receiver structure here.
@@ -139,7 +148,8 @@ private:
 
       {'c', NR_LAMBDA_CHANNELS},
       {'b', NR_LAMBDA_BLOCKS_FOR_CORRELATION},
-      {'r', NR_PADDED_LAMBDA_RECEIVERS},
+      {'r', NR_LAMBDA_RECEIVERS},
+      {'d', NR_PADDED_LAMBDA_RECEIVERS},
       {'p', NR_LAMBDA_POLARIZATIONS},
       {'q', NR_LAMBDA_POLARIZATIONS}, // 2nd polarization for baselines
       {'t', NR_LAMBDA_TIMES_PER_BLOCK},
@@ -192,7 +202,7 @@ public:
 
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
-                    sizeof(LambdaPacketSamplesT<int8_t>), cudaMemcpyDefault,
+                    packet_data->get_samples_elements_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
 
     auto *ctx = new BufferReleaseContext{
@@ -368,7 +378,7 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
 
-    tcc::Format inputFormat = tcc::Format::i8;
+    tcc::Format inputFormat = tcc::Format::fp16;
     for (auto i = 0; i < num_buffers; ++i) {
       gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
           NR_LAMBDA_CHANNELS * NR_LAMBDA_POLARIZATIONS, NR_LAMBDA_BEAMS,
@@ -380,10 +390,41 @@ public:
 
     LOG_DEBUG("Copying weights...");
     for (auto i = 0; i < num_buffers; ++i) {
-
       cudaMemcpy(d_weights[i], h_weights, sizeof(LambdaBeamWeights),
                  cudaMemcpyDefault);
     }
+
+    tensor_16.addTensor(modePacket, "packet");
+    tensor_16.addTensor(modePacketPadding, "packet_padding");
+    tensor_16.addTensor(modePacketPadded, "packet_padded");
+    tensor_16.addTensor(modeCorrelatorInput, "corr_input");
+    tensor_16.addTensor(modePlanar, "planar");
+    tensor_16.addTensor(modePlanarCons, "planarCons");
+    tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
+
+    tensor_16.addTensor(modeWeightsInput, "weightsInput");
+    tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
+    tensor_32.addTensor(modeVisCorr, "visCorr");
+    tensor_32.addTensor(modeVisDecomp, "visDecomp");
+
+    tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
+    tensor_32.addTensor(modeBeamOutput, "beamOutput");
+
+    tensor_16.addPermutation("packet", "packet_padding",
+                             CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
+
+    tensor_16.addPermutation("packet_padded", "corr_input",
+                             CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
+    tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
+                             "packetToPlanar");
+    tensor_16.addPermutation("planarCons", "planarColMajCons",
+                             CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
+    tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
+                             CUTENSOR_COMPUTE_DESC_16F, "weightsInputToCCGLIB");
+    tensor_32.addPermutation("visCorr", "visDecomp", CUTENSOR_COMPUTE_DESC_32F,
+                             "visCorrToDecomp");
+    tensor_32.addPermutation("beamCCGLIB", "beamOutput",
+                             CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
   };
   ~LambdaGPUPipeline() {
 
