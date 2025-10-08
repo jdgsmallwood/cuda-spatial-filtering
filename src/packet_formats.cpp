@@ -41,20 +41,11 @@ ProcessedPacket LambdaPacketEntry::parse() {
 
 LambdaFinalPacketData::LambdaFinalPacketData() {
   // allocate samples
-  cudaError_t err = cudaHostAlloc(
-      (void **)&samples, sizeof(LambdaPacketSamples), cudaHostAllocDefault);
-  if (err != cudaSuccess) {
-    throw std::runtime_error("cudaHostAlloc failed for samples: " +
-                             std::string(cudaGetErrorString(err)));
-  }
-
-  // allocated scales
-  err = cudaHostAlloc((void **)&scales, sizeof(LambdaScales),
-                      cudaHostAllocDefault);
-  if (err != cudaSuccess) {
-    throw std::runtime_error("cudaHostAlloc failed for scales: " +
-                             std::string(cudaGetErrorString(err)));
-  }
+  CUDA_CHECK(cudaHostAlloc((void **)&samples, sizeof(LambdaPacketSamples),
+                           cudaHostAllocDefault));
+  // allocate scales
+  CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(LambdaScales),
+                           cudaHostAllocDefault));
 };
 
 LambdaFinalPacketData::~LambdaFinalPacketData() {
@@ -68,7 +59,9 @@ void LambdaFinalPacketData::zero_missing_packets() {
       for (auto k = 0; k < NR_LAMBDA_FPGAS; ++k) {
         if (arrivals[i][j][k] == 0) {
           for (auto m = 0; m < NR_LAMBDA_RECEIVERS_PER_PACKET; ++m) {
-            *scales[i][j][k * NR_LAMBDA_RECEIVERS_PER_PACKET + m] = 0;
+            for (auto n = 0; n < NR_LAMBDA_POLARIZATIONS; ++n) {
+              *scales[i][j][k * NR_LAMBDA_RECEIVERS_PER_PACKET + m][n] = 0;
+            }
           }
         }
       }

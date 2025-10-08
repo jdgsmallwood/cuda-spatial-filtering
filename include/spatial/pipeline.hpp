@@ -76,17 +76,17 @@ private:
   static constexpr int NR_EIGENVALUES =
       NR_PADDED_LAMBDA_RECEIVERS * NR_LAMBDA_CHANNELS * NR_LAMBDA_POLARIZATIONS;
 
-  static __half alpha;
+  inline static const __half alpha = __float2half(1.0f);
   static constexpr float alpha_32 = 1.0f;
 
   using LambdaCorrelatorInput =
-      std::complex<int8_t>[NR_LAMBDA_CHANNELS][NR_LAMBDA_BLOCKS_FOR_CORRELATION]
-                          [NR_PADDED_LAMBDA_RECEIVERS][NR_LAMBDA_POLARIZATIONS]
-                          [NR_LAMBDA_TIMES_PER_BLOCK];
+      __half[NR_LAMBDA_CHANNELS][NR_LAMBDA_BLOCKS_FOR_CORRELATION]
+            [NR_PADDED_LAMBDA_RECEIVERS][NR_LAMBDA_POLARIZATIONS]
+            [NR_LAMBDA_TIMES_PER_BLOCK][COMPLEX];
 
   using LambdaCorrelatorOutput =
-      std::complex<int32_t>[NR_LAMBDA_CHANNELS][NR_LAMBDA_BASELINES]
-                           [NR_LAMBDA_POLARIZATIONS][NR_LAMBDA_POLARIZATIONS];
+      float[NR_LAMBDA_CHANNELS][NR_LAMBDA_BASELINES][NR_LAMBDA_POLARIZATIONS]
+           [NR_LAMBDA_POLARIZATIONS][COMPLEX];
 
   using LambdaVisibilities =
       std::complex<float>[NR_LAMBDA_CHANNELS][NR_LAMBDA_BASELINES]
@@ -99,7 +99,7 @@ private:
 
   using LambdaBeamformerOutput =
       float[NR_LAMBDA_CHANNELS][NR_LAMBDA_POLARIZATIONS][NR_LAMBDA_BEAMS]
-           [NR_LAMBDA_TIME_STEPS_FOR_CORRELATION];
+           [NR_LAMBDA_TIME_STEPS_FOR_CORRELATION][COMPLEX];
 
   using LambdaBeamWeights =
       BeamWeights<NR_LAMBDA_CHANNELS, NR_LAMBDA_RECEIVERS,
@@ -135,7 +135,20 @@ private:
   inline static const std::vector<int> modeWeightsCCGLIB{'c', 'p', 'z', 'm',
                                                          'r'};
 
-  std::unordered_map<int, int64_t> extent;
+  inline static const std::unordered_map<int, int64_t> extent = {
+
+      {'c', NR_LAMBDA_CHANNELS},
+      {'b', NR_LAMBDA_BLOCKS_FOR_CORRELATION},
+      {'r', NR_PADDED_LAMBDA_RECEIVERS},
+      {'p', NR_LAMBDA_POLARIZATIONS},
+      {'q', NR_LAMBDA_POLARIZATIONS}, // 2nd polarization for baselines
+      {'t', NR_LAMBDA_TIMES_PER_BLOCK},
+      {'z', 2}, // real, imaginary
+      {'l', NR_LAMBDA_BASELINES},
+      {'m', NR_LAMBDA_BEAMS},
+      {'s', NR_LAMBDA_BLOCKS_FOR_CORRELATION *NR_LAMBDA_TIMES_PER_BLOCK},
+
+  };
 
   CutensorSetup tensor_16;
   CutensorSetup tensor_32;
@@ -149,7 +162,12 @@ private:
 
   tcc::Correlator correlator;
 
-  std::vector<LambdaPacketSamples *> d_samples_entry, d_samples_scaled;
+  std::vector<LambdaPacketSamplesT<int8_t> *> d_samples_entry, d_samples_scaled;
+  std::vector<LambdaPacketSamplesT<__half> *> d_samples_half;
+  std::vector<LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS> *>
+      d_samples_padded,
+      d_samples_reord; // This is not the right type for reord
+                       // - but it will do I guess. Size will be correct.
   std::vector<LambdaCorrelatorInput *> d_correlator_input;
   std::vector<LambdaCorrelatorOutput *> d_correlator_output;
 
@@ -174,7 +192,7 @@ public:
 
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
-                    sizeof(LambdaPacketSamples), cudaMemcpyDefault,
+                    sizeof(LambdaPacketSamplesT<int8_t>), cudaMemcpyDefault,
                     streams[current_buffer]);
 
     auto *ctx = new BufferReleaseContext{
@@ -186,12 +204,11 @@ public:
                            (CUdeviceptr)d_correlator_output[current_buffer],
                            (CUdeviceptr)d_samples_entry[current_buffer]);
 
-    convert_int8_to_half(
-        (int8_t *)d_samples_entry[current_buffer],
-        d_samples_converted[current_buffer],
-        /* number of samples (2x complex) */ sizeof(LambdaPacketSamples) /
-            sizeof(int8_t),
-        streams[current_buffer]);
+    convert_int8_to_half((int8_t *)d_samples_entry[current_buffer],
+                         d_samples_converted[current_buffer],
+                         /* number of samples (2x complex) */
+                         sizeof(LambdaPacketSamplesT<int8_t>) / sizeof(int8_t),
+                         streams[current_buffer]);
     convert_int_to_float((int *)d_correlator_output[current_buffer],
                          (float *)d_visibilities_converted[current_buffer],
                          sizeof(Visibilities) / sizeof(int32_t),
@@ -279,7 +296,7 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
 
-        correlator(cu::Device(0), tcc::Format::i8, NR_PADDED_LAMBDA_RECEIVERS,
+        correlator(cu::Device(0), tcc::Format::fp16, NR_PADDED_LAMBDA_RECEIVERS,
                    NR_LAMBDA_CHANNELS,
                    NR_LAMBDA_BLOCKS_FOR_CORRELATION * NR_LAMBDA_TIMES_PER_BLOCK,
                    NR_LAMBDA_POLARIZATIONS, NR_LAMBDA_RECEIVERS_PER_BLOCK),
@@ -288,9 +305,6 @@ public:
         tensor_32(extent, CUTENSOR_R_32F, 128)
 
   {
-
-    alpha = __float2half(1.0f);
-
     streams.resize(num_buffers);
     d_weights.resize(num_buffers);
     d_weights_updated.resize(num_buffers);
@@ -298,6 +312,9 @@ public:
     d_samples_entry.resize(num_buffers);
     d_scales.resize(num_buffers);
     d_samples_scaled.resize(num_buffers);
+    d_samples_half.resize(num_buffers);
+    d_samples_padded.resize(num_buffers);
+    d_samples_reord.resize(num_buffers);
     d_correlator_input.resize(num_buffers);
     d_correlator_output.resize(num_buffers);
     d_beamformer_input.resize(num_buffers);
@@ -309,9 +326,17 @@ public:
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
-                            sizeof(LambdaPacketSamples)));
+                            sizeof(LambdaPacketSamplesT<int8_t>)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_scaled[i],
-                            sizeof(LambdaPacketSamples)));
+                            sizeof(LambdaPacketSamplesT<int8_t>)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
+                            sizeof(LambdaPacketSamplesT<__half>)));
+      CUDA_CHECK(cudaMalloc(
+          (void **)&d_samples_padded[i],
+          sizeof(LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS>)));
+      CUDA_CHECK(cudaMalloc(
+          (void **)&d_samples_reord[i],
+          sizeof(LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS>)));
       CUDA_CHECK(cudaMalloc((void **)&d_scales[i], sizeof(LambdaScales)));
       CUDA_CHECK(cudaMalloc((void **)&d_weights[i], sizeof(LambdaBeamWeights)));
       CUDA_CHECK(cudaMalloc((void **)&d_weights_permuted[i],
@@ -335,20 +360,6 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_permuted[i],
                             sizeof(LambdaVisibilities)));
     }
-
-    extent['c'] = NR_LAMBDA_CHANNELS;
-    extent['b'] = NR_LAMBDA_BLOCKS_FOR_CORRELATION;
-    extent['r'] = NR_PADDED_LAMBDA_RECEIVERS;
-    extent['p'] = NR_LAMBDA_POLARIZATIONS;
-    extent['q'] = NR_LAMBDA_POLARIZATIONS; // 2nd
-                                           // polarizations
-                                           // for
-                                           // baselines
-    extent['t'] = NR_LAMBDA_TIMES_PER_BLOCK;
-    extent['z'] = 2; // real, imaginary
-    extent['l'] = NR_LAMBDA_BASELINES;
-    extent['m'] = NR_LAMBDA_BEAMS;
-    extent['s'] = NR_LAMBDA_BLOCKS_FOR_CORRELATION * NR_LAMBDA_TIMES_PER_BLOCK;
 
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
@@ -416,14 +427,3 @@ public:
     }
   };
 };
-
-template <int NR_LAMBDA_BITS, int NR_LAMBDA_CHANNELS,
-          int NR_LAMBDA_TIME_STEPS_PER_PACKET,
-          int NR_LAMBDA_PACKETS_FOR_CORRELATION, int NR_LAMBDA_RECEIVERS,
-          int NR_PADDED_LAMBDA_RECEIVERS, int NR_LAMBDA_POLARIZATIONS,
-          int NR_LAMBDA_BEAMS, int NR_LAMBDA_RECEIVERS_PER_BLOCK>
-__half LambdaGPUPipeline<NR_LAMBDA_BITS, NR_LAMBDA_CHANNELS,
-                         NR_LAMBDA_TIME_STEPS_PER_PACKET,
-                         NR_LAMBDA_PACKETS_FOR_CORRELATION, NR_LAMBDA_RECEIVERS,
-                         NR_PADDED_LAMBDA_RECEIVERS, NR_LAMBDA_POLARIZATIONS,
-                         NR_LAMBDA_BEAMS, NR_LAMBDA_RECEIVERS_PER_BLOCK>::alpha;

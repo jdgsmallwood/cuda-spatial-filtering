@@ -47,22 +47,25 @@ struct CustomHeader {
 constexpr int NR_LAMBDA_CHANNELS = 8;
 constexpr int NR_LAMBDA_PACKETS_FOR_CORRELATION = 16;
 constexpr int NR_LAMBDA_TIME_STEPS_PER_PACKET = 64;
-constexpr int NR_LAMBDA_ACTUAL_RECEIVERS = 20;
-constexpr int NR_LAMBDA_RECEIVERS_PER_PACKET = 20;
+constexpr int NR_LAMBDA_ACTUAL_RECEIVERS = 10;
+constexpr int NR_LAMBDA_POLARIZATIONS = 2;
+constexpr int NR_LAMBDA_RECEIVERS_PER_PACKET = 10;
 constexpr int NR_LAMBDA_FPGAS = 1;
 
 typedef std::complex<int8_t> LambdaSample;
 typedef LambdaSample LambdaPacket[NR_LAMBDA_TIME_STEPS_PER_PACKET]
                                  [NR_LAMBDA_RECEIVERS_PER_PACKET];
 
-typedef LambdaSample LambdaPacketSamples[NR_LAMBDA_CHANNELS]
-                                        [NR_LAMBDA_PACKETS_FOR_CORRELATION]
-                                        [NR_LAMBDA_TIME_STEPS_PER_PACKET]
-                                        [NR_LAMBDA_ACTUAL_RECEIVERS];
+template <typename T, int RECEIVERS = NR_LAMBDA_ACTUAL_RECEIVERS>
+using LambdaPacketSamplesT =
+    std::complex<T>[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
+                   [NR_LAMBDA_TIME_STEPS_PER_PACKET][RECEIVERS]
+                   [NR_LAMBDA_POLARIZATIONS];
 
-typedef int16_t LambdaScales[NR_LAMBDA_CHANNELS]
-                            [NR_LAMBDA_PACKETS_FOR_CORRELATION]
-                            [NR_LAMBDA_ACTUAL_RECEIVERS];
+typedef int16_t
+    LambdaScales[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
+                [NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
+
 struct FinalPacketData {
   size_t start_seq_id;
   size_t end_seq_id;
@@ -80,7 +83,7 @@ struct FinalPacketData {
 };
 
 struct LambdaFinalPacketData : public FinalPacketData {
-  LambdaPacketSamples *samples = nullptr;
+  LambdaPacketSamplesT<int8_t> *samples = nullptr;
 
   LambdaScales *scales = nullptr;
   bool arrivals[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
@@ -91,7 +94,7 @@ struct LambdaFinalPacketData : public FinalPacketData {
   bool *get_arrivals_ptr() override { return &arrivals[0][0][0]; };
 
   size_t get_samples_elements_size() override {
-    return sizeof(LambdaPacketSamples);
+    return sizeof(LambdaPacketSamplesT<int8_t>);
   };
   size_t get_scales_element_size() override { return sizeof(scales); };
 
@@ -102,9 +105,10 @@ struct LambdaFinalPacketData : public FinalPacketData {
 
 using PacketDataStructure =
     std::complex<int8_t>[NR_LAMBDA_TIME_STEPS_PER_PACKET]
-                        [NR_LAMBDA_ACTUAL_RECEIVERS];
+                        [NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
 
-using PacketScaleStructure = int16_t[NR_LAMBDA_ACTUAL_RECEIVERS];
+using PacketScaleStructure =
+    int16_t[NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
 
 struct PacketPayload {
   PacketScaleStructure scales;
@@ -140,7 +144,7 @@ struct LambdaPacketEntry : public PacketEntry {
 struct LambdaPacketStructure {
   using Sample = LambdaSample;
   using PacketPayloadType = PacketPayload;
-  using PacketSamplesType = LambdaPacketSamples;
+  using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using ProcessedPacketType = ProcessedPacket;
   using Packet = LambdaPacket;
   using PacketEntryType = LambdaPacketEntry;
