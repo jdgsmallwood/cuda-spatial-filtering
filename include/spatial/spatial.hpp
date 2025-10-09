@@ -27,7 +27,7 @@
 #endif
 
 #ifndef NR_ACTUAL_RECEIVERS
-#define NR_ACTUAL_RECEIVERS 20
+#define NR_ACTUAL_RECEIVERS 10
 #endif
 
 #ifndef NR_BUFFERS
@@ -240,7 +240,8 @@ constexpr int COMPLEX = 2;
 
 typedef Sample Packet[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_DEF_PER_PACKET];
 typedef Sample PacketSamples[NR_CHANNELS_DEF][NR_PACKETS_FOR_CORRELATION]
-                            [NR_TIME_STEPS_PER_PACKET][NR_ACTUAL_RECEIVERS];
+                            [NR_TIME_STEPS_PER_PACKET][NR_ACTUAL_RECEIVERS]
+                            [NR_POLARIZATIONS_DEF];
 typedef bool SampleOccupancy[NR_CHANNELS_DEF]
                             [spatial::NR_BLOCKS_FOR_CORRELATION]
                             [NR_RECEIVERS_DEF];
@@ -409,8 +410,9 @@ public:
              parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
              parsed.payload_size);
 
-    LOG_INFO("First data point...{} + {} i", parsed.payload->data[0][0].real(),
-             parsed.payload->data[0][0].imag());
+    LOG_INFO("First data point...{} + {} i",
+             parsed.payload->data[0][0][0].real(),
+             parsed.payload->data[0][0][0].imag());
 
     if (!buffers_initialized) {
       LOG_INFO("Initializing buffers as this is the first packet...");
@@ -543,7 +545,8 @@ public:
 
     // Dataset shape
     std::vector<size_t> dims = {NR_CHANNELS_DEF, NR_PACKETS_FOR_CORRELATION,
-                                NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS};
+                                NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS,
+                                NR_POLARIZATIONS_DEF};
 
     // Create dataset of complex<int8_t> (or whatever Sample is)
     DataSet dataset =

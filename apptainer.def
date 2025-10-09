@@ -61,6 +61,8 @@ From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
     set-option -g status-bg red' > /etc/tmux.conf
 %environment
     export PATH=/usr/local/bin:$PATH
+    export PATH=/usr/local/cuda-12.8/bin:$PATH
+    export PATH=/usr/local/cuda-12.8/compute-sanitizer:$PATH
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcutensor/12:$LD_LIBRARY_PATH
     export CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
 

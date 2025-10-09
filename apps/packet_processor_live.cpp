@@ -51,22 +51,22 @@ int main() {
   int num_buffers = 2;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
-  constexpr int nr_lambda_receivers = 20;
+  constexpr int nr_lambda_receivers = 10;
   constexpr int nr_lambda_beams = 8;
   BeamWeights<num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations,
               nr_lambda_beams>
       h_weights;
 
   LambdaGPUPipeline<
-      /* bits */ 8,
+      /* data input bits */ 8,
       /* channels */ num_lambda_channels,
       /* time steps per packet */ 64,
       /* packets for correlation */ 16,
-      /*nr receivers */ 20,
+      /*nr receivers */ 10,
       /* padded receivers (round up to * of 32) */ 32,
       /* nr polarizations */ 2,
       /* nr beams */ 8,
-      /* receivers per block */ 20>
+      /* receivers per block */ 32>
       pipeline(num_buffers, &h_weights);
 
   state.set_pipeline(&pipeline);
@@ -74,7 +74,7 @@ int main() {
   int port = 12345;
   KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
   LOG_INFO("Ring buffer size: {} packets\n", RING_BUFFER_SIZE);
-
+  LOG_INFO("Starting threads....");
   std::thread receiver(
       [&socket_capture, &state]() { socket_capture.get_packets(state); });
 

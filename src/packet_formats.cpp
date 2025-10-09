@@ -1,5 +1,6 @@
 #include "spatial/packet_formats.hpp"
 #include "spatial/logging.hpp"
+#include "spatial/spatial.hpp"
 #include <arpa/inet.h>
 #include <cuda_runtime.h>
 #include <driver_types.h>
@@ -41,7 +42,8 @@ ProcessedPacket LambdaPacketEntry::parse() {
 
 LambdaFinalPacketData::LambdaFinalPacketData() {
   // allocate samples
-  CUDA_CHECK(cudaHostAlloc((void **)&samples, sizeof(LambdaPacketSamples),
+  CUDA_CHECK(cudaHostAlloc((void **)&samples,
+                           sizeof(LambdaPacketSamplesT<int8_t>),
                            cudaHostAllocDefault));
   // allocate scales
   CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(LambdaScales),

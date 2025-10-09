@@ -63,7 +63,8 @@ private:
   int num_buffers;
   std::vector<cudaStream_t> streams;
 
-  static constexpr int NR_LAMBDA_TIMES_PER_BLOCK = 128 / NR_LAMBDA_BITS;
+  // We are converting it to fp16 so this should not be changable anymore.
+  static constexpr int NR_LAMBDA_TIMES_PER_BLOCK = 128 / 16; // NR_LAMBDA_BITS;
 
   static constexpr int NR_LAMBDA_BLOCKS_FOR_CORRELATION =
       NR_LAMBDA_PACKETS_FOR_CORRELATION * NR_LAMBDA_TIME_STEPS_PER_PACKET /
@@ -173,7 +174,7 @@ private:
   tcc::Correlator correlator;
 
   std::vector<LambdaPacketSamplesT<int8_t> *> d_samples_entry, d_samples_scaled;
-  std::vector<LambdaPacketSamplesT<__half> *> d_samples_half;
+  std::vector<LambdaPacketSamplesT<__half> *> d_samples_half, d_samples_padding;
   std::vector<LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS> *>
       d_samples_padded,
       d_samples_reord; // This is not the right type for reord
@@ -186,7 +187,7 @@ private:
   std::vector<LambdaBeamformerInput *> d_beamformer_input;
   std::vector<LambdaBeamformerOutput *> d_beamformer_output,
       d_beamformer_data_output;
-  std::vector<__half *> d_samples_converted, d_samples_converted_col_maj,
+  std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
       d_weights, d_weights_updated, d_weights_permuted;
   std::vector<LambdaScales *> d_scales;
   std::vector<float *> d_eigenvalues;
@@ -210,28 +211,50 @@ public:
 
     cudaLaunchHostFunc(streams[current_buffer], release_buffer_host_func, ctx);
 
-    correlator.launchAsync((CUstream)streams[current_buffer],
-                           (CUdeviceptr)d_correlator_output[current_buffer],
-                           (CUdeviceptr)d_samples_entry[current_buffer]);
+    // TODO: need to add a scale step here.
 
     convert_int8_to_half((int8_t *)d_samples_entry[current_buffer],
-                         d_samples_converted[current_buffer],
+                         (__half *)d_samples_half[current_buffer],
                          /* number of samples (2x complex) */
                          sizeof(LambdaPacketSamplesT<int8_t>) / sizeof(int8_t),
                          streams[current_buffer]);
-    convert_int_to_float((int *)d_correlator_output[current_buffer],
-                         (float *)d_visibilities_converted[current_buffer],
-                         sizeof(Visibilities) / sizeof(int32_t),
-                         streams[current_buffer]);
 
     tensor_16.runPermutation(
-        "packetToPlanar", alpha, d_samples_converted[current_buffer],
-        d_samples_scaled[current_buffer], streams[current_buffer]);
+        "packetToPadding", alpha, d_samples_half[current_buffer],
+        d_samples_padding[current_buffer], streams[current_buffer]);
+
+    // tensor copy into correct place in d_samples_padded
+    cudaMemcpyAsync(d_samples_padded[current_buffer],
+                    d_samples_padding[current_buffer],
+                    sizeof(LambdaPacketSamplesT<__half>), cudaMemcpyDefault,
+                    streams[current_buffer]);
+    cudaMemsetAsync(
+        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
+            sizeof(LambdaPacketSamplesT<__half>),
+        0,
+        sizeof(LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS>) -
+            sizeof(LambdaPacketSamplesT<__half>),
+        streams[current_buffer]);
+
+    tensor_16.runPermutation(
+        "paddedToCorrInput", alpha, d_samples_padded[current_buffer],
+        d_correlator_input[current_buffer], streams[current_buffer]);
+
+    correlator.launchAsync((CUstream)streams[current_buffer],
+                           (CUdeviceptr)d_correlator_output[current_buffer],
+                           (CUdeviceptr)d_correlator_input[current_buffer]);
+
+    // not required anymore.
+    // convert_int_to_float((int *)d_correlator_output[current_buffer],
+    //                     (float *)d_visibilities_converted[current_buffer],
+    //                     sizeof(Visibilities) / sizeof(int32_t),
+    //                     streams[current_buffer]);
+
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
-                             (float *)d_visibilities_converted[current_buffer],
+                             (float *)d_correlator_output[current_buffer],
                              (float *)d_visibilities_permuted[current_buffer],
                              streams[current_buffer]);
-    accumulate_visibilities((float *)d_visibilities_converted[current_buffer],
+    accumulate_visibilities((float *)d_correlator_output[current_buffer],
                             (float *)d_visibilities_accumulator[current_buffer],
                             2 * spatial::NR_BASELINES, streams[current_buffer]);
     int current_num_correlation_units_integrated =
@@ -268,8 +291,12 @@ public:
     }
 
     tensor_16.runPermutation(
-        "consToColMajCons", alpha, d_samples_scaled[current_buffer],
-        d_samples_converted_col_maj[current_buffer], streams[current_buffer]);
+        "packetToPlanar", alpha, d_samples_half[current_buffer],
+        d_samples_consolidated[current_buffer], streams[current_buffer]);
+    tensor_16.runPermutation("consToColMajCons", alpha,
+                             d_samples_consolidated[current_buffer],
+                             d_samples_consolidated_col_maj[current_buffer],
+                             streams[current_buffer]);
 
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    NR_LAMBDA_BEAMS, NR_LAMBDA_RECEIVERS, NR_LAMBDA_CHANNELS,
@@ -284,7 +311,7 @@ public:
 
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
-             (CUdeviceptr)d_samples_converted_col_maj[current_buffer],
+             (CUdeviceptr)d_samples_consolidated_col_maj[current_buffer],
              (CUdeviceptr)d_beamformer_output[current_buffer]);
 
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
@@ -324,6 +351,9 @@ public:
     d_samples_scaled.resize(num_buffers);
     d_samples_half.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
+    d_samples_padding.resize(num_buffers);
+    d_samples_consolidated.resize(num_buffers);
+    d_samples_consolidated_col_maj.resize(num_buffers);
     d_samples_reord.resize(num_buffers);
     d_correlator_input.resize(num_buffers);
     d_correlator_output.resize(num_buffers);
@@ -333,6 +363,7 @@ public:
     d_visibilities_accumulator.resize(num_buffers);
     d_visibilities_converted.resize(num_buffers);
     d_visibilities_permuted.resize(num_buffers);
+    d_eigenvalues.resize(num_buffers);
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
@@ -341,9 +372,16 @@ public:
                             sizeof(LambdaPacketSamplesT<int8_t>)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
                             sizeof(LambdaPacketSamplesT<__half>)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
+                            sizeof(LambdaPacketSamplesT<__half>)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
+                            sizeof(LambdaPacketSamplesT<__half>)));
       CUDA_CHECK(cudaMalloc(
           (void **)&d_samples_padded[i],
           sizeof(LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS>)));
+      CUDA_CHECK(cudaMalloc(
+          (void **)&d_samples_padding[i],
+          sizeof(LambdaPacketSamplesT<__half, NR_LAMBDA_RECEIVERS>)));
       CUDA_CHECK(cudaMalloc(
           (void **)&d_samples_reord[i],
           sizeof(LambdaPacketSamplesT<__half, NR_PADDED_LAMBDA_RECEIVERS>)));
@@ -369,6 +407,8 @@ public:
                             sizeof(LambdaVisibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_permuted[i],
                             sizeof(LambdaVisibilities)));
+      CUDA_CHECK(cudaMalloc((void **)&d_eigenvalues[i],
+                            sizeof(float) * NR_PADDED_LAMBDA_RECEIVERS));
     }
 
     last_frame_processed = 0;
@@ -465,6 +505,26 @@ public:
     }
     for (auto beamformer_output : d_beamformer_output) {
       cudaFree(beamformer_output);
+    }
+
+    for (auto samples_padding : d_samples_padding) {
+      cudaFree(samples_padding);
+    }
+
+    for (auto samples_padded : d_samples_padded) {
+      cudaFree(samples_padded);
+    }
+
+    for (auto samples_consolidated : d_samples_consolidated) {
+      cudaFree(samples_consolidated);
+    }
+
+    for (auto samples_consolidated_col_maj : d_samples_consolidated_col_maj) {
+      cudaFree(samples_consolidated_col_maj);
+    }
+
+    for (auto eigenvalues : d_eigenvalues) {
+      cudaFree(eigenvalues);
     }
   };
 };
