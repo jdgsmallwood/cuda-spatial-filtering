@@ -80,6 +80,7 @@ int main() {
 
   std::thread processor([&state]() { state.process_packets(); });
 
+  std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   while (state.running) {
     sleep(5);

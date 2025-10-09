@@ -1,10 +1,13 @@
-
 #include "spatial/tensor.hpp"
+#include "spatial/spatial.hpp"
 #include <algorithm>
 #include <cuda_fp16.h>
 #include <cutensor.h>
 #include <iostream>
+#include <numeric>
+#include <ranges>
 #include <stdexcept>
+#include <string_view>
 
 void checkCutensorStatus(cutensorStatus_t status, const char *msg) {
   if (status != CUTENSOR_STATUS_SUCCESS) {
@@ -78,12 +81,13 @@ void CutensorSetup::addTensor(const std::vector<int> &modes,
   // Create tensor descriptor
   createTensorDescriptor(*meta, reversed_modes);
 
-  std::cout << "Tensor " << name << " created with " << meta->elements
-            << " elements and size " << meta->sizeBytes << " bytes. Modes ";
-  for (auto ex : meta->modes) {
-    std::cout << ex;
-  }
-  std::cout << std::endl;
+  auto modes_str = std::accumulate(
+      meta->modes.begin(), meta->modes.end(), std::string{},
+      [](const std::string &a, int b) {
+        return a.empty() ? std::to_string(b) : a + " " + std::to_string(b);
+      });
+  LOG_INFO("Tensor {} created with {} elements and size {} bytes. Modes {}",
+           name, meta->elements, meta->sizeBytes, modes_str);
 
   // Store the tensor
   tensors[name] = std::move(meta);
@@ -130,19 +134,22 @@ void CutensorSetup::addPermutation(const std::string &fromTensorName,
     throw std::runtime_error("Failed to create execution plan");
   }
 
-  std::cout << "Created permutation from " << fromTensorName << " to "
-            << toTensorName << " with " << fromIt->second->elements << ", "
-            << toIt->second->elements << " elements and shapes (";
+  auto fromExtents = std::accumulate(
+      fromIt->second->modes.begin(), fromIt->second->modes.end(), std::string{},
+      [](const std::string &a, int b) {
+        return a.empty() ? std::to_string(b) : a + ", " + std::to_string(b);
+      });
 
-  for (auto &item : fromIt->second->modes) {
-    std::cout << extentMap[item] << ",";
-  }
-  std::cout << ") and (";
+  auto toExtents = std::accumulate(
+      toIt->second->modes.begin(), toIt->second->modes.end(), std::string{},
+      [](const std::string &a, int b) {
+        return a.empty() ? std::to_string(b) : a + ", " + std::to_string(b);
+      });
 
-  for (const auto &item : toIt->second->modes) {
-    std::cout << extentMap[item] << ",";
-  }
-  std::cout << ")\n";
+  LOG_INFO("Created permutation from {} to {} with {}, {} elements and shapes "
+           "({}) and ({}).",
+           fromTensorName, toTensorName, fromIt->second->elements,
+           toIt->second->elements, fromExtents, toExtents);
 
   // Store the operation
   ops[opName] = std::move(op);
