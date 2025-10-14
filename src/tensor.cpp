@@ -1,4 +1,5 @@
 #include "spatial/tensor.hpp"
+#include "spatial/logging.hpp"
 #include "spatial/spatial.hpp"
 #include <algorithm>
 #include <cuda_fp16.h>
@@ -7,7 +8,9 @@
 #include <numeric>
 #include <ranges>
 #include <stdexcept>
+#include <stdlib.h>
 #include <string_view>
+#include <utility>
 
 void checkCutensorStatus(cutensorStatus_t status, const char *msg) {
   if (status != CUTENSOR_STATUS_SUCCESS) {

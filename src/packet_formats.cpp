@@ -4,8 +4,6 @@
 #include <arpa/inet.h>
 #include <cuda_runtime.h>
 #include <driver_types.h>
-#include <stdexcept>
-#include <string>
 
 ProcessedPacket LambdaPacketEntry::parse() {
   LOG_INFO("Entering parser...\n");

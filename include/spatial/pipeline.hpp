@@ -33,7 +33,7 @@
 #include <highfive/highfive.hpp>
 
 template <int NR_CHANNELS, int NR_RECEIVERS, int NR_POLARIZATIONS, int NR_BEAMS>
-class BeamWeights {
+struct BeamWeights {
 
   std::complex<__half> weights[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
                               [NR_RECEIVERS];
@@ -205,20 +205,28 @@ public:
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
+    cudaMemcpyAsync(d_scales[current_buffer],
+                    (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
+                    streams[current_buffer]);
 
     auto *ctx = new BufferReleaseContext{
         .state = this->state_, .buffer_index = packet_data->buffer_index};
 
     cudaLaunchHostFunc(streams[current_buffer], release_buffer_host_func, ctx);
 
-    // TODO: need to add a scale step here.
+    scale_and_convert_to_half<
+        LambdaPacketSamplesPlanarT<int8_t>, LambdaScales,
+        LambdaPacketSamplesPlanarT<__half>, NR_LAMBDA_CHANNELS,
+        NR_LAMBDA_POLARIZATIONS, NR_LAMBDA_RECEIVERS,
+        NR_LAMBDA_TIME_STEPS_PER_PACKET, NR_LAMBDA_PACKETS_FOR_CORRELATION>(
+        (LambdaPacketSamplesPlanarT<int8_t> *)d_samples_entry[current_buffer],
+        d_scales[current_buffer],
+        (LambdaPacketSamplesPlanarT<__half> *)d_samples_half[current_buffer],
+        streams[current_buffer]);
 
-    convert_int8_to_half((int8_t *)d_samples_entry[current_buffer],
-                         (__half *)d_samples_half[current_buffer],
-                         /* number of samples (2x complex) */
-                         sizeof(LambdaPacketSamplesT<int8_t>) / sizeof(int8_t),
-                         streams[current_buffer]);
-
+    //  Reorder so that receiver is the slowest changing index so that we can
+    //  pad it out.
     tensor_16.runPermutation(
         "packetToPadding", alpha, d_samples_half[current_buffer],
         d_samples_padding[current_buffer], streams[current_buffer]);
@@ -229,6 +237,7 @@ public:
                     sizeof(LambdaPacketSamplesT<__half>), cudaMemcpyDefault,
                     streams[current_buffer]);
     cudaMemsetAsync(
+        // need to convert to char which gives in terms of bytes.
         reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
             sizeof(LambdaPacketSamplesT<__half>),
         0,
@@ -244,12 +253,6 @@ public:
                            (CUdeviceptr)d_correlator_output[current_buffer],
                            (CUdeviceptr)d_correlator_input[current_buffer]);
 
-    // not required anymore.
-    // convert_int_to_float((int *)d_correlator_output[current_buffer],
-    //                     (float *)d_visibilities_converted[current_buffer],
-    //                     sizeof(Visibilities) / sizeof(int32_t),
-    //                     streams[current_buffer]);
-
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
                              (float *)d_correlator_output[current_buffer],
                              (float *)d_visibilities_permuted[current_buffer],
@@ -264,6 +267,8 @@ public:
     // it's done.
 
     // Dump out integrated values to host
+    // Perhaps assume this is a multiple of the number of packets
+    // in the data to allow this to be checked only at the end.
     if (current_num_correlation_units_integrated >=
         NR_CORRELATION_BLOCKS_TO_INTEGRATE - 1) {
       LOG_INFO("Dumping correlations to host...");
@@ -418,7 +423,7 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
 
-    tcc::Format inputFormat = tcc::Format::fp16;
+    //    tcc::Format inputFormat = tcc::Format::fp16;
     for (auto i = 0; i < num_buffers; ++i) {
       gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
           NR_LAMBDA_CHANNELS * NR_LAMBDA_POLARIZATIONS, NR_LAMBDA_BEAMS,

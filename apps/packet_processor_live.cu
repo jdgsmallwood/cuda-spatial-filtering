@@ -57,6 +57,20 @@ int main() {
               nr_lambda_beams>
       h_weights;
 
+    for (auto i = 0; i < num_lambda_channels; ++i) {
+        for (auto j =0; j <nr_lambda_receivers; ++j) {
+            for (auto k = 0; k < nr_lambda_beams; ++ k) {
+                for (auto l = 0; l < nr_lambda_polarizations; ++l) {
+                    h_weights.weights[i][l][k][j] = 1 / nr_lambda_receivers;
+                }
+            }
+        }
+    }
+
+  
+
+
+
   LambdaGPUPipeline<
       /* data input bits */ 8,
       /* channels */ num_lambda_channels,

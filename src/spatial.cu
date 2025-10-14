@@ -87,3 +87,24 @@ void accumulate_visibilities(const float *d_visibilities, float *d_visibilities_
     
 
 }
+
+
+template<typename inputT, typename scaleT, typename outputT, size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_TIME_STEPS_PER_PACKET, size_t NR_PACKETS> 
+__global__ void scale_and_convert_to_half_kernel(const inputT *d_input, const scaleT *d_scale, const outputT *d_output)  {
+
+    int channel_idx = blockIdx.x / NR_CHANNELS;
+    int packet_idx = blockIdx.x % NR_CHANNELS;
+    int receiver_idx = threadIdx.y;
+    int polarization_idx = blockIdx.y;
+    int time_idx = threadIdx.x / 2;
+    int complex_idx = threadIdx.x % 2;
+
+    int val = static_cast<int>(d_input[channel_idx][packet_idx][time_idx][receiver_idx][polarization_idx][complex_idx]);
+    int scale_factor = static_cast<int>(d_scale[channel_idx][packet_idx][receiver_idx][polarization_idx]);
+
+    int result = val * scale_factor;
+    d_output[channel_idx][packet_idx][time_idx][receiver_idx][polarization_idx][complex_idx] = __int2half_rn(result);
+};
+
+
+

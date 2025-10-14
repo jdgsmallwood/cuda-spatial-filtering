@@ -1,5 +1,8 @@
 #include "spatial/ethernet.hpp"
-#include <pcap/pcap.h>
+#include "spatial/packet_formats.hpp"
+#include <arpa/inet.h>
+#include <stdio.h>
+
 #include <stdexcept>
 #include <vector>
 #ifndef MIN_PCAP_HEADER_SIZE

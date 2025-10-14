@@ -1,7 +1,11 @@
 #pragma once
 #include <cuda_fp16.h>
 #include <cutensor.h>
+#include <cutensor/types.h>
+#include <driver_types.h>
 #include <memory>
+#include <stddef.h>
+#include <stdint.h>
 #include <string>
 #include <unordered_map>
 #include <vector>

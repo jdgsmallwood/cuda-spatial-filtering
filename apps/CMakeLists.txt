@@ -47,7 +47,7 @@ target_link_libraries(test_cutensor_2 PRIVATE CUDA::cudart cuda cutensor spatial
 
 add_executable(
   packet_processor_live
-  ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cpp
+  ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cu
 )
 target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
 

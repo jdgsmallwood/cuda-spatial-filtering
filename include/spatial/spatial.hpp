@@ -22,8 +22,8 @@
 #define NR_PACKETS_FOR_CORRELATION 16
 #endif
 
-#ifndef NR_TIME_STEPS_PER_PACKET
-#define NR_TIME_STEPS_PER_PACKET 64
+#ifndef NR_TIME_STEPS_PER_PACKET_DEF
+#define NR_TIME_STEPS_PER_PACKET_DEF 64
 #endif
 
 #ifndef NR_ACTUAL_RECEIVERS
@@ -35,7 +35,7 @@
 #endif
 
 #ifndef NR_CORRELATION_BLOCKS_TO_INTEGRATE
-#define NR_CORRELATION_BLOCKS_TO_INTEGRATE 10
+#define NR_CORRELATION_BLOCKS_TO_INTEGRATE 100000
 #endif
 
 #define MIN_PCAP_HEADER_SIZE 64
@@ -59,10 +59,11 @@ constexpr int NR_TIMES_PER_BLOCK = 128 / NR_BITS_DEF;
 constexpr int NR_BASELINES = NR_RECEIVERS_DEF * (NR_RECEIVERS_DEF + 1) / 2;
 constexpr int NR_ACTUAL_BASELINES =
     NR_ACTUAL_RECEIVERS * (NR_ACTUAL_RECEIVERS + 1) / 2;
-constexpr int NR_BLOCKS_FOR_CORRELATION =
-    NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET / NR_TIMES_PER_BLOCK;
+constexpr int NR_BLOCKS_FOR_CORRELATION = NR_PACKETS_FOR_CORRELATION *
+                                          NR_TIME_STEPS_PER_PACKET_DEF /
+                                          NR_TIMES_PER_BLOCK;
 constexpr int NR_TIME_STEPS_FOR_CORRELATION =
-    NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+    NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET_DEF;
 
 } // namespace spatial
 
@@ -231,16 +232,17 @@ constexpr int NR_BETWEEN_SAMPLES = 64;
 constexpr int MIN_FREQ_CHANNEL = 252; // this is assuming I know this...
 
 // typedef Sample Packet[NR_RECEIVERS_DEF_PER_PACKET][NR_POLARIZATIONS_DEF]
-//                      [NR_TIME_STEPS_PER_PACKET];
+//                      [NR_TIME_STEPS_PER_PACKET_DEF];
 // using Tin = int8_t;
 // using Tscale = int16_t;
 constexpr int NR_TIMES_PER_PACKET = 64;
 // constexpr int NR_ACTUAL_RECEIVERS = 20;
 constexpr int COMPLEX = 2;
 
-typedef Sample Packet[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_DEF_PER_PACKET];
+typedef Sample Packet[NR_TIME_STEPS_PER_PACKET_DEF]
+                     [NR_RECEIVERS_DEF_PER_PACKET];
 typedef Sample PacketSamples[NR_CHANNELS_DEF][NR_PACKETS_FOR_CORRELATION]
-                            [NR_TIME_STEPS_PER_PACKET][NR_ACTUAL_RECEIVERS]
+                            [NR_TIME_STEPS_PER_PACKET_DEF][NR_ACTUAL_RECEIVERS]
                             [NR_POLARIZATIONS_DEF];
 typedef bool SampleOccupancy[NR_CHANNELS_DEF]
                             [spatial::NR_BLOCKS_FOR_CORRELATION]
@@ -251,8 +253,6 @@ struct BufferState {
   int end_seq;
   std::array<bool, NR_CHANNELS_DEF> is_populated{};
 };
-
-typedef PacketEntry Packets[RING_BUFFER_SIZE];
 
 // forward declaration of GPUPipeline.
 class GPUPipeline;
@@ -457,6 +457,8 @@ public:
     // This is not necessarily the next buffer as the buffers can be
     // updated in any order. This will be the buffer that has the next
     // highest start_seq.
+    //  I can probably use a data structure here to pop off the top
+    //  rather than checking through everything.
     LOG_INFO("advancing to next buffer...");
     int next_highest_start_seq = -1;
     int next_highest_buffer = -1;
@@ -545,8 +547,8 @@ public:
 
     // Dataset shape
     std::vector<size_t> dims = {NR_CHANNELS_DEF, NR_PACKETS_FOR_CORRELATION,
-                                NR_TIME_STEPS_PER_PACKET, NR_ACTUAL_RECEIVERS,
-                                NR_POLARIZATIONS_DEF};
+                                NR_TIME_STEPS_PER_PACKET_DEF,
+                                NR_ACTUAL_RECEIVERS, NR_POLARIZATIONS_DEF};
 
     // Create dataset of complex<int8_t> (or whatever Sample is)
     DataSet dataset =
@@ -558,7 +560,7 @@ public:
   void process_packets() {
 
     LOG_INFO("Processor thread started");
-    static bool first_written = false;
+    //    static bool first_written = false;
     int packets_processed_before_completion_check = 0;
     int current_read_index;
     while (running) {
@@ -587,10 +589,10 @@ public:
                         [](bool i) { return i; })) {
           // Send off data to be processed by CUDA pipeline.
           // Then advance to next buffer and keep iterating.
-          if (!first_written) {
-            write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
-            first_written = true;
-          }
+          // if (!first_written) {
+          //  write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
+          //  first_written = true;
+          //}
           if (pipeline_ == nullptr) {
             throw std::logic_error(
                 "Pipeline has not been set. Ensure that set_pipeline has been "

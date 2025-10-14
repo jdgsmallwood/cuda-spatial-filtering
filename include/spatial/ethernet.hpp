@@ -2,6 +2,7 @@
 #include "spatial/spatial.hpp"
 #include <cstdint>
 #include <pcap/pcap.h>
+#include <sys/types.h>
 #include <vector>
 
 struct PacketInfo {
