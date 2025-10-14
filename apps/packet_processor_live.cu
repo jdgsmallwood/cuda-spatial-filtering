@@ -19,32 +19,13 @@
 #include <thread>
 #include <unistd.h>
 
-// Processor thread - continuously processes packets
-
-void print_startup_info() {
-
-  // Startup debug info
-  LOG_INFO("NR_CHANNELS: {}", NR_CHANNELS_DEF);
-  LOG_INFO("NUM_FRAMES_PER_ITERATION: {}", NUM_FRAMES_PER_ITERATION);
-  LOG_INFO("NR_TOTAL_FRAMES_PER_CHANNEL: {}", NR_TOTAL_FRAMES_PER_CHANNEL);
-  LOG_INFO("NR_FPGA_SOURCES: {}", NR_FPGA_SOURCES);
-  LOG_INFO("NR_RECEIVERS: {}", NR_RECEIVERS_DEF);
-  LOG_INFO("NR_RECEIVERS_PER_PACKET: {}", NR_RECEIVERS_DEF_PER_PACKET);
-  LOG_INFO("NR_PACKETS_FOR_CORRELATION: {}", NR_PACKETS_FOR_CORRELATION);
-  LOG_INFO("NR_INPUT_BUFFERS: {}", NR_INPUT_BUFFERS);
-  LOG_INFO("PacketDataStructure size is {}", sizeof(PacketDataStructure));
-  LOG_INFO("PacketScaleStructure size is {}", sizeof(PacketScaleStructure));
-}
-
 int main() {
   auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
                                             "app.log", /*truncate*/ true);
   app_logger->set_level(spdlog::level::debug);
   app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 
-  // Provide it to the library
   spatial::Logger::set(app_logger);
-  print_startup_info();
 
   ProcessorState<LambdaPacketStructure> state;
 
