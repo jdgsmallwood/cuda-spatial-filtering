@@ -155,4 +155,11 @@ struct LambdaPacketStructure {
   using Packet = LambdaPacket;
   using PacketEntryType = LambdaPacketEntry;
   using PacketFinalDataType = LambdaFinalPacketData;
+
+  size_t NR_CHANNELS = 8;
+  size_t NR_FPGA_SOURCES = 1;
+  size_t NR_TIME_STEPS_PER_PACKET = 64;
+  size_t NR_RECEIVERS = 10;
+  size_t NR_POLARIZATIONS = 2;
+  size_t NR_RECEIVERS_PER_PACKET = 10;
 };

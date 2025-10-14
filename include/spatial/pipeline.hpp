@@ -193,6 +193,7 @@ private:
   std::vector<float *> d_eigenvalues;
 
   LambdaBeamWeights *h_weights;
+  size_t NR_CORRELATION_BLOCKS_TO_INTEGRATE;
 
 public:
   void execute_pipeline(FinalPacketData *packet_data) override {
@@ -259,7 +260,7 @@ public:
                              streams[current_buffer]);
     accumulate_visibilities((float *)d_correlator_output[current_buffer],
                             (float *)d_visibilities_accumulator[current_buffer],
-                            2 * spatial::NR_BASELINES, streams[current_buffer]);
+                            2 * NR_LAMBDA_BASELINES, streams[current_buffer]);
     int current_num_correlation_units_integrated =
         num_correlation_units_integrated.fetch_add(1);
 
@@ -277,17 +278,17 @@ public:
       LOG_INFO("Current num integrated units processed is {}",
                current_num_integrated_units_processed);
       cudaDeviceSynchronize();
-      for (auto i = 1; i < NR_BUFFERS; ++i) {
+      for (auto i = 1; i < num_buffers; ++i) {
         accumulate_visibilities((float *)d_visibilities_accumulator[i],
                                 (float *)d_visibilities_accumulator[0],
-                                spatial::NR_BASELINES * 2,
+                                NR_LAMBDA_BASELINES * 2,
                                 streams[current_buffer]);
       }
       // checkCudaCall(cudaMemcpyAsync(
       //     h_visibilities_output[current_num_integrated_units_processed],
       //     d_visibilities_accumulator[0], sizeof(LambdaVisibilities),
       //     cudaMemcpyDefault, streams[current_buffer]));
-      for (auto i = 0; i < NR_BUFFERS; ++i) {
+      for (auto i = 0; i < num_buffers; ++i) {
         cudaMemsetAsync(d_visibilities_accumulator[i], 0,
                         sizeof(LambdaVisibilities), streams[i]);
       }
@@ -334,9 +335,11 @@ public:
   LambdaGPUPipeline(
       const int num_buffers,
       BeamWeights<NR_LAMBDA_CHANNELS, NR_LAMBDA_RECEIVERS,
-                  NR_LAMBDA_POLARIZATIONS, NR_LAMBDA_BEAMS> *h_weights)
+                  NR_LAMBDA_POLARIZATIONS, NR_LAMBDA_BEAMS> *h_weights,
+      size_t nr_correlation_blocks_to_integrate)
 
       : num_buffers(num_buffers), h_weights(h_weights),
+        NR_CORRELATION_BLOCKS_TO_INTEGRATE(nr_correlation_blocks_to_integrate),
 
         correlator(cu::Device(0), tcc::Format::fp16, NR_PADDED_LAMBDA_RECEIVERS,
                    NR_LAMBDA_CHANNELS,

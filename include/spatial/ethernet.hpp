@@ -19,9 +19,10 @@ struct PCAPInfo {
 };
 
 PacketInfo get_packet_info(const u_char *packet, const int size);
-void process_packet(const u_char *packet, const int size, Samples *agg_samples,
-                    std::vector<Tscale> &scales_output, const int start_seq_id,
-                    const int start_freq, const int nr_time_steps_per_packet,
-                    const int nr_blocks_for_correlation,
-                    const int nr_times_per_block,
-                    const int nr_actual_receivers);
+// void process_packet(const u_char *packet, const int size, Samples
+// *agg_samples,
+//                     std::vector<Tscale> &scales_output, const int
+//                     start_seq_id, const int start_freq, const int
+//                     nr_time_steps_per_packet, const int
+//                     nr_blocks_for_correlation, const int nr_times_per_block,
+//                     const int nr_actual_receivers);

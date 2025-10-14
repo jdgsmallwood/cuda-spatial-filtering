@@ -1,8 +1,0 @@
-#pragma once
-
-#define NR_CHANNELS 3
-#define NR_SAMPLES_PER_CHANNEL 8
-#define NR_RECEIVERS 8
-#define NR_POLARIZATIONS 2
-#define NR_RECEIVERS_PER_BLOCK 64
-#define NR_BITS 16
