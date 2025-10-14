@@ -52,35 +52,30 @@ int main() {
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers = 10;
+  constexpr int nr_lambda_padded_receivers = 32;
   constexpr int nr_lambda_beams = 8;
+  constexpr int nr_lambda_time_steps_per_packet = 64;
+  constexpr int nr_lambda_receivers_per_block = 32;
+  constexpr int nr_lambda_packets_for_correlation = 16;
   BeamWeights<num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations,
               nr_lambda_beams>
       h_weights;
 
-    for (auto i = 0; i < num_lambda_channels; ++i) {
-        for (auto j =0; j <nr_lambda_receivers; ++j) {
-            for (auto k = 0; k < nr_lambda_beams; ++ k) {
-                for (auto l = 0; l < nr_lambda_polarizations; ++l) {
-                    h_weights.weights[i][l][k][j] = 1 / nr_lambda_receivers;
-                }
-            }
+  for (auto i = 0; i < num_lambda_channels; ++i) {
+    for (auto j = 0; j < nr_lambda_receivers; ++j) {
+      for (auto k = 0; k < nr_lambda_beams; ++k) {
+        for (auto l = 0; l < nr_lambda_polarizations; ++l) {
+          h_weights.weights[i][l][k][j] = 1 / nr_lambda_receivers;
         }
+      }
     }
-
-  
-
-
+  }
 
   LambdaGPUPipeline<
-      /* data input bits */ 8,
-      /* channels */ num_lambda_channels,
-      /* time steps per packet */ 64,
-      /* packets for correlation */ 16,
-      /*nr receivers */ 10,
-      /* padded receivers (round up to * of 32) */ 32,
-      /* nr polarizations */ 2,
-      /* nr beams */ 8,
-      /* receivers per block */ 32>
+      sizeof(int8_t), num_lambda_channels, nr_lambda_time_steps_per_packet,
+      nr_lambda_packets_for_correlation, nr_lambda_receivers,
+      /* padded receivers (round up to * of 32) */ nr_lambda_padded_receivers,
+      /* nr_polarizations */ 2, nr_lambda_beams, nr_lambda_receivers_per_block>
       pipeline(num_buffers, &h_weights);
 
   state.set_pipeline(&pipeline);
