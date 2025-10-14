@@ -27,8 +27,6 @@ int main() {
 
   spatial::Logger::set(app_logger);
 
-  ProcessorState<LambdaPacketStructure> state;
-
   int num_buffers = 2;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
@@ -38,6 +36,13 @@ int main() {
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation = 16;
+  constexpr int min_freq_channel = 252;
+  constexpr int nr_correlation_blocks_to_integrate = 1000000;
+
+  ProcessorState<LambdaPacketStructure> state(nr_lambda_packets_for_correlation,
+                                              nr_lambda_time_steps_per_packet,
+                                              min_freq_channel);
+
   BeamWeights<num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations,
               nr_lambda_beams>
       h_weights;
@@ -57,7 +62,7 @@ int main() {
       nr_lambda_packets_for_correlation, nr_lambda_receivers,
       /* padded receivers (round up to * of 32) */ nr_lambda_padded_receivers,
       /* nr_polarizations */ 2, nr_lambda_beams, nr_lambda_receivers_per_block>
-      pipeline(num_buffers, &h_weights);
+      pipeline(num_buffers, &h_weights, nr_correlation_blocks_to_integrate);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
