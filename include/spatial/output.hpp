@@ -1,4 +1,4 @@
-
+#include "spatial/spatial.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -14,7 +14,7 @@ public:
 };
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_BEAMS>
-class SingleHostMemoryOutput ::public Output {
+class SingleHostMemoryOutput : public Output {
 
 private:
   using BeamOutput = __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS];

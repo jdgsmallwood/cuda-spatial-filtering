@@ -14,7 +14,7 @@ target_link_libraries(CUDASpatialFilteringTests
 )
 
 add_executable(
-    CUDASpatialFilteringPipelineTests test_pipeline.cpp
+    CUDASpatialFilteringPipelineTests test_pipeline.cu
 )
 
 target_link_libraries(CUDASpatialFilteringPipelineTests
@@ -24,6 +24,8 @@ target_link_libraries(CUDASpatialFilteringPipelineTests
             CUDA::cudart
             ccglib
             HighFive::HighFive
+            cutensor
+            tcc
 )
 add_executable(
   CUDASpatialFilteringCPUTests test_packet_formats.cpp
