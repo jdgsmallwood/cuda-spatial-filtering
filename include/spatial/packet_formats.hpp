@@ -109,30 +109,33 @@ struct LambdaFinalPacketData : public FinalPacketData {
   ~LambdaFinalPacketData();
 };
 
-using PacketDataStructure =
+using LambdaPacketDataStructure =
     std::complex<int8_t>[NR_LAMBDA_TIME_STEPS_PER_PACKET]
                         [NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
 
-using PacketScaleStructure =
+using LambdaPacketScaleStructure =
     int16_t[NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
 
+template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketPayload {
   PacketScaleStructure scales;
   PacketDataStructure data;
 };
 
 // Processed packet info
+template <typename PacketScaleStructure, typename PacketDataStructure>
 struct ProcessedPacket {
   uint64_t sample_count;
   uint32_t fpga_id;
   uint16_t freq_channel;
-  PacketPayload *payload;
+  PacketPayload<PacketScaleStructure, PacketDataStructure> *payload;
   int payload_size;
   struct timeval timestamp;
   bool *original_packet_processed;
 };
 
 // Packet storage for ring buffer
+template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketEntry {
   uint8_t data[BUFFER_SIZE];
   int length;
@@ -140,18 +143,25 @@ struct PacketEntry {
   struct timeval timestamp;
   bool processed; // 0 = unprocessed, 1 = processed
 
-  virtual ProcessedPacket parse() = 0;
+  virtual ProcessedPacket<PacketScaleStructure, PacketDataStructure>
+  parse() = 0;
 };
 
-struct LambdaPacketEntry : public PacketEntry {
-  ProcessedPacket parse() override;
+struct LambdaPacketEntry : public PacketEntry<LambdaPacketScaleStructure,
+                                              LambdaPacketDataStructure> {
+  ProcessedPacket<LambdaPacketScaleStructure, LambdaPacketDataStructure>
+  parse() override;
 };
 
 struct LambdaPacketStructure {
   using Sample = LambdaSample;
-  using PacketPayloadType = PacketPayload;
+  using PacketPayloadType =
+      PacketPayload<LambdaPacketScaleStructure, LambdaPacketDataStructure>;
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
-  using ProcessedPacketType = ProcessedPacket;
+  using PacketScaleStructure = LambdaPacketScaleStructure;
+  using PacketDataStructure = LambdaPacketDataStructure;
+  using ProcessedPacketType =
+      ProcessedPacket<LambdaPacketScaleStructure, LambdaPacketDataStructure>;
   using Packet = LambdaPacket;
   using PacketEntryType = LambdaPacketEntry;
   using PacketFinalDataType = LambdaFinalPacketData;

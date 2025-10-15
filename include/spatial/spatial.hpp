@@ -127,7 +127,9 @@ public:
     LOG_INFO("Next write index is...{}", next_write_index);
     return true;
   };
-  void copy_data_to_input_buffer_if_able(ProcessedPacket &pkt) {
+  void copy_data_to_input_buffer_if_able(
+      ProcessedPacket<typename T::PacketScaleStructure,
+                      typename T::PacketDataStructure> &pkt) {
 
     auto it = std::find(fpga_ids.begin(), fpga_ids.end(), pkt.fpga_id);
     size_t fpga_index;
@@ -169,10 +171,11 @@ public:
         std::memcpy(
             &(*(*d_samples[buffer_index])
                    .samples)[freq_channel][packet_index][receiver_index],
-            pkt.payload->data, sizeof(PacketDataStructure));
+            pkt.payload->data, sizeof(typename T::PacketDataStructure));
         std::memcpy(&(*(*d_samples[buffer_index])
                            .scales)[freq_channel][packet_index][receiver_index],
-                    pkt.payload->scales, sizeof(PacketScaleStructure));
+                    pkt.payload->scales,
+                    sizeof(typename T::PacketScaleStructure));
         d_samples[buffer_index]
             ->arrivals[freq_channel][packet_index][fpga_index] = true;
         LOG_DEBUG("Setting original_packet_processed as true...");
@@ -485,8 +488,6 @@ public:
       state.add_received_packet_metadata(received, client_addr);
       state.packets_received += 1;
       next_write_pointer = state.get_next_write_pointer();
-      // Store in ring buffer
-      // store_packet(buffer, received, &client_addr, state);
     }
 
     LOG_INFO("Receiver thread exiting");

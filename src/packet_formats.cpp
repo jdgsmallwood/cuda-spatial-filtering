@@ -5,9 +5,11 @@
 #include <cuda_runtime.h>
 #include <driver_types.h>
 
-ProcessedPacket LambdaPacketEntry::parse() {
+ProcessedPacket<LambdaPacketScaleStructure, LambdaPacketDataStructure>
+LambdaPacketEntry::parse() {
   LOG_INFO("Entering parser...\n");
-  ProcessedPacket result = {0};
+  ProcessedPacket<LambdaPacketScaleStructure, LambdaPacketDataStructure>
+      result = {0};
 
   if (length < MIN_PCAP_HEADER_SIZE) {
     LOG_WARN("Packet too small for custom headers\n");
@@ -30,8 +32,9 @@ ProcessedPacket LambdaPacketEntry::parse() {
   result.timestamp = timestamp;
 
   // Point to payload (after headers)
-  result.payload =
-      reinterpret_cast<PacketPayload *>(data + MIN_PCAP_HEADER_SIZE);
+  result.payload = reinterpret_cast<
+      PacketPayload<LambdaPacketScaleStructure, LambdaPacketDataStructure> *>(
+      data + MIN_PCAP_HEADER_SIZE);
   result.payload_size = length - MIN_PCAP_HEADER_SIZE;
   result.original_packet_processed = &processed;
 

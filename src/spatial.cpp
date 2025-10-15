@@ -346,7 +346,6 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size)
     close(sockfd);
   }
 
-  LOG_INFO("Size of PacketPayload is {} bytes...", sizeof(PacketPayload));
   LOG_INFO("Server listening on 0.0.0.0:{}", port);
   LOG_INFO("Press Ctrl+C to stop\n");
 }

@@ -6,6 +6,7 @@
 constexpr size_t HEADER_SIZE = sizeof(EthernetHeader) + sizeof(IPHeader) +
                                sizeof(UDPHeader) + sizeof(CustomHeader);
 
+template <typename T>
 LambdaPacketEntry create_valid_test_packet(const int sample_count,
                                            const int fpga_id,
                                            const int channel) {
@@ -26,8 +27,10 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
   // 2. IP Header
   IPHeader ip = {};
   ip.version_ihl = (4 << 4) | 5; // IPv4, IHL=5
-  ip.total_length = htons(sizeof(IPHeader) + sizeof(UDPHeader) +
-                          sizeof(CustomHeader) + sizeof(PacketPayload));
+  ip.total_length =
+      htons(sizeof(IPHeader) + sizeof(UDPHeader) + sizeof(CustomHeader) +
+            sizeof(PacketPayload<typename T::PacketScaleStructure,
+                                 typename T::PacketDataStructure>));
   ip.protocol = 17;              // UDP
   ip.src_ip = htonl(0x0a000001); // 10.0.0.1
   ip.dst_ip = htonl(0x0a000002); // 10.0.0.2
@@ -39,8 +42,9 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
   UDPHeader udp = {};
   udp.src_port = htons(12345);
   udp.dst_port = htons(54321);
-  udp.length =
-      htons(sizeof(UDPHeader) + sizeof(CustomHeader) + sizeof(PacketPayload));
+  udp.length = htons(sizeof(UDPHeader) + sizeof(CustomHeader) +
+                     sizeof(PacketPayload<typename T::PacketScaleStructure,
+                                          typename T::PacketDataStructure>));
 
   std::memcpy(ptr, &udp, sizeof(udp));
   ptr += sizeof(udp);
@@ -55,16 +59,22 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
   ptr += sizeof(custom);
 
   // 5. Payload
-  PacketPayload payload = {};
+  PacketPayload<typename T::PacketScaleStructure,
+                typename T::PacketDataStructure>
+      payload = {};
   // Fill scales with incrementing numbers
-  for (int i = 0; i < NR_LAMBDA_ACTUAL_RECEIVERS; ++i) {
-    payload.scales[i] = i * 10;
+  for (int i = 0; i < T::NR_RECEIVERS; ++i) {
+    for (int j = 0; j < T::NR_POLARIZATIONS; ++j) {
+      payload.scales[i][j] = i * 10;
+    }
   }
 
   // Fill complex data with real = row, imag = col
-  for (int t = 0; t < NR_LAMBDA_TIME_STEPS_PER_PACKET; ++t) {
-    for (int r = 0; r < NR_LAMBDA_ACTUAL_RECEIVERS; ++r) {
-      payload.data[t][r] = std::complex<int8_t>(t, r);
+  for (int t = 0; t < T::NR_TIME_STEPS_PER_PACKET; ++t) {
+    for (int r = 0; r < T::NR_RECEIVERS; ++r) {
+      for (int j = 0; j < T::NR_POLARIZATIONS; ++j) {
+        payload.data[t][r][j] = std::complex<int8_t>(t, r);
+      }
     }
   }
 
@@ -80,7 +90,8 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
 }
 
 TEST(PacketFormatTests, TestValidTestPacketSize) {
-  LambdaPacketEntry test_packet = create_valid_test_packet(1, 1, 1);
+  LambdaPacketEntry test_packet =
+      create_valid_test_packet<LambdaPacketStructure>(1, 1, 1);
   ASSERT_EQ(test_packet.length, 2664);
 }
 
@@ -90,16 +101,20 @@ TEST(PacketFormatTests, TestLambdaPacketEntryParsedFormat) {
   int channel = 3;
 
   LambdaPacketEntry test_packet =
-      create_valid_test_packet(sample_count, fpga_id, channel);
+      create_valid_test_packet<LambdaPacketStructure>(sample_count, fpga_id,
+                                                      channel);
 
-  ProcessedPacket processed_packet = test_packet.parse();
+  ProcessedPacket<LambdaPacketStructure::PacketScaleStructure,
+                  LambdaPacketStructure::PacketDataStructure>
+      processed_packet = test_packet.parse();
 
   ASSERT_EQ(processed_packet.sample_count, sample_count);
   ASSERT_EQ(processed_packet.fpga_id, fpga_id);
   ASSERT_EQ(processed_packet.freq_channel, channel);
 
-  ASSERT_EQ(processed_packet.payload->scales[0], 0);
-  ASSERT_EQ(processed_packet.payload->scales[1], 10);
+  ASSERT_EQ(processed_packet.payload->scales[0][0], 0);
+  ASSERT_EQ(processed_packet.payload->scales[1][0], 10);
 
-  ASSERT_EQ(processed_packet.payload->data[0][0], std::complex<int8_t>(0, 0));
+  ASSERT_EQ(processed_packet.payload->data[0][0][0],
+            std::complex<int8_t>(0, 0));
 }
