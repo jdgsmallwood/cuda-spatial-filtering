@@ -7,6 +7,16 @@
 #define LOG_WARN(...) spatial::Logger::get()->warn(__VA_ARGS__)
 #define LOG_ERROR(...) spatial::Logger::get()->error(__VA_ARGS__)
 
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = (call);                                                  \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr, "CUDA error in %s at %s:%d: %s\n", #call, __FILE__,      \
+              __LINE__, cudaGetErrorString(err));                              \
+      std::exit(EXIT_FAILURE);                                                 \
+    }                                                                          \
+  } while (0)
+
 namespace spatial {
 
 class Logger {

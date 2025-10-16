@@ -1,10 +1,12 @@
 #pragma once
-#include <cstdint>
-#include <unistd.h>
-
+#include "spatial/logging.hpp"
 #include <complex>
+#include <cstdint>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <netinet/in.h>
 #include <sys/time.h>
+#include <unistd.h>
 #define BUFFER_SIZE 4096
 #define MIN_PCAP_HEADER_SIZE 64
 
@@ -44,34 +46,6 @@ struct CustomHeader {
 
 #pragma pack(pop)
 
-constexpr int NR_LAMBDA_CHANNELS = 8;
-constexpr int NR_LAMBDA_PACKETS_FOR_CORRELATION = 16;
-constexpr int NR_LAMBDA_TIME_STEPS_PER_PACKET = 64;
-constexpr int NR_LAMBDA_ACTUAL_RECEIVERS = 10;
-constexpr int NR_LAMBDA_POLARIZATIONS = 2;
-constexpr int NR_LAMBDA_RECEIVERS_PER_PACKET = 10;
-constexpr int NR_LAMBDA_FPGAS = 1;
-
-typedef std::complex<int8_t> LambdaSample;
-typedef LambdaSample LambdaPacket[NR_LAMBDA_TIME_STEPS_PER_PACKET]
-                                 [NR_LAMBDA_RECEIVERS_PER_PACKET];
-
-template <typename T, int RECEIVERS = NR_LAMBDA_ACTUAL_RECEIVERS>
-using LambdaPacketSamplesT =
-    std::complex<T>[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
-                   [NR_LAMBDA_TIME_STEPS_PER_PACKET][RECEIVERS]
-                   [NR_LAMBDA_POLARIZATIONS];
-
-template <typename T, int RECEIVERS = NR_LAMBDA_ACTUAL_RECEIVERS>
-using LambdaPacketSamplesPlanarT =
-    T[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
-     [NR_LAMBDA_TIME_STEPS_PER_PACKET][RECEIVERS][NR_LAMBDA_POLARIZATIONS]
-     [2]; // for complex
-
-typedef int16_t
-    LambdaScales[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
-                [NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
-
 struct FinalPacketData {
   size_t start_seq_id;
   size_t end_seq_id;
@@ -88,33 +62,56 @@ struct FinalPacketData {
   virtual void zero_missing_packets() = 0;
 };
 
+// This one needs to be like this because it will be defined in the
+// PacketStructure struct.
+template <typename PacketSamplesType, typename PacketScalesType,
+          size_t NR_CHANNELS, size_t NR_PACKETS_FOR_CORRELATION,
+          size_t NR_RECEIVERS, size_t NR_POLARIZATIONS, size_t NR_FPGAS>
 struct LambdaFinalPacketData : public FinalPacketData {
-  LambdaPacketSamplesT<int8_t> *samples = nullptr;
-
-  LambdaScales *scales = nullptr;
-  bool arrivals[NR_LAMBDA_CHANNELS][NR_LAMBDA_PACKETS_FOR_CORRELATION]
-               [NR_LAMBDA_FPGAS];
+  PacketSamplesType *samples = nullptr;
+  PacketScalesType *scales = nullptr;
+  bool arrivals[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGAS];
 
   void *get_samples_ptr() override { return (void *)samples; };
   void *get_scales_ptr() override { return (void *)scales; };
   bool *get_arrivals_ptr() override { return &arrivals[0][0][0]; };
 
   size_t get_samples_elements_size() override {
-    return sizeof(LambdaPacketSamplesT<int8_t>);
+    return sizeof(PacketSamplesType);
   };
   size_t get_scales_element_size() override { return sizeof(scales); };
 
-  void zero_missing_packets() override;
-  LambdaFinalPacketData();
-  ~LambdaFinalPacketData();
+  void zero_missing_packets() override {
+
+    for (auto i = 0; i < NR_CHANNELS; ++i) {
+      for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
+        for (auto k = 0; k < NR_FPGAS; ++k) {
+          if (arrivals[i][j][k] == 0) {
+            for (auto m = 0; m < NR_RECEIVERS; ++m) {
+              for (auto n = 0; n < NR_POLARIZATIONS; ++n) {
+                *scales[i][j][k * NR_RECEIVERS + m][n] = 0;
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  LambdaFinalPacketData() {
+
+    // allocate samples
+    CUDA_CHECK(cudaHostAlloc((void **)&samples, sizeof(PacketSamplesType),
+                             cudaHostAllocDefault));
+    // allocate scales
+    CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(PacketScalesType),
+                             cudaHostAllocDefault));
+  };
+  ~LambdaFinalPacketData() {
+
+    cudaFreeHost(samples);
+    cudaFreeHost(scales);
+  };
 };
-
-using LambdaPacketDataStructure =
-    std::complex<int8_t>[NR_LAMBDA_TIME_STEPS_PER_PACKET]
-                        [NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
-
-using LambdaPacketScaleStructure =
-    int16_t[NR_LAMBDA_ACTUAL_RECEIVERS][NR_LAMBDA_POLARIZATIONS];
 
 template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketPayload {
@@ -147,29 +144,98 @@ struct PacketEntry {
   parse() = 0;
 };
 
-struct LambdaPacketEntry : public PacketEntry<LambdaPacketScaleStructure,
-                                              LambdaPacketDataStructure> {
-  ProcessedPacket<LambdaPacketScaleStructure, LambdaPacketDataStructure>
-  parse() override;
+template <typename PacketScaleStructure, typename PacketDataStructure>
+struct LambdaPacketEntry
+    : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
+  ProcessedPacket<PacketScaleStructure, PacketDataStructure> parse() override {
+
+    LOG_INFO("Entering parser...\n");
+    ProcessedPacket<PacketScaleStructure, PacketDataStructure> result = {0};
+
+    if (this->length < MIN_PCAP_HEADER_SIZE) {
+      LOG_WARN("Packet too small for custom headers\n");
+      this->processed = true;
+      return result;
+    }
+
+    // Parse your custom packet structure
+    const EthernetHeader *eth = (const EthernetHeader *)this->data;
+    if (ntohs(eth->ethertype) != 0x0800) {
+      LOG_ERROR("Not IPv4 packet\n");
+      return result;
+    }
+
+    const CustomHeader *custom = (const CustomHeader *)(this->data + 42);
+
+    result.sample_count = custom->sample_count;
+    result.fpga_id = custom->fpga_id;
+    result.freq_channel = custom->freq_channel;
+    result.timestamp = this->timestamp;
+
+    // Point to payload (after headers)
+    result.payload = reinterpret_cast<
+        PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
+        this->data + MIN_PCAP_HEADER_SIZE);
+    result.payload_size = this->length - MIN_PCAP_HEADER_SIZE;
+    result.original_packet_processed = &this->processed;
+
+    return result;
+  };
 };
 
-struct LambdaPacketStructure {
-  using Sample = LambdaSample;
-  using PacketPayloadType =
-      PacketPayload<LambdaPacketScaleStructure, LambdaPacketDataStructure>;
-  using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
-  using PacketScaleStructure = LambdaPacketScaleStructure;
-  using PacketDataStructure = LambdaPacketDataStructure;
-  using ProcessedPacketType =
-      ProcessedPacket<LambdaPacketScaleStructure, LambdaPacketDataStructure>;
-  using Packet = LambdaPacket;
-  using PacketEntryType = LambdaPacketEntry;
-  using PacketFinalDataType = LambdaFinalPacketData;
+template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
+          size_t NR_TIME_STEPS_PER_PACKET_T, size_t NR_RECEIVERS_T,
+          size_t NR_POLARIZATIONS_T, size_t NR_RECEIVERS_PER_PACKET_T,
+          size_t NR_PACKETS_FOR_CORRELATION_T, size_t NR_BEAMS_T,
+          size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T>
 
-  static constexpr size_t NR_CHANNELS = 8;
-  static constexpr size_t NR_FPGA_SOURCES = 1;
-  static constexpr size_t NR_TIME_STEPS_PER_PACKET = 64;
-  static constexpr size_t NR_RECEIVERS = 10;
-  static constexpr size_t NR_POLARIZATIONS = 2;
-  static constexpr size_t NR_RECEIVERS_PER_PACKET = 10;
+struct LambdaConfig {
+
+  static constexpr size_t NR_CHANNELS = NR_CHANNELS_T;
+  static constexpr size_t NR_FPGA_SOURCES = NR_FPGA_SOURCES_T;
+  static constexpr size_t NR_TIME_STEPS_PER_PACKET = NR_TIME_STEPS_PER_PACKET_T;
+  static constexpr size_t NR_RECEIVERS = NR_RECEIVERS_T;
+  static constexpr size_t NR_POLARIZATIONS = NR_POLARIZATIONS_T;
+  static constexpr size_t NR_RECEIVERS_PER_PACKET = NR_RECEIVERS_PER_PACKET_T;
+  static constexpr size_t NR_PACKETS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION_T;
+  static constexpr size_t NR_BEAMS = NR_BEAMS_T;
+  static constexpr size_t NR_PADDED_RECEIVERS = NR_PADDED_RECEIVERS_T;
+  static constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK =
+      NR_PADDED_RECEIVERS_PER_BLOCK_T;
+
+  template <typename T, int RECEIVERS = NR_RECEIVERS>
+  using LambdaPacketSamplesT =
+      std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+                     [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
+  template <typename T, int RECEIVERS = NR_RECEIVERS>
+  using LambdaPacketSamplesPlanarT =
+      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_TIME_STEPS_PER_PACKET]
+       [RECEIVERS][NR_POLARIZATIONS][2]; // for complex
+
+  using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+                                  [NR_RECEIVERS][NR_POLARIZATIONS];
+  using Sample = std::complex<int8_t>;
+  using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
+  using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
+  using PaddedPacketSamplesType =
+      LambdaPacketSamplesT<__half, NR_PADDED_RECEIVERS>;
+  using PacketSamplesPlanarType = LambdaPacketSamplesPlanarT<int8_t>;
+  using HalfPacketSamplesPlanarType = LambdaPacketSamplesPlanarT<__half>;
+  using PaddedPacketSamplesPlanarType =
+      LambdaPacketSamplesPlanarT<__half, NR_PADDED_RECEIVERS>;
+  using PacketScaleStructure = int16_t[NR_RECEIVERS][NR_POLARIZATIONS];
+  using PacketDataStructure =
+      std::complex<int8_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS]
+                          [NR_POLARIZATIONS];
+  using PacketPayloadType =
+      PacketPayload<PacketScaleStructure, PacketDataStructure>;
+  using ProcessedPacketType =
+      ProcessedPacket<PacketScaleStructure, PacketDataStructure>;
+  using PacketEntryType =
+      LambdaPacketEntry<PacketScaleStructure, PacketDataStructure>;
+  using PacketFinalDataType =
+      LambdaFinalPacketData<PacketSamplesType, PacketScalesType, NR_CHANNELS,
+                            NR_PACKETS_FOR_CORRELATION, NR_RECEIVERS,
+                            NR_POLARIZATIONS, NR_FPGA_SOURCES>;
 };

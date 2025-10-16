@@ -30,7 +30,7 @@ target_link_libraries(CUDASpatialFilteringPipelineTests
 add_executable(
   CUDASpatialFilteringCPUTests test_packet_formats.cpp
 )
-target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE GTest::gtest_main spatial HighFive::HighFive)
+target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE GTest::gtest_main spatial HighFive::HighFive CUDA::cudart)
 
 
 

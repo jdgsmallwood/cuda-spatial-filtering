@@ -7,10 +7,10 @@ constexpr size_t HEADER_SIZE = sizeof(EthernetHeader) + sizeof(IPHeader) +
                                sizeof(UDPHeader) + sizeof(CustomHeader);
 
 template <typename T>
-LambdaPacketEntry create_valid_test_packet(const int sample_count,
-                                           const int fpga_id,
-                                           const int channel) {
-  LambdaPacketEntry entry;
+typename T::PacketEntryType create_valid_test_packet(const int sample_count,
+                                                     const int fpga_id,
+                                                     const int channel) {
+  typename T::PacketEntryType entry;
   memset(&entry, 0, sizeof(entry)); // Zero everything
 
   uint8_t *ptr = entry.data;
@@ -29,8 +29,7 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
   ip.version_ihl = (4 << 4) | 5; // IPv4, IHL=5
   ip.total_length =
       htons(sizeof(IPHeader) + sizeof(UDPHeader) + sizeof(CustomHeader) +
-            sizeof(PacketPayload<typename T::PacketScaleStructure,
-                                 typename T::PacketDataStructure>));
+            sizeof(typename T::PacketPayloadType));
   ip.protocol = 17;              // UDP
   ip.src_ip = htonl(0x0a000001); // 10.0.0.1
   ip.dst_ip = htonl(0x0a000002); // 10.0.0.2
@@ -43,8 +42,7 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
   udp.src_port = htons(12345);
   udp.dst_port = htons(54321);
   udp.length = htons(sizeof(UDPHeader) + sizeof(CustomHeader) +
-                     sizeof(PacketPayload<typename T::PacketScaleStructure,
-                                          typename T::PacketDataStructure>));
+                     sizeof(typename T::PacketPayloadType));
 
   std::memcpy(ptr, &udp, sizeof(udp));
   ptr += sizeof(udp);
@@ -59,9 +57,7 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
   ptr += sizeof(custom);
 
   // 5. Payload
-  PacketPayload<typename T::PacketScaleStructure,
-                typename T::PacketDataStructure>
-      payload = {};
+  typename T::PacketPayloadType payload = {};
   // Fill scales with incrementing numbers
   for (int i = 0; i < T::NR_RECEIVERS; ++i) {
     for (int j = 0; j < T::NR_POLARIZATIONS; ++j) {
@@ -90,22 +86,22 @@ LambdaPacketEntry create_valid_test_packet(const int sample_count,
 }
 
 TEST(PacketFormatTests, TestValidTestPacketSize) {
-  LambdaPacketEntry test_packet =
-      create_valid_test_packet<LambdaPacketStructure>(1, 1, 1);
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32>;
+  Config::PacketEntryType test_packet =
+      create_valid_test_packet<Config>(1, 1, 1);
   ASSERT_EQ(test_packet.length, 2664);
 }
 
 TEST(PacketFormatTests, TestLambdaPacketEntryParsedFormat) {
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32>;
   int sample_count = 1;
   int fpga_id = 2;
   int channel = 3;
 
-  LambdaPacketEntry test_packet =
-      create_valid_test_packet<LambdaPacketStructure>(sample_count, fpga_id,
-                                                      channel);
+  Config::PacketEntryType test_packet =
+      create_valid_test_packet<Config>(sample_count, fpga_id, channel);
 
-  ProcessedPacket<LambdaPacketStructure::PacketScaleStructure,
-                  LambdaPacketStructure::PacketDataStructure>
+  ProcessedPacket<Config::PacketScaleStructure, Config::PacketDataStructure>
       processed_packet = test_packet.parse();
 
   ASSERT_EQ(processed_packet.sample_count, sample_count);

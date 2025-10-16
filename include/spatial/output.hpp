@@ -13,14 +13,14 @@ public:
   virtual void register_transfer_complete(size_t block_num) = 0;
 };
 
-template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_BEAMS>
-class SingleHostMemoryOutput : public Output {
-
-private:
-  using BeamOutput = __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS];
-  BeamOutput *data;
+template <typename T> class SingleHostMemoryOutput : public Output {
 
 public:
+  using BeamOutput =
+      float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
+           [T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET][2];
+  BeamOutput *data;
+
   size_t register_block() override { return 1; };
 
   void *get_landing_pointer(size_t block_num) override { return (void *)data; };

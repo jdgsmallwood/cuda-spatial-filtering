@@ -140,6 +140,11 @@ FetchContent_MakeAvailable(HighFive)
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
 
+
+# Silence warnings from external dependencies
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/extern)
+
+
 # Testing only available if this is the main app
 # Emergency override MODERN_CMAKE_BUILD_TESTING provided as well
 if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MODERN_CMAKE_BUILD_TESTING)

@@ -19,16 +19,6 @@
 #define BUFFER_SIZE 4096
 #include <cuda_fp16.h>
 
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = (call);                                                  \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA error in %s at %s:%d: %s\n", #call, __FILE__,      \
-              __LINE__, cudaGetErrorString(err));                              \
-      std::exit(EXIT_FAILURE);                                                 \
-    }                                                                          \
-  } while (0)
-
 // template <typename T>
 // void eigendecomposition(float *h_eigenvalues, int n, const std::vector<T>
 // *A); template <typename T> void d_eigendecomposition(float *d_eigenvalues,

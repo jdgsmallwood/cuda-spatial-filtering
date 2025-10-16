@@ -47,27 +47,46 @@ struct DummyFinalPacketData : public FinalPacketData {
 };
 
 TEST(LambdaGPUPipelineTest, Ex1) {
-  constexpr size_t nr_channels = 1;
-  constexpr size_t nr_receivers = 4;
-  constexpr size_t nr_packets = 1;
-  constexpr size_t nr_time_per_packet = 8;
-  constexpr size_t nr_polarizations = 2;
-  constexpr size_t nr_beams = 1;
-  using sampleT =
-      std::complex<int8_t>[nr_channels][nr_packets][nr_time_per_packet]
-                          [nr_receivers][nr_polarizations];
-  using scaleT =
-      int16_t[nr_channels][nr_packets][nr_receivers][nr_polarizations];
+  constexpr size_t NR_CHANNELS = 1;
+  constexpr size_t NR_FPGA_SOURCES = 1;
+  constexpr size_t NR_RECEIVERS = 4;
+  constexpr size_t NR_RECEIVERS_PER_PACKET = NR_RECEIVERS;
+  constexpr size_t NR_PACKETS = 1;
+  constexpr size_t NR_TIME_STEPS_PER_PACKET = 8;
+  constexpr size_t NR_POLARIZATIONS = 2;
+  constexpr size_t NR_BEAMS = 1;
+  constexpr size_t NR_PADDED_RECEIVERS = 32;
+  constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = NR_PADDED_RECEIVERS;
+  constexpr size_t NR_PACKETS_FOR_CORRELATION = 1;
+
+  using Config =
+      LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
+                   NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
+                   NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
+                   NR_PADDED_RECEIVERS_PER_BLOCK>;
 
   FakeProcessorState state;
 
-  DummyFinalPacketData<sampleT, scaleT> packet_data;
+  DummyFinalPacketData<Config::PacketSamplesType, Config::PacketScalesType>
+      packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_PACKETS; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(1, 0);
+            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+          }
+        }
+      }
+    }
+  }
 
-  BeamWeights<nr_channels, nr_receivers, nr_polarizations, nr_beams> h_weights;
-  for (auto i = 0; i < nr_channels; ++i) {
-    for (auto j = 0; j < nr_receivers; ++j) {
-      for (auto k = 0; k < nr_polarizations; ++k) {
-        for (auto l = 0; l < nr_beams; ++l) {
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
           h_weights.weights[i][k][l][j] =
               std::complex<__half>(__float2half(1.0f), 0);
         }
@@ -75,18 +94,19 @@ TEST(LambdaGPUPipelineTest, Ex1) {
     }
   }
 
-  SingleHostMemoryOutput<nr_channels, nr_polarizations, nr_beams> output;
+  SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<sizeof(int8_t), nr_channels, nr_time_per_packet, nr_packets,
-                    nr_receivers, 32, nr_polarizations, nr_beams, nr_receivers>
-      pipeline(1, &h_weights,
-               10000 /* blocks to integrate - set high for now. */
-      );
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      10000 /* blocks to integrate - set high for now. */
+  );
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
 
   pipeline.execute_pipeline(&packet_data);
+  cudaDeviceSynchronize();
+  ASSERT_EQ(true, false);
 };
 
 // TEST(LambdaGPUPipelineTest, StateNotSetThrows) {
