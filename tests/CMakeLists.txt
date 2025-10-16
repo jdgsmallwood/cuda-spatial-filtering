@@ -14,10 +14,10 @@ target_link_libraries(CUDASpatialFilteringTests
 )
 
 add_executable(
-    CUDASpatialFilteringPipelineTests test_pipeline.cu
+    PipelineTests test_pipeline.cu
 )
 
-target_link_libraries(CUDASpatialFilteringPipelineTests
+target_link_libraries(PipelineTests
         PRIVATE 
             GTest::gtest_main
             spatial
@@ -37,4 +37,4 @@ target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE GTest::gtest_main spa
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
-gtest_discover_tests(CUDASpatialFilteringPipelineTests)
+gtest_discover_tests(PipelineTests)

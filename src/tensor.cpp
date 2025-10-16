@@ -84,11 +84,13 @@ void CutensorSetup::addTensor(const std::vector<int> &modes,
   // Create tensor descriptor
   createTensorDescriptor(*meta, reversed_modes);
 
-  auto modes_str = std::accumulate(
-      meta->modes.begin(), meta->modes.end(), std::string{},
-      [](const std::string &a, int b) {
-        return a.empty() ? std::to_string(b) : a + " " + std::to_string(b);
-      });
+  auto modes_str =
+      std::accumulate(meta->modes.begin(), meta->modes.end(), std::string{},
+                      [this](const std::string &a, int b) {
+                        return a.empty()
+                                   ? std::to_string(extentMap[b])
+                                   : a + " " + std::to_string(extentMap[b]);
+                      });
   LOG_INFO("Tensor {} created with {} elements and size {} bytes. Modes {}",
            name, meta->elements, meta->sizeBytes, modes_str);
 
@@ -139,15 +141,18 @@ void CutensorSetup::addPermutation(const std::string &fromTensorName,
 
   auto fromExtents = std::accumulate(
       fromIt->second->modes.begin(), fromIt->second->modes.end(), std::string{},
-      [](const std::string &a, int b) {
-        return a.empty() ? std::to_string(b) : a + ", " + std::to_string(b);
+      [this](const std::string &a, int b) {
+        return a.empty() ? std::to_string(extentMap[b])
+                         : a + ", " + std::to_string(extentMap[b]);
       });
 
-  auto toExtents = std::accumulate(
-      toIt->second->modes.begin(), toIt->second->modes.end(), std::string{},
-      [](const std::string &a, int b) {
-        return a.empty() ? std::to_string(b) : a + ", " + std::to_string(b);
-      });
+  auto toExtents =
+      std::accumulate(toIt->second->modes.begin(), toIt->second->modes.end(),
+                      std::string{}, [this](const std::string &a, int b) {
+                        return a.empty()
+                                   ? std::to_string(extentMap[b])
+                                   : a + ", " + std::to_string(extentMap[b]);
+                      });
 
   LOG_INFO("Created permutation from {} to {} with {}, {} elements and shapes "
            "({}) and ({}).",

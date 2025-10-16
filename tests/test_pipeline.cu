@@ -23,8 +23,9 @@ struct FakeProcessorState : public ProcessorStateBase {
 };
 
 // A fake FinalPacketData for tests, minimal stub
-template <typename sampleT, typename scaleT>
-struct DummyFinalPacketData : public FinalPacketData {
+template <typename T> struct DummyFinalPacketData : public FinalPacketData {
+  using sampleT = typename T::PacketSamplesType;
+  using scaleT = typename T::PacketScalesType;
   sampleT *samples;
   scaleT *scales;
 
@@ -67,14 +68,13 @@ TEST(LambdaGPUPipelineTest, Ex1) {
 
   FakeProcessorState state;
 
-  DummyFinalPacketData<Config::PacketSamplesType, Config::PacketScalesType>
-      packet_data;
+  DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
     for (auto j = 0; j < NR_PACKETS; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(1, 0);
+            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
           }
         }
@@ -106,7 +106,25 @@ TEST(LambdaGPUPipelineTest, Ex1) {
 
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
-  ASSERT_EQ(true, false);
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_BEAMS; ++k) {
+        for (auto l = 0;
+             l < NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET; ++l) {
+          for (auto m = 0; m < 2; ++m) {
+            float expected;
+            if (m == 0) {
+              expected = 8.0f;
+            } else {
+              expected = -8.0f;
+            }
+            ASSERT_EQ(output.data[0][i][j][k][l][m], expected);
+          }
+        }
+      }
+    }
+  }
 };
 
 // TEST(LambdaGPUPipelineTest, StateNotSetThrows) {

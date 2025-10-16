@@ -68,3 +68,26 @@ void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
                      dim3(num_threads_x, 1, 1), 0, stream>>>(d_input, d_scale,
                                                              d_output);
 }
+
+template <typename T>
+__global__ void
+debug_kernel(typename T::PacketSamplesPlanarType *d_samples_entry,
+             typename T::PacketScalesType *d_scales,
+             typename T::HalfPacketSamplesPlanarType *d_samples_half,
+             typename T::HalfPacketSamplesPlanarType *d_samples_padding,
+             typename T::PaddedPacketSamplesPlanarType *d_samples_padded) {
+  int i = 1;
+};
+
+template <typename T>
+void debug_kernel_launch(
+    typename T::PacketSamplesPlanarType *d_samples_entry,
+    typename T::PacketScalesType *d_scales,
+    typename T::HalfPacketSamplesPlanarType *d_samples_half,
+    typename T::HalfPacketSamplesPlanarType *d_samples_padding,
+    typename T::PaddedPacketSamplesPlanarType *d_samples_padded,
+    cudaStream_t stream) {
+  debug_kernel<T><<<1, 1, 0, stream>>>(d_samples_entry, d_scales,
+                                       d_samples_half, d_samples_padding,
+                                       d_samples_padded);
+};

@@ -231,8 +231,8 @@ public:
     //  Reorder so that receiver is the slowest changing index so that we can
     //  pad it out.
     tensor_16.runPermutation(
-        "packetToPadding", alpha, d_samples_half[current_buffer],
-        d_samples_padding[current_buffer], streams[current_buffer]);
+        "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
+        (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
 
     // tensor copy into correct place in d_samples_padded
     cudaMemcpyAsync(d_samples_padded[current_buffer],
@@ -249,8 +249,8 @@ public:
         streams[current_buffer]);
 
     tensor_16.runPermutation(
-        "paddedToCorrInput", alpha, d_samples_padded[current_buffer],
-        d_correlator_input[current_buffer], streams[current_buffer]);
+        "paddedToCorrInput", alpha, (__half *)d_samples_padded[current_buffer],
+        (__half *)d_correlator_input[current_buffer], streams[current_buffer]);
 
     correlator.launchAsync((CUstream)streams[current_buffer],
                            (CUdeviceptr)d_correlator_output[current_buffer],
@@ -285,6 +285,7 @@ public:
                                 (float *)d_visibilities_accumulator[0],
                                 NR_BASELINES * 2, streams[current_buffer]);
       }
+
       // checkCudaCall(cudaMemcpyAsync(
       //     h_visibilities_output[current_num_integrated_units_processed],
       //     d_visibilities_accumulator[0], sizeof(Visibilities),
@@ -297,13 +298,15 @@ public:
       num_correlation_units_integrated.store(0);
     }
     // These two can be combined.
-    tensor_16.runPermutation(
-        "packetToPlanar", alpha, d_samples_half[current_buffer],
-        d_samples_consolidated[current_buffer], streams[current_buffer]);
-    tensor_16.runPermutation("consToColMajCons", alpha,
-                             d_samples_consolidated[current_buffer],
-                             d_samples_consolidated_col_maj[current_buffer],
+    tensor_16.runPermutation("packetToPlanar", alpha,
+                             (__half *)d_samples_half[current_buffer],
+                             (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
+    tensor_16.runPermutation(
+        "consToColMajCons", alpha,
+        (__half *)d_samples_consolidated[current_buffer],
+        (__half *)d_samples_consolidated_col_maj[current_buffer],
+        streams[current_buffer]);
 
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
@@ -313,7 +316,7 @@ public:
     // this seems suboptimal - figure this out later.
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights_updated[current_buffer],
-                             d_weights_permuted[current_buffer],
+                             (__half *)d_weights_permuted[current_buffer],
                              streams[current_buffer]);
 
     (*gemm_handles[current_buffer])
@@ -342,6 +345,18 @@ public:
       cudaLaunchHostFunc(streams[current_buffer],
                          output_transfer_complete_host_func, output_ctx);
     }
+
+    debug_kernel_launch<T>(
+        (typename T::PacketSamplesPlanarType *)d_samples_entry[current_buffer],
+        (typename T::PacketScalesType *)d_scales[current_buffer],
+        (typename T::HalfPacketSamplesPlanarType *)
+            d_samples_half[current_buffer],
+        (typename T::HalfPacketSamplesPlanarType *)
+            d_samples_padding[current_buffer],
+
+        (typename T::PaddedPacketSamplesPlanarType *)
+            d_samples_padded[current_buffer],
+        streams[current_buffer]);
 
     current_buffer = (current_buffer + 1) % num_buffers;
   };
@@ -442,7 +457,6 @@ public:
           cu_device, streams[i], ccglib::ValueType::float16,
           ccglib::mma::basic));
     }
-    cudaDeviceSynchronize();
 
     LOG_DEBUG("Copying weights...");
     for (auto i = 0; i < num_buffers; ++i) {
@@ -450,6 +464,7 @@ public:
                  cudaMemcpyDefault);
     }
 
+    cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
     tensor_16.addTensor(modePacketPadded, "packet_padded");
