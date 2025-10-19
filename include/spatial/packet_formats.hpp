@@ -205,6 +205,10 @@ struct LambdaConfig {
       NR_PADDED_RECEIVERS_PER_BLOCK_T;
   static constexpr size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE =
       NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T;
+  static constexpr size_t NR_BASELINES =
+      NR_PADDED_RECEIVERS * (NR_PADDED_RECEIVERS + 1) / 2;
+  static constexpr size_t NR_BASELINES_UNPADDED =
+      NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
 
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesT =

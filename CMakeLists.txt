@@ -13,7 +13,8 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
   # Let's ensure -std=c++xx instead of -std=g++xx
   set(CMAKE_CXX_EXTENSIONS OFF)
-  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_EXTENSIONS OFF)
   set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs

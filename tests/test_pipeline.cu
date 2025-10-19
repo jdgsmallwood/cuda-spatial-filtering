@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
+#include <unordered_set>
 
 struct FakeProcessorState : public ProcessorStateBase {
   bool released = false;
@@ -110,6 +111,7 @@ TEST(LambdaGPUPipelineTest, Ex1) {
   pipeline.set_output(&output);
 
   pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
   cudaDeviceSynchronize();
 
   for (auto i = 0; i < NR_CHANNELS; ++i) {
@@ -126,6 +128,23 @@ TEST(LambdaGPUPipelineTest, Ex1) {
             }
             ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
+        }
+      }
+      // Now visibilities
+      for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
+        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+          float expected_vis;
+          if (q >= Config::NR_BASELINES_UNPADDED) {
+            expected_vis = 0;
+          } else {
+            expected_vis = 64.0f;
+          };
+          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+              << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
+              << ", p=" << p
+              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << ", expected=" << expected_vis;
+          ;
         }
       }
     }
@@ -177,6 +196,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
   pipeline.set_output(&output);
 
   pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
   cudaDeviceSynchronize();
 
   for (auto i = 0; i < NR_CHANNELS; ++i) {
@@ -197,6 +217,23 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
             }
             ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
+        }
+      }
+      // Now visibilities
+      for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
+        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+          float expected_vis;
+          if (q >= Config::NR_BASELINES_UNPADDED || j == 1 || p == 1) {
+            expected_vis = 0;
+          } else {
+            expected_vis = 64.0f;
+          };
+          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+              << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
+              << ", p=" << p
+              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << ", expected=" << expected_vis;
+          ;
         }
       }
     }
@@ -434,6 +471,279 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
             }
             ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
+        }
+      }
+    }
+  }
+};
+
+TEST(LambdaGPUPipelineTest, ScalesTest) {
+  FakeProcessorState state;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_PACKETS; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(2);
+          }
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  SingleHostMemoryOutput<Config> output;
+
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      10000 /* blocks to integrate - set high for now. */
+  );
+
+  pipeline.set_state(&state);
+  pipeline.set_output(&output);
+
+  pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_BEAMS; ++k) {
+        for (auto l = 0;
+             l < NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET; ++l) {
+          for (auto m = 0; m < 2; ++m) {
+            float expected;
+            if (m == 0) {
+              expected = 16.0f;
+            } else {
+              expected = -16.0f;
+            }
+            EXPECT_EQ(output.beam_data[0][i][j][k][l][m], expected)
+                << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
+                << ", l=" << l << ", m=" << m
+                << " → actual=" << output.beam_data[0][i][j][k][l][m]
+                << ", expected=" << expected;
+          }
+        }
+      }
+      // Now visibilities
+      for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
+        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+          float expected_vis;
+          if (q >= Config::NR_BASELINES_UNPADDED) {
+            expected_vis = 0;
+          } else {
+            expected_vis = 256.0f;
+          };
+          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+              << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
+              << ", p=" << p
+              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << ", expected=" << expected_vis;
+          ;
+        }
+      }
+    }
+  }
+};
+TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
+  FakeProcessorState state;
+
+  using Config =
+      LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
+                   NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
+                   NR_PACKETS_FOR_CORRELATION + 1, NR_BEAMS,
+                   NR_PADDED_RECEIVERS, NR_PADDED_RECEIVERS_PER_BLOCK,
+                   NR_VISIBILITIES_BEFORE_DUMP>;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < Config::NR_PACKETS_FOR_CORRELATION; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(j);
+          }
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  SingleHostMemoryOutput<Config> output;
+
+  LambdaGPUPipeline<Config> pipeline(
+      2, &h_weights, 10000 /* blocks to integrate - set high for now. */
+  );
+
+  pipeline.set_state(&state);
+  pipeline.set_output(&output);
+
+  pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_BEAMS; ++k) {
+        for (auto l = 0;
+             l < Config::NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+             ++l) {
+          for (auto m = 0; m < 2; ++m) {
+            float expected;
+            if (l / NR_TIME_STEPS_PER_PACKET == 0) {
+              expected = 0;
+            } else if (m == 0) {
+              expected = 8.0f;
+            } else {
+              expected = -8.0f;
+            }
+            EXPECT_EQ(output.beam_data[0][i][j][k][l][m], expected)
+                << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
+                << ", l=" << l << ", m=" << m
+                << " → actual=" << output.beam_data[0][i][j][k][l][m]
+                << ", expected=" << expected;
+          }
+        }
+      }
+      // Now visibilities
+      for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
+        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+          float expected_vis;
+          if (q >= Config::NR_BASELINES_UNPADDED) {
+            expected_vis = 0;
+          } else {
+            expected_vis = 64.0f;
+          };
+          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+              << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
+              << ", p=" << p
+              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << ", expected=" << expected_vis;
+          ;
+        }
+      }
+    }
+  }
+};
+
+TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
+  FakeProcessorState state;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < Config::NR_PACKETS_FOR_CORRELATION; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(l, -l);
+            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(l);
+          }
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  SingleHostMemoryOutput<Config> output;
+
+  LambdaGPUPipeline<Config> pipeline(
+      2, &h_weights, 10000 /* blocks to integrate - set high for now. */
+  );
+
+  pipeline.set_state(&state);
+  pipeline.set_output(&output);
+
+  pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_BEAMS; ++k) {
+        for (auto l = 0;
+             l < Config::NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+             ++l) {
+          for (auto m = 0; m < 2; ++m) {
+            float expected;
+            if (m == 0) {
+              expected = 14.0f;
+            } else {
+              expected = -14.0f;
+            }
+            EXPECT_EQ(output.beam_data[0][i][j][k][l][m], expected)
+                << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
+                << ", l=" << l << ", m=" << m
+                << " → actual=" << output.beam_data[0][i][j][k][l][m]
+                << ", expected=" << expected;
+          }
+        }
+      }
+      // Now visibilities
+      for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
+        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+          float expected_vis;
+          if (q == 0 || q == 1 || q == 3 || q == 6 ||
+              q >= Config::NR_BASELINES_UNPADDED) {
+            expected_vis = 0;
+          } else if (q == 2) {
+            expected_vis = 16.0f;
+          } else if (q == 4) {
+            expected_vis = 64.0f;
+          } else if (q == 5) {
+            expected_vis = 256.0f;
+          } else if (q == 7) {
+            expected_vis = 144.0f;
+          } else if (q == 8) {
+            expected_vis = 576.0f;
+          } else if (q == 9) {
+            expected_vis = 1296.0f;
+          } else {
+            expected_vis = 0;
+          };
+          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+              << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
+              << ", p=" << p
+              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << ", expected=" << expected_vis;
+          ;
         }
       }
     }

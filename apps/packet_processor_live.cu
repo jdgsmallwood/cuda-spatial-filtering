@@ -1,4 +1,5 @@
 #include "spatial/logging.hpp"
+#include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline.hpp"
 #include "spatial/spatial.hpp"
@@ -36,16 +37,22 @@ int main() {
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation = 16;
+  constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 1000000;
+  using Config =
+      LambdaConfig<num_lambda_channels, nr_fpga_sources,
+                   nr_lambda_time_steps_per_packet, nr_lambda_receivers,
+                   nr_lambda_polarizations, nr_lambda_receivers,
+                   nr_lambda_packets_for_correlation, nr_lambda_beams,
+                   nr_lambda_padded_receivers, nr_lambda_padded_receivers,
+                   nr_correlation_blocks_to_integrate>;
 
-  ProcessorState<LambdaPacketStructure> state(nr_lambda_packets_for_correlation,
-                                              nr_lambda_time_steps_per_packet,
-                                              min_freq_channel);
+  ProcessorState<Config> state(nr_lambda_packets_for_correlation,
+                               nr_lambda_time_steps_per_packet,
+                               min_freq_channel);
 
-  BeamWeights<num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations,
-              nr_lambda_beams>
-      h_weights;
+  BeamWeightsT<Config> h_weights;
 
   for (auto i = 0; i < num_lambda_channels; ++i) {
     for (auto j = 0; j < nr_lambda_receivers; ++j) {
@@ -57,12 +64,8 @@ int main() {
     }
   }
 
-  LambdaGPUPipeline<
-      sizeof(int8_t), num_lambda_channels, nr_lambda_time_steps_per_packet,
-      nr_lambda_packets_for_correlation, nr_lambda_receivers,
-      /* padded receivers (round up to * of 32) */ nr_lambda_padded_receivers,
-      /* nr_polarizations */ 2, nr_lambda_beams, nr_lambda_receivers_per_block>
-      pipeline(num_buffers, &h_weights, nr_correlation_blocks_to_integrate);
+  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights,
+                                     nr_correlation_blocks_to_integrate);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

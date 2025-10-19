@@ -62,6 +62,13 @@ static void output_transfer_complete_host_func(void *data) {
   delete ctx;
 }
 
+static void output_visibilities_transfer_complete_host_func(void *data) {
+  auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
+  LOG_INFO("Marking output transfer for block #{} complete", ctx->block_index);
+  ctx->output->register_visibilities_transfer_complete(ctx->block_index);
+  delete ctx;
+}
+
 template <typename T> class LambdaGPUPipeline : public GPUPipeline {
 
 private:
@@ -477,6 +484,8 @@ public:
                              CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
   };
   ~LambdaGPUPipeline() {
+    dump_visibilities();
+    cudaDeviceSynchronize();
 
     for (auto stream : streams) {
       cudaStreamDestroy(stream);
@@ -557,7 +566,12 @@ public:
         output_->get_visibilities_landing_pointer(block_num);
     cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator[0],
                     sizeof(Visibilities), cudaMemcpyDefault, streams[0]);
+    auto *output_ctx = new OutputTransferCompleteContext{
+        .output = this->output_, .block_index = block_num};
 
+    cudaLaunchHostFunc(streams[current_buffer],
+                       output_visibilities_transfer_complete_host_func,
+                       output_ctx);
     for (auto i = 0; i < num_buffers; ++i) {
       cudaMemsetAsync(d_visibilities_accumulator[i], 0, sizeof(Visibilities),
                       streams[i]);

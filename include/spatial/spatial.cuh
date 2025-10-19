@@ -33,8 +33,8 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
                                                  const scaleT *d_scale,
                                                  outputT *d_output) {
 
-  int channel_idx = blockIdx.x / NR_CHANNELS;
-  int packet_idx = blockIdx.x % NR_CHANNELS;
+  int channel_idx = blockIdx.x % NR_CHANNELS;
+  int packet_idx = blockIdx.x / NR_CHANNELS;
   int receiver_idx = blockIdx.y / NR_POLARIZATIONS;
   int polarization_idx = blockIdx.y % NR_POLARIZATIONS;
   int time_idx = threadIdx.x / 2;
