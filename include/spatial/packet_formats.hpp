@@ -187,7 +187,8 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_TIME_STEPS_PER_PACKET_T, size_t NR_RECEIVERS_T,
           size_t NR_POLARIZATIONS_T, size_t NR_RECEIVERS_PER_PACKET_T,
           size_t NR_PACKETS_FOR_CORRELATION_T, size_t NR_BEAMS_T,
-          size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T>
+          size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T,
+          size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T>
 struct LambdaConfig {
 
   static constexpr size_t NR_CHANNELS = NR_CHANNELS_T;
@@ -202,6 +203,8 @@ struct LambdaConfig {
   static constexpr size_t NR_PADDED_RECEIVERS = NR_PADDED_RECEIVERS_T;
   static constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK =
       NR_PADDED_RECEIVERS_PER_BLOCK_T;
+  static constexpr size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE =
+      NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T;
 
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesT =

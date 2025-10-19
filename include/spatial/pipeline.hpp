@@ -58,7 +58,7 @@ static void release_buffer_host_func(void *data) {
 static void output_transfer_complete_host_func(void *data) {
   auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
   LOG_INFO("Marking output transfer for block #{} complete", ctx->block_index);
-  ctx->output->register_transfer_complete(ctx->block_index);
+  ctx->output->register_beam_data_transfer_complete(ctx->block_index);
   delete ctx;
 }
 
@@ -274,28 +274,7 @@ public:
     // in the data to allow this to be checked only at the end.
     if (current_num_correlation_units_integrated >=
         NR_CORRELATION_BLOCKS_TO_INTEGRATE - 1) {
-      LOG_INFO("Dumping correlations to host...");
-      int current_num_integrated_units_processed =
-          num_integrated_units_processed.fetch_add(1);
-      LOG_INFO("Current num integrated units processed is {}",
-               current_num_integrated_units_processed);
-      cudaDeviceSynchronize();
-      for (auto i = 1; i < num_buffers; ++i) {
-        accumulate_visibilities((float *)d_visibilities_accumulator[i],
-                                (float *)d_visibilities_accumulator[0],
-                                NR_BASELINES * 2, streams[current_buffer]);
-      }
-
-      // checkCudaCall(cudaMemcpyAsync(
-      //     h_visibilities_output[current_num_integrated_units_processed],
-      //     d_visibilities_accumulator[0], sizeof(Visibilities),
-      //     cudaMemcpyDefault, streams[current_buffer]));
-      for (auto i = 0; i < num_buffers; ++i) {
-        cudaMemsetAsync(d_visibilities_accumulator[i], 0, sizeof(Visibilities),
-                        streams[i]);
-      }
-      cudaDeviceSynchronize();
-      num_correlation_units_integrated.store(0);
+      dump_visibilities();
     }
     // These two can be combined.
     tensor_16.runPermutation("packetToPlanar", alpha,
@@ -332,9 +311,8 @@ public:
     if (output_ == nullptr) {
       LOG_WARN("No output is defined!");
     } else {
-
-      size_t block_num = output_->register_block();
-      void *landing_pointer = output_->get_landing_pointer(block_num);
+      size_t block_num = output_->register_beam_data_block();
+      void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
 
       cudaMemcpyAsync(landing_pointer, d_beamformer_data_output[current_buffer],
                       sizeof(BeamformerOutput), cudaMemcpyDefault,
@@ -346,17 +324,18 @@ public:
                          output_transfer_complete_host_func, output_ctx);
     }
 
-    debug_kernel_launch<T>(
-        (typename T::PacketSamplesPlanarType *)d_samples_entry[current_buffer],
-        (typename T::PacketScalesType *)d_scales[current_buffer],
-        (typename T::HalfPacketSamplesPlanarType *)
-            d_samples_half[current_buffer],
-        (typename T::HalfPacketSamplesPlanarType *)
-            d_samples_padding[current_buffer],
+    // debug_kernel_launch<T>(
+    //     (typename T::PacketSamplesPlanarType
+    //     *)d_samples_entry[current_buffer], (typename T::PacketScalesType
+    //     *)d_scales[current_buffer], (typename T::HalfPacketSamplesPlanarType
+    //     *)
+    //         d_samples_half[current_buffer],
+    //     (typename T::HalfPacketSamplesPlanarType *)
+    //         d_samples_padding[current_buffer],
 
-        (typename T::PaddedPacketSamplesPlanarType *)
-            d_samples_padded[current_buffer],
-        streams[current_buffer]);
+    //    (typename T::PaddedPacketSamplesPlanarType *)
+    //        d_samples_padded[current_buffer],
+    //    streams[current_buffer]);
 
     current_buffer = (current_buffer + 1) % num_buffers;
   };
@@ -557,5 +536,32 @@ public:
     for (auto eigenvalues : d_eigenvalues) {
       cudaFree(eigenvalues);
     }
+  };
+
+  void dump_visibilities() override {
+
+    LOG_INFO("Dumping correlations to host...");
+    int current_num_integrated_units_processed =
+        num_integrated_units_processed.fetch_add(1);
+    LOG_INFO("Current num integrated units processed is {}",
+             current_num_integrated_units_processed);
+    cudaDeviceSynchronize();
+    for (auto i = 1; i < num_buffers; ++i) {
+      accumulate_visibilities((float *)d_visibilities_accumulator[i],
+                              (float *)d_visibilities_accumulator[0],
+                              NR_BASELINES * 2, streams[current_buffer]);
+    }
+    cudaDeviceSynchronize();
+    size_t block_num = output_->register_visibilities_block();
+    void *landing_pointer =
+        output_->get_visibilities_landing_pointer(block_num);
+    cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator[0],
+                    sizeof(Visibilities), cudaMemcpyDefault, streams[0]);
+
+    for (auto i = 0; i < num_buffers; ++i) {
+      cudaMemsetAsync(d_visibilities_accumulator[i], 0, sizeof(Visibilities),
+                      streams[i]);
+    }
+    num_correlation_units_integrated.store(0);
   };
 };

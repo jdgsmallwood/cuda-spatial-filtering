@@ -47,6 +47,8 @@ __global__ void convert_int_to_float_kernel(const int *d_input, float *d_output,
 __global__ void
 accumulate_visibilities_kernel(const float *d_visibilities,
                                float *d_visibilities_accumulated, const int n) {
+  // This may need to change to an atomic add at some point. Especially if there
+  // are more than 2 streams.
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int stride = blockDim.x * gridDim.x;
   while (idx < n) {

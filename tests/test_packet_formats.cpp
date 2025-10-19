@@ -86,14 +86,14 @@ typename T::PacketEntryType create_valid_test_packet(const int sample_count,
 }
 
 TEST(PacketFormatTests, TestValidTestPacketSize) {
-  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32>;
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
   Config::PacketEntryType test_packet =
       create_valid_test_packet<Config>(1, 1, 1);
   ASSERT_EQ(test_packet.length, 2664);
 }
 
 TEST(PacketFormatTests, TestLambdaPacketEntryParsedFormat) {
-  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32>;
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
   int sample_count = 1;
   int fpga_id = 2;
   int channel = 3;

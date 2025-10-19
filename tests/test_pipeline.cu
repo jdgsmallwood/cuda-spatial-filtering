@@ -64,11 +64,12 @@ constexpr size_t NR_BEAMS = 1;
 constexpr size_t NR_PADDED_RECEIVERS = 32;
 constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = NR_PADDED_RECEIVERS;
 constexpr size_t NR_PACKETS_FOR_CORRELATION = 1;
+constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 10000;
 using Config =
     LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                  NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
-                 NR_PADDED_RECEIVERS_PER_BLOCK>;
+                 NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
 TEST(LambdaGPUPipelineTest, Ex1) {
   FakeProcessorState state;
 
@@ -123,7 +124,7 @@ TEST(LambdaGPUPipelineTest, Ex1) {
             } else {
               expected = -8.0f;
             }
-            ASSERT_EQ(output.data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -194,7 +195,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -210,7 +211,8 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
       LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                    NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                    NR_PACKETS_FOR_CORRELATION, NR_BEAMS + 1,
-                   NR_PADDED_RECEIVERS, NR_PADDED_RECEIVERS_PER_BLOCK>;
+                   NR_PADDED_RECEIVERS, NR_PADDED_RECEIVERS_PER_BLOCK,
+                   NR_VISIBILITIES_BEFORE_DUMP>;
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
@@ -272,7 +274,7 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -287,7 +289,7 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
       LambdaConfig<NR_CHANNELS + 1, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                    NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                    NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
-                   NR_PADDED_RECEIVERS_PER_BLOCK>;
+                   NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
@@ -349,7 +351,7 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -364,7 +366,7 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
       LambdaConfig<NR_CHANNELS + 1, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                    NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                    NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
-                   NR_PADDED_RECEIVERS_PER_BLOCK>;
+                   NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
@@ -430,7 +432,7 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
