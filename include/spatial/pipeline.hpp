@@ -88,6 +88,8 @@ private:
   static constexpr int COMPLEX = 2;
   static constexpr int NR_EIGENVALUES =
       T::NR_PADDED_RECEIVERS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
+  static constexpr int NR_CORRELATED_BLOCKS_TO_ACCUMULATE =
+      T::NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
 
   inline static const __half alpha = __float2half(1.0f);
   static constexpr float alpha_32 = 1.0f;
@@ -201,7 +203,6 @@ private:
   std::vector<float *> d_eigenvalues;
 
   BeamWeights *h_weights;
-  size_t NR_CORRELATION_BLOCKS_TO_INTEGRATE;
 
 public:
   void execute_pipeline(FinalPacketData *packet_data) override {
@@ -280,7 +281,7 @@ public:
     // Perhaps assume this is a multiple of the number of packets
     // in the data to allow this to be checked only at the end.
     if (current_num_correlation_units_integrated >=
-        NR_CORRELATION_BLOCKS_TO_INTEGRATE - 1) {
+        NR_CORRELATED_BLOCKS_TO_ACCUMULATE - 1) {
       dump_visibilities();
     }
     // These two can be combined.
@@ -346,11 +347,9 @@ public:
 
     current_buffer = (current_buffer + 1) % num_buffers;
   };
-  LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights,
-                    size_t nr_correlation_blocks_to_integrate)
+  LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
 
       : num_buffers(num_buffers), h_weights(h_weights),
-        NR_CORRELATION_BLOCKS_TO_INTEGRATE(nr_correlation_blocks_to_integrate),
 
         correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
                    T::NR_CHANNELS,

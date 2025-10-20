@@ -102,10 +102,7 @@ TEST(LambdaGPUPipelineTest, Ex1) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      NR_PACKETS_FOR_CORRELATION, &h_weights,
-      10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -187,10 +184,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      NR_PACKETS_FOR_CORRELATION, &h_weights,
-      10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -284,10 +278,7 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      NR_PACKETS_FOR_CORRELATION, &h_weights,
-      10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -361,10 +352,7 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      NR_PACKETS_FOR_CORRELATION, &h_weights,
-      10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -442,10 +430,7 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      NR_PACKETS_FOR_CORRELATION, &h_weights,
-      10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -508,10 +493,7 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      NR_PACKETS_FOR_CORRELATION, &h_weights,
-      10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -598,9 +580,7 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      2, &h_weights, 10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(2, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);
@@ -684,9 +664,7 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
 
   SingleHostMemoryOutput<Config> output;
 
-  LambdaGPUPipeline<Config> pipeline(
-      2, &h_weights, 10000 /* blocks to integrate - set high for now. */
-  );
+  LambdaGPUPipeline<Config> pipeline(2, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(&output);

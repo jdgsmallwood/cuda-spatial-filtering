@@ -64,8 +64,7 @@ int main() {
     }
   }
 
-  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights,
-                                     nr_correlation_blocks_to_integrate);
+  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
