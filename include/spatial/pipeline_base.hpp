@@ -11,7 +11,7 @@ public:
   void set_state(ProcessorStateBase *state) { state_ = state; };
   void set_output(Output *output) { output_ = output; };
   virtual void execute_pipeline(FinalPacketData *packet_data) = 0;
-  virtual void dump_visibilities() = 0;
+  virtual void dump_visibilities(const int end_seq_num = -1) = 0;
 
 protected:
   ProcessorStateBase *state_;

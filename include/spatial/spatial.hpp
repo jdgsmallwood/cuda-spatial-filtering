@@ -167,7 +167,7 @@ public:
                     pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
         d_samples[buffer_index]
-            ->arrivals[freq_channel][packet_index][fpga_index] = true;
+            ->arrivals[0][freq_channel][packet_index][fpga_index] = true;
         LOG_DEBUG("Setting original_packet_processed as true...");
         LOG_DEBUG("original_packet_processed_before={}",
                   *pkt.original_packet_processed);
@@ -241,8 +241,10 @@ public:
     buffers[buffer_index].end_seq =
         buffers[buffer_index].start_seq +
         (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-    std::memset(std::begin(d_samples[buffer_index]->arrivals), false,
-                sizeof(d_samples[buffer_index]->arrivals));
+    std::fill_n((bool *)d_samples[buffer_index]->arrivals,
+                T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
+                    T::NR_FPGA_SOURCES,
+                false);
     buffers[buffer_index].is_ready = true;
   };
 

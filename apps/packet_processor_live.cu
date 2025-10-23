@@ -3,6 +3,7 @@
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline.hpp"
 #include "spatial/spatial.hpp"
+#include "spatial/writers.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
@@ -70,7 +71,6 @@ int main() {
   pipeline.set_state(&state);
   int port = 12345;
   KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
-  LibibverbsPacketCapture ibverbs_capture(port, BUFFER_SIZE);
   LOG_INFO("Ring buffer size: {} packets\n", RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver(

@@ -68,13 +68,14 @@ template <typename PacketSamplesType, typename PacketScalesType,
           size_t NR_CHANNELS, size_t NR_PACKETS_FOR_CORRELATION,
           size_t NR_RECEIVERS, size_t NR_POLARIZATIONS, size_t NR_FPGAS>
 struct LambdaFinalPacketData : public FinalPacketData {
+  using ArrivalsType = bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGAS];
   PacketSamplesType *samples = nullptr;
   PacketScalesType *scales = nullptr;
-  bool arrivals[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGAS];
+  ArrivalsType *arrivals = nullptr;
 
   void *get_samples_ptr() override { return (void *)samples; };
   void *get_scales_ptr() override { return (void *)scales; };
-  bool *get_arrivals_ptr() override { return &arrivals[0][0][0]; };
+  bool *get_arrivals_ptr() override { return (bool *)arrivals; };
 
   size_t get_samples_elements_size() override {
     return sizeof(PacketSamplesType);
@@ -86,7 +87,7 @@ struct LambdaFinalPacketData : public FinalPacketData {
     for (auto i = 0; i < NR_CHANNELS; ++i) {
       for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
-          if (arrivals[i][j][k] == 0) {
+          if (arrivals[0][i][j][k] == 0) {
             for (auto m = 0; m < NR_RECEIVERS; ++m) {
               for (auto n = 0; n < NR_POLARIZATIONS; ++n) {
                 *scales[i][j][k * NR_RECEIVERS + m][n] = 0;
@@ -105,11 +106,14 @@ struct LambdaFinalPacketData : public FinalPacketData {
     // allocate scales
     CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(PacketScalesType),
                              cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc((void **)&arrivals, sizeof(ArrivalsType),
+                             cudaHostAllocDefault));
   };
   ~LambdaFinalPacketData() {
 
     cudaFreeHost(samples);
     cudaFreeHost(scales);
+    cudaFreeHost(arrivals);
   };
 };
 

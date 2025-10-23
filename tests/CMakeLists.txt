@@ -32,9 +32,14 @@ add_executable(
 )
 target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE GTest::gtest_main spatial HighFive::HighFive CUDA::cudart)
 
+add_executable(
+  WriterTests test_writers.cpp
+)
+target_link_libraries(WriterTests PRIVATE GTest::gtest_main spatial HighFive::HighFive)
 
 
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
+gtest_discover_tests(WriterTests)

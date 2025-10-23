@@ -204,13 +204,20 @@ private:
 
   BeamWeights *h_weights;
 
+  int visibilities_start_seq_num;
+  int visibilities_end_seq_num;
+
 public:
   void execute_pipeline(FinalPacketData *packet_data) override {
 
     if (state_ == nullptr) {
       std::logic_error("State has not been set on GPUPipeline object!");
     }
-
+    const size_t start_seq_num = packet_data->start_seq_id;
+    const size_t end_seq_num = packet_data->end_seq_id;
+    if (visibilities_start_seq_num == -1) {
+      visibilities_start_seq_num = packet_data->start_seq_id;
+    }
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
@@ -282,7 +289,7 @@ public:
     // in the data to allow this to be checked only at the end.
     if (current_num_correlation_units_integrated >=
         NR_CORRELATED_BLOCKS_TO_ACCUMULATE - 1) {
-      dump_visibilities();
+      dump_visibilities(end_seq_num);
     }
     // These two can be combined.
     tensor_16.runPermutation("packetToPlanar", alpha,
@@ -319,7 +326,8 @@ public:
     if (output_ == nullptr) {
       LOG_WARN("No output is defined!");
     } else {
-      size_t block_num = output_->register_beam_data_block();
+      size_t block_num =
+          output_->register_beam_data_block(start_seq_num, end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
 
       cudaMemcpyAsync(landing_pointer, d_beamformer_data_output[current_buffer],
@@ -430,6 +438,8 @@ public:
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
+    visibilities_start_seq_num = -1;
+    visibilities_end_seq_num = -1;
     current_buffer = 0;
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
@@ -483,7 +493,12 @@ public:
                              CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
   };
   ~LambdaGPUPipeline() {
-    dump_visibilities();
+    // If there are visibilities in the accumulator on the GPU - dump them
+    // out to disk. These will get tagged with a -1 end_seq_id currently
+    // which is not fully ideal.
+    if (visibilities_start_seq_num != -1) {
+      dump_visibilities();
+    }
     cudaDeviceSynchronize();
 
     for (auto stream : streams) {
@@ -546,7 +561,7 @@ public:
     }
   };
 
-  void dump_visibilities() override {
+  void dump_visibilities(const int end_seq_num = -1) override {
 
     LOG_INFO("Dumping correlations to host...");
     int current_num_integrated_units_processed =
@@ -560,7 +575,9 @@ public:
                               NR_BASELINES * 2, streams[current_buffer]);
     }
     cudaDeviceSynchronize();
-    size_t block_num = output_->register_visibilities_block();
+    size_t block_num = output_->register_visibilities_block(
+        visibilities_start_seq_num, end_seq_num);
+    visibilities_start_seq_num = -1;
     void *landing_pointer =
         output_->get_visibilities_landing_pointer(block_num);
     cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator[0],
