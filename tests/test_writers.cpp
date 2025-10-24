@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-#include "spatial/writers.hpp" // your header
+#include "spatial/writers.hpp"
 
 struct MockT {
   static constexpr size_t NR_CHANNELS = 1;

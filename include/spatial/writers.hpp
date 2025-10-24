@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
@@ -7,15 +8,14 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 template <typename BeamT, typename ArrivalsT> class BeamWriter {
 public:
   virtual ~BeamWriter() = default;
   virtual void write_beam_block(const BeamT *beam_data,
-                                const ArrivalsT *arrivals_data,
-                                size_t beam_element_count,
-                                size_t arrivals_element_count, int start_seq,
+                                const ArrivalsT *arrivals_data, int start_seq,
                                 int end_seq) = 0;
   virtual void flush() = 0;
 };
@@ -23,68 +23,114 @@ public:
 template <typename T> class VisibilitiesWriter {
 public:
   virtual ~VisibilitiesWriter() = default;
-  virtual void write_visibilities_block(const T *data, size_t element_count,
-                                        int start_seq, int end_seq) = 0;
+  virtual void write_visibilities_block(const T *data, int start_seq,
+                                        int end_seq) = 0;
   virtual void flush() = 0;
 };
+
+template <typename T, size_t N = 0> constexpr auto get_array_dims() {
+  if constexpr (std::is_array_v<T>) {
+    constexpr size_t extent = std::extent_v<T>;
+    auto inner = get_array_dims<std::remove_extent_t<T>, N + 1>();
+    inner.insert(inner.begin(), extent);
+    return inner;
+  } else {
+    return std::vector<size_t>{};
+  }
+}
 
 template <typename BeamT, typename ArrivalsT>
 class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 public:
   HDF5BeamWriter(HighFive::File &file) : file_(file) {
-
-    typename beam_type = std::remove_extent<BeamT>::type;
-    typename arrival_type = bool;
+    using namespace HighFive;
+    using beam_type = std::remove_all_extents<BeamT>::type;
+    using arrival_type = std::remove_all_extents<ArrivalsT>::type;
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
+    beam_dims_ = get_array_dims<BeamT>();
+    arrivals_dims_ = get_array_dims<ArrivalsT>();
+
+    std::vector<size_t> beam_dataset_dims = {0};
+    std::vector<size_t> beam_dataset_max_dims = {DataSpace::UNLIMITED};
+
+    beam_dataset_dims.insert(beam_dataset_dims.end(), beam_dims_.begin(),
+                             beam_dims_.end());
+    beam_dataset_max_dims.insert(beam_dataset_max_dims.end(),
+                                 beam_dims_.begin(), beam_dims_.end());
+    std::vector<hsize_t> beam_chunk = {1};
+    beam_chunk.insert(beam_chunk.end(), beam_dims_.begin(), beam_dims_.end());
+
+    std::vector<size_t> arrivals_dataset_dims = {0};
+    std::vector<size_t> arrivals_dataset_max_dims = {DataSpace::UNLIMITED};
+
+    arrivals_dataset_dims.insert(arrivals_dataset_dims.end(),
+                                 arrivals_dims_.begin(), arrivals_dims_.end());
+    arrivals_dataset_max_dims.insert(arrivals_dataset_max_dims.end(),
+                                     arrivals_dims_.begin(),
+                                     arrivals_dims_.end());
+    std::vector<hsize_t> arrivals_chunk = {1};
+    arrivals_chunk.insert(arrivals_chunk.end(), arrivals_dims_.begin(),
+                          arrivals_dims_.end());
     // Create beam dataset
-    HighFive::DataSpace beam_space(
-        {0, beam_element_count_},
-        {HighFive::DataSpace::UNLIMITED, beam_element_count_});
-    HighFive::DataSetCreateProps beam_props;
-    beam_props.add(
-        HighFive::Chunking(std::vector<hsize_t>{1, beam_element_count_}));
+    DataSpace beam_space(beam_dataset_dims, beam_dataset_max_dims);
+    DataSetCreateProps beam_props;
+    beam_props.add(Chunking(beam_chunk));
     beam_dataset_ =
         file_.createDataSet<beam_type>("beam_data", beam_space, beam_props);
 
     // Create arrivals dataset
-    HighFive::DataSpace arrivals_space(
-        {0, arrivals_element_count_},
-        {HighFive::DataSpace::UNLIMITED, arrivals_element_count_});
-    HighFive::DataSetCreateProps arrivals_props;
-    arrivals_props.add(
-        HighFive::Chunking(std::vector<hsize_t>{1, arrivals_element_count_}));
-    arrivals_dataset_ =
-        file_.createDataSet<bool>("arrivals", arrivals_space, arrivals_props);
+    DataSpace arrivals_space(arrivals_dataset_dims, arrivals_dataset_max_dims);
+    DataSetCreateProps arrivals_props;
+    arrivals_props.add(Chunking(arrivals_chunk));
+    arrivals_dataset_ = file_.createDataSet<arrival_type>(
+        "arrivals", arrivals_space, arrivals_props);
 
+    DataSetCreateProps beam_seq_props;
+    beam_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
     // Create sequence number dataset
     beam_seq_dataset_ = file_.createDataSet<int>(
-        "beam_seq_nums",
-        HighFive::DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}));
+        "beam_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
+        beam_seq_props);
   }
 
-  void write_beam_block(const BeamT *beam_data, const bool *arrivals_data,
+  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
                         int start_seq, int end_seq) override {
     // Write beam data
     auto current_size = beam_dataset_.getDimensions()[0];
-    beam_dataset_.resize({current_size + 1, beam_element_count_});
-    std::vector<BeamT> beam_vec(beam_data, beam_data + beam_element_count);
-    beam_dataset_.select({current_size, 0}, {1, beam_element_count_})
-        .write(beam_vec);
+    std::vector<size_t> new_dims = {current_size + 1};
+    new_dims.insert(new_dims.end(), beam_dims_.begin(), beam_dims_.end());
+    beam_dataset_.resize(new_dims);
+
+    std::vector<size_t> beam_offset = {current_size};
+    beam_offset.insert(beam_offset.end(), beam_dims_.size(), 0);
+    std::vector<size_t> beam_count = {1};
+    beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
+
+    using beam_type = std::remove_all_extents<BeamT>::type;
+    beam_dataset_.select(beam_offset, beam_count).write(beam_data);
 
     // Write arrivals data
     auto arrivals_size = arrivals_dataset_.getDimensions()[0];
-    arrivals_dataset_.resize({arrivals_size + 1, arrivals_element_count_});
-    std::vector<bool> arrivals_vec(arrivals_data,
-                                   arrivals_data + arrivals_element_count);
-    arrivals_dataset_.select({arrivals_size, 0}, {1, arrivals_element_count_})
-        .write(arrivals_vec);
+    std::vector<size_t> arrivals_new_dims = {arrivals_size + 1};
+    arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
+                             arrivals_dims_.end());
+    std::vector<size_t> arrivals_offset = {arrivals_size};
+    arrivals_offset.insert(arrivals_offset.end(), arrivals_dims_.size(), 0);
+    std::vector<size_t> arrivals_count = {1};
+    arrivals_count.insert(arrivals_count.end(), arrivals_dims_.begin(),
+                          arrivals_dims_.end());
+
+    arrivals_dataset_.resize(arrivals_new_dims);
+
+    arrivals_dataset_.select(arrivals_offset, arrivals_count)
+        .write_raw(arrivals_data);
 
     // Write sequence numbers
     auto seq_size = beam_seq_dataset_.getDimensions()[0];
     beam_seq_dataset_.resize({seq_size + 1, 2});
     std::vector<int> seq_nums = {start_seq, end_seq};
-    beam_seq_dataset_.select({seq_size, 0}, {1, 2}).write(seq_nums);
+    beam_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
   }
 
   void flush() override { file_.flush(); }
@@ -92,7 +138,9 @@ public:
 private:
   HighFive::File &file_;
   size_t beam_element_count_;
+  std::vector<size_t> beam_dims_;
   size_t arrivals_element_count_;
+  std::vector<size_t> arrivals_dims_;
   HighFive::DataSet beam_dataset_;
   HighFive::DataSet arrivals_dataset_;
   HighFive::DataSet beam_seq_dataset_;
@@ -104,7 +152,7 @@ public:
   HDF5VisibilitiesWriter(HighFive::File &file)
       : file_(file),
         element_count_(sizeof(T) /
-                       sizeof(typename std::remove_extent<T>::type)) {
+                       sizeof(typename std::remove_all_extents<T>::type)) {
     HighFive::DataSpace vis_space(
         {0, element_count_}, {HighFive::DataSpace::UNLIMITED, element_count_});
     HighFive::DataSetCreateProps props;
