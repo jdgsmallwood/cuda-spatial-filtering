@@ -15,16 +15,16 @@ template <typename BeamT, typename ArrivalsT> class BeamWriter {
 public:
   virtual ~BeamWriter() = default;
   virtual void write_beam_block(const BeamT *beam_data,
-                                const ArrivalsT *arrivals_data, int start_seq,
-                                int end_seq) = 0;
+                                const ArrivalsT *arrivals_data,
+                                const int start_seq, const int end_seq) = 0;
   virtual void flush() = 0;
 };
 
 template <typename T> class VisibilitiesWriter {
 public:
   virtual ~VisibilitiesWriter() = default;
-  virtual void write_visibilities_block(const T *data, int start_seq,
-                                        int end_seq) = 0;
+  virtual void write_visibilities_block(const T *data, const int start_seq,
+                                        const int end_seq) = 0;
   virtual void flush() = 0;
 };
 
@@ -41,6 +41,7 @@ template <typename T, size_t N = 0> constexpr auto get_array_dims() {
 
 template <typename BeamT, typename ArrivalsT>
 class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
+
 public:
   HDF5BeamWriter(HighFive::File &file) : file_(file) {
     using namespace HighFive;
@@ -95,7 +96,7 @@ public:
   }
 
   void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
-                        int start_seq, int end_seq) override {
+                        const int start_seq, const int end_seq) override {
     // Write beam data
     auto current_size = beam_dataset_.getDimensions()[0];
     std::vector<size_t> new_dims = {current_size + 1};
@@ -153,29 +154,49 @@ public:
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
-    HighFive::DataSpace vis_space(
-        {0, element_count_}, {HighFive::DataSpace::UNLIMITED, element_count_});
-    HighFive::DataSetCreateProps props;
-    props.add(HighFive::Chunking(std::vector<hsize_t>{1, element_count_}));
+    using namespace HighFive;
+    vis_dims_ = get_array_dims<T>();
+    std::vector<size_t> vis_dataset_dims = {0};
+    std::vector<size_t> vis_dataset_max_dims = {DataSpace::UNLIMITED};
+
+    vis_dataset_dims.insert(vis_dataset_dims.end(), vis_dims_.begin(),
+                            vis_dims_.end());
+    vis_dataset_max_dims.insert(vis_dataset_max_dims.end(), vis_dims_.begin(),
+                                vis_dims_.end());
+    std::vector<hsize_t> vis_chunk = {1};
+    vis_chunk.insert(vis_chunk.end(), vis_dims_.begin(), vis_dims_.end());
+    DataSpace vis_space(vis_dataset_dims, vis_dataset_max_dims);
+    DataSetCreateProps props;
+    props.add(HighFive::Chunking(vis_chunk));
     // I imagine createDataSet needs a primitive type
-    vis_dataset_ = file_.createDataSet<T>("visibilities", vis_space, props);
+    vis_dataset_ = file_.createDataSet<float>("visibilities", vis_space, props);
+
+    DataSetCreateProps vis_seq_props;
+    vis_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
     vis_seq_dataset_ = file_.createDataSet<int>(
-        "vis_seq_nums",
-        HighFive::DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}));
+        "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
+        vis_seq_props);
   }
 
-  void write_visibilities_block(const T *data, size_t element_count,
-                                int start_seq, int end_seq) override {
+  void write_visibilities_block(const T *data, const int start_seq,
+                                const int end_seq) override {
+    LOG_INFO("writing visibilities block {} to {}", start_seq, end_seq);
     auto current_size = vis_dataset_.getDimensions()[0];
-    vis_dataset_.resize({current_size + 1, element_count_});
+    std::vector<size_t> new_dims = {current_size + 1};
+    new_dims.insert(new_dims.end(), vis_dims_.begin(), vis_dims_.end());
+    vis_dataset_.resize(new_dims);
 
-    std::vector<T> data_vec(data, data + element_count);
-    vis_dataset_.select({current_size, 0}, {1, element_count_}).write(data_vec);
+    std::vector<size_t> vis_offset = {current_size};
+    vis_offset.insert(vis_offset.end(), vis_dims_.size(), 0);
+    std::vector<size_t> vis_count = {1};
+    vis_count.insert(vis_count.end(), vis_dims_.begin(), vis_dims_.end());
+
+    vis_dataset_.select(vis_offset, vis_count).write(data);
 
     auto seq_size = vis_seq_dataset_.getDimensions()[0];
     vis_seq_dataset_.resize({seq_size + 1, 2});
     std::vector<int> seq_nums = {start_seq, end_seq};
-    vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write(seq_nums);
+    vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
   }
 
   void flush() override { file_.flush(); }
@@ -185,6 +206,7 @@ private:
   size_t element_count_;
   HighFive::DataSet vis_dataset_;
   HighFive::DataSet vis_seq_dataset_;
+  std::vector<size_t> vis_dims_;
 };
 
 // Factory function for easy creation

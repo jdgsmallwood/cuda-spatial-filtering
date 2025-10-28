@@ -43,7 +43,7 @@ struct BufferReleaseContext {
 };
 
 struct OutputTransferCompleteContext {
-  Output *output;
+  std::shared_ptr<Output> output;
   size_t block_index;
 };
 
@@ -57,7 +57,8 @@ static void release_buffer_host_func(void *data) {
 
 static void output_transfer_complete_host_func(void *data) {
   auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
-  LOG_INFO("Marking output transfer for block #{} complete", ctx->block_index);
+  LOG_INFO("Marking beam data output transfer for block #{} complete",
+           ctx->block_index);
   ctx->output->register_beam_data_transfer_complete(ctx->block_index);
   delete ctx;
 }
@@ -338,6 +339,13 @@ public:
 
       cudaLaunchHostFunc(streams[current_buffer],
                          output_transfer_complete_host_func, output_ctx);
+      // Move arrivals to the output
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
+
+      std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
+                  packet_data->get_arrivals_size());
+      output_->register_arrivals_transfer_complete(block_num);
     }
 
     // debug_kernel_launch<T>(

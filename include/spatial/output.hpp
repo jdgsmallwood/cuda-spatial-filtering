@@ -1,3 +1,4 @@
+#include "spatial/logging.hpp"
 #include "spatial/spatial.hpp"
 
 #include <cuda_fp16.h>
@@ -84,7 +85,7 @@ template <typename T> class BufferedOutput : public Output {
 public:
   struct BeamBlock {
     typename T::BeamOutputType beam_data;
-    typename T::ArrivalOutputType arrival_data;
+    typename T::ArrivalsOutputType arrival_data;
     int start_seq_num;
     int end_seq_num;
     bool beam_transfer_complete;
@@ -105,8 +106,8 @@ public:
   };
 
   BufferedOutput(
-      std::unique_ptr<
-          BeamWriter<typename T::BeamOutputType, typename T::ArrivalOutputType>>
+      std::unique_ptr<BeamWriter<typename T::BeamOutputType,
+                                 typename T::ArrivalsOutputType>>
           beam_writer,
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
@@ -124,10 +125,10 @@ public:
 
   ~BufferedOutput() {
     running_ = false;
+
     if (writer_thread_.joinable()) {
       writer_thread_.join();
     }
-
     beam_writer_->flush();
     vis_writer_->flush();
   }
@@ -194,16 +195,22 @@ public:
 
 private:
   void writer_loop() {
+    LOG_INFO("Writer loop is running!");
     while (running_) {
+
       if (has_data_to_write()) {
+        LOG_INFO("There is data to write! Writing data...");
         write_beam_data();
         write_visibilities();
       }
     }
 
     // Flush remaining data
-    write_beam_data();
-    write_visibilities();
+    while (beam_read_idx_ != beam_write_idx_ ||
+           vis_read_idx_ != vis_write_idx_) {
+      write_beam_data();
+      write_visibilities();
+    }
   }
 
   bool has_data_to_write() {
@@ -218,19 +225,13 @@ private:
 
   void write_beam_data() {
     while (beam_read_idx_ != beam_write_idx_ &&
-           beam_blocks_[beam_read_idx_].transfer_complete) {
+           beam_blocks_[beam_read_idx_].beam_transfer_complete &&
+           beam_blocks_[beam_read_idx_].arrival_transfer_complete) {
 
       const auto &block = beam_blocks_[beam_read_idx_];
 
-      beam_writer_->write_beam_block(
-          &block.beam_data, &block.arrival_data,
-          sizeof(typename T::BeamOutputType) /
-              sizeof(typename std::remove_extent<
-                     typename T::BeamOutputType>::type),
-          sizeof(typename T::ArrivalOutputType) /
-              sizeof(typename std::remove_extent<
-                     typename T::ArrivalOutputType>::type),
-          block.start_seq_num, block.end_seq_num);
+      beam_writer_->write_beam_block(&block.beam_data, &block.arrival_data,
+                                     block.start_seq_num, block.end_seq_num);
 
       beam_read_idx_ = (beam_read_idx_ + 1) % beam_blocks_.size();
     }
@@ -242,12 +243,8 @@ private:
 
       const auto &block = vis_blocks_[vis_read_idx_];
 
-      vis_writer_->write_visibilities_block(
-          &block.data,
-          sizeof(typename T::VisibilitiesOutputType) /
-              sizeof(typename std::remove_extent<
-                     typename T::VisibilitiesOutputType>::type),
-          block.start_seq_num, block.end_seq_num);
+      vis_writer_->write_visibilities_block(&block.data, block.start_seq_num,
+                                            block.end_seq_num);
 
       vis_read_idx_ = (vis_read_idx_ + 1) % vis_blocks_.size();
     }

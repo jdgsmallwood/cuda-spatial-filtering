@@ -58,6 +58,7 @@ struct FinalPacketData {
   virtual size_t get_scales_element_size() = 0;
 
   virtual bool *get_arrivals_ptr() = 0;
+  virtual size_t get_arrivals_size() = 0;
 
   virtual void zero_missing_packets() = 0;
 };
@@ -81,6 +82,8 @@ struct LambdaFinalPacketData : public FinalPacketData {
     return sizeof(PacketSamplesType);
   };
   size_t get_scales_element_size() override { return sizeof(scales); };
+
+  size_t get_arrivals_size() override { return sizeof(ArrivalsType); };
 
   void zero_missing_packets() override {
 
@@ -213,6 +216,7 @@ struct LambdaConfig {
       NR_PADDED_RECEIVERS * (NR_PADDED_RECEIVERS + 1) / 2;
   static constexpr size_t NR_BASELINES_UNPADDED =
       NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
+  static constexpr size_t COMPLEX = 2;
 
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesT =
@@ -248,4 +252,12 @@ struct LambdaConfig {
       LambdaFinalPacketData<PacketSamplesType, PacketScalesType, NR_CHANNELS,
                             NR_PACKETS_FOR_CORRELATION, NR_RECEIVERS,
                             NR_POLARIZATIONS, NR_FPGA_SOURCES>;
+  using BeamOutputType =
+      float[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+           [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
+  using ArrivalsOutputType =
+      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
+  using VisibilitiesOutputType =
+      float[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS][NR_POLARIZATIONS]
+           [COMPLEX];
 };

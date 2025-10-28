@@ -6,6 +6,7 @@
 #define LOG_DEBUG(...) spatial::Logger::get()->debug(__VA_ARGS__)
 #define LOG_WARN(...) spatial::Logger::get()->warn(__VA_ARGS__)
 #define LOG_ERROR(...) spatial::Logger::get()->error(__VA_ARGS__)
+#define FLUSH_LOG() spatial::Logger::get()->flush();
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \

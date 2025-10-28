@@ -367,6 +367,11 @@ public:
         if (current_read_index != write_index.load(std::memory_order_acquire)) {
           break;
         }
+
+        if (!running) {
+          // Will want to update this to finish buffer that's been processed.
+          return;
+        }
       }
       typename T::PacketEntryType *entry = d_packet_data[current_read_index];
 
@@ -464,14 +469,25 @@ public:
 
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
+    // adds a timeout here - otherwise the socket will block indefinitely
+    // and get in the way of shutdown.
+    struct timeval tv;
+    tv.tv_sec = 1; // 1 second timeout
+    tv.tv_usec = 0;
 
+    // Make kernel receive buffer a bit larger to avoid dropping packets
+    // during the timeout
+    int recv_buffer_size = 8 * 1024 * 1024;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
+               sizeof(recv_buffer_size));
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     LOG_INFO("Receiver thread started");
     void *next_write_pointer = state.get_current_write_pointer();
     while (state.running) {
       int received = recvfrom(sockfd, next_write_pointer, buffer_size, 0,
                               (struct sockaddr *)&client_addr, &client_len);
       if (received < 0) {
-        if (errno == EINTR)
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
         perror("recvfrom");
         break;
@@ -481,7 +497,6 @@ public:
       state.packets_received += 1;
       next_write_pointer = state.get_next_write_pointer();
     }
-
     LOG_INFO("Receiver thread exiting");
   };
 

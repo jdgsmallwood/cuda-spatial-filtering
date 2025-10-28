@@ -60,17 +60,57 @@ TEST(HDF5BeamWriterTest, WritesBeamAndArrivalsAndSeq) {
 
   auto beam_ds = verify_file.getDataSet("beam_data");
   auto beam_dims = beam_ds.getDimensions();
-  ASSERT_EQ(beam_dims[0], MockT::NR_CHANNELS);
-  ASSERT_EQ(beam_dims[1], MockT::NR_POLARIZATIONS);
+  ASSERT_EQ(beam_dims[0], 1); // as we only wrote one parcel of data
+  ASSERT_EQ(beam_dims[1], MockT::NR_CHANNELS);
+  ASSERT_EQ(beam_dims[2], MockT::NR_POLARIZATIONS);
+  ASSERT_EQ(beam_dims[3], MockT::NR_BEAMS);
+  ASSERT_EQ(beam_dims[4], MockT::NR_PACKETS_FOR_CORRELATION *
+                              MockT::NR_TIME_STEPS_PER_PACKET);
+  ASSERT_EQ(beam_dims[5], MockT::COMPLEX);
 
   auto arr_ds = verify_file.getDataSet("arrivals");
   auto arr_dims = arr_ds.getDimensions();
   ASSERT_EQ(arr_dims[0], 1);
-  ASSERT_EQ(arr_dims[1], 1);
+  ASSERT_EQ(arr_dims[1], MockT::NR_CHANNELS);
+  ASSERT_EQ(arr_dims[2], MockT::NR_PACKETS_FOR_CORRELATION);
+  ASSERT_EQ(arr_dims[3], MockT::NR_FPGA_SOURCES);
 
   auto seq_ds = verify_file.getDataSet("beam_seq_nums");
-  std::vector<int> seq_out(2);
+  std::vector<std::vector<int>> seq_out(1);
   seq_ds.select({0, 0}, {1, 2}).read(seq_out);
-  EXPECT_EQ(seq_out[0], 100);
-  EXPECT_EQ(seq_out[1], 200);
+  EXPECT_EQ(seq_out[0][0], 100);
+  EXPECT_EQ(seq_out[0][1], 200);
+}
+
+TEST(HDF5BeamWriterTest, WritesVisibilities) {
+  std::string filename = make_temp_hdf5_file();
+  HighFive::File file(filename, HighFive::File::Truncate);
+
+  HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(file);
+
+  // Prepare dummy data
+  MockT::VisibilitiesOutputType vis_data;
+
+  writer.write_visibilities_block(&vis_data,
+                                  /*start_seq=*/100,
+                                  /*end_seq=*/200);
+  writer.flush();
+
+  // Reopen and verify
+  HighFive::File verify_file(filename, HighFive::File::ReadOnly);
+
+  auto vis_ds = verify_file.getDataSet("visibilities");
+  auto vis_dims = vis_ds.getDimensions();
+  ASSERT_EQ(vis_dims[0], 1);
+  ASSERT_EQ(vis_dims[1], MockT::NR_CHANNELS);
+  ASSERT_EQ(vis_dims[2], MockT::NR_BASELINES);
+  ASSERT_EQ(vis_dims[3], MockT::NR_POLARIZATIONS);
+  ASSERT_EQ(vis_dims[4], MockT::NR_POLARIZATIONS);
+  ASSERT_EQ(vis_dims[5], MockT::COMPLEX);
+
+  auto seq_ds = verify_file.getDataSet("vis_seq_nums");
+  std::vector<std::vector<int>> seq_out(2);
+  seq_ds.select({0, 0}, {1, 2}).read(seq_out);
+  EXPECT_EQ(seq_out[0][0], 100);
+  EXPECT_EQ(seq_out[0][1], 200);
 }
