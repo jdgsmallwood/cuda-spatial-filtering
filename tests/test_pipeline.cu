@@ -30,15 +30,19 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   using scaleT = typename T::PacketScalesType;
   sampleT *samples;
   scaleT *scales;
+  typename T::ArrivalsOutputType arrivals;
 
   DummyFinalPacketData() {
     CUDA_CHECK(cudaMallocHost((void **)&samples, sizeof(sampleT)));
     CUDA_CHECK(cudaMallocHost((void **)&scales, sizeof(scaleT)));
+    CUDA_CHECK(cudaMallocHost((void **)&arrivals,
+                              sizeof(typename T::ArrivalsOutputType)));
   };
 
   ~DummyFinalPacketData() {
     cudaFreeHost(samples);
     cudaFreeHost(scales);
+    cudaFreeHost(arrivals);
   }
 
   void *get_samples_ptr() override { return samples; };
@@ -46,10 +50,10 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   void *get_scales_ptr() override { return scales; };
   size_t get_scales_element_size() override { return sizeof(scaleT); };
 
-  bool *get_arrivals_ptr() override {
-    bool out = true;
-    return &out;
-  };
+  bool *get_arrivals_ptr() override { return (bool *)&arrivals; };
+  size_t get_arrivals_size() override {
+    return sizeof(typename T::ArrivalsOutputType);
+  }
 
   void zero_missing_packets() override {};
 };
@@ -100,12 +104,12 @@ TEST(LambdaGPUPipelineTest, Ex1) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
@@ -123,7 +127,7 @@ TEST(LambdaGPUPipelineTest, Ex1) {
             } else {
               expected = -8.0f;
             }
-            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -136,10 +140,10 @@ TEST(LambdaGPUPipelineTest, Ex1) {
           } else {
             expected_vis = 64.0f;
           };
-          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
-              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << " → actual=" << output->visibilities[0][i][q][j][p][0]
               << ", expected=" << expected_vis;
           ;
         }
@@ -182,12 +186,12 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
@@ -209,7 +213,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -222,10 +226,10 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
           } else {
             expected_vis = 64.0f;
           };
-          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
-              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << " → actual=" << output->visibilities[0][i][q][j][p][0]
               << ", expected=" << expected_vis;
           ;
         }
@@ -276,12 +280,12 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
@@ -302,7 +306,7 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -350,12 +354,12 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
@@ -376,7 +380,7 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -428,12 +432,12 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
@@ -454,7 +458,7 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output.beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
           }
         }
       }
@@ -491,12 +495,12 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
@@ -514,10 +518,10 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
             } else {
               expected = -16.0f;
             }
-            EXPECT_EQ(output.beam_data[0][i][j][k][l][m], expected)
+            EXPECT_EQ(output->beam_data[0][i][j][k][l][m], expected)
                 << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
                 << ", l=" << l << ", m=" << m
-                << " → actual=" << output.beam_data[0][i][j][k][l][m]
+                << " → actual=" << output->beam_data[0][i][j][k][l][m]
                 << ", expected=" << expected;
           }
         }
@@ -531,10 +535,10 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
           } else {
             expected_vis = 256.0f;
           };
-          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
-              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << " → actual=" << output->visibilities[0][i][q][j][p][0]
               << ", expected=" << expected_vis;
           ;
         }
@@ -578,12 +582,12 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(2, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
@@ -604,10 +608,10 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
             } else {
               expected = -8.0f;
             }
-            EXPECT_EQ(output.beam_data[0][i][j][k][l][m], expected)
+            EXPECT_EQ(output->beam_data[0][i][j][k][l][m], expected)
                 << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
                 << ", l=" << l << ", m=" << m
-                << " → actual=" << output.beam_data[0][i][j][k][l][m]
+                << " → actual=" << output->beam_data[0][i][j][k][l][m]
                 << ", expected=" << expected;
           }
         }
@@ -621,10 +625,10 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
           } else {
             expected_vis = 64.0f;
           };
-          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
-              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << " → actual=" << output->visibilities[0][i][q][j][p][0]
               << ", expected=" << expected_vis;
           ;
         }
@@ -662,12 +666,12 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
     }
   }
 
-  SingleHostMemoryOutput<Config> output;
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
   LambdaGPUPipeline<Config> pipeline(2, &h_weights);
 
   pipeline.set_state(&state);
-  pipeline.set_output(&output);
+  pipeline.set_output(output);
 
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
@@ -686,10 +690,10 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
             } else {
               expected = -14.0f;
             }
-            EXPECT_EQ(output.beam_data[0][i][j][k][l][m], expected)
+            EXPECT_EQ(output->beam_data[0][i][j][k][l][m], expected)
                 << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
                 << ", l=" << l << ", m=" << m
-                << " → actual=" << output.beam_data[0][i][j][k][l][m]
+                << " → actual=" << output->beam_data[0][i][j][k][l][m]
                 << ", expected=" << expected;
           }
         }
@@ -716,10 +720,10 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
           } else {
             expected_vis = 0;
           };
-          EXPECT_EQ(output.visibilities[0][i][q][j][p][0], expected_vis)
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
-              << " → actual=" << output.visibilities[0][i][q][j][p][0]
+              << " → actual=" << output->visibilities[0][i][q][j][p][0]
               << ", expected=" << expected_vis;
           ;
         }

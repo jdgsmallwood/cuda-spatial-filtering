@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include "spatial/logging.hpp"
 #include <condition_variable>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
