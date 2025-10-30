@@ -68,6 +68,6 @@ RUN echo "set-option -g prefix C-a" > /etc/tmux.conf && \
     echo "unbind-key C-b" >> /etc/tmux.conf && \
     echo "bind-key C-a send-prefix" >> /etc/tmux.conf && \
     echo "set-option -g status-bg red" >> /etc/tmux.conf
-RUN echo "alias cmlamd='cmake -DBUILD_TESTING=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CUDA_FLAGS="-g -G --ptxas-options=-v" -DCMAKE_CXX_FLAGS="-g -pg" -DCMAKE_EXE_LINKER_FLAGS="-g -pg" -DCMAKE_BUILD_TYPE=Debug .. && cmake --build .'" >> ~/.bashrc 
+RUN echo "alias cmlamd='cmake -DBUILD_TESTING=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CUDA_FLAGS=\"-g -G --ptxas-options=-v\" -DCMAKE_CXX_FLAGS=\"-g -pg\" -DCMAKE_EXE_LINKER_FLAGS=\"-g -pg\" -DCMAKE_BUILD_TYPE=Debug .. && cmake --build .'" >> ~/.bashrc 
 ENV     CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
 WORKDIR /workspace
