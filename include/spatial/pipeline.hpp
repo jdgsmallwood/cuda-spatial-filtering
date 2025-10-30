@@ -473,16 +473,21 @@ public:
       cudaMemcpyAsync(landing_pointer, d_beamformer_data_output[current_buffer],
                       sizeof(BeamformerOutput), cudaMemcpyDefault,
                       streams[current_buffer]);
+      cpu_end = clock::now();
+      LOG_DEBUG("CPU time for output registration + copying: {} us",
+                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                      cpu_start)
+                    .count());
+      cpu_start = clock::now();
       auto *output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = block_num};
       cudaLaunchHostFunc(streams[current_buffer],
                          output_transfer_complete_host_func, output_ctx);
       cpu_end = clock::now();
-      LOG_DEBUG(
-          "CPU time for output registration + host function launch: {} us",
-          std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                cpu_start)
-              .count());
+      LOG_DEBUG("CPU time for host function launch: {} us",
+                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                      cpu_start)
+                    .count());
 
       // memcpy arrivals
       cpu_start = clock::now();
