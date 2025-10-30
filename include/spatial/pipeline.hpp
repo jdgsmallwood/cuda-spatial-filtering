@@ -213,7 +213,8 @@ public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
   size_t benchmark_runs_done = 0;
   cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
-  void execute_pipeline(FinalPacketData *packet_data) override {
+  void execute_pipeline(FinalPacketData *packet_data,
+                        const bool dummy_run = false) override {
     using clock = std::chrono::high_resolution_clock;
 
     auto cpu_start_total = clock::now();
@@ -458,7 +459,7 @@ public:
                   .count());
 
     // Output handling
-    if (output_ != nullptr) {
+    if (output_ != nullptr && !dummy_run) {
       cpu_start = clock::now();
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
@@ -492,9 +493,10 @@ public:
     }
 
     // Rotate buffer indices
-    current_buffer = (current_buffer + 1) % num_buffers;
-    benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
-
+    if (!dummy_run) {
+      current_buffer = (current_buffer + 1) % num_buffers;
+      benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
+    }
     auto cpu_end_total = clock::now();
     LOG_DEBUG("Total CPU time for execute_pipeline: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(
@@ -641,6 +643,17 @@ public:
                              "visCorrToDecomp");
     tensor_32.addPermutation("beamCCGLIB", "beamOutput",
                              CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
+
+    // warm up the pipeline.
+    // This will JIT the template kernels to avoid having a long startup time
+    // Because everything is zeroed it should have negligible effect on output.
+    T::PacketFinalDataType warmup_packet;
+    std::memset(warmup_packet.samples, 0,
+                warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
+    std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
+    execute_pipeline(&warmup_packet, true);
   };
   ~LambdaGPUPipeline() {
     // If there are visibilities in the accumulator on the GPU - dump them

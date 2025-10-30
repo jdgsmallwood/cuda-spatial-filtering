@@ -113,7 +113,6 @@ struct LambdaFinalPacketData : public FinalPacketData {
                              cudaHostAllocDefault));
   };
   ~LambdaFinalPacketData() {
-
     cudaFreeHost(samples);
     cudaFreeHost(scales);
     cudaFreeHost(arrivals);
