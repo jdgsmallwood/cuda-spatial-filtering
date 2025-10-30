@@ -62,10 +62,10 @@ RUN    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-sy
 RUN    dpkg -i NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb && rm NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb
 
 
-RUN    echo 'set-option -g prefix C-a
-    unbind-key C-b
-    bind-key C-a send-prefix
-    set-option -g status-bg red' > /etc/tmux.conf
+RUN    echo "set-option -g prefix C-a \
+    unbind-key C-b \
+    bind-key C-a send-prefix \ 
+    set-option -g status-bg red" > /etc/tmux.conf
 
 
 ENV     CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
