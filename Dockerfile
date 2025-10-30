@@ -61,12 +61,10 @@ RUN apt-get -y install libcutensor2 libcutensor-dev libcutensor-doc
 RUN    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_3/NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb
 RUN    dpkg -i NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb && rm NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb
 
-
-RUN    echo "set-option -g prefix C-a \
-    unbind-key C-b \
-    bind-key C-a send-prefix \ 
-    set-option -g status-bg red" > /etc/tmux.conf
-
+RUN echo "set-option -g prefix C-a" > /etc/tmux.conf && \
+    echo "unbind-key C-b" >> /etc/tmux.conf && \
+    echo "bind-key C-a send-prefix" >> /etc/tmux.conf && \
+    echo "set-option -g status-bg red" >> /etc/tmux.conf
 
 ENV     CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
 WORKDIR /workspace
