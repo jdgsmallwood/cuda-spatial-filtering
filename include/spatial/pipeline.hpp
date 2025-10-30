@@ -1,6 +1,7 @@
 #pragma once
 #include "spatial/packet_formats.hpp"
 #include "spatial/spatial.hpp"
+#include <chrono>
 #include <complex>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -212,32 +213,68 @@ public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
   size_t benchmark_runs_done = 0;
   cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
-
   void execute_pipeline(FinalPacketData *packet_data) override {
+    using clock = std::chrono::high_resolution_clock;
+
+    auto cpu_start_total = clock::now();
 
     if (state_ == nullptr) {
-      std::logic_error("State has not been set on GPUPipeline object!");
+      throw std::logic_error("State has not been set on GPUPipeline object!");
     }
+
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
     if (visibilities_start_seq_num == -1) {
       visibilities_start_seq_num = packet_data->start_seq_id;
     }
+
+    // Record GPU start event
+    auto cpu_start = clock::now();
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
+    auto cpu_end = clock::now();
+    LOG_DEBUG("CPU time for cudaEventRecord start_run: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // d_samples_entry memcpy
+    cpu_start = clock::now();
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU overhead for d_samples_entry cudaMemcpyAsync: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // d_scales memcpy
+    cpu_start = clock::now();
     cudaMemcpyAsync(d_scales[current_buffer],
                     (void *)packet_data->get_scales_ptr(),
                     packet_data->get_scales_element_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU overhead for d_scales cudaMemcpyAsync: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // BufferReleaseContext + host function
+    cpu_start = clock::now();
     auto *ctx = new BufferReleaseContext{
         .state = this->state_, .buffer_index = packet_data->buffer_index};
-
     cudaLaunchHostFunc(streams[current_buffer], release_buffer_host_func, ctx);
+    cpu_end = clock::now();
+    LOG_DEBUG(
+        "CPU time for BufferReleaseContext alloc + cudaLaunchHostFunc: {} us",
+        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                              cpu_start)
+            .count());
 
+    // scale_and_convert_to_half kernel
+    cpu_start = clock::now();
     scale_and_convert_to_half<
         typename T::PacketSamplesPlanarType, typename T::PacketScalesType,
         typename T::HalfPacketSamplesPlanarType, T::NR_CHANNELS,
@@ -248,128 +285,222 @@ public:
         (typename T::HalfPacketSamplesPlanarType *)
             d_samples_half[current_buffer],
         streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for scale_and_convert_to_half launch: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
-    //  Reorder so that receiver is the slowest changing index so that we can
-    //  pad it out.
+    // tensor_16.runPermutation "packetToPadding"
+    cpu_start = clock::now();
     tensor_16.runPermutation(
         "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToPadding: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
-    // tensor copy into correct place in d_samples_padded
+    // cudaMemcpyAsync for padding
+    cpu_start = clock::now();
     cudaMemcpyAsync(d_samples_padded[current_buffer],
                     d_samples_padding[current_buffer],
                     sizeof(typename T::HalfPacketSamplesType),
                     cudaMemcpyDefault, streams[current_buffer]);
-    cudaMemsetAsync(
-        // need to convert to char which gives in terms of bytes.
-        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
-            sizeof(typename T::HalfPacketSamplesType),
-        0,
-        sizeof(typename T::PaddedPacketSamplesType) -
-            sizeof(typename T::HalfPacketSamplesType),
-        streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU overhead for d_samples_padded cudaMemcpyAsync: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // cudaMemsetAsync
+    cpu_start = clock::now();
+    cudaMemsetAsync(reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
+                        sizeof(typename T::HalfPacketSamplesType),
+                    0,
+                    sizeof(typename T::PaddedPacketSamplesType) -
+                        sizeof(typename T::HalfPacketSamplesType),
+                    streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU overhead for cudaMemsetAsync: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // tensor_16.runPermutation "paddedToCorrInput"
+    cpu_start = clock::now();
     tensor_16.runPermutation(
         "paddedToCorrInput", alpha, (__half *)d_samples_padded[current_buffer],
         (__half *)d_correlator_input[current_buffer], streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_16.runPermutation paddedToCorrInput: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // correlator.launchAsync
+    cpu_start = clock::now();
     correlator.launchAsync((CUstream)streams[current_buffer],
                            (CUdeviceptr)d_correlator_output[current_buffer],
                            (CUdeviceptr)d_correlator_input[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for correlator.launchAsync: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // tensor_32.runPermutation "visCorrToDecomp"
+    cpu_start = clock::now();
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
                              (float *)d_correlator_output[current_buffer],
                              (float *)d_visibilities_permuted[current_buffer],
                              streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_32.runPermutation visCorrToDecomp: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // accumulate_visibilities (CPU wrapper)
+    cpu_start = clock::now();
     accumulate_visibilities((float *)d_correlator_output[current_buffer],
                             (float *)d_visibilities_accumulator[current_buffer],
                             2 * NR_BASELINES, streams[current_buffer]);
-    int current_num_correlation_units_integrated =
-        num_correlation_units_integrated.fetch_add(1);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for accumulate_visibilities: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
-    // Each buffer has its own visibilities and we need to combine them once
-    // it's done.
-
-    // Dump out integrated values to host
-    // Perhaps assume this is a multiple of the number of packets
-    // in the data to allow this to be checked only at the end.
-    if (current_num_correlation_units_integrated >=
-        NR_CORRELATED_BLOCKS_TO_ACCUMULATE - 1) {
-      dump_visibilities(end_seq_num);
-    }
-    // These two can be combined.
+    // tensor_16.runPermutation "packetToPlanar"
+    cpu_start = clock::now();
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)d_samples_half[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToPlanar: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // tensor_16.runPermutation "consToColMajCons"
+    cpu_start = clock::now();
     tensor_16.runPermutation(
         "consToColMajCons", alpha,
         (__half *)d_samples_consolidated[current_buffer],
         (__half *)d_samples_consolidated_col_maj[current_buffer],
         streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_16.runPermutation consToColMajCons: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // update_weights
+    cpu_start = clock::now();
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
                    T::NR_POLARIZATIONS, d_eigenvalues[current_buffer],
                    (float *)d_visibilities_converted[current_buffer],
                    streams[current_buffer]);
-    // this seems suboptimal - figure this out later.
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for update_weights: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // tensor_16.runPermutation "weightsInputToCCGLIB"
+    cpu_start = clock::now();
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights_updated[current_buffer],
                              (__half *)d_weights_permuted[current_buffer],
                              streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG(
+        "CPU time for tensor_16.runPermutation weightsInputToCCGLIB: {} us",
+        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                              cpu_start)
+            .count());
 
+    // GEMM run
+    cpu_start = clock::now();
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
              (CUdeviceptr)d_samples_consolidated_col_maj[current_buffer],
              (CUdeviceptr)d_beamformer_output[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for GEMM run: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // tensor_32.runPermutation "beamCCGLIBToOutput"
+    cpu_start = clock::now();
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
                              (float *)d_beamformer_output[current_buffer],
                              (float *)d_beamformer_data_output[current_buffer],
                              streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_32.runPermutation beamCCGLIBToOutput: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
 
+    // Record GPU stop event
+    cpu_start = clock::now();
     cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
-    if (output_ == nullptr) {
-      LOG_WARN("No output is defined!");
-    } else {
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for cudaEventRecord stop_run: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // Output handling
+    if (output_ != nullptr) {
+      cpu_start = clock::now();
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
-
       cudaMemcpyAsync(landing_pointer, d_beamformer_data_output[current_buffer],
                       sizeof(BeamformerOutput), cudaMemcpyDefault,
                       streams[current_buffer]);
       auto *output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = block_num};
-
       cudaLaunchHostFunc(streams[current_buffer],
                          output_transfer_complete_host_func, output_ctx);
-      // Move arrivals to the output
+      cpu_end = clock::now();
+      LOG_DEBUG(
+          "CPU time for output registration + host function launch: {} us",
+          std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                cpu_start)
+              .count());
+
+      // memcpy arrivals
+      cpu_start = clock::now();
       bool *arrivals_output_pointer =
           (bool *)output_->get_arrivals_data_landing_pointer(block_num);
-
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
+      cpu_end = clock::now();
+      LOG_DEBUG("CPU time for memcpy arrivals + register completion: {} us",
+                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                      cpu_start)
+                    .count());
     }
 
-    // debug_kernel_launch<T>(
-    //     (typename T::PacketSamplesPlanarType
-    //     *)d_samples_entry[current_buffer], (typename T::PacketScalesType
-    //     *)d_scales[current_buffer], (typename T::HalfPacketSamplesPlanarType
-    //     *)
-    //         d_samples_half[current_buffer],
-    //     (typename T::HalfPacketSamplesPlanarType *)
-    //         d_samples_padding[current_buffer],
-
-    //    (typename T::PaddedPacketSamplesPlanarType *)
-    //        d_samples_padded[current_buffer],
-    //    streams[current_buffer]);
-
+    // Rotate buffer indices
     current_buffer = (current_buffer + 1) % num_buffers;
     benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
-  };
+
+    auto cpu_end_total = clock::now();
+    LOG_DEBUG("Total CPU time for execute_pipeline: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  cpu_end_total - cpu_start_total)
+                  .count());
+  }
   LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
 
       : num_buffers(num_buffers), h_weights(h_weights),
