@@ -41,6 +41,7 @@ template <typename T> struct BeamWeightsT {
 struct BufferReleaseContext {
   ProcessorStateBase *state;
   size_t buffer_index;
+  bool dummy_run;
 };
 
 struct OutputTransferCompleteContext {
@@ -50,9 +51,12 @@ struct OutputTransferCompleteContext {
 
 // Static function to be called by cudaLaunchHostFunc
 static void release_buffer_host_func(void *data) {
+
   auto *ctx = static_cast<BufferReleaseContext *>(data);
-  LOG_INFO("Releasing buffer #{}", ctx->buffer_index);
-  ctx->state->release_buffer(ctx->buffer_index);
+  if (!ctx->dummy_run) {
+    LOG_INFO("Releasing buffer #{}", ctx->buffer_index);
+    ctx->state->release_buffer(ctx->buffer_index);
+  }
   delete ctx;
 }
 
@@ -264,8 +268,10 @@ public:
 
     // BufferReleaseContext + host function
     cpu_start = clock::now();
-    auto *ctx = new BufferReleaseContext{
-        .state = this->state_, .buffer_index = packet_data->buffer_index};
+    auto *ctx =
+        new BufferReleaseContext{.state = this->state_,
+                                 .buffer_index = packet_data->buffer_index,
+                                 .dummy_run = dummy_run};
     cudaLaunchHostFunc(streams[current_buffer], release_buffer_host_func, ctx);
     cpu_end = clock::now();
     LOG_DEBUG(
@@ -654,6 +660,7 @@ public:
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
+    cudaDeviceSynchronize();
   };
   ~LambdaGPUPipeline() {
     // If there are visibilities in the accumulator on the GPU - dump them
