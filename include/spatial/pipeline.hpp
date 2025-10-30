@@ -647,7 +647,7 @@ public:
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time
     // Because everything is zeroed it should have negligible effect on output.
-    T::PacketFinalDataType warmup_packet;
+    typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
     std::memset(warmup_packet.scales, 0,
