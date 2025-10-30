@@ -33,8 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set default compiler environment variables (optional)
 ENV CC=/usr/bin/gcc
 ENV CXX=/usr/bin/g++
-ENV LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64/stubs:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64/stubs:$LD_LIBRARY_PATH
 
-RUN ln -s /usr/local/cuda-12.9/lib64/stubs/libcuda.so /usr/local/cuda-12.9/lib64/stubs/libcuda.so.1
+RUN ln -s /usr/local/cuda-12.8/lib64/stubs/libcuda.so /usr/local/cuda-12.8/lib64/stubs/libcuda.so.1
 
 WORKDIR /workspace
