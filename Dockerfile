@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bison \
     linux-tools-common \ 
     linux-tools-generic \
+    linux-tools-$(uname -r) \
     && rm -rf /var/lib/apt/lists/*
 
 # Set default compiler environment variables (optional)
