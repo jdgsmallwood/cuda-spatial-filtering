@@ -7,13 +7,11 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
-#include <chrono>
 #include <complex>
 #include <csignal>
 #include <cuComplex.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <fstream>
 #include <highfive/highfive.hpp>
 #include <iostream>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -24,11 +22,39 @@
 #include <thread>
 #include <unistd.h>
 
+#ifndef NUMBER_BEAMS
+#define NUMBER_BEAMS 1
+#endif
+
+#ifndef NUMBER_PACKETS_TO_CORRELATE
+#define NUMBER_PACKETS_TO_CORRELATE 16
+#endif
+
 std::atomic<bool> running{true};
 
 void signal_handler(int signal) {
   LOG_INFO("Caught CTRL+C, shutting down...");
   running = false;
+}
+
+void writeVectorToCSV(const std::vector<float> &times,
+                      const std::string &filename) {
+  std::ofstream file(filename);
+  if (!file.is_open()) {
+    std::cerr << "Error: Could not open file " << filename << "\n";
+    return;
+  }
+
+  // Write CSV header
+  file << "index,time\n";
+
+  // Write data
+  for (size_t i = 0; i < times.size(); ++i) {
+    file << i << "," << times[i] << "\n";
+  }
+
+  file.close();
+  std::cout << "Data successfully written to " << filename << "\n";
 }
 
 int main() {
@@ -46,10 +72,10 @@ int main() {
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers = 10;
   constexpr int nr_lambda_padded_receivers = 32;
-  constexpr int nr_lambda_beams = 8;
+  constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_receivers_per_block = 32;
-  constexpr int nr_lambda_packets_for_correlation = 16;
+  constexpr int nr_lambda_packets_for_correlation = NUMBER_PACKETS_TO_CORRELATE;
   constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 10000000;
@@ -65,10 +91,8 @@ int main() {
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel);
 
-  std::string beam_filename =
-      "/tmp/cuda-spatial-filtering/build/apps/hdf5_trial.hdf5";
-  std::string vis_filename =
-      "/tmp/cuda-spatial-filtering/build/apps/hdf5_trial_vis.hdf5";
+  std::string beam_filename = "hdf5_trial.hdf5";
+  std::string vis_filename = "hdf5_trial_vis.hdf5";
   HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   auto beam_writer = std::make_unique<
@@ -110,12 +134,27 @@ int main() {
 
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
+  int packets_received = 0;
+  int timeout = 0;
   while (state.running) {
     sleep(5);
     // This is nice to see outside of log files.
     std::cout << "Stats: Received=" << state.packets_received
               << ", Processed=" << state.packets_processed << std::endl;
     state.running = (int)running;
+    // This is my attempt at a rudimentary shutdown procedure
+    // when there are no more packets running through in a 20sec period.
+    if (packets_received != 0) {
+      if (packets_received == state.packets_received) {
+        timeout += 1;
+      } else {
+        timeout = 0;
+      }
+      packets_received = state.packets_received;
+      if (timeout > 4) {
+        state.running = 0;
+      }
+    }
   }
 
   // Cleanup
@@ -126,6 +165,17 @@ int main() {
   receiver.join();
   std::cout << "Waiting for processor to finish...\n";
   processor.join();
+
+  std::vector<float> run_timings;
+  run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
+  for (auto i = 0; i < pipeline.NR_BENCHMARKING_RUNS; ++i) {
+    float ms;
+    cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.stop_run[i]);
+    if (ms != 0.0f) {
+      run_timings.push_back(ms);
+    };
+  }
+  writeVectorToCSV(run_timings, "output_timings.csv");
   FLUSH_LOG();
   spdlog::shutdown();
   return 0;

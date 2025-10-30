@@ -1,24 +1,24 @@
 
-add_executable(
-  test_cublas
-  ${PROJECT_SOURCE_DIR}/apps/test_cublas_complex.cpp
-)
-
-target_link_libraries(test_cublas PRIVATE cuda cublas CUDA::cudart)
-
-add_executable(
-  test_cutensor
-  ${PROJECT_SOURCE_DIR}/apps/test_cutensor.cpp
-)
-
-target_link_libraries(test_cutensor PRIVATE CUDA::cudart cuda cutensor)
-
-add_executable(
-  test_cutensor_2
-  ${PROJECT_SOURCE_DIR}/apps/test_cutensor_2.cpp
-)
-
-target_link_libraries(test_cutensor_2 PRIVATE CUDA::cudart cuda cutensor spatial)
+#add_executable(
+#  test_cublas
+#  ${PROJECT_SOURCE_DIR}/apps/test_cublas_complex.cpp
+#)
+#
+#target_link_libraries(test_cublas PRIVATE cuda cublas CUDA::cudart)
+#
+#add_executable(
+#  test_cutensor
+#  ${PROJECT_SOURCE_DIR}/apps/test_cutensor.cpp
+#)
+#
+#target_link_libraries(test_cutensor PRIVATE CUDA::cudart cuda cutensor)
+#
+#add_executable(
+#  test_cutensor_2
+#  ${PROJECT_SOURCE_DIR}/apps/test_cutensor_2.cpp
+#)
+#
+#target_link_libraries(test_cutensor_2 PRIVATE CUDA::cudart cuda cutensor spatial)
 
 #add_executable(
 #  beamform_spatial
@@ -50,6 +50,15 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cu
 )
 target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
+
+set(NUMBER_PACKETS_TO_CORRELATE 16 CACHE STRING "Number of packets to correlate while benchmarking")
+set(NUMBER_BEAMS 10 CACHE STRING "Number of beams to correlate while benchmarking")
+add_executable(
+  benchmark
+  ${PROJECT_SOURCE_DIR}/apps/benchmark-20251030.cu
+)
+target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
+target_compile_definitions(benchmark PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS} NUMBER_PACKETS_TO_CORRELATE=${NUMBER_PACKETS_TO_CORRELATE} )
 
 
 add_executable(

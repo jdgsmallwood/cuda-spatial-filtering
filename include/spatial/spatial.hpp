@@ -389,6 +389,7 @@ public:
         if (std::all_of(buffers[current_buffer].is_populated.begin(),
                         buffers[current_buffer].is_populated.end(),
                         [](bool i) { return i; })) {
+          LOG_INFO("Buffer is complete - passing to output pipeline...");
           // Send off data to be processed by CUDA pipeline.
           // Then advance to next buffer and keep iterating.
           // if (!first_written) {
@@ -402,6 +403,7 @@ public:
           }
 
           buffers[current_buffer].is_ready = false;
+          LOG_INFO("Zeroing missing packets...");
           d_samples[current_buffer]->zero_missing_packets();
           // order here is important. As the pipeline can async update
           // the start/end seqs we need to capture the
@@ -409,8 +411,11 @@ public:
           // the saved copy of the start_seq.
           const int current_buffer_start_seq =
               buffers[current_buffer].start_seq;
+          LOG_INFO("Executing pipeline...");
           pipeline_->execute_pipeline(d_samples[current_buffer]);
+          LOG_INFO("Advancing to next buffer...");
           advance_to_next_buffer(current_buffer_start_seq);
+          LOG_INFO("Done!");
         }
         packets_processed_before_completion_check = 0;
       }

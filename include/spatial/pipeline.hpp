@@ -23,14 +23,14 @@
 #include <cuda_runtime.h>
 #include <cudawrappers/cu.hpp>
 #include <cusolverDn.h>
+#include <highfive/highfive.hpp>
 #include <iostream>
 #include <libtcc/Correlator.h>
+#include <nvToolsExt.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-
-#include <highfive/highfive.hpp>
 
 template <typename T> struct BeamWeightsT {
   std::complex<__half> weights[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
@@ -209,6 +209,10 @@ private:
   int visibilities_end_seq_num;
 
 public:
+  static constexpr size_t NR_BENCHMARKING_RUNS = 100;
+  size_t benchmark_runs_done = 0;
+  cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
+
   void execute_pipeline(FinalPacketData *packet_data) override {
 
     if (state_ == nullptr) {
@@ -219,6 +223,7 @@ public:
     if (visibilities_start_seq_num == -1) {
       visibilities_start_seq_num = packet_data->start_seq_id;
     }
+    cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
@@ -324,6 +329,7 @@ public:
                              (float *)d_beamformer_data_output[current_buffer],
                              streams[current_buffer]);
 
+    cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
     if (output_ == nullptr) {
       LOG_WARN("No output is defined!");
     } else {
@@ -362,6 +368,7 @@ public:
     //    streams[current_buffer]);
 
     current_buffer = (current_buffer + 1) % num_buffers;
+    benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
   };
   LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
 
@@ -466,6 +473,10 @@ public:
       cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights),
                  cudaMemcpyDefault);
     }
+    for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
+      cudaEventCreate(&start_run[i]);
+      cudaEventCreate(&stop_run[i]);
+    }
 
     cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
@@ -566,6 +577,13 @@ public:
 
     for (auto eigenvalues : d_eigenvalues) {
       cudaFree(eigenvalues);
+    }
+
+    for (auto event : start_run) {
+      cudaEventDestroy(event);
+    }
+    for (auto event : stop_run) {
+      cudaEventDestroy(event);
     }
   };
 
