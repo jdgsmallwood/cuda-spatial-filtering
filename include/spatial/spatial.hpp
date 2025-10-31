@@ -108,11 +108,15 @@ public:
   ProcessorState &operator=(ProcessorState &&) = delete;
   void set_pipeline(GPUPipeline *pipeline) { pipeline_ = pipeline; };
   bool get_next_write_index() {
-    int next_write_index =
-        (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
-    if (next_write_index == read_index.load(std::memory_order_acquire)) {
-      LOG_INFO("Ring buffer is full!! Dropping packets...");
-      return false;
+    int next_write_index = -1;
+    while (next_write_index < 0 ||
+           !d_packet_data[next_write_index]->processed) {
+      next_write_index =
+          (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
+      if (next_write_index == read_index.load(std::memory_order_acquire)) {
+        LOG_INFO("Ring buffer is full!! Dropping packets...");
+        return false;
+      }
     }
     write_index.store(next_write_index, std::memory_order_release);
     LOG_INFO("Next write index is...{}", next_write_index);
