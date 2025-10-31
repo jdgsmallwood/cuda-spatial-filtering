@@ -53,6 +53,7 @@ int main() {
   constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 10000000;
+  constexpr int RING_BUFFER_SIZE = 10000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -61,7 +62,7 @@ int main() {
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
                    nr_correlation_blocks_to_integrate>;
 
-  ProcessorState<Config, num_packet_buffers> state(
+  ProcessorState<Config, num_packet_buffers, RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel);
 
