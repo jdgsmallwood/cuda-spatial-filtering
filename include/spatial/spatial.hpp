@@ -10,8 +10,8 @@
 #include <netinet/in.h>
 // #include <sys/socket.h>
 #include <atomic>
+#include <chrono>
 #include <mutex>
-
 #include <sys/time.h>
 
 #define MIN_PCAP_HEADER_SIZE 64
@@ -356,6 +356,9 @@ public:
   };
   void process_packets() {
 
+    using clock = std::chrono::high_resolution_clock;
+    auto cpu_start = clock::now();
+    auto cpu_end = clock::now();
     LOG_INFO("Processor thread started");
     //    static bool first_written = false;
     int packets_processed_before_completion_check = 0;
@@ -403,8 +406,14 @@ public:
           }
 
           buffers[current_buffer].is_ready = false;
+          cpu_start = clock::now();
           LOG_INFO("Zeroing missing packets...");
           d_samples[current_buffer]->zero_missing_packets();
+          cpu_end = clock::now();
+          LOG_DEBUG("CPU time for zeroing packets: {} us",
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        cpu_end - cpu_start)
+                        .count());
           // order here is important. As the pipeline can async update
           // the start/end seqs we need to capture the
           // start_seq, then execute the pipeline, then advance using
@@ -414,7 +423,13 @@ public:
           LOG_INFO("Executing pipeline...");
           pipeline_->execute_pipeline(d_samples[current_buffer]);
           LOG_INFO("Advancing to next buffer...");
+          cpu_start = clock::now();
           advance_to_next_buffer(current_buffer_start_seq);
+          cpu_end = clock::now();
+          LOG_DEBUG("CPU time for advancing to next buffer: {} us",
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        cpu_end - cpu_start)
+                        .count());
           LOG_INFO("Done!");
         }
         packets_processed_before_completion_check = 0;

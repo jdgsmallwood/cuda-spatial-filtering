@@ -61,7 +61,7 @@ int main() {
   std::signal(SIGINT, signal_handler);
   auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
                                             "app.log", /*truncate*/ true);
-  app_logger->set_level(spdlog::level::info);
+  app_logger->set_level(spdlog::level::debug);
   app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 
   spatial::Logger::set(app_logger);
@@ -95,15 +95,14 @@ int main() {
   std::string vis_filename = "hdf5_trial_vis.hdf5";
   HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
-  auto beam_writer = std::make_unique<
-      HDF5BeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
-      beam_file);
+  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
+      Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 150);
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
-      std::move(beam_writer), std::move(vis_writer), 1000, 1000);
+      std::move(beam_writer), std::move(vis_writer), 100, 100);
 
   BeamWeightsT<Config> h_weights;
 

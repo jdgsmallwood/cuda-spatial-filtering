@@ -34,6 +34,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iwyu \
     tmux \
     gdb \
+    libelf-dev \
+    libdw-dev \
+    libaudit-dev \
+    libslang2-dev \
+    libperl-dev \
+    python3-dev \
+    binutils-dev \
+    liblzma-dev \
+    libzstd-dev \
+    libcap-dev \
+    libnuma-dev \
+    libtraceevent-dev \
+    libtracefs-dev \
+    libpfm4-dev \
+    pkg-config \
+    libunwind-dev \
+    less \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -68,6 +85,33 @@ RUN echo "set-option -g prefix C-a" > /etc/tmux.conf && \
     echo "unbind-key C-b" >> /etc/tmux.conf && \
     echo "bind-key C-a send-prefix" >> /etc/tmux.conf && \
     echo "set-option -g status-bg red" >> /etc/tmux.conf
-RUN echo "alias cmlamd='cmake -DBUILD_TESTING=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CUDA_FLAGS=\"-g -G --ptxas-options=-v\" -DCMAKE_CXX_FLAGS=\"-g -pg\" -DCMAKE_EXE_LINKER_FLAGS=\"-g -pg\" -DCMAKE_BUILD_TYPE=Debug .. && cmake --build .'" >> ~/.bashrc 
+#RUN echo "alias cmlamd='cmake -DBUILD_TESTING=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CUDA_FLAGS=\"-g -G --ptxas-options=-v\" -DCMAKE_CXX_FLAGS=\"-g -pg\" -DCMAKE_EXE_LINKER_FLAGS=\"-g -pg\" -DCMAKE_BUILD_TYPE=Debug .. && cmake --build .'" >> ~/.bashrc 
+
+# Add cmlamd build command w/ argument possibilities
+RUN echo 'cmlamd() {' >> ~/.bashrc && \
+    echo '  local args="";' >> ~/.bashrc && \
+    echo '  for arg in "$@"; do' >> ~/.bashrc && \
+    echo '    args+=" -D$arg"' >> ~/.bashrc && \
+    echo '  done' >> ~/.bashrc && \
+    echo '  cmake -DBUILD_TESTING=OFF \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_CUDA_FLAGS="-g -G --ptxas-options=-v" \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_CXX_FLAGS="-g -pg" \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_EXE_LINKER_FLAGS="-g -pg" \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_BUILD_TYPE=Debug $args .. && cmake --build .' >> ~/.bashrc && \
+    echo '}' >> ~/.bashrc
+
 ENV     CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
-WORKDIR /workspace
+
+# Build Perf
+WORKDIR /tmp
+RUN wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.66.tar.xz && \
+    tar -xf linux-6.6.66.tar.xz && \
+    rm linux-6.6.66.tar.xz
+
+WORKDIR /tmp/linux-6.6.66/tools/perf
+RUN make && make install prefix=/usr/local
+RUN cp /usr/local/bin/perf /usr/bin/perf
+
+
+WORKDIR /tmp
