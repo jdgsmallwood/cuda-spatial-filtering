@@ -150,7 +150,7 @@ public:
                  "begin_seq {} actually has packet_index {}",
                  buffers[current_buffer].start_seq, pkt.sample_count);
         *pkt.original_packet_processed = true;
-        break;
+        return;
       }
 
       if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
@@ -176,9 +176,14 @@ public:
         LOG_DEBUG("DEBUG: original_packet_processed_after={}",
                   *pkt.original_packet_processed);
 
-        break;
+        return;
       }
     }
+
+    LOG_INFO("Packet with seq number {} was unable to find a home. Adding to "
+             "future_packet_queue...",
+             pkt.sample_count);
+    future_packet_queue.push(read_index.load(std::memory_order_relaxed));
   };
   void initialize_buffers(const int first_count) {
 
@@ -365,10 +370,20 @@ public:
     int packets_processed_before_completion_check = 0;
     int current_read_index;
     while (running) {
+      size_t current_read_index = -1;
+      bool from_queue = false;
       while (true) {
         current_read_index = read_index.load(std::memory_order_relaxed);
 
         if (current_read_index != write_index.load(std::memory_order_acquire)) {
+          break;
+        }
+        // This is to avoid a deadlock situation
+        handle_buffer_completion();
+        if (future_packet_queue.size()) {
+          current_read_index = future_packet_queue.front();
+          from_queue = true;
+          future_packet_queue.pop();
           break;
         }
 
@@ -384,60 +399,68 @@ public:
       }
 
       process_packet_data(entry);
-      read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
-                       std::memory_order_release);
+      if (!from_queue) {
+        read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
+                         std::memory_order_release);
+      }
       packets_processed_before_completion_check += 1;
       if (packets_processed_before_completion_check > 100) {
-        LOG_INFO("Checking buffer completion...");
-        check_buffer_completion();
-        if (std::all_of(buffers[current_buffer].is_populated.begin(),
-                        buffers[current_buffer].is_populated.end(),
-                        [](bool i) { return i; })) {
-          LOG_INFO("Buffer is complete - passing to output pipeline...");
-          // Send off data to be processed by CUDA pipeline.
-          // Then advance to next buffer and keep iterating.
-          // if (!first_written) {
-          //  write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
-          //  first_written = true;
-          //}
-          if (pipeline_ == nullptr) {
-            throw std::logic_error(
-                "Pipeline has not been set. Ensure that set_pipeline has been "
-                "called on ProcessorState class.");
-          }
-
-          buffers[current_buffer].is_ready = false;
-          cpu_start = clock::now();
-          LOG_INFO("Zeroing missing packets...");
-          d_samples[current_buffer]->zero_missing_packets();
-          cpu_end = clock::now();
-          LOG_DEBUG("CPU time for zeroing packets: {} us",
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        cpu_end - cpu_start)
-                        .count());
-          // order here is important. As the pipeline can async update
-          // the start/end seqs we need to capture the
-          // start_seq, then execute the pipeline, then advance using
-          // the saved copy of the start_seq.
-          const int current_buffer_start_seq =
-              buffers[current_buffer].start_seq;
-          LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
-          buffers_ready_for_pipeline.push(current_buffer);
-          LOG_INFO("Advancing to next buffer...");
-          cpu_start = clock::now();
-          advance_to_next_buffer(current_buffer_start_seq);
-          cpu_end = clock::now();
-          LOG_DEBUG("CPU time for advancing to next buffer: {} us",
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        cpu_end - cpu_start)
-                        .count());
-          LOG_INFO("Done!");
-        }
+        handle_buffer_completion();
         packets_processed_before_completion_check = 0;
       }
     }
 
     LOG_INFO("Processor thread exiting");
+  };
+
+  void handle_buffer_completion() {
+    using clock = std::chrono::high_resolution_clock;
+    auto cpu_start = clock::now();
+    auto cpu_end = clock::now();
+    LOG_INFO("Checking buffer completion...");
+    check_buffer_completion();
+    if (std::all_of(buffers[current_buffer].is_populated.begin(),
+                    buffers[current_buffer].is_populated.end(),
+                    [](bool i) { return i; })) {
+      LOG_INFO("Buffer is complete - passing to output pipeline...");
+      // Send off data to be processed by CUDA pipeline.
+      // Then advance to next buffer and keep iterating.
+      // if (!first_written) {
+      //  write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
+      //  first_written = true;
+      //}
+      if (pipeline_ == nullptr) {
+        throw std::logic_error(
+            "Pipeline has not been set. Ensure that set_pipeline has been "
+            "called on ProcessorState class.");
+      }
+
+      buffers[current_buffer].is_ready = false;
+      cpu_start = clock::now();
+      LOG_INFO("Zeroing missing packets...");
+      d_samples[current_buffer]->zero_missing_packets();
+      cpu_end = clock::now();
+      LOG_DEBUG("CPU time for zeroing packets: {} us",
+                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                      cpu_start)
+                    .count());
+      // order here is important. As the pipeline can async update
+      // the start/end seqs we need to capture the
+      // start_seq, then execute the pipeline, then advance using
+      // the saved copy of the start_seq.
+      const int current_buffer_start_seq = buffers[current_buffer].start_seq;
+      LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
+      buffers_ready_for_pipeline.push(current_buffer);
+      LOG_INFO("Advancing to next buffer...");
+      cpu_start = clock::now();
+      advance_to_next_buffer(current_buffer_start_seq);
+      cpu_end = clock::now();
+      LOG_DEBUG("CPU time for advancing to next buffer: {} us",
+                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                      cpu_start)
+                    .count());
+      LOG_INFO("Done!");
+    }
   };
 
   void pipeline_feeder() {
@@ -488,6 +511,11 @@ private:
   };
 
   std::queue<size_t> buffers_ready_for_pipeline;
+  // This is for packets that arrive but their buffer is not yet created.
+  // The read pointer moves on but keep these as things to process.
+  // They will not be overwritten by the write pointer as it checks whether or
+  // not they have been processed.
+  std::queue<size_t> future_packet_queue;
 };
 
 class PacketInput {
