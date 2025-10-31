@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <queue>
 #include <sys/time.h>
 
 #define MIN_PCAP_HEADER_SIZE 64
@@ -420,8 +421,8 @@ public:
           // the saved copy of the start_seq.
           const int current_buffer_start_seq =
               buffers[current_buffer].start_seq;
-          LOG_INFO("Executing pipeline...");
-          pipeline_->execute_pipeline(d_samples[current_buffer]);
+          LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
+          buffers_ready_for_pipeline.push(current_buffer);
           LOG_INFO("Advancing to next buffer...");
           cpu_start = clock::now();
           advance_to_next_buffer(current_buffer_start_seq);
@@ -438,6 +439,20 @@ public:
 
     LOG_INFO("Processor thread exiting");
   };
+
+  void pipeline_feeder() {
+    LOG_INFO("Pipeline feeder starting up...");
+    while (running) {
+      if (buffers_ready_for_pipeline.size()) {
+        size_t buffer_index = buffers_ready_for_pipeline.front();
+        LOG_INFO("Buffer index {} picked up by pipeline feeder...",
+                 buffer_index);
+        pipeline_->execute_pipeline(d_samples[buffer_index]);
+        buffers_ready_for_pipeline.pop();
+      }
+    }
+    LOG_INFO("Pipeline feeder exiting!");
+  }
 
   void *get_current_write_pointer() {
     return (void *)&(d_packet_data[write_index]->data);
@@ -471,6 +486,8 @@ private:
       d_samples[i] = nullptr;
     }
   };
+
+  std::queue<size_t> buffers_ready_for_pipeline;
 };
 
 class PacketInput {

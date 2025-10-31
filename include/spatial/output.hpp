@@ -1,11 +1,11 @@
 #include "spatial/logging.hpp"
-#include "spatial/spatial.hpp"
 #include "spatial/pinned_vector.hpp"
+#include "spatial/spatial.hpp"
 
+#include <chrono>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <unistd.h>
-#include <chrono>
 
 // forward declarations
 
@@ -147,8 +147,13 @@ public:
 
     LOG_INFO("Beam write index is now {}", beam_write_idx_);
     if (beam_write_idx_ + 1 == beam_read_idx_) {
-            LOG_ERROR("Output beam data ring buffer is full. Read Idx is {} and Write Idx is {}", beam_read_idx_, beam_write_idx_);
-            throw std::runtime_error("Beam data ring buffer is full.");
+      LOG_ERROR("Output beam data ring buffer is full. Read Idx is {} and "
+                "Write Idx is {}",
+                beam_read_idx_, beam_write_idx_);
+      while (beam_write_idx_ + 1 == beam_read_idx_) {
+        LOG_INFO("Output beam data ring buffer is still full. Waiting....");
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
     }
     beam_write_idx_ = (block_num + 1) % beam_blocks_.size();
     LOG_INFO("Updated Beam write idx is now {}", beam_write_idx_);
@@ -201,8 +206,8 @@ private:
   void writer_loop() {
 
     using clock = std::chrono::high_resolution_clock;
-        auto cpu_start = clock::now();
-        auto cpu_end = clock::now();
+    auto cpu_start = clock::now();
+    auto cpu_end = clock::now();
     LOG_INFO("Writer loop is running!");
     while (running_) {
 
@@ -210,19 +215,19 @@ private:
         LOG_INFO("There is data to write! Writing data...");
         cpu_start = clock::now();
         write_beam_data();
-                cpu_end = clock::now();
+        cpu_end = clock::now();
 
-    LOG_DEBUG("CPU time for writing beam data...: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-                cpu_start = clock::now();
+        LOG_DEBUG("CPU time for writing beam data...: {} us",
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      cpu_end - cpu_start)
+                      .count());
+        cpu_start = clock::now();
         write_visibilities();
-                cpu_end = clock::now();
-    LOG_DEBUG("CPU time for writing visibilities...: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+        cpu_end = clock::now();
+        LOG_DEBUG("CPU time for writing visibilities...: {} us",
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      cpu_end - cpu_start)
+                      .count());
       }
     }
 
@@ -253,9 +258,10 @@ private:
 
       beam_writer_->write_beam_block(&block.beam_data, &block.arrival_data,
                                      block.start_seq_num, block.end_seq_num);
-            auto block_num = beam_read_idx_;
+      auto block_num = beam_read_idx_;
       beam_read_idx_ = (beam_read_idx_ + 1) % beam_blocks_.size();
-      LOG_INFO("Output block {} written. Next read index is {}.", block_num, beam_read_idx_);
+      LOG_INFO("Output block {} written. Next read index is {}.", block_num,
+               beam_read_idx_);
     }
   }
 
@@ -278,8 +284,8 @@ private:
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;
 
-    cuda_util::PinnedVector<BeamBlock> beam_blocks_;
-    cuda_util::PinnedVector<VisBlock> vis_blocks_;
+  cuda_util::PinnedVector<BeamBlock> beam_blocks_;
+  cuda_util::PinnedVector<VisBlock> vis_blocks_;
 
   size_t beam_write_idx_;
   size_t beam_read_idx_;

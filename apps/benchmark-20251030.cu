@@ -130,6 +130,7 @@ int main() {
       [&socket_capture, &state]() { socket_capture.get_packets(state); });
 
   std::thread processor([&state]() { state.process_packets(); });
+  std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
