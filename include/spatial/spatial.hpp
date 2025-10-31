@@ -16,7 +16,6 @@
 #include <sys/time.h>
 
 #define MIN_PCAP_HEADER_SIZE 64
-#define RING_BUFFER_SIZE 1000
 #define BUFFER_SIZE 4096
 #include <cuda_fp16.h>
 
@@ -59,7 +58,8 @@ public:
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
 };
-template <typename T, size_t NR_INPUT_BUFFERS = 2>
+template <typename T, size_t NR_INPUT_BUFFERS = 2,
+          size_t RING_BUFFER_SIZE = 1000>
 class ProcessorState : public ProcessorStateBase {
   // Public member variables
 public:

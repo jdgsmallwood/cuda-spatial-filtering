@@ -67,7 +67,7 @@ int main() {
   spatial::Logger::set(app_logger);
 
   int num_buffers = 2;
-  constexpr size_t num_packet_buffers = 10;
+  constexpr size_t num_packet_buffers = 20;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers = 10;
@@ -79,6 +79,7 @@ int main() {
   constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 10000000;
+  constexpr size_t PACKET_RING_BUFFER_SIZE = 10000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -87,7 +88,7 @@ int main() {
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
                    nr_correlation_blocks_to_integrate>;
 
-  ProcessorState<Config, num_packet_buffers> state(
+  ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel);
 
@@ -165,6 +166,11 @@ int main() {
   receiver.join();
   std::cout << "Waiting for processor to finish...\n";
   processor.join();
+  std::cout << "Waiting for pipeline feeder to finish...\n";
+  pipeline_feeder.join();
+
+  std::cout << "Synchronizing GPU...\n";
+  cudaDeviceSynchronize();
 
   std::vector<float> run_timings;
   run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
