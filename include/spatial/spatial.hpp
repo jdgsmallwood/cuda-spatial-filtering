@@ -367,19 +367,17 @@ public:
     auto cpu_end = clock::now();
     LOG_INFO("Processor thread started");
     //    static bool first_written = false;
-    int packets_processed_before_completion_check = 0;
     int current_read_index;
     while (running) {
       size_t current_read_index = -1;
       bool from_queue = false;
+
       while (true) {
         current_read_index = read_index.load(std::memory_order_relaxed);
 
         if (current_read_index != write_index.load(std::memory_order_acquire)) {
           break;
         }
-        // This is to avoid a deadlock situation
-        handle_buffer_completion();
         if (future_packet_queue.size()) {
           current_read_index = future_packet_queue.front();
           from_queue = true;
@@ -403,11 +401,7 @@ public:
         read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
                          std::memory_order_release);
       }
-      packets_processed_before_completion_check += 1;
-      if (packets_processed_before_completion_check > 100) {
-        handle_buffer_completion();
-        packets_processed_before_completion_check = 0;
-      }
+      handle_buffer_completion();
     }
 
     LOG_INFO("Processor thread exiting");
