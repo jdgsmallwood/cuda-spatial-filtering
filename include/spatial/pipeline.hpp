@@ -27,7 +27,6 @@
 #include <highfive/highfive.hpp>
 #include <iostream>
 #include <libtcc/Correlator.h>
-#include <nvToolsExt.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -223,7 +222,7 @@ public:
 
     auto cpu_start_total = clock::now();
 
-    if (state_ == nullptr) {
+    if (!dummy_run && state_ == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
 

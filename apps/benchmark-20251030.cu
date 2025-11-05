@@ -1,3 +1,4 @@
+#include "hdf5.h"
 #include "spatial/logging.hpp"
 #include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
@@ -58,6 +59,7 @@ void writeVectorToCSV(const std::vector<float> &times,
 }
 
 int main() {
+  std::cout << "Starting....\n";
   std::signal(SIGINT, signal_handler);
   auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
                                             "app.log", /*truncate*/ true);
@@ -67,7 +69,7 @@ int main() {
   spatial::Logger::set(app_logger);
 
   int num_buffers = 2;
-  constexpr size_t num_packet_buffers = 20;
+  constexpr size_t num_packet_buffers = 12;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers = 10;
@@ -92,12 +94,14 @@ int main() {
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel);
 
-  std::string beam_filename = "hdf5_trial.hdf5";
+  const char *beam_filename = "hdf5_trial.hdf5";
   std::string vis_filename = "hdf5_trial_vis.hdf5";
-  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
+  hid_t beam_file = H5Fopen(beam_filename, H5F_ACC_RDWR, H5P_DEFAULT);
+  // HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
-  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
-      Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 150);
+  auto beam_writer = std::make_unique<
+      HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
+      beam_file);
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file);
@@ -147,15 +151,22 @@ int main() {
     // when there are no more packets running through in a 20sec period.
     if (packets_received != 0) {
       if (packets_received == state.packets_received) {
+        std::cout
+            << "Packets received is same as state... adding to timeout.\n";
         timeout += 1;
       } else {
+        std::cout << "Packets received is " << packets_received
+                  << " and state.packets_received is " << state.packets_received
+                  << ".\n";
         timeout = 0;
       }
-      packets_received = state.packets_received;
       if (timeout > 4) {
+        std::cout << "Timeout reached...shutting down\n";
         state.running = 0;
+        running = false;
       }
     }
+    packets_received = state.packets_received;
   }
 
   // Cleanup

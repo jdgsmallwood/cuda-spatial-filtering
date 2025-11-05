@@ -1,3 +1,4 @@
+#pragma once
 #include "spatial/logging.hpp"
 #include "spatial/pinned_vector.hpp"
 #include "spatial/spatial.hpp"

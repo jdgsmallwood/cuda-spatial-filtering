@@ -109,10 +109,19 @@ public:
   void set_pipeline(GPUPipeline *pipeline) { pipeline_ = pipeline; };
   bool get_next_write_index() {
     int next_write_index = -1;
+    bool first_loop = true;
     while (next_write_index < 0 ||
            !d_packet_data[next_write_index]->processed) {
-      next_write_index =
-          (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
+      // Get the next write index that has already been processed. This avoids
+      // overwriting packets that have been left behind because their buffer was
+      // not yet available.
+      if (first_loop) {
+        next_write_index = (write_index.load(std::memory_order_relaxed) + 1) %
+                           RING_BUFFER_SIZE;
+        first_loop = false;
+      } else {
+        next_write_index = (next_write_index + 1) % RING_BUFFER_SIZE;
+      }
       if (next_write_index == read_index.load(std::memory_order_acquire)) {
         LOG_INFO("Ring buffer is full!! Dropping packets...");
         return false;
@@ -198,6 +207,11 @@ public:
           first_count +
           ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
       buffers[i].is_ready = true;
+
+      // we know 0 will be the first one - so no need to add zero
+      if (i != 0) {
+        buffer_ordering_queue.push({i, buffers[i].start_seq});
+      };
     }
   };
   void process_packet_data(typename T::PacketEntryType *pkt) {
@@ -240,8 +254,8 @@ public:
     //
     // We may well need a mutex or lock here so that multiple GPU threads do not
     // compete.
-    std::lock_guard<std::mutex> lock(buffer_index_mutex);
     int max_end_seq_in_buffers = 0;
+    std::lock_guard<std::mutex> lock(buffer_index_mutex);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       max_end_seq_in_buffers =
           std::max(max_end_seq_in_buffers, buffers[i].end_seq);
@@ -256,6 +270,7 @@ public:
                     T::NR_FPGA_SOURCES,
                 false);
     buffers[buffer_index].is_ready = true;
+    buffer_ordering_queue.push({buffer_index, buffers[buffer_index].start_seq});
   };
 
   void advance_to_next_buffer(const int current_buffer_start_seq) {
@@ -267,27 +282,16 @@ public:
     //  I can probably use a data structure here to pop off the top
     //  rather than checking through everything.
     LOG_INFO("advancing to next buffer...");
-    int next_highest_start_seq = -1;
-    int next_highest_buffer = -1;
-    LOG_INFO("Current buffer start seq is {}", current_buffer_start_seq);
-    while (next_highest_start_seq < 0) {
-      for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-        LOG_INFO("buffer {} start seq is {}.", i, buffers[i].start_seq);
-        if (buffers[i].start_seq <= current_buffer_start_seq) {
-          LOG_INFO("Continuing...");
-          continue;
-        };
-
-        if (buffers[i].start_seq < next_highest_start_seq ||
-            next_highest_start_seq < 0) {
-          LOG_INFO("Buffer {} has higher start_seq {}", i,
-                   buffers[i].start_seq);
-          next_highest_start_seq = buffers[i].start_seq;
-          next_highest_buffer = i;
-        };
+    {
+      while (buffer_ordering_queue.empty()) {
+        LOG_INFO("waiting for buffer to become available...");
       }
-    };
-    current_buffer = next_highest_buffer;
+      std::lock_guard<std::mutex> lock(buffer_index_mutex);
+      BufferOrder b = buffer_ordering_queue.top();
+      buffer_ordering_queue.pop();
+      LOG_INFO("Current buffer start seq is {}", current_buffer_start_seq);
+      current_buffer = b.index;
+    }
 
     LOG_INFO(
         "next current_buffer is {} and has start_seq {} and is it ready? {}",
@@ -372,9 +376,10 @@ public:
     LOG_INFO("Processor thread started");
     //    static bool first_written = false;
     int current_read_index;
+    bool from_queue = false;
     while (running) {
-      size_t current_read_index = -1;
-      bool from_queue = false;
+      current_read_index = -1;
+      from_queue = false;
 
       while (true) {
         current_read_index = read_index.load(std::memory_order_relaxed);
@@ -498,13 +503,23 @@ private:
   void cleanup() {
 
     for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-      free(d_packet_data[i]);
+      delete d_packet_data[i];
       d_packet_data[i] = nullptr;
     }
 
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      free(d_samples[i]);
+      delete d_samples[i];
       d_samples[i] = nullptr;
+    }
+  };
+
+  struct BufferOrder {
+    int index;
+    int start_seq;
+
+    // Compare to make the priority queue a min-heap based on start_seq
+    bool operator>(const BufferOrder &other) const {
+      return start_seq > other.start_seq;
     }
   };
 
@@ -514,6 +529,9 @@ private:
   // They will not be overwritten by the write pointer as it checks whether or
   // not they have been processed.
   std::queue<size_t> future_packet_queue;
+  std::priority_queue<BufferOrder, std::vector<BufferOrder>,
+                      std::greater<BufferOrder>>
+      buffer_ordering_queue;
 };
 
 class PacketInput {
@@ -525,7 +543,8 @@ public:
 
 class KernelSocketPacketCapture : public PacketInput {
 public:
-  KernelSocketPacketCapture(int port, int buffer_size);
+  KernelSocketPacketCapture(int port, int buffer_size,
+                            int recv_buffer_size = 64 * 1024 * 1024);
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
@@ -540,7 +559,6 @@ public:
 
     // Make kernel receive buffer a bit larger to avoid dropping packets
     // during the timeout
-    int recv_buffer_size = 8 * 1024 * 1024;
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
                sizeof(recv_buffer_size));
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -552,7 +570,7 @@ public:
       if (received < 0) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
-        perror("recvfrom");
+        // perror("recvfrom");
         break;
       }
 
@@ -568,4 +586,5 @@ private:
   struct sockaddr_in server_addr;
   int port;
   int buffer_size;
+  int recv_buffer_size;
 };

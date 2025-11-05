@@ -318,8 +318,9 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
   CUDA_CHECK(cudaFree(d_C));
 }
 
-KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size)
-    : port(port), buffer_size(buffer_size) {
+KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size,
+                                                     int recv_buffer_size)
+    : port(port), buffer_size(buffer_size), recv_buffer_size(recv_buffer_size) {
 
   LOG_INFO("UDP Server with concurrent processing starting on port {}...",
            port);

@@ -95,13 +95,14 @@ RUN echo 'cmlamd() {' >> ~/.bashrc && \
     echo '  done' >> ~/.bashrc && \
     echo '  cmake -DBUILD_TESTING=OFF \\' >> ~/.bashrc && \
     echo '        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_CUDA_FLAGS="-g -G --ptxas-options=-v" \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_CXX_FLAGS="-g -pg" \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_CUDA_FLAGS="-g -G --ptxas-options=-v -O0" \\' >> ~/.bashrc && \
+    echo '        -DCMAKE_CXX_FLAGS="-g -pg -O0" \\' >> ~/.bashrc && \
     echo '        -DCMAKE_EXE_LINKER_FLAGS="-g -pg" \\' >> ~/.bashrc && \
     echo '        -DCMAKE_BUILD_TYPE=Debug $args .. && cmake --build .' >> ~/.bashrc && \
     echo '}' >> ~/.bashrc
 
 ENV     CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
+
 
 # Build Perf
 WORKDIR /tmp

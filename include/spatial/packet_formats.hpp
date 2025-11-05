@@ -164,7 +164,6 @@ struct LambdaPacketEntry
       return result;
     }
 
-    // Parse your custom packet structure
     const EthernetHeader *eth = (const EthernetHeader *)this->data;
     if (ntohs(eth->ethertype) != 0x0800) {
       LOG_ERROR("Not IPv4 packet\n");
@@ -183,6 +182,8 @@ struct LambdaPacketEntry
         PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
         this->data + MIN_PCAP_HEADER_SIZE);
     result.payload_size = this->length - MIN_PCAP_HEADER_SIZE;
+    // This adds a pointer to the original processed boolean on the queue
+    // so that we can update it later once it's been processed.
     result.original_packet_processed = &this->processed;
 
     return result;
