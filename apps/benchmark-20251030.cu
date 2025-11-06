@@ -94,14 +94,17 @@ int main() {
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel);
 
-  const char *beam_filename = "hdf5_trial.hdf5";
+  // const char *beam_filename = "hdf5_trial.hdf5";
+  std::string beam_filename = "hdf5_trial.hdf5";
   std::string vis_filename = "hdf5_trial_vis.hdf5";
-  hid_t beam_file = H5Fopen(beam_filename, H5F_ACC_RDWR, H5P_DEFAULT);
-  // HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
+  // hid_t beam_file = H5Fopen(beam_filename, H5F_ACC_RDWR, H5P_DEFAULT);
+  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
-  auto beam_writer = std::make_unique<
-      HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
-      beam_file);
+  // auto beam_writer = std::make_unique<
+  //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
+  //     beam_file);
+  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
+      Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 100);
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file);
