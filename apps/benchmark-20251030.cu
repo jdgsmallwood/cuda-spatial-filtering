@@ -95,17 +95,20 @@ int main() {
       min_freq_channel);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
-  std::string beam_filename = "/tmp/hdf5_trial.hdf5";
+  // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
   std::string vis_filename = "hdf5_trial_vis.hdf5";
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
+  //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
-  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
-      Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 100);
+  //  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
+  //    Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 100);
+  auto beam_writer = std::make_unique<
+      InMemoryBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
+      100);
   // auto beam_writer = std::make_unique<
   //     BinaryRawBeamWriter<Config::BeamOutputType,
   //     Config::ArrivalsOutputType>>(

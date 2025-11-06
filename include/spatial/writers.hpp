@@ -860,3 +860,100 @@ private:
   size_t beam_element_count_;
   size_t arrivals_element_count_;
 };
+
+template <typename BeamT, typename ArrivalsT>
+class InMemoryBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
+public:
+  struct Meta {
+    int start_seq;
+    int end_seq;
+  };
+
+  explicit InMemoryBeamWriter(size_t capacity)
+      : capacity_(capacity), start_index_(0), count_(0) {
+    beam_buffer_ = static_cast<BeamT *>(std::malloc(capacity * sizeof(BeamT)));
+    arrivals_buffer_ =
+        static_cast<ArrivalsT *>(std::malloc(capacity * sizeof(ArrivalsT)));
+    meta_buffer_ = static_cast<Meta *>(std::malloc(capacity * sizeof(Meta)));
+
+    if (!beam_buffer_ || !arrivals_buffer_ || !meta_buffer_) {
+      throw std::bad_alloc();
+    }
+
+    std::cout << "[InMemoryRawBeamWriter] Allocated space for " << capacity
+              << " blocks (" << sizeof(BeamT) << " + " << sizeof(ArrivalsT)
+              << " bytes each)\n";
+  }
+
+  ~InMemoryBeamWriter() override {
+    std::free(beam_buffer_);
+    std::free(arrivals_buffer_);
+    std::free(meta_buffer_);
+    std::cout << "[InMemoryRawBeamWriter] Freed buffers.\n";
+  }
+
+  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
+                        int start_seq, int end_seq) override {
+    using clock = std::chrono::high_resolution_clock;
+    auto start = clock::now();
+
+    size_t write_index = (start_index_ + count_) % capacity_;
+    if (count_ == capacity_) {
+      // Overwrite oldest
+      start_index_ = (start_index_ + 1) % capacity_;
+      std::cout
+          << "[InMemoryRawBeamWriter] Buffer full, overwriting oldest block.\n";
+    } else {
+      ++count_;
+    }
+
+    meta_buffer_[write_index].start_seq = start_seq;
+    meta_buffer_[write_index].end_seq = end_seq;
+
+    std::memcpy(&beam_buffer_[write_index], beam_data, sizeof(BeamT));
+    std::memcpy(&arrivals_buffer_[write_index], arrivals_data,
+                sizeof(ArrivalsT));
+
+    auto end = clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+                  .count();
+
+    std::cout << "[InMemoryRawBeamWriter] Copied block " << write_index
+              << " in " << us << " µs.\n";
+  }
+
+  void flush() override {
+    std::cout << "[InMemoryRawBeamWriter] Flush (no-op).\n";
+  }
+
+  size_t size() const { return count_; }
+  size_t capacity() const { return capacity_; }
+
+  void clear() {
+    start_index_ = 0;
+    count_ = 0;
+  }
+
+  // Retrieve a copy of a block by index (0 = oldest)
+  void get_block(size_t i, int &start_seq, int &end_seq, BeamT &beam,
+                 ArrivalsT &arrivals) const {
+    if (i >= count_)
+      throw std::out_of_range("get_block index out of range");
+
+    size_t idx = (start_index_ + i) % capacity_;
+    start_seq = meta_buffer_[idx].start_seq;
+    end_seq = meta_buffer_[idx].end_seq;
+
+    std::memcpy(&beam, &beam_buffer_[idx], sizeof(BeamT));
+    std::memcpy(&arrivals, &arrivals_buffer_[idx], sizeof(ArrivalsT));
+  }
+
+private:
+  size_t capacity_;
+  size_t start_index_;
+  size_t count_;
+
+  BeamT *beam_buffer_;
+  ArrivalsT *arrivals_buffer_;
+  Meta *meta_buffer_;
+};
