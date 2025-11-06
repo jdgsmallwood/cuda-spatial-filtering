@@ -3,6 +3,7 @@
 #include "spatial/logging.hpp"
 #include <array>
 #include <condition_variable>
+#include <fstream>
 #include <hdf5.h>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
@@ -30,14 +31,15 @@ public:
   virtual void flush() = 0;
 };
 
-template <typename T, size_t N = 0> constexpr auto get_array_dims() {
+template <typename T, typename U = size_t, size_t N = 0>
+constexpr auto get_array_dims() {
   if constexpr (std::is_array_v<T>) {
-    constexpr size_t extent = std::extent_v<T>;
-    auto inner = get_array_dims<std::remove_extent_t<T>, N + 1>();
+    constexpr U extent = std::extent_v<T>;
+    auto inner = get_array_dims<std::remove_extent_t<T>, U, N + 1>();
     inner.insert(inner.begin(), extent);
     return inner;
   } else {
-    return std::vector<size_t>{};
+    return std::vector<U>{};
   }
 }
 
@@ -561,8 +563,8 @@ public:
 
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
-    beam_dims_ = get_array_dims<BeamT>();
-    arrivals_dims_ = get_array_dims<ArrivalsT>();
+    beam_dims_ = get_array_dims<BeamT, hsize_t>();
+    arrivals_dims_ = get_array_dims<ArrivalsT, hsize_t>();
 
     // Create beam dataset
     beam_dataset_id_ = create_dataset<beam_type>("beam_data", beam_dims_);
@@ -630,8 +632,8 @@ public:
 
     cpu_start = clock::now();
     using beam_type = std::remove_all_extents_t<BeamT>;
-    write_hyperslab<beam_type>(beam_dataset_id_, beam_data, offset, count,
-                               beam_dims_);
+    write_hyperslab<beam_type>(beam_dataset_id_, (beam_type *)beam_data, offset,
+                               count, beam_dims_);
     cpu_end = clock::now();
     LOG_DEBUG("CPU overhead for beam dataset write: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
@@ -672,9 +674,9 @@ public:
 
     cpu_start = clock::now();
     using arrival_type = std::remove_all_extents_t<ArrivalsT>;
-    write_hyperslab<arrival_type>(arrivals_dataset_id_, arrivals_data,
-                                  arrivals_offset, arrivals_count,
-                                  arrivals_dims_);
+    write_hyperslab<arrival_type>(
+        arrivals_dataset_id_, (arrival_type *)arrivals_data, arrivals_offset,
+        arrivals_count, arrivals_dims_);
     cpu_end = clock::now();
     LOG_DEBUG("CPU overhead for arrivals dataset write: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
@@ -788,4 +790,73 @@ private:
   std::vector<hsize_t> beam_dims_;
   size_t arrivals_element_count_;
   std::vector<hsize_t> arrivals_dims_;
+};
+
+template <typename BeamT, typename ArrivalsT>
+class BinaryRawBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
+public:
+  BinaryRawBeamWriter(const std::string &filename)
+      : filename_(filename),
+        file_stream_(filename, std::ios::binary | std::ios::out) {
+    if (!file_stream_) {
+      throw std::runtime_error("Failed to open binary file: " + filename);
+    }
+
+    using beam_type = std::remove_all_extents_t<BeamT>;
+    using arrival_type = std::remove_all_extents_t<ArrivalsT>;
+
+    beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
+    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
+
+    std::cout << "[BinaryRawBeamWriter] Opened " << filename
+              << " for writing.\n";
+  }
+
+  ~BinaryRawBeamWriter() {
+    if (file_stream_.is_open()) {
+      file_stream_.close();
+      std::cout << "[BinaryRawBeamWriter] Closed " << filename_ << ".\n";
+    }
+  }
+
+  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
+                        const int start_seq, const int end_seq) {
+    using clock = std::chrono::high_resolution_clock;
+
+    auto cpu_start = clock::now();
+
+    // Write header: start_seq, end_seq, element counts
+    file_stream_.write(reinterpret_cast<const char *>(&start_seq), sizeof(int));
+    file_stream_.write(reinterpret_cast<const char *>(&end_seq), sizeof(int));
+
+    // Write beam data
+    file_stream_.write(reinterpret_cast<const char *>(beam_data),
+                       sizeof(BeamT));
+
+    // Write arrivals data
+    file_stream_.write(reinterpret_cast<const char *>(arrivals_data),
+                       sizeof(ArrivalsT));
+
+    auto cpu_end = clock::now();
+
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                          cpu_end - cpu_start)
+                          .count();
+
+    std::cout << "[BinaryRawBeamWriter] Wrote beam block ("
+              << sizeof(BeamT) + sizeof(ArrivalsT) << " bytes) "
+              << "in " << elapsed_us << " us.\n";
+  }
+
+  void flush() {
+    file_stream_.flush();
+    std::cout << "[BinaryRawBeamWriter] Flushed file buffer.\n";
+  }
+
+private:
+  std::string filename_;
+  std::ofstream file_stream_;
+
+  size_t beam_element_count_;
+  size_t arrivals_element_count_;
 };
