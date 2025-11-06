@@ -81,7 +81,7 @@ int main() {
   constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 10000000;
-  constexpr size_t PACKET_RING_BUFFER_SIZE = 10000;
+  constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -99,16 +99,17 @@ int main() {
   std::string vis_filename = "hdf5_trial_vis.hdf5";
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-  // HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
+  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
-  // auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
-  // Config::BeamOutputType, Config::ArrivalsOutputType >> (beam_file, 100);
-  auto beam_writer = std::make_unique<
-      BinaryRawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
-      beam_filename);
+  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
+      Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 100);
+  // auto beam_writer = std::make_unique<
+  //     BinaryRawBeamWriter<Config::BeamOutputType,
+  //     Config::ArrivalsOutputType>>(
+  //    beam_filename);
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file);

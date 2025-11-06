@@ -93,7 +93,7 @@ public:
     DataSetCreateProps beam_props;
     beam_props.add(Chunking(beam_chunk));
     // Optional: reduce compression for speed
-    // beam_props.add(Deflate(1)); // Light compression
+    beam_props.add(Deflate(4)); // Light compression
     beam_dataset_ =
         file_.createDataSet<beam_type>("beam_data", beam_space, beam_props);
 
@@ -101,7 +101,7 @@ public:
     DataSpace arrivals_space(arrivals_dataset_dims, arrivals_dataset_max_dims);
     DataSetCreateProps arrivals_props;
     arrivals_props.add(Chunking(arrivals_chunk));
-    // arrivals_props.add(Deflate(1)); // Light compression
+    arrivals_props.add(Deflate(4)); // Light compression
     arrivals_dataset_ = file_.createDataSet<arrival_type>(
         "arrivals", arrivals_space, arrivals_props);
 
