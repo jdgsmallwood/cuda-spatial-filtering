@@ -410,7 +410,14 @@ public:
         read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
                          std::memory_order_release);
       }
+      cpu_start = clock::now();
       handle_buffer_completion();
+      cpu_end = clock::now();
+
+      LOG_DEBUG("CPU time for buffer completion check: {} us",
+                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                      cpu_start)
+                    .count());
     }
 
     LOG_INFO("Processor thread exiting");
