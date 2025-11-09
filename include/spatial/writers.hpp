@@ -880,16 +880,16 @@ public:
       throw std::bad_alloc();
     }
 
-    std::cout << "[InMemoryRawBeamWriter] Allocated space for " << capacity
-              << " blocks (" << sizeof(BeamT) << " + " << sizeof(ArrivalsT)
-              << " bytes each)\n";
+    LOG_INFO("[InMemoryRawBeamWriter] Allocated space for {} blocks ({} + {} "
+             "bytes each)",
+             capacity, sizeof(BeamT), sizeof(ArrivalsT));
   }
 
   ~InMemoryBeamWriter() override {
     std::free(beam_buffer_);
     std::free(arrivals_buffer_);
     std::free(meta_buffer_);
-    std::cout << "[InMemoryRawBeamWriter] Freed buffers.\n";
+    LOG_INFO("[InMemoryRawBeamWriter] Freed buffers.");
   }
 
   void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
@@ -901,8 +901,8 @@ public:
     if (count_ == capacity_) {
       // Overwrite oldest
       start_index_ = (start_index_ + 1) % capacity_;
-      std::cout
-          << "[InMemoryRawBeamWriter] Buffer full, overwriting oldest block.\n";
+      LOG_INFO(
+          "[InMemoryRawBeamWriter] Buffer full, overwriting oldest block.");
     } else {
       ++count_;
     }
@@ -918,13 +918,11 @@ public:
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start)
                   .count();
 
-    std::cout << "[InMemoryRawBeamWriter] Copied block " << write_index
-              << " in " << us << " µs.\n";
+    LOG_DEBUG("[InMemoryRawBeamWriter] Copied block {} in {} us.", write_index,
+              us);
   }
 
-  void flush() override {
-    std::cout << "[InMemoryRawBeamWriter] Flush (no-op).\n";
-  }
+  void flush() override { LOG_INFO("[InMemoryRawBeamWriter] Flush (no-op)."); }
 
   size_t size() const { return count_; }
   size_t capacity() const { return capacity_; }
