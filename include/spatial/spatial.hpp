@@ -81,7 +81,8 @@ public:
         MIN_FREQ_CHANNEL(min_freq_channel) {
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
-    std::fill_n(modified_since_last_completion_check, T::NR_CHANNELS, false);
+    std::fill(modified_since_last_completion_check.begin(),
+              modified_since_last_completion_check.end(), false);
     try {
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
         d_packet_data[i] = new typename T::PacketEntryType();
