@@ -81,6 +81,7 @@ public:
         MIN_FREQ_CHANNEL(min_freq_channel) {
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
+    std::fill_n(modified_since_last_completion_check, T::NR_CHANNELS, false);
     try {
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
         d_packet_data[i] = new typename T::PacketEntryType();
@@ -242,6 +243,8 @@ public:
     copy_data_to_input_buffer_if_able(parsed);
     if (*parsed.original_packet_processed) {
       packets_processed += 1;
+      modified_since_last_completion_check[parsed.freq_channel -
+                                           MIN_FREQ_CHANNEL] = true;
     }
   };
 
@@ -325,6 +328,10 @@ public:
     }
 
     for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
+      if (buffers[current_buffer].is_populated[channel] ||
+          !modified_since_last_completion_check[channel]) {
+        continue;
+      }
       LOG_INFO("Check if buffers are complete for channel {}", channel);
 
       if (std::all_of(std::begin(latest_packet_received[channel]),
@@ -536,6 +543,7 @@ private:
   // They will not be overwritten by the write pointer as it checks whether or
   // not they have been processed.
   std::queue<size_t> future_packet_queue;
+  std::array<bool, T::NR_CHANNELS> modified_since_last_completion_check;
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
       buffer_ordering_queue;
