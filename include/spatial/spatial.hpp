@@ -350,6 +350,7 @@ public:
                    latest_packet_received[channel][check]);
         }
       }
+      modified_since_last_completion_check[channel] = false;
     }
   };
 
