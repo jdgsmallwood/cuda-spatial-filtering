@@ -684,10 +684,10 @@ public:
           total_bytes += header->caplen;
 
           // Get next write pointer for next iteration
-          while (!state.get_next_write_pointer()) {
+          while (!state.get_next_write_index()) {
             LOG_INFO("[PCAPPacketCapture] Waiting for buffer to become "
                      "available...");
-            std::this_thread::sleep_for(std::chrono::microseconds(1));
+            std::this_thread::sleep_for(std::chrono::nanoseconds(500));
           }
 
           // Periodic statistics (every 5 seconds)
