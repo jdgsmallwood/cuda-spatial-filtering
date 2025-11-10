@@ -49,8 +49,8 @@ public:
   BatchedHDF5BeamWriter(HighFive::File &file, size_t batch_size = 100)
       : file_(file), batch_size_(batch_size), current_batch_count_(0) {
     using namespace HighFive;
-    using beam_type = std::remove_all_extents<BeamT>::type;
-    using arrival_type = std::remove_all_extents<ArrivalsT>::type;
+    using beam_type = typename std::remove_all_extents<BeamT>::type;
+    using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
 
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
@@ -263,8 +263,8 @@ class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 public:
   HDF5BeamWriter(HighFive::File &file) : file_(file) {
     using namespace HighFive;
-    using beam_type = std::remove_all_extents<BeamT>::type;
-    using arrival_type = std::remove_all_extents<ArrivalsT>::type;
+    using beam_type = typename std::remove_all_extents<BeamT>::type;
+    using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
     beam_dims_ = get_array_dims<BeamT>();
@@ -357,7 +357,7 @@ public:
                   .count());
 
     cpu_start = clock::now();
-    using beam_type = std::remove_all_extents<BeamT>::type;
+    using beam_type = typename std::remove_all_extents<BeamT>::type;
     beam_dataset_.select(beam_offset, beam_count).write_raw(beam_data);
     cpu_end = clock::now();
     LOG_DEBUG("CPU overhead for beam_dataset_.select().write(): {} us",
@@ -558,8 +558,8 @@ template <typename BeamT, typename ArrivalsT>
 class HDF5RawBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 public:
   HDF5RawBeamWriter(hid_t file_id) : file_id_(file_id) {
-    using beam_type = std::remove_all_extents_t<BeamT>;
-    using arrival_type = std::remove_all_extents_t<ArrivalsT>;
+    using beam_type = typename std::remove_all_extents_t<BeamT>;
+    using arrival_type = typename std::remove_all_extents_t<ArrivalsT>;
 
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
@@ -631,7 +631,7 @@ public:
                   .count());
 
     cpu_start = clock::now();
-    using beam_type = std::remove_all_extents_t<BeamT>;
+    using beam_type = typename std::remove_all_extents_t<BeamT>;
     write_hyperslab<beam_type>(beam_dataset_id_, (beam_type *)beam_data, offset,
                                count, beam_dims_);
     cpu_end = clock::now();
@@ -673,7 +673,7 @@ public:
                   .count());
 
     cpu_start = clock::now();
-    using arrival_type = std::remove_all_extents_t<ArrivalsT>;
+    using arrival_type = typename std::remove_all_extents_t<ArrivalsT>;
     write_hyperslab<arrival_type>(
         arrivals_dataset_id_, (arrival_type *)arrivals_data, arrivals_offset,
         arrivals_count, arrivals_dims_);
@@ -802,8 +802,8 @@ public:
       throw std::runtime_error("Failed to open binary file: " + filename);
     }
 
-    using beam_type = std::remove_all_extents_t<BeamT>;
-    using arrival_type = std::remove_all_extents_t<ArrivalsT>;
+    using beam_type = typename std::remove_all_extents_t<BeamT>;
+    using arrival_type = typename std::remove_all_extents_t<ArrivalsT>;
 
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
