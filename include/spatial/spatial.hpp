@@ -4,7 +4,6 @@
 #include "spatial/pipeline_base.hpp"
 #include <complex>
 #include <cuda.h>
-#include <highfive/highfive.hpp>
 #include <iostream>
 #include <libtcc/Correlator.h>
 #include <netinet/in.h>
@@ -355,29 +354,6 @@ public:
     }
   };
 
-  void write_buffer_to_hdf5(const int buffer_index,
-                            const std::string &filename) {
-
-    using namespace HighFive;
-
-    // Create / overwrite file
-    File file(filename, File::Overwrite);
-
-    // Pointer to your samples
-    typename T::PacketSamplesType *samples = d_samples[buffer_index]->samples;
-
-    // Dataset shape
-    std::vector<size_t> dims = {T::NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
-                                T::NR_TIME_STEPS_PER_PACKET, T::NR_RECEIVERS,
-                                T::NR_POLARIZATIONS};
-
-    // Create dataset of complex<int8_t> (or whatever Sample is)
-    DataSet dataset = file.createDataSet<typename T::Sample>("packet_samples",
-                                                             DataSpace(dims));
-
-    // Write buffer
-    dataset.write(*samples);
-  };
   void process_packets() {
 
     using clock = std::chrono::high_resolution_clock;
