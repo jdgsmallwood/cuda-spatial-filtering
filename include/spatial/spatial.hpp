@@ -43,7 +43,7 @@ class GPUPipeline;
 class ProcessorStateTest;
 
 class ProcessorStateBase {
-  friend class ProcessorStateTest;
+  friend class ::ProcessorStateTest;
 
 public:
   int current_buffer = 0;
@@ -64,7 +64,7 @@ public:
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000>
 class ProcessorState : public ProcessorStateBase {
-  friend class ProcessorStateTest;
+  friend class ::ProcessorStateTest;
 
 public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
