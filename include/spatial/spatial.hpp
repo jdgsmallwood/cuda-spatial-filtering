@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <pcap/pcap.h>
 #include <queue>
 #include <sys/time.h>
 
