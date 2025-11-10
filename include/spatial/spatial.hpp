@@ -40,8 +40,12 @@ template <size_t NR_CHANNELS> struct BufferState {
 
 // forward declaration of GPUPipeline.
 class GPUPipeline;
+// forward declaration for friend class for testing purposes
+class ProcessorStateTest;
 
 class ProcessorStateBase {
+  friend class ProcessorStateTest;
+
 public:
   int current_buffer = 0;
   std::atomic<int> write_index = 0;
@@ -61,7 +65,8 @@ public:
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000>
 class ProcessorState : public ProcessorStateBase {
-  // Public member variables
+  friend class ProcessorStateTest;
+
 public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
