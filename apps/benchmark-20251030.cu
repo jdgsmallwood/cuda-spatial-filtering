@@ -138,12 +138,12 @@ int main() {
   pipeline.set_state(&state);
   pipeline.set_output(output);
   int port = 12345;
-  KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
-
+  // KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
+  PCAPPacketCapture capture(
+      "/tmp/cuda-spatial-filtering/cap_13Dec2024_0.pcapng", true);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
-  std::thread receiver(
-      [&socket_capture, &state]() { socket_capture.get_packets(state); });
+  std::thread receiver([&capture, &state]() { capture.get_packets(state); });
 
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
