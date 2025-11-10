@@ -38,7 +38,7 @@ add_executable(
 target_link_libraries(WriterTests PRIVATE GTest::gtest_main spatial HighFive::HighFive)
 
 add_executable(
-  ProcessorTests test_processor.cpp
+  ProcessorTests test_processor.cu
 )
 target_link_libraries(ProcessorTests PRIVATE GTest::gtest_main spatial CUDA::cudart HighFive::HighFive ccglib)
 
