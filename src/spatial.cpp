@@ -25,6 +25,7 @@
 #include <iostream>
 #include <library_types.h>
 #include <libtcc/Correlator.h>
+#include <pcap/pcap.h>
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
