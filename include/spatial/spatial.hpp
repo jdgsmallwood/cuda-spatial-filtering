@@ -408,6 +408,10 @@ public:
       typename T::PacketEntryType *entry = d_packet_data[current_read_index];
 
       if (entry->length == 0 || entry->processed == true) {
+        // if we don't increment the read index here it can get stuck!
+        int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
+        read_index.store(new_read_index, std::memory_order_release);
+        LOG_INFO("New read index is {}", new_read_index);
         continue;
       }
 
