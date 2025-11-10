@@ -82,8 +82,6 @@ protected:
   void TearDown() override {}
 };
 
-TEST_F(ProcessorStateTest, CanCallPrivateCleanup) { state.cleanup(); }
-
 TEST_F(ProcessorStateTest, InitializationSetsDefaults) {
   EXPECT_EQ(state.buffers_initialized, false);
   EXPECT_EQ(state.current_buffer, 0);

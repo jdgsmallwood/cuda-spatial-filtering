@@ -39,12 +39,8 @@ template <size_t NR_CHANNELS> struct BufferState {
 
 // forward declaration of GPUPipeline.
 class GPUPipeline;
-// forward declaration for friend class for testing purposes
-class ProcessorStateTest;
 
 class ProcessorStateBase {
-  friend class ::ProcessorStateTest;
-
 public:
   int current_buffer = 0;
   std::atomic<int> write_index = 0;
@@ -64,8 +60,6 @@ public:
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000>
 class ProcessorState : public ProcessorStateBase {
-  friend class ::ProcessorStateTest;
-
 public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
@@ -583,4 +577,192 @@ private:
   int port;
   int buffer_size;
   int recv_buffer_size;
+};
+
+class PCAPPacketCapture : public PacketInput {
+public:
+  PCAPPacketCapture(const std::string &pcap_filename, bool loop = false,
+                    uint64_t seq_jump_per_packet = 64);
+  ~PCAPPacketCapture();
+
+  void get_packets(ProcessorStateBase &state) override {
+    LOG_INFO("PCAP reader thread started for file: {}", filename_);
+
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t *handle = nullptr;
+    struct pcap_pkthdr *header;
+    const u_char *data;
+    int res;
+
+    // Statistics
+    unsigned long long total_packets = 0;
+    unsigned long long total_bytes = 0;
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_stats_time = start_time;
+
+    // For sample number incrementing across loops
+    uint64_t current_loop = 0;
+    uint64_t sample_offset = 0;
+    uint64_t min_sample_in_loop = UINT64_MAX;
+    uint64_t max_sample_in_loop = 0;
+    bool first_loop = true;
+
+    if (loop_ && seq_jump_per_packet_ > 0) {
+      LOG_INFO("Sample incrementing enabled with seq jump per packet: {}",
+               seq_jump_per_packet_);
+    }
+
+    do {
+      handle = pcap_open_offline(filename_.c_str(), errbuf);
+      if (!handle) {
+        LOG_ERROR("Failed to open PCAP file '{}': {}", filename_, errbuf);
+        state.running = 0;
+        return;
+      }
+
+      min_sample_in_loop = UINT64_MAX;
+      max_sample_in_loop = 0;
+
+      if (current_loop > 0) {
+        LOG_INFO("Starting loop {} with sample offset {}", current_loop,
+                 sample_offset);
+      } else {
+        LOG_INFO("Reading packets from PCAP file...");
+      }
+
+      while ((res = pcap_next_ex(handle, &header, &data)) >= 0 &&
+             state.running) {
+        // Get pointer to write location
+        void *write_pointer = state.get_current_write_pointer();
+
+        if (header->caplen <= header->len) {
+          std::memcpy(write_pointer, data, header->caplen);
+
+          // Extract and potentially modify the sample number
+          // Structure: Ethernet (14) + IP (20) + UDP (8) + CustomHeader
+          // CustomHeader layout: sample_count (8), fpga_id (4), freq_channel
+          // (2), padding (8)
+          const size_t CUSTOM_HEADER_OFFSET = 42; // Ethernet + IP + UDP
+
+          if (header->caplen > CUSTOM_HEADER_OFFSET + sizeof(uint64_t)) {
+            // sample_count is the first field in CustomHeader (uint64_t)
+            uint64_t *sample_count_ptr = reinterpret_cast<uint64_t *>(
+                static_cast<uint8_t *>(write_pointer) + CUSTOM_HEADER_OFFSET);
+
+            uint64_t original_sample = *sample_count_ptr;
+
+            // Track min/max for first loop to calculate range
+            if (first_loop) {
+              min_sample_in_loop =
+                  std::min(min_sample_in_loop, original_sample);
+              max_sample_in_loop =
+                  std::max(max_sample_in_loop, original_sample);
+            }
+
+            // Apply offset for loops after the first
+            if (!first_loop && sample_offset > 0) {
+              *sample_count_ptr = original_sample + sample_offset;
+              LOG_DEBUG("Modified sample count: {} -> {}", original_sample,
+                        *sample_count_ptr);
+            }
+          }
+
+          // Create a fake sender address since PCAP doesn't provide this
+          // This might not be necessary.
+          struct sockaddr_in client_addr;
+          std::memset(&client_addr, 0, sizeof(client_addr));
+          client_addr.sin_family = AF_INET;
+          client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+          client_addr.sin_port = htons(0);
+
+          // Add metadata
+          state.add_received_packet_metadata(header->caplen, client_addr);
+          state.packets_received += 1;
+
+          total_packets++;
+          total_bytes += header->caplen;
+
+          // Get next write pointer for next iteration
+          void *next_pointer = state.get_next_write_pointer();
+          (void)next_pointer; // Suppress unused warning
+
+          // Periodic statistics (every 5 seconds)
+          auto now = std::chrono::steady_clock::now();
+          auto stats_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                   now - last_stats_time)
+                                   .count();
+
+          if (stats_elapsed >= 5) {
+            auto total_elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(now -
+                                                                 start_time)
+                    .count();
+            double avg_pps = total_packets / (double)total_elapsed;
+            double avg_mbps = (total_bytes * 8.0) / (total_elapsed * 1e6);
+            LOG_INFO("PCAP stats: {:.2f} kpps, {:.2f} Mbps (total: {} packets, "
+                     "loop: {})",
+                     avg_pps / 1000.0, avg_mbps, total_packets, current_loop);
+            last_stats_time = now;
+          }
+        } else {
+          LOG_WARN("Packet truncated: caplen={} < len={}", header->caplen,
+                   header->len);
+        }
+      }
+
+      if (res == -1) {
+        LOG_ERROR("Error reading PCAP: {}", pcap_geterr(handle));
+      } else {
+        LOG_INFO("Reached end of PCAP file. Total packets read: {}",
+                 total_packets);
+      }
+
+      pcap_close(handle);
+      handle = nullptr;
+
+      if (loop_ && state.running) {
+        // Calculate offset for next loop
+        if (first_loop) {
+          if (max_sample_in_loop > min_sample_in_loop) {
+            // Range of samples in this loop
+            uint64_t sample_range = max_sample_in_loop - min_sample_in_loop;
+            // Next loop starts at: max + seq_jump_per_packet
+            sample_offset = sample_range + seq_jump_per_packet_;
+
+            LOG_INFO("First loop complete. Sample range: {} to {} (span: {})",
+                     min_sample_in_loop, max_sample_in_loop, sample_range);
+            LOG_INFO("Next loop offset will be: {}", sample_offset);
+          } else {
+            LOG_WARN("Could not determine sample range, using "
+                     "seq_jump_per_packet only");
+            sample_offset = seq_jump_per_packet_;
+          }
+          first_loop = false;
+        } else {
+          // For subsequent loops, keep adding the same offset
+          uint64_t sample_range = max_sample_in_loop - min_sample_in_loop;
+          sample_offset += sample_range + seq_jump_per_packet_;
+        }
+
+        current_loop++;
+        LOG_INFO(
+            "Looping back to beginning (loop {}, cumulative offset: {})...",
+            current_loop, sample_offset);
+
+        // Small delay before restarting to avoid tight loop
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+
+    } while (loop_ && state.running);
+
+    LOG_INFO("PCAP reader thread exiting. Total packets: {}, Total bytes: {}, "
+             "Loops: {}",
+             total_packets, total_bytes, current_loop);
+  }
+
+private:
+  std::string filename_;
+  bool loop_; // Whether to loop the PCAP file
+  uint64_t
+      seq_jump_per_packet_; // Sequence number jump between packets (e.g., 64)
 };
