@@ -194,11 +194,12 @@ public:
         return;
       }
     }
-
-    LOG_INFO("Packet with seq number {} was unable to find a home. Adding to "
+    int current_read_index = read_index.load(std::memory_order_relaxed);
+    LOG_INFO("Packet with seq number {} and read index {} was unable to find a "
+             "home. Adding to "
              "future_packet_queue...",
-             pkt.sample_count);
-    future_packet_queue.push(read_index.load(std::memory_order_relaxed));
+             pkt.sample_count, current_read_index);
+    future_packet_queue.push(current_read_index);
   };
   void initialize_buffers(const int first_count) {
 
@@ -252,13 +253,10 @@ public:
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
   void release_buffer(const int buffer_index) {
-    // I'm imagining this will be called once data has been transferred
-    // to the GPU. I don't know exactly how but we'll figure that out I guess.
-    // Update old buffer for future use
-    //
-    // We may well need a mutex or lock here so that multiple GPU threads do not
-    // compete.
+    // This is called to let the processor know that the buffer has been
+    // copied to the GPU and now can be overwritten.
     int max_end_seq_in_buffers = 0;
+    // This is necessary to avoid multiple GPU threads competing / racing.
     std::lock_guard<std::mutex> lock(buffer_index_mutex);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       max_end_seq_in_buffers =
@@ -283,8 +281,6 @@ public:
     // This is not necessarily the next buffer as the buffers can be
     // updated in any order. This will be the buffer that has the next
     // highest start_seq.
-    //  I can probably use a data structure here to pop off the top
-    //  rather than checking through everything.
     LOG_INFO("advancing to next buffer...");
     {
       while (buffer_ordering_queue.empty()) {
@@ -383,7 +379,6 @@ public:
     auto cpu_start = clock::now();
     auto cpu_end = clock::now();
     LOG_INFO("Processor thread started");
-    //    static bool first_written = false;
     int current_read_index;
     bool from_queue = false;
     while (running) {
@@ -398,6 +393,8 @@ public:
         }
         if (future_packet_queue.size()) {
           current_read_index = future_packet_queue.front();
+          LOG_INFO("Reading from future packet queue...position {}",
+                   current_read_index);
           from_queue = true;
           future_packet_queue.pop();
           break;
@@ -416,8 +413,9 @@ public:
 
       process_packet_data(entry);
       if (!from_queue) {
-        read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
-                         std::memory_order_release);
+        int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
+        read_index.store(new_read_index, std::memory_order_release);
+        LOG_INFO("New read index is {}", new_read_index);
       }
       cpu_start = clock::now();
       handle_buffer_completion();
@@ -444,10 +442,6 @@ public:
       LOG_INFO("Buffer is complete - passing to output pipeline...");
       // Send off data to be processed by CUDA pipeline.
       // Then advance to next buffer and keep iterating.
-      // if (!first_written) {
-      //  write_buffer_to_hdf5(current_buffer, "first_buffer.hdf5");
-      //  first_written = true;
-      //}
       if (pipeline_ == nullptr) {
         throw std::logic_error(
             "Pipeline has not been set. Ensure that set_pipeline has been "

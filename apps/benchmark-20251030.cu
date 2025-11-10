@@ -63,7 +63,7 @@ int main() {
   std::signal(SIGINT, signal_handler);
   auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
                                             "app.log", /*truncate*/ true);
-  app_logger->set_level(spdlog::level::debug);
+  app_logger->set_level(spdlog::level::info);
   app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 
   spatial::Logger::set(app_logger);
