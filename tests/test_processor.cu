@@ -1,8 +1,10 @@
+#include "spatial/output.hpp"
 #include "spatial/pipeline.hpp"
 #include "spatial/spatial.hpp"
 #include <array>
 #include <complex>
 #include <cstring>
+#include <gtest/gtest.h>
 #include <vector>
 
 struct MockPacketDataStructure {
