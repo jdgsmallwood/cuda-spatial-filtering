@@ -1,5 +1,6 @@
 #include "spatial/output.hpp"
-#include "spatial/pipeline.hpp"
+#include "spatial/packet_formats.hpp"
+#include "spatial/pipeline_base.hpp"
 #include "spatial/spatial.hpp"
 #include <array>
 #include <complex>
@@ -28,7 +29,7 @@ struct MockPacketEntry {
   MockPacketEntry *parse() { return this; } // Dummy parse
 };
 
-struct MockPacketFinalDataType {
+struct MockPacketFinalDataType : public FinalPacketData {
   struct Samples {
     bool dummy = true;
   };
@@ -59,9 +60,11 @@ struct MockT {
 class MockPipeline : public GPUPipeline {
 public:
   bool executed = false;
-  void execute_pipeline(MockT::PacketFinalDataType *d_sample) {
+  void execute_pipeline(FinalPacketData *packet_data,
+                        const bool dummy_run = false) override {
     executed = true;
-  }
+  };
+  void dump_visibilities(const int end_seq_num = -1) override {};
 };
 
 class ProcessorStateTest : public ::testing::Test {
