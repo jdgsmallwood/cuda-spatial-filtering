@@ -60,9 +60,6 @@ add_executable(
 target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
 target_compile_definitions(benchmark PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS} NUMBER_PACKETS_TO_CORRELATE=${NUMBER_PACKETS_TO_CORRELATE} )
 
-if(CMAKE_BUILD_TYPE MATCHES Debug)
-target_link_libraries(benchmark PRIVATE sanitizer_flags)
-endif()
 
 add_executable(
   udp_sender

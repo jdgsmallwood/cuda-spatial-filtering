@@ -128,6 +128,7 @@ target_include_directories(spdlog PRIVATE ${spdlog_SOURCE_DIR})
 
 find_package(ZLIB REQUIRED)
 find_package(HDF5 REQUIRED COMPONENTS C)
+find_package(CFITSIO REQUIRED)
 
 message(STATUS "HDF5_FOUND is ${HDF5_FOUND}")
 message(STATUS "HDF5_ROOT is ${HDF5_ROOT}")

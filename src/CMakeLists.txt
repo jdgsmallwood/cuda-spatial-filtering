@@ -11,7 +11,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/pipeline.cpp
 
 
 target_link_libraries(
-    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor HighFive::HighFive spdlog::spdlog
+    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor HighFive::HighFive spdlog::spdlog ${CFITSIO_LIBRARIES}
 )
 
 
@@ -23,6 +23,7 @@ target_include_directories(
         ${PROJECT_SOURCE_DIR}/extern/cudawrappers/include
         ${PROJECT_SOURCE_DIR}/extern/spdlog/include
         ${PROJECT_SOURCE_DIR}/include
+        ${CFITSIO_INCLUDE_DIR}
 )
 
 set_target_properties(spatial PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
