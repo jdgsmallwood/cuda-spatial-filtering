@@ -156,7 +156,10 @@ int main() {
     sleep(5);
     // This is nice to see outside of log files.
     std::cout << "Stats: Received=" << state.packets_received
-              << ", Processed=" << state.packets_processed << std::endl;
+              << ", Processed=" << state.packets_processed
+              << ", Discarded=" << state.packets_discarded << std::endl;
+    std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
+              << std::endl;
     state.running = (int)running;
     // This is my attempt at a rudimentary shutdown procedure
     // when there are no more packets running through in a 20sec period.

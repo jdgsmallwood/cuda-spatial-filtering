@@ -8,83 +8,280 @@
 #include <gtest/gtest.h>
 #include <vector>
 
-struct MockPacketDataStructure {
-  std::complex<float> data[1][1][1];
-  float scales[1][1][1];
+#include <atomic>
+#include <chrono>
+#include <thread>
+
+// Mock configuration for testing
+using TestConfig = LambdaConfig<2,  // NR_CHANNELS
+                                1,  // NR_FPGA_SOURCES
+                                8,  // NR_TIME_STEPS_PER_PACKET
+                                32, // NR_RECEIVERS
+                                2,  // NR_POLARIZATIONS
+                                16, // NR_RECEIVERS_PER_PACKET
+                                10, // NR_PACKETS_FOR_CORRELATION
+                                1,  // NR_BEAMS
+                                32, // NR_PADDED_RECEIVERS
+                                32, // NR_PADDED_RECEIVERS_PER_BLOCK
+                                1   // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                                >;
+
+// Simple mock pipeline that just tracks what it receives
+class SimpleMockPipeline : public GPUPipeline {
+public:
+  std::atomic<int> execute_count{0};
+  std::atomic<int> release_count{0};
+  std::vector<int> buffer_indices_received;
+  std::vector<int> start_seqs_received;
+  std::vector<int> end_seqs_received;
+  std::mutex data_mutex;
+  FinalPacketData *last_packet_data;
+
+  void execute_pipeline(FinalPacketData *packet_data,
+                        const bool dummy_run = false) override {
+    {
+      std::lock_guard<std::mutex> lock(data_mutex);
+      buffer_indices_received.push_back(packet_data->buffer_index);
+      start_seqs_received.push_back(packet_data->start_seq_id);
+      end_seqs_received.push_back(packet_data->end_seq_id);
+      last_packet_data = packet_data;
+    }
+    execute_count++;
+
+    // Immediately release the buffer to simulate GPU completion
+    if (state_) {
+      state_->release_buffer(packet_data->buffer_index);
+      release_count++;
+    }
+  }
+
+  void dump_visibilities(const int end_seq_num = -1) override {}
+
+  int get_execute_count() const { return execute_count.load(); }
+  int get_release_count() const { return release_count.load(); }
 };
 
-struct MockPacketScaleStructure {
-  float scale;
-};
+// Test fixture
+class ProcessorStateTest : public ::testing::Test {
+protected:
+  ProcessorState<TestConfig, 3> *processor_state;
+  SimpleMockPipeline *mock_pipeline;
 
-struct MockPacketEntry {
-  int length = 0;
-  bool processed = false;
-  sockaddr_in sender_addr{};
-  timeval timestamp{};
-  using PacketScaleStructure = MockPacketScaleStructure;
-  using PacketDataStructure = MockPacketDataStructure;
+  void SetUp() override {
+    processor_state =
+        new ProcessorState<TestConfig, 3>(10, // nr_packets_for_correlation
+                                          64, // nr_between_samples
+                                          0   // min_freq_channel
+        );
 
-  MockPacketEntry *self = this;             // For mock use
-  MockPacketEntry *parse() { return this; } // Dummy parse
-};
+    mock_pipeline = new SimpleMockPipeline();
+    mock_pipeline->set_state(processor_state);
+    processor_state->set_pipeline(mock_pipeline);
+    processor_state->synchronous_pipeline = true;
+  }
 
-struct MockPacketFinalDataType : public FinalPacketData {
-  struct Samples {
-    bool dummy = true;
-  };
-  Samples *samples = new Samples();
-  bool arrivals[1][1][1][1] = {{{{false}}}};
-  int buffer_index = 0;
+  void TearDown() override {
+    processor_state->running = 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    delete processor_state;
+    delete mock_pipeline;
+  }
 
-  void zero_missing_packets() {
-    // pretend to zero data
+  // Helper to create a properly formatted Lambda packet
+  void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
+                            uint16_t freq_channel, int val) {
+    // Get the current write pointer
+    void *write_ptr = processor_state->get_current_write_pointer();
+    uint8_t *data_ptr = (uint8_t *)write_ptr;
+
+    // Ethernet header (14 bytes)
+    EthernetHeader *eth = (EthernetHeader *)data_ptr;
+    memset(eth, 0, sizeof(EthernetHeader));
+    eth->ethertype = htons(0x0800); // IPv4
+    data_ptr += sizeof(EthernetHeader);
+
+    // IP header (20 bytes)
+    IPHeader *ip = (IPHeader *)data_ptr;
+    memset(ip, 0, sizeof(IPHeader));
+    ip->version_ihl = 0x45; // IPv4, 20 byte header
+    data_ptr += sizeof(IPHeader);
+
+    // UDP header (8 bytes)
+    UDPHeader *udp = (UDPHeader *)data_ptr;
+    memset(udp, 0, sizeof(UDPHeader));
+    data_ptr += sizeof(UDPHeader);
+
+    // Custom header (22 bytes: 8 + 4 + 2 + 8)
+    CustomHeader *custom = (CustomHeader *)data_ptr;
+    custom->sample_count = sample_count;
+    custom->fpga_id = fpga_id;
+    custom->freq_channel = freq_channel;
+    memset(custom->padding, 0, sizeof(custom->padding));
+    data_ptr += sizeof(CustomHeader);
+
+    // Payload: PacketPayload<PacketScaleStructure, PacketDataStructure>
+    // PacketScaleStructure: int16_t[NR_RECEIVERS][NR_POLARIZATIONS]
+    // PacketDataStructure:
+    // complex<int8_t>[NR_TIME_STEPS][NR_RECEIVERS][NR_POLARIZATIONS]
+    auto *payload =
+        reinterpret_cast<typename TestConfig::PacketPayloadType *>(data_ptr);
+
+    // Fill scales with test data
+    for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
+      for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
+        payload->scales[r][p] = 1 + r; // Non-zero scales
+      }
+    }
+
+    // Fill data with test pattern
+    for (int t = 0; t < TestConfig::NR_TIME_STEPS_PER_PACKET; t++) {
+      for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
+        for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
+          payload->data[t][r][p] = std::complex<int8_t>(
+              static_cast<int8_t>(val), static_cast<int8_t>(val));
+        }
+      }
+    }
+
+    // Set packet metadata
+    int total_length = sizeof(EthernetHeader) + sizeof(IPHeader) +
+                       sizeof(UDPHeader) + sizeof(CustomHeader) +
+                       sizeof(typename TestConfig::PacketPayloadType);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    processor_state->add_received_packet_metadata(total_length, addr);
+  }
+
+  void validate_packet_contents(FinalPacketData *parcel, int channel,
+                                int packet_number, int val) {
+    typename TestConfig::PacketSamplesType *packet_samples =
+        (typename TestConfig::PacketSamplesType *)parcel->get_samples_ptr();
+    for (int t = 0; t < TestConfig::NR_TIME_STEPS_PER_PACKET; t++) {
+      for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
+        for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
+          EXPECT_EQ(packet_samples[0][channel][packet_number][t][r][p],
+                    std::complex<int8_t>(static_cast<int8_t>(val),
+                                         static_cast<int8_t>(val)));
+        }
+      }
+    }
+  }
+
+  // Add packet and advance write pointer
+  void add_packet(uint64_t sample_count, uint32_t fpga_id,
+                  uint16_t freq_channel, int val = 1) {
+    create_lambda_packet(sample_count, fpga_id, freq_channel, val);
+    processor_state->get_next_write_pointer();
   }
 };
 
-struct MockT {
-  static constexpr int NR_CHANNELS = 1;
-  static constexpr int NR_FPGA_SOURCES = 1;
-  static constexpr int NR_RECEIVERS_PER_PACKET = 1;
-  static constexpr int NR_RECEIVERS = 1;
-  static constexpr int NR_TIME_STEPS_PER_PACKET = 1;
-  static constexpr int NR_POLARIZATIONS = 1;
+TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
+  add_packet(1000, 0, 0);
 
-  using PacketEntryType = MockPacketEntry;
-  using PacketFinalDataType = MockPacketFinalDataType;
-  using PacketDataStructure = MockPacketDataStructure;
-  using PacketScaleStructure = MockPacketScaleStructure;
-  using PacketSamplesType = typename MockPacketFinalDataType::Samples;
-  using Sample = std::complex<float>;
-};
-class MockPipeline : public GPUPipeline {
-public:
-  bool executed = false;
-  void execute_pipeline(FinalPacketData *packet_data,
-                        const bool dummy_run = false) override {
-    executed = true;
-  };
-  void dump_visibilities(const int end_seq_num = -1) override {};
-};
+  // Process the packet
+  int read_idx = processor_state->read_index.load();
+  processor_state->process_packet_data(
+      processor_state->d_packet_data[read_idx]);
 
-class ProcessorStateTest : public ::testing::Test {
-protected:
-  static constexpr size_t NR_PACKETS_FOR_CORR = 4;
-  static constexpr size_t NR_BETWEEN_SAMPLES = 2;
-  static constexpr size_t MIN_FREQ_CHANNEL = 0;
+  EXPECT_EQ(processor_state->packets_processed, 1);
+}
 
-  ProcessorState<MockT> state{NR_PACKETS_FOR_CORR, NR_BETWEEN_SAMPLES,
-                              MIN_FREQ_CHANNEL};
-  MockPipeline pipeline;
+TEST_F(ProcessorStateTest, BufferInitializationTest) {
+  EXPECT_FALSE(processor_state->buffers_initialized);
 
-  void SetUp() override { state.set_pipeline(&pipeline); }
+  add_packet(1000, 0, 0);
 
-  void TearDown() override {}
-};
+  int read_idx = processor_state->read_index.load();
+  processor_state->process_packet_data(
+      processor_state->d_packet_data[read_idx]);
 
-TEST_F(ProcessorStateTest, InitializationSetsDefaults) {
-  EXPECT_EQ(state.buffers_initialized, false);
-  EXPECT_EQ(state.current_buffer, 0);
-  EXPECT_EQ(state.write_index.load(), 0);
-  EXPECT_EQ(state.read_index.load(), 0);
+  EXPECT_TRUE(processor_state->buffers_initialized);
+}
+
+TEST_F(ProcessorStateTest, FillOneBufferTest) {
+  const uint64_t start_sample = 1000;
+
+  // For one complete buffer, we need packets from all channels and all FPGAs
+  // Total packets = NR_CHANNELS * NR_FPGA_SOURCES * NR_PACKETS_FOR_CORRELATION
+  int total_packets = TestConfig::NR_CHANNELS * TestConfig::NR_FPGA_SOURCES *
+                      TestConfig::NR_PACKETS_FOR_CORRELATION;
+
+  for (int channel = 0; channel < TestConfig::NR_CHANNELS; channel++) {
+    for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
+      for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
+        uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        add_packet(sample, fpga, channel);
+      }
+    }
+  }
+
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion(true);
+  EXPECT_EQ(processor_state->packets_processed, total_packets);
+  EXPECT_EQ(mock_pipeline->get_execute_count(), 1);
+
+  validate_packet_contents(mock_pipeline->last_packet_data, 0, 0, 1);
+}
+
+TEST_F(ProcessorStateTest, OnePacketPlacementTest) {
+  const uint64_t start_sample = 1000;
+  // need to initialize - so give it a start_sample
+  int pkt = 1;
+  int fpga = 0;
+  int channel = 0;
+  uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+  add_packet(start_sample, fpga, channel, 1);
+  add_packet(sample, fpga, channel, 10);
+
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion(true);
+  EXPECT_EQ(processor_state->packets_processed, 2);
+  EXPECT_EQ(mock_pipeline->get_execute_count(), 1);
+
+  validate_packet_contents(mock_pipeline->last_packet_data, 0, 0, 1);
+  validate_packet_contents(mock_pipeline->last_packet_data, channel, pkt, 10);
+}
+
+TEST_F(ProcessorStateTest, OnePacketPlacementTest2) {
+  const uint64_t start_sample = 1000;
+  // need to initialize - so give it a start_sample
+  int pkt = 2;
+  int fpga = 0;
+  int channel = 1;
+  uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+  add_packet(start_sample, fpga, channel, 1);
+  add_packet(sample, fpga, channel, 10);
+
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion(true);
+  EXPECT_EQ(processor_state->packets_processed, 2);
+  EXPECT_EQ(mock_pipeline->get_execute_count(), 1);
+
+  validate_packet_contents(mock_pipeline->last_packet_data, 1, 0, 1);
+  validate_packet_contents(mock_pipeline->last_packet_data, channel, pkt, 10);
+}
+
+TEST_F(ProcessorStateTest, DiscardOldPacketsTest) {
+  // Initialize with a packet at sample 1000
+  add_packet(1000, 0, 0);
+  int read_idx = processor_state->read_index.load();
+  processor_state->process_packet_data(
+      processor_state->d_packet_data[read_idx]);
+  processor_state->read_index.store((read_idx + 1) % 1000,
+                                    std::memory_order_release);
+
+  EXPECT_TRUE(processor_state->buffers_initialized);
+
+  // Try to add a packet that's too old (before current buffer)
+  add_packet(500, 0, 0);
+  read_idx = processor_state->read_index.load();
+  processor_state->process_packet_data(
+      processor_state->d_packet_data[read_idx]);
+
+  // This packet should be discarded
+  EXPECT_GT(processor_state->packets_discarded, 0);
 }

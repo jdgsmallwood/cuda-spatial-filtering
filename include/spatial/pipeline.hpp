@@ -271,7 +271,8 @@ public:
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
                                  .dummy_run = dummy_run};
-    cudaLaunchHostFunc(streams[current_buffer], release_buffer_host_func, ctx);
+    CUDA_CHECK(cudaLaunchHostFunc(streams[current_buffer],
+                                  release_buffer_host_func, ctx));
     cpu_end = clock::now();
     LOG_DEBUG(
         "CPU time for BufferReleaseContext alloc + cudaLaunchHostFunc: {} us",
@@ -310,10 +311,10 @@ public:
 
     // cudaMemcpyAsync for padding
     cpu_start = clock::now();
-    cudaMemcpyAsync(d_samples_padded[current_buffer],
-                    d_samples_padding[current_buffer],
-                    sizeof(typename T::HalfPacketSamplesType),
-                    cudaMemcpyDefault, streams[current_buffer]);
+    CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
+                               d_samples_padding[current_buffer],
+                               sizeof(typename T::HalfPacketSamplesType),
+                               cudaMemcpyDefault, streams[current_buffer]));
     cpu_end = clock::now();
     LOG_DEBUG("CPU overhead for d_samples_padded cudaMemcpyAsync: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
@@ -322,12 +323,13 @@ public:
 
     // cudaMemsetAsync
     cpu_start = clock::now();
-    cudaMemsetAsync(reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
-                        sizeof(typename T::HalfPacketSamplesType),
-                    0,
-                    sizeof(typename T::PaddedPacketSamplesType) -
-                        sizeof(typename T::HalfPacketSamplesType),
-                    streams[current_buffer]);
+    CUDA_CHECK(cudaMemsetAsync(
+        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
+            sizeof(typename T::HalfPacketSamplesType),
+        0,
+        sizeof(typename T::PaddedPacketSamplesType) -
+            sizeof(typename T::HalfPacketSamplesType),
+        streams[current_buffer]));
     cpu_end = clock::now();
     LOG_DEBUG("CPU overhead for cudaMemsetAsync: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
