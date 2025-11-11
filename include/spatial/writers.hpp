@@ -3,6 +3,7 @@
 #include "spatial/logging.hpp"
 #include <array>
 #include <condition_variable>
+#include <fitsio.h>
 #include <fstream>
 #include <hdf5.h>
 #include <highfive/H5DataSet.hpp>
@@ -954,4 +955,112 @@ private:
   BeamT *beam_buffer_;
   ArrivalsT *arrivals_buffer_;
   Meta *meta_buffer_;
+};
+
+template <typename T>
+class UVFITSVisibilitiesWriter : public VisibilitiesWriter<T> {
+public:
+  explicit UVFITSVisibilitiesWriter(const std::string &filename)
+      : filename_(filename), fptr_(nullptr), row_counter_(0) {
+    int status = 0;
+
+    LOG_INFO("Creating UVFITS file: {}", filename_);
+    if (fits_create_file(&fptr_, ("!" + filename_).c_str(), &status))
+      report_error(status, "fits_create_file");
+
+    // Define main table structure — one HDU for visibilities
+    long naxes[6] = {0};
+    vis_dims_ = get_array_dims<T, long>();
+    if (vis_dims_.size() > 5) {
+      throw std::runtime_error(
+          "UVFITS format supports at most 5D visibility cubes");
+    }
+    for (size_t i = 0; i < vis_dims_.size(); ++i)
+      naxes[i] = vis_dims_[i];
+
+    // Create primary image (FLOAT, placeholder header)
+    if (fits_create_img(fptr_, FLOAT_IMG, 0, nullptr, &status))
+      report_error(status, "fits_create_img");
+
+    // Add metadata
+    fits_write_key(fptr_, TSTRING, "ORIGIN", (void *)"SPATIALPIPE", nullptr,
+                   &status);
+    fits_write_key(fptr_, TSTRING, "CTYPE1", (void *)"U", nullptr, &status);
+    fits_write_key(fptr_, TSTRING, "CTYPE2", (void *)"V", nullptr, &status);
+    fits_write_key(fptr_, TSTRING, "CTYPE3", (void *)"FREQ", nullptr, &status);
+    fits_write_key(fptr_, TSTRING, "CTYPE4", (void *)"STOKES", nullptr,
+                   &status);
+
+    // Create a binary table extension for visibilities
+    char *ttype[] = {(char *)"DATA"};
+    char *tform[] = {(char *)"1PE"}; // variable-length array of floats
+    char *tunit[] = {(char *)"JY"};
+    if (fits_create_tbl(fptr_, BINARY_TBL, 0, 1, ttype, tform, tunit, "UV_DATA",
+                        &status))
+      report_error(status, "fits_create_tbl");
+
+    LOG_INFO("UVFITSVisibilitiesWriter initialized: dims = {}",
+             vis_dims_.size());
+  }
+
+  ~UVFITSVisibilitiesWriter() override {
+    if (fptr_) {
+      int status = 0;
+      fits_close_file(fptr_, &status);
+      if (status)
+        fits_report_error(stderr, status);
+    }
+  }
+
+  void write_visibilities_block(const T *data, const int start_seq,
+                                const int end_seq) override {
+    int status = 0;
+
+    LOG_INFO("Writing visibilities block {}-{}", start_seq, end_seq);
+
+    // Flatten the array (T is multi-dimensional)
+    using value_type = typename std::remove_all_extents<T>::type;
+    const size_t n_elements = sizeof(T) / sizeof(value_type);
+    std::vector<float> buffer(n_elements);
+    std::memcpy(buffer.data(), data, sizeof(T));
+
+    // Move to binary table HDU
+    fits_movnam_hdu(fptr_, BINARY_TBL, (char *)"UV_DATA", 0, &status);
+
+    long row = ++row_counter_;
+    fits_insert_rows(fptr_, row - 1, 1, &status);
+
+    // Write the visibility array as a variable-length float column
+    long firstelem = 1;
+    fits_write_col(fptr_, TFLOAT, 1, row, firstelem, n_elements, buffer.data(),
+                   &status);
+
+    // Also add sequence number keywords (optional)
+    fits_update_key(fptr_, TINT, "STARTSEQ", (void *)&start_seq, nullptr,
+                    &status);
+    fits_update_key(fptr_, TINT, "ENDSEQ", (void *)&end_seq, nullptr, &status);
+
+    if (status)
+      report_error(status, "write_visibilities_block");
+  }
+
+  void flush() override {
+    int status = 0;
+    fits_flush_file(fptr_, &status);
+    if (status)
+      report_error(status, "fits_flush_file");
+    LOG_INFO("UVFITS file flushed to disk");
+  }
+
+private:
+  void report_error(int status, const char *msg) {
+    LOG_ERROR("[CFITSIO] {} failed with status {}", msg, status);
+    fits_report_error(stderr, status);
+    throw std::runtime_error(std::string("CFITSIO error: ") + msg);
+  }
+
+  std::string filename_;
+  fitsfile *fptr_;
+  std::vector<long> vis_dims_;
+  long row_counter_;
 };
