@@ -12,7 +12,7 @@
 
 # Copyright (C) 2020 ASTRON (Netherlands Institute for Radio Astronomy)
 # SPDX-License-Identifier: GPL-3.0-or-later
-
+# Taken from ASTRON with no changes.
 if(NOT CFITSIO_FOUND)
 
   if(NOT CFITSIO_ROOT_DIR AND DEFINED ENV{CFITSIO_ROOT_DIR})
