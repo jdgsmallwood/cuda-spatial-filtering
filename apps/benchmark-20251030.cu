@@ -80,7 +80,7 @@ int main() {
   constexpr int nr_lambda_packets_for_correlation = NUMBER_PACKETS_TO_CORRELATE;
   constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
-  constexpr int nr_correlation_blocks_to_integrate = 1000000;
+  constexpr int nr_correlation_blocks_to_integrate = 1000;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
