@@ -96,11 +96,11 @@ int main() {
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
-  std::string vis_filename = "hdf5_trial_vis.hdf5";
+  std::string vis_filename = "hdf5_trial_vis.uvfits";
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
+  // HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -113,9 +113,8 @@ int main() {
   //     BinaryRawBeamWriter<Config::BeamOutputType,
   //     Config::ArrivalsOutputType>>(
   //    beam_filename);
-  auto vis_writer =
-      std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
-          vis_file);
+  auto vis_writer = std::make_unique<
+      UVFITSVisibilitiesWriter<Config::VisibilitiesOutputType>>(vis_filename);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), 100, 100);
