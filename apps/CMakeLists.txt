@@ -57,7 +57,7 @@ add_executable(
   benchmark
   ${PROJECT_SOURCE_DIR}/apps/benchmark-20251030.cu
 )
-target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
+target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc CFITSIO::CFITSIO)
 target_compile_definitions(benchmark PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS} NUMBER_PACKETS_TO_CORRELATE=${NUMBER_PACKETS_TO_CORRELATE} )
 
 
