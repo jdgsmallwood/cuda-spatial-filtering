@@ -62,7 +62,7 @@ void writeVectorToCSV(const std::vector<float> &times,
 int main() {
   std::cout << "Starting....\n";
   std::signal(SIGINT, signal_handler);
-  static auto tp = std::make_shared<spdlog::thread_pool>(8192, 1);
+  static auto tp = std::make_shared<spdlog::details::thread_pool>(8192, 1);
   auto app_logger = std::make_shared<spdlog::async_logger>(
       "async_logger",
       std::make_shared<spdlog::sinks::basic_file_sink_mt>("app.log", true), tp,
