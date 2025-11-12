@@ -39,6 +39,7 @@ endif()
   # main CMakeLists.
   include(CTest)
 include(cmake/find_cutensor.cmake)
+include(cmake/find_cfitsio.cmake)
 
   # Docs only available if this is the main app
   find_package(Doxygen)
