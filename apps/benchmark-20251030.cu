@@ -61,8 +61,13 @@ void writeVectorToCSV(const std::vector<float> &times,
 int main() {
   std::cout << "Starting....\n";
   std::signal(SIGINT, signal_handler);
-  auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
-                                            "app.log", /*truncate*/ true);
+  spdlog::init_thread_pool(8192, 1);
+
+  auto app_logger = spdlog::basic_logger_mt<spdlog::async_factory>(
+      "async_logger", "app.log", true);
+
+  // auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
+  //                                         "app.log", /*truncate*/ true);
   app_logger->set_level(spdlog::level::info);
   app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 

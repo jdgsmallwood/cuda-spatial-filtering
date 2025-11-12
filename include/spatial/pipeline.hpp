@@ -381,7 +381,6 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // tensor_16.runPermutation "packetToPlanar"
     cpu_start = clock::now();
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)d_samples_half[current_buffer],
@@ -393,7 +392,6 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // tensor_16.runPermutation "consToColMajCons"
     cpu_start = clock::now();
     tensor_16.runPermutation(
         "consToColMajCons", alpha,
@@ -406,7 +404,6 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // update_weights
     cpu_start = clock::now();
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
@@ -419,7 +416,6 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // tensor_16.runPermutation "weightsInputToCCGLIB"
     cpu_start = clock::now();
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights_updated[current_buffer],
@@ -432,7 +428,6 @@ public:
                                                               cpu_start)
             .count());
 
-    // GEMM run
     cpu_start = clock::now();
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
@@ -444,7 +439,6 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // tensor_32.runPermutation "beamCCGLIBToOutput"
     cpu_start = clock::now();
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
                              (float *)d_beamformer_output[current_buffer],
@@ -456,7 +450,6 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // Record GPU stop event
     cpu_start = clock::now();
     cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
     cpu_end = clock::now();
