@@ -38,8 +38,9 @@ endif()
   # since it calls enable_testing, which must be in the
   # main CMakeLists.
   include(CTest)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(cmake/find_cutensor.cmake)
-include(cmake/find_cfitsio.cmake)
+  include(cmake/FindCFITSIO.cmake)
 
   # Docs only available if this is the main app
   find_package(Doxygen)
