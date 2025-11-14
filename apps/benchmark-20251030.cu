@@ -62,11 +62,11 @@ void writeVectorToCSV(const std::vector<float> &times,
 int main() {
   std::cout << "Starting....\n";
   std::signal(SIGINT, signal_handler);
-  static auto tp = std::make_shared<spdlog::details::thread_pool>(8192, 1);
+  static auto tp = std::make_shared<spdlog::details::thread_pool>(4 * 8192, 2);
   auto app_logger = std::make_shared<spdlog::async_logger>(
       "async_logger",
       std::make_shared<spdlog::sinks::basic_file_sink_mt>("app.log", true), tp,
-      spdlog::async_overflow_policy::block);
+      spdlog::async_overflow_policy::overrun_oldest);
 
   // auto app_logger = spdlog::basic_logger_mt<spdlog::async_factory>(
   //   "async_logger", "app.log", true);
@@ -124,7 +124,9 @@ int main() {
   //     Config::ArrivalsOutputType>>(
   //    beam_filename);
   auto vis_writer = std::make_unique<
-      UVFITSVisibilitiesWriter<Config::VisibilitiesOutputType>>(vis_filename);
+      UVFITSVisibilitiesWriter<Config::VisibilitiesOutputType>>(
+      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
+      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), 100, 100);
@@ -157,6 +159,8 @@ int main() {
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
+  // Start writer thread
+  std::thread writer_thread_([&output] { output->writer_loop(); });
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   int packets_received = 0;
@@ -196,6 +200,7 @@ int main() {
   LOG_INFO("\nShutting down...\n");
   std::cout << "Shutting down...\n";
   state.running = 0;
+
   std::cout << "Waiting for receiver to finish...\n";
   receiver.join();
   std::cout << "Waiting for processor to finish...\n";
@@ -203,9 +208,16 @@ int main() {
   std::cout << "Waiting for pipeline feeder to finish...\n";
   pipeline_feeder.join();
 
+  cudaDeviceSynchronize();
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
   std::cout << "Synchronizing GPU...\n";
   cudaDeviceSynchronize();
 
+  output->running_ = false;
+  std::cout << "Waiting for writer thread to finish...\n";
+  writer_thread_.join();
   std::vector<float> run_timings;
   run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
   for (auto i = 0; i < pipeline.NR_BENCHMARKING_RUNS; ++i) {
@@ -218,5 +230,6 @@ int main() {
   writeVectorToCSV(run_timings, "output_timings.csv");
   FLUSH_LOG();
   spdlog::shutdown();
+  std::cout << "Shutdown complete.\n";
   return 0;
 }

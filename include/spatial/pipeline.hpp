@@ -53,7 +53,7 @@ static void release_buffer_host_func(void *data) {
 
   auto *ctx = static_cast<BufferReleaseContext *>(data);
   if (!ctx->dummy_run) {
-    LOG_INFO("Releasing buffer #{}", ctx->buffer_index);
+    LOG_DEBUG("Releasing buffer #{}", ctx->buffer_index);
     ctx->state->release_buffer(ctx->buffer_index);
   }
   delete ctx;
@@ -665,10 +665,6 @@ public:
     // If there are visibilities in the accumulator on the GPU - dump them
     // out to disk. These will get tagged with a -1 end_seq_id currently
     // which is not fully ideal.
-    if (visibilities_start_seq_num != -1) {
-      dump_visibilities();
-    }
-    cudaDeviceSynchronize();
 
     for (auto stream : streams) {
       cudaStreamDestroy(stream);

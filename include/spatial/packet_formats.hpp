@@ -155,7 +155,7 @@ struct LambdaPacketEntry
     : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
   ProcessedPacket<PacketScaleStructure, PacketDataStructure> parse() override {
 
-    LOG_INFO("Entering parser...\n");
+    LOG_DEBUG("Entering parser...\n");
     ProcessedPacket<PacketScaleStructure, PacketDataStructure> result = {0};
 
     if (this->length < MIN_PCAP_HEADER_SIZE) {

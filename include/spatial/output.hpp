@@ -3,6 +3,7 @@
 #include "spatial/pinned_vector.hpp"
 #include "spatial/spatial.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -121,17 +122,11 @@ public:
     // Allocate ring buffer blocks
     beam_blocks_.resize(beam_buffer_size);
     vis_blocks_.resize(vis_buffer_size);
-
-    // Start writer thread
-    writer_thread_ = std::thread(&BufferedOutput::writer_loop, this);
   }
 
   ~BufferedOutput() {
     running_ = false;
 
-    if (writer_thread_.joinable()) {
-      writer_thread_.join();
-    }
     beam_writer_->flush();
     vis_writer_->flush();
   }
@@ -203,7 +198,6 @@ public:
     beam_blocks_[block_num].arrival_transfer_complete = true;
   }
 
-private:
   void writer_loop() {
 
     using clock = std::chrono::high_resolution_clock;
@@ -231,15 +225,11 @@ private:
                       .count());
       }
     }
-
-    // Flush remaining data
-    while (beam_read_idx_ != beam_write_idx_ ||
-           vis_read_idx_ != vis_write_idx_) {
-      write_beam_data();
-      write_visibilities();
-    }
   }
 
+  std::atomic<bool> running_{true};
+
+private:
   bool has_data_to_write() {
     bool has_beam = (beam_read_idx_ != beam_write_idx_) &&
                     beam_blocks_[beam_read_idx_].beam_transfer_complete &&
@@ -253,7 +243,7 @@ private:
   void write_beam_data() {
     while (beam_read_idx_ != beam_write_idx_ &&
            beam_blocks_[beam_read_idx_].beam_transfer_complete &&
-           beam_blocks_[beam_read_idx_].arrival_transfer_complete) {
+           beam_blocks_[beam_read_idx_].arrival_transfer_complete && running_) {
 
       const auto &block = beam_blocks_[beam_read_idx_];
 
@@ -268,7 +258,7 @@ private:
 
   void write_visibilities() {
     while (vis_read_idx_ != vis_write_idx_ &&
-           vis_blocks_[vis_read_idx_].transfer_complete) {
+           vis_blocks_[vis_read_idx_].transfer_complete && running_) {
 
       const auto &block = vis_blocks_[vis_read_idx_];
 
@@ -292,7 +282,4 @@ private:
   size_t beam_read_idx_;
   size_t vis_write_idx_;
   size_t vis_read_idx_;
-
-  std::thread writer_thread_;
-  bool running_;
 };

@@ -62,9 +62,8 @@ RUN cp /var/cutensor-local-repo-ubuntu2404-2.2.0/cutensor-*-keyring.gpg /usr/sha
 RUN apt-get update
 RUN apt-get -y install libcutensor2 libcutensor-dev libcutensor-doc
    
-
-RUN    wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_3/NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb
-RUN    dpkg -i NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb && rm NsightSystems-linux-cli-public-2025.3.1.90-3582212.deb
+RUN wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_5/NsightSystems-linux-cli-public-2025.5.1.121-3638078.deb
+RUN    dpkg -i NsightSystems-linux-cli-public-2025.5.1.121-3638078.deb && rm NsightSystems-linux-cli-public-2025.5.1.121-3638078.deb
 
 
 RUN    test -f /usr/share/doc/kitware-archive-keyring/copyright || wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
@@ -79,8 +78,8 @@ ENV CC=/usr/bin/gcc
 ENV CXX=/usr/bin/g++
 ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcutensor/12:$LD_LIBRARY_PATH
 ENV PATH=/usr/local/bin:$PATH
-ENV PATH=/usr/local/cuda-12.8/bin:$PATH
-ENV PATH=/usr/local/cuda-12.8/compute-sanitizer:$PATH
+ENV PATH=/usr/local/cuda-12/bin:$PATH
+ENV PATH=/usr/local/cuda-12/compute-sanitizer:$PATH
 
 RUN echo "set-option -g prefix C-a" > /etc/tmux.conf && \
     echo "unbind-key C-b" >> /etc/tmux.conf && \

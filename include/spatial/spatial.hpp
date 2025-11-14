@@ -133,7 +133,7 @@ public:
       }
     }
     write_index.store(next_write_index, std::memory_order_release);
-    LOG_INFO("Next write index is...{}", next_write_index);
+    LOG_DEBUG("Next write index is...{}", next_write_index);
     return true;
   };
   void copy_data_to_input_buffer_if_able(
@@ -241,14 +241,15 @@ public:
     if (pkt->processed) {
       return;
     }
-    LOG_INFO("Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
-             "payload={} bytes",
-             parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
-             parsed.payload_size);
+    LOG_DEBUG(
+        "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
+        "payload={} bytes",
+        parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
+        parsed.payload_size);
 
-    LOG_INFO("First data point...{} + {} i",
-             parsed.payload->data[0][0][0].real(),
-             parsed.payload->data[0][0][0].imag());
+    LOG_DEBUG("First data point...{} + {} i",
+              parsed.payload->data[0][0][0].real(),
+              parsed.payload->data[0][0][0].imag());
 
     if (!buffers_initialized) {
       LOG_INFO("Initializing buffers as this is the first packet...");
@@ -272,11 +273,12 @@ public:
     // copied to the GPU and now can be overwritten.
     int max_end_seq_in_buffers = 0;
     // This is necessary to avoid multiple GPU threads competing / racing.
-    LOG_INFO("[ProcessorState - release_buffer] acquiring lock for index {}...",
-             buffer_index);
+    LOG_DEBUG(
+        "[ProcessorState - release_buffer] acquiring lock for index {}...",
+        buffer_index);
     std::lock_guard<std::mutex> lock(buffer_index_mutex);
-    LOG_INFO("[ProcessorState - release_buffer] lock acquired for index {}...",
-             buffer_index);
+    LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index {}...",
+              buffer_index);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       max_end_seq_in_buffers =
           std::max(max_end_seq_in_buffers, buffers[i].end_seq);
@@ -287,16 +289,16 @@ public:
     buffers[buffer_index].end_seq =
         buffers[buffer_index].start_seq +
         (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-    LOG_INFO("[ProcessorState - release_buffer] filling arrivals as false for "
-             "buffer {}...",
-             buffer_index);
+    LOG_DEBUG("[ProcessorState - release_buffer] filling arrivals as false for "
+              "buffer {}...",
+              buffer_index);
     std::fill_n((bool *)d_samples[buffer_index]->arrivals,
                 T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
                     T::NR_FPGA_SOURCES,
                 false);
-    LOG_INFO("[ProcessorState - release_buffer] pushing to queue for index {} "
-             "with seq {}",
-             buffer_index, buffers[buffer_index].start_seq);
+    LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index {} "
+              "with seq {}",
+              buffer_index, buffers[buffer_index].start_seq);
 
     buffers[buffer_index].is_ready = true;
     buffer_ordering_queue.push({buffer_index, buffers[buffer_index].start_seq});
@@ -388,8 +390,9 @@ public:
     LOG_INFO("Processor thread started");
     int current_read_index;
     bool from_queue = false;
-    constexpr int num_loops_before_completion_check = 100;
+    constexpr int num_loops_before_completion_check = 50;
     int loops_since_completion_check = 0;
+    int new_read_index = 0;
     while (running) {
       current_read_index = -1;
       from_queue = false;
@@ -402,8 +405,8 @@ public:
         }
         if (future_packet_queue.size()) {
           current_read_index = future_packet_queue.front();
-          LOG_INFO("Reading from future packet queue...position {}",
-                   current_read_index);
+          LOG_DEBUG("Reading from future packet queue...position {}",
+                    current_read_index);
           from_queue = true;
           future_packet_queue.pop();
           break;
@@ -418,17 +421,17 @@ public:
 
       if (entry->length == 0 || entry->processed == true) {
         // if we don't increment the read index here it can get stuck!
-        int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
+        new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
         read_index.store(new_read_index, std::memory_order_release);
-        LOG_INFO("New read index is {}", new_read_index);
+        LOG_DEBUG("New read index is {}", new_read_index);
         continue;
       }
 
       process_packet_data(entry);
       if (!from_queue) {
-        int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
+        new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
         read_index.store(new_read_index, std::memory_order_release);
-        LOG_INFO("New read index is {}", new_read_index);
+        LOG_DEBUG("New read index is {}", new_read_index);
       }
       if (loops_since_completion_check > num_loops_before_completion_check) {
         cpu_start = clock::now();
@@ -442,7 +445,8 @@ public:
       }
       loops_since_completion_check += 1;
     }
-
+    // shut down pipeline thread
+    buffer_ready_for_pipeline.notify_all();
     LOG_INFO("Processor thread exiting");
   };
 
@@ -484,12 +488,12 @@ public:
         if (!synchronous_pipeline) {
           std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
           buffers_ready_for_pipeline.push(current_buffer);
+          buffer_ready_for_pipeline.notify_one();
         } else {
           pipeline_->execute_pipeline(d_samples[current_buffer]);
           pipeline_runs_queued += 1;
         }
       }
-      LOG_INFO("Advancing to next buffer...");
       cpu_start = clock::now();
       advance_to_next_buffer(current_buffer_start_seq);
       cpu_end = clock::now();
@@ -504,15 +508,21 @@ public:
   void pipeline_feeder() {
     LOG_INFO("Pipeline feeder starting up...");
     while (running) {
-      if (buffers_ready_for_pipeline.size()) {
-        std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
-        size_t buffer_index = buffers_ready_for_pipeline.front();
-        LOG_INFO("Buffer index {} picked up by pipeline feeder...",
-                 buffer_index);
-        pipeline_->execute_pipeline(d_samples[buffer_index]);
-        buffers_ready_for_pipeline.pop();
-        pipeline_runs_queued += 1;
+      std::unique_lock<std::mutex> lock(buffers_ready_for_pipeline_lock);
+      buffer_ready_for_pipeline.wait(lock, [&] {
+        return !buffers_ready_for_pipeline.empty() || !running;
+      });
+
+      if (!running) {
+        lock.unlock();
+        break;
       }
+      size_t buffer_index = buffers_ready_for_pipeline.front();
+      buffers_ready_for_pipeline.pop();
+      lock.unlock();
+      LOG_INFO("Buffer index {} picked up by pipeline feeder...", buffer_index);
+      pipeline_->execute_pipeline(d_samples[buffer_index]);
+      pipeline_runs_queued += 1;
     }
     LOG_INFO("Pipeline feeder exiting!");
   }
@@ -523,7 +533,7 @@ public:
   void *get_next_write_pointer() {
     while (!get_next_write_index() && running) {
       LOG_DEBUG("Waiting for next pointer....");
-      std::this_thread::sleep_for(std::chrono::nanoseconds(10));
+      // std::this_thread::sleep_for(std::chrono::nanoseconds(10));
     };
     return get_current_write_pointer();
   }
@@ -563,6 +573,7 @@ private:
 
   std::queue<size_t> buffers_ready_for_pipeline;
   mutable std::mutex buffers_ready_for_pipeline_lock;
+  std::condition_variable buffer_ready_for_pipeline;
   // This is for packets that arrive but their buffer is not yet created.
   // The read pointer moves on but keep these as things to process.
   // They will not be overwritten by the write pointer as it checks whether or
@@ -796,7 +807,7 @@ public:
             current_loop, sample_offset);
 
         // Small delay before restarting to avoid tight loop
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
 
     } while (loop_ && state.running);
