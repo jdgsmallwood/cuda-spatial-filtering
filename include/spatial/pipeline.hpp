@@ -372,12 +372,11 @@ public:
 
     // accumulate_visibilities (CPU wrapper)
     cpu_start = clock::now();
-    accumulate_visibilities(
-        (float *)d_correlator_output[current_buffer],
-        (float *)d_visibilities_accumulator[current_buffer],
-        2 * NR_BASELINES, //* T::NR_POLARIZATIONS *
-                          // T::NR_POLARIZATIONS * T::NR_CHANNELS,
-        streams[current_buffer]);
+    accumulate_visibilities((float *)d_correlator_output[current_buffer],
+                            (float *)d_visibilities_accumulator[current_buffer],
+                            2 * NR_BASELINES * T::NR_POLARIZATIONS *
+                                T::NR_POLARIZATIONS * T::NR_CHANNELS,
+                            streams[current_buffer]);
     cpu_end = clock::now();
     LOG_DEBUG("CPU time for accumulate_visibilities: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
@@ -745,12 +744,11 @@ public:
              current_num_integrated_units_processed);
     cudaDeviceSynchronize();
     for (auto i = 1; i < num_buffers; ++i) {
-      accumulate_visibilities(
-          (float *)d_visibilities_accumulator[i],
-          (float *)d_visibilities_accumulator[0],
-          NR_BASELINES * 2, // * T::NR_CHANNELS *
-                            // T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
-          streams[current_buffer]);
+      accumulate_visibilities((float *)d_visibilities_accumulator[i],
+                              (float *)d_visibilities_accumulator[0],
+                              NR_BASELINES * 2 * T::NR_CHANNELS *
+                                  T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
+                              streams[current_buffer]);
     }
     cudaDeviceSynchronize();
     size_t block_num = output_->register_visibilities_block(
