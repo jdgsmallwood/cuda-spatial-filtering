@@ -203,6 +203,7 @@ int main() {
   LOG_INFO("\nShutting down...\n");
   std::cout << "Shutting down...\n";
   state.running.store(0, std::memory_order_release);
+  state.shutdown();
 
   std::cout << "Waiting for receiver to finish...\n";
   receiver.join();
