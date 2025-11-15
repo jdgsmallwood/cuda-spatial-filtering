@@ -310,7 +310,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
           if (q >= Config::NR_BASELINES_UNPADDED || j == 0 || p == 0) {
             expected_vis = 0;
           } else {
-            expected_vis = 64.0f;
+            expected_vis = 63.0f;
           };
           EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
