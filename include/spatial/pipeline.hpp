@@ -761,7 +761,7 @@ public:
     auto *output_ctx = new OutputTransferCompleteContext{
         .output = this->output_, .block_index = block_num};
 
-    cudaLaunchHostFunc(streams[current_buffer],
+    cudaLaunchHostFunc(streams[0],
                        output_visibilities_transfer_complete_host_func,
                        output_ctx);
     for (auto i = 0; i < num_buffers; ++i) {
