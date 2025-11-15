@@ -242,11 +242,21 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
   // Ensure that polarization is respected. Make the samples in one
   // polarization zero and then check that means everything in that polarization
   // is zero too.
+  //
+  // Also check the visibilities are copied across correctly. I'm choosing a
+  // large number of channels to ensure coverage across the whole data
+  // structure. If I only had 1 or 2 channels then only a few near the front
+  // would be non-zero.
 
+  using Config =
+      LambdaConfig<NR_CHANNELS + 5, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
+                   NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
+                   NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
+                   NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
+  for (auto i = 0; i < NR_CHANNELS + 5; ++i) {
     for (auto j = 0; j < NR_PACKETS; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
@@ -261,7 +271,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
   }
 
   BeamWeightsT<Config> h_weights;
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
+  for (auto i = 0; i < NR_CHANNELS + 5; ++i) {
     for (auto j = 0; j < NR_RECEIVERS; ++j) {
       for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
         for (auto l = 0; l < NR_BEAMS; ++l) {
@@ -283,7 +293,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();
 
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
+  for (auto i = 0; i < NR_CHANNELS + 5; ++i) {
     for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
       for (auto k = 0; k < NR_BEAMS; ++k) {
         for (auto l = 0;
