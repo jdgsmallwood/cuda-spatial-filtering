@@ -77,3 +77,4 @@ scripts/.venv
 **/__pycache__/*
 *.hdf5
 *.pcapng
+*.uvfits
