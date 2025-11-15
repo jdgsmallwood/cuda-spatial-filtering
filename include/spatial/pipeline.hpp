@@ -528,6 +528,13 @@ public:
         tensor_32(extent, CUTENSOR_R_32F, 128)
 
   {
+    std::cout << "Correlator instantiated with NR_CHANNELS: " << T::NR_CHANNELS
+              << ", NR_RECEIVERS: " << T::NR_PADDED_RECEIVERS
+              << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS
+              << ", NR_SAMPLES_PER_CHANNEL: "
+              << NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK
+              << ", NR_RECEIVERS_PER_BLOCK: "
+              << T::NR_PADDED_RECEIVERS_PER_BLOCK << std::endl;
     streams.resize(num_buffers);
     d_weights.resize(num_buffers);
     d_weights_updated.resize(num_buffers);
