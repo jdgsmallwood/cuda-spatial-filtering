@@ -154,7 +154,7 @@ int main() {
   int port = 12345;
   // KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
   PCAPPacketCapture capture(
-      "/tmp/cuda-spatial-filtering/cap_13Dec2024_0.pcapng", true);
+      "/tmp/cuda-spatial-filtering/cap_13Dec2024_0.pcapng", false);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });
