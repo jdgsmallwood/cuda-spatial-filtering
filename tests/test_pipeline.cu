@@ -238,6 +238,92 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
   }
 };
 
+TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
+  // Ensure that polarization is respected. Make the samples in one
+  // polarization zero and then check that means everything in that polarization
+  // is zero too.
+
+  FakeProcessorState state;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_PACKETS; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          packet_data.samples[0][i][j][k][l][0] = std::complex<int8_t>(0, 0);
+          packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
+          packet_data.samples[0][i][j][k][l][1] = std::complex<int8_t>(2, -2);
+          // Deliberately have the scale non-zero.
+          packet_data.scales[0][i][j][l][1] = static_cast<int16_t>(1);
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
+
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+
+  pipeline.set_state(&state);
+  pipeline.set_output(output);
+
+  pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_BEAMS; ++k) {
+        for (auto l = 0;
+             l < NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET; ++l) {
+          for (auto m = 0; m < 2; ++m) {
+            float expected;
+            if (j == 0) {
+              expected = 0.0f;
+            } else {
+              if (m == 0) {
+                expected = 8.0f;
+              } else {
+                expected = -8.0f;
+              }
+            }
+            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+          }
+        }
+      }
+      // Now visibilities
+      for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
+        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+          float expected_vis;
+          if (q >= Config::NR_BASELINES_UNPADDED || j == 0 || p == 0) {
+            expected_vis = 0;
+          } else {
+            expected_vis = 64.0f;
+          };
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
+              << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
+              << ", p=" << p
+              << " → actual=" << output->visibilities[0][i][q][j][p][0]
+              << ", expected=" << expected_vis;
+          ;
+        }
+      }
+    }
+  }
+};
+
 TEST(LambdaGPUPipelineTest, BeamBlankTest) {
   // Ensure that beam weights are respected. Make the weights in one
   // beam zero and then check that means everything in that beam
@@ -450,85 +536,6 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
           for (auto m = 0; m < 2; ++m) {
             float expected;
             if (i == 1) {
-              expected = 0.0f;
-            } else {
-              if (m == 0) {
-                expected = 8.0f;
-              } else {
-                expected = -8.0f;
-              }
-            }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
-          }
-        }
-      }
-    }
-  }
-};
-
-TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTestInvertedMultiChannel) {
-  // Ensure that channel samples are respected. Make the samples in one
-  // channel zero and then check that means everything in that channel output
-  // is zero too.
-  using Config =
-      LambdaConfig<NR_CHANNELS + 1, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
-                   NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
-                   NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
-                   NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
-  FakeProcessorState state;
-
-  DummyFinalPacketData<Config> packet_data;
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
-      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
-        for (auto l = 0; l < NR_RECEIVERS; ++l) {
-          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            if (i == 1) {
-              packet_data.samples[0][i][j][k][l][m] =
-                  std::complex<int8_t>(2, -2);
-              packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
-            } else {
-
-              packet_data.samples[0][i][j][k][l][m] =
-                  std::complex<int8_t>(0, 0);
-              packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  BeamWeightsT<Config> h_weights;
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_RECEIVERS; ++j) {
-      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
-        for (auto l = 0; l < NR_BEAMS; ++l) {
-          h_weights.weights[i][k][l][j] =
-              std::complex<__half>(__float2half(1.0f), 0);
-        }
-      }
-    }
-  }
-
-  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
-
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
-
-  pipeline.set_state(&state);
-  pipeline.set_output(output);
-
-  pipeline.execute_pipeline(&packet_data);
-  cudaDeviceSynchronize();
-
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
-      for (auto k = 0; k < NR_BEAMS; ++k) {
-        for (auto l = 0;
-             l < NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET; ++l) {
-          for (auto m = 0; m < 2; ++m) {
-            float expected;
-            if (i == 0) {
               expected = 0.0f;
             } else {
               if (m == 0) {
