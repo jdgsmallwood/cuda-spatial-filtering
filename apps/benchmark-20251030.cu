@@ -192,7 +192,7 @@ int main() {
       }
       if (timeout > 4) {
         std::cout << "Timeout reached...shutting down\n";
-        state.running = 0;
+        state.running.store(0, std::memory_order_acquire);
         running = false;
       }
     }
@@ -202,7 +202,7 @@ int main() {
   // Cleanup
   LOG_INFO("\nShutting down...\n");
   std::cout << "Shutting down...\n";
-  state.running = 0;
+  state.running.store(0, std::memory_order_release);
 
   std::cout << "Waiting for receiver to finish...\n";
   receiver.join();
