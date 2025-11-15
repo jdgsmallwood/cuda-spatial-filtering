@@ -81,7 +81,9 @@ struct LambdaFinalPacketData : public FinalPacketData {
   size_t get_samples_elements_size() override {
     return sizeof(PacketSamplesType);
   };
-  size_t get_scales_element_size() override { return sizeof(scales); };
+  size_t get_scales_element_size() override {
+    return sizeof(PacketScalesType);
+  };
 
   size_t get_arrivals_size() override { return sizeof(ArrivalsType); };
 

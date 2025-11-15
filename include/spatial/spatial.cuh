@@ -47,7 +47,7 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
       d_scale[0][channel_idx][packet_idx][receiver_idx][polarization_idx]);
 
   int result = val * scale_factor;
-  printf("[scale] val %i by scale %i is %i", val, scale_factor, result);
+  printf("[scale] val %i by scale %i is %i\n", val, scale_factor, result);
   d_output[0][channel_idx][packet_idx][time_idx][receiver_idx][polarization_idx]
           [complex_idx] = __int2half_rn(result);
 };
