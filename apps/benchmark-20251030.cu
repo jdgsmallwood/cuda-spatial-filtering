@@ -192,7 +192,7 @@ int main() {
       }
       if (timeout > 4) {
         std::cout << "Timeout reached...shutting down\n";
-        state.running.store(0, std::memory_order_acquire);
+        state.running.store(0, std::memory_order_release);
         running = false;
       }
     }
