@@ -323,13 +323,13 @@ public:
 
     // cudaMemsetAsync
     cpu_start = clock::now();
-    CUDA_CHECK(cudaMemsetAsync(
-        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
-            sizeof(typename T::HalfPacketSamplesType),
-        0,
-        sizeof(typename T::PaddedPacketSamplesType) -
-            sizeof(typename T::HalfPacketSamplesType),
-        streams[current_buffer]));
+    // CUDA_CHECK(cudaMemsetAsync(
+    //     reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
+    //         sizeof(typename T::HalfPacketSamplesType),
+    //     0,
+    //     sizeof(typename T::PaddedPacketSamplesType) -
+    //         sizeof(typename T::HalfPacketSamplesType),
+    //     streams[current_buffer]));
     cpu_end = clock::now();
     LOG_DEBUG("CPU overhead for cudaMemsetAsync: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
