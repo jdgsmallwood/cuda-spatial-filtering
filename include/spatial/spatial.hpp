@@ -510,6 +510,7 @@ public:
       std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
       running.store(0, std::memory_order_release);
     };
+    buffer_ready_for_pipeline.notify_all();
   };
 
   void pipeline_feeder() {
@@ -518,7 +519,7 @@ public:
       std::unique_lock<std::mutex> lock(buffers_ready_for_pipeline_lock);
       buffer_ready_for_pipeline.wait(lock, [&] {
         return !buffers_ready_for_pipeline.empty() ||
-               running.load(std::memory_order_acquire) == 0;
+               (running.load(std::memory_order_acquire) == 0);
       });
 
       if (running.load(std::memory_order_acquire) == 0) {
