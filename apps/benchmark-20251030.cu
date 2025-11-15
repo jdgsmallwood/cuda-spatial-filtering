@@ -210,7 +210,7 @@ int main() {
   processor.join();
   std::cout << "Waiting for pipeline feeder to finish...\n";
   pipeline_feeder.join();
-
+  std::cout << "Dumping visibilities....\n";
   cudaDeviceSynchronize();
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();

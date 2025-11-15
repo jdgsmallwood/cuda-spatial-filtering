@@ -48,7 +48,7 @@ public:
   std::atomic<int> read_index = 0;
   std::vector<uint32_t> fpga_ids{};
   bool buffers_initialized = false;
-  int running = 1;
+  std::atomic<int> running = 1;
   unsigned long long packets_received = 0;
   unsigned long long packets_processed = 0;
   unsigned long long packets_discarded = 0;
