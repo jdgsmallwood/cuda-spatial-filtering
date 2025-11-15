@@ -507,13 +507,14 @@ public:
 
   void pipeline_feeder() {
     LOG_INFO("Pipeline feeder starting up...");
-    while (running.load() == 1) {
+    while (running.load(std::memory_order_acquire) == 1) {
       std::unique_lock<std::mutex> lock(buffers_ready_for_pipeline_lock);
       buffer_ready_for_pipeline.wait(lock, [&] {
-        return !buffers_ready_for_pipeline.empty() || running.load() == 0;
+        return !buffers_ready_for_pipeline.empty() ||
+               running.load(std::memory_order_acquire) == 0;
       });
 
-      if (running.load() == 0) {
+      if (running.load(std::memory_order_acquire) == 0) {
         lock.unlock();
         break;
       }

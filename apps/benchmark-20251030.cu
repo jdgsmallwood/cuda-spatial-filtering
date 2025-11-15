@@ -176,7 +176,7 @@ int main() {
               << ", Discarded=" << state.packets_discarded << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
-    state.running.store((int)running);
+    state.running.store((int)running, std::memory_order_release);
     // This is my attempt at a rudimentary shutdown procedure
     // when there are no more packets running through in a 20sec period.
     if (packets_received != 0) {
