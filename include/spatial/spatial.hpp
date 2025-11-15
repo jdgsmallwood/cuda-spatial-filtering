@@ -507,13 +507,13 @@ public:
 
   void pipeline_feeder() {
     LOG_INFO("Pipeline feeder starting up...");
-    while (running) {
+    while (running.load() == 1) {
       std::unique_lock<std::mutex> lock(buffers_ready_for_pipeline_lock);
       buffer_ready_for_pipeline.wait(lock, [&] {
-        return !buffers_ready_for_pipeline.empty() || !running;
+        return !buffers_ready_for_pipeline.empty() || running.load() == 0;
       });
 
-      if (!running) {
+      if (running.load() == 0) {
         lock.unlock();
         break;
       }
