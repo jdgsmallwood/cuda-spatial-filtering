@@ -374,8 +374,8 @@ public:
     cpu_start = clock::now();
     accumulate_visibilities((float *)d_correlator_output[current_buffer],
                             (float *)d_visibilities_accumulator[current_buffer],
-                            2 * NR_BASELINES * NR_POLARIZATIONS *
-                                NR_POLARIZATIONS * NR_CHANNELS,
+                            2 * NR_BASELINES * T::NR_POLARIZATIONS *
+                                T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
     cpu_end = clock::now();
     LOG_DEBUG("CPU time for accumulate_visibilities: {} us",
@@ -746,8 +746,8 @@ public:
     for (auto i = 1; i < num_buffers; ++i) {
       accumulate_visibilities((float *)d_visibilities_accumulator[i],
                               (float *)d_visibilities_accumulator[0],
-                              NR_BASELINES * 2 * NR_CHANNELS *
-                                  NR_POLARIZATIONS * NR_POLARIZATIONS,
+                              NR_BASELINES * 2 * T::NR_CHANNELS *
+                                  T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
                               streams[current_buffer]);
     }
     cudaDeviceSynchronize();
