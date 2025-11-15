@@ -1038,14 +1038,9 @@ public:
       error(status, "fits_create_tbl");
   }
 
-  // ------------------------------------------------------------
-  // This is the interface you must conform to
-  // ------------------------------------------------------------
   void write_visibilities_block(const T *data, const int start_seq,
                                 const int end_seq) override {
     double center_seq = 0.5 * (start_seq + end_seq);
-    // Use the *center* of the sequence for the time stamp for pyuvdata
-    // compatibility
     double time_jd = ref_jd_ + center_seq * (int_time_sec_ / 86400.0);
 
     write_block_internal(data, time_jd, start_seq, end_seq);
