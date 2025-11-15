@@ -505,6 +505,13 @@ public:
     }
   };
 
+  void shutdown() {
+    {
+      std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
+      running.store(0, std::memory_order_release);
+    };
+  };
+
   void pipeline_feeder() {
     LOG_INFO("Pipeline feeder starting up...");
     while (running.load(std::memory_order_acquire) == 1) {
