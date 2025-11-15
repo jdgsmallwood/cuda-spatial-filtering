@@ -497,6 +497,11 @@ public:
                 std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
                                                                       cpu_start)
                     .count());
+      num_correlation_units_integrated += 1;
+      if (num_correlation_units_integrated >=
+          NR_CORRELATED_BLOCKS_TO_ACCUMULATE) {
+        dump_visibilities();
+      }
     }
 
     // Rotate buffer indices
