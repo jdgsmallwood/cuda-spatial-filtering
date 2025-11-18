@@ -272,7 +272,7 @@ public:
     LOG_INFO("[ProcessorState] Releasing buffer with index {}", buffer_index);
     // This is called to let the processor know that the buffer has been
     // copied to the GPU and now can be overwritten.
-    int max_end_seq_in_buffers = 0;
+    unsigned long long max_end_seq_in_buffers = 0;
     // This is necessary to avoid multiple GPU threads competing / racing.
     LOG_DEBUG(
         "[ProcessorState - release_buffer] acquiring lock for index {}...",

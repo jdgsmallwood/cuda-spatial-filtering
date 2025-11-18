@@ -12,7 +12,7 @@ public:
   void set_output(std::shared_ptr<Output> output) { output_ = output; };
   virtual void execute_pipeline(FinalPacketData *packet_data,
                                 const bool dummy_run = false) = 0;
-  virtual void dump_visibilities(const unsigned long long end_seq_num = -1) = 0;
+  virtual void dump_visibilities(const unsigned long long end_seq_num = 0) = 0;
 
 protected:
   ProcessorStateBase *state_;
