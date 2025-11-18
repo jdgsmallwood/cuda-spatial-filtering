@@ -56,7 +56,7 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   }
 
   void zero_missing_packets() override {};
-  int get_num_missing_packets() override { return -1 };
+  int get_num_missing_packets() override { return -1; };
 };
 
 constexpr size_t NR_CHANNELS = 1;
