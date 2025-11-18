@@ -649,6 +649,54 @@ private:
   int recv_buffer_size;
 };
 
+class KernelSocketIP6PacketCapture : public PacketInput {
+public:
+  KernelSocketIP6PacketCapture(int port, int buffer_size,
+                               int recv_buffer_size = 64 * 1024 * 1024);
+  ~KernelSocketIP6PacketCapture();
+
+  void get_packets(ProcessorStateBase &state) override {
+
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    // adds a timeout here - otherwise the socket will block indefinitely
+    // and get in the way of shutdown.
+    struct timeval tv;
+    tv.tv_sec = 1; // 1 second timeout
+    tv.tv_usec = 0;
+
+    // Make kernel receive buffer a bit larger to avoid dropping packets
+    // during the timeout
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
+               sizeof(recv_buffer_size));
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    LOG_INFO("Receiver thread started");
+    void *next_write_pointer = state.get_current_write_pointer();
+    while (state.running) {
+      int received = recvfrom(sockfd, next_write_pointer, buffer_size, 0,
+                              (struct sockaddr *)&client_addr, &client_len);
+      if (received < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+          continue;
+        // perror("recvfrom");
+        break;
+      }
+
+      state.add_received_packet_metadata(received, client_addr);
+      state.packets_received += 1;
+      next_write_pointer = state.get_next_write_pointer();
+    }
+    LOG_INFO("Receiver thread exiting");
+  };
+
+private:
+  int sockfd;
+  struct sockaddr_in server_addr;
+  int port;
+  int buffer_size;
+  int recv_buffer_size;
+};
+
 class PCAPPacketCapture : public PacketInput {
 public:
   PCAPPacketCapture(const std::string &pcap_filename, bool loop = false,

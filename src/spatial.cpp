@@ -354,6 +354,42 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size,
 
 KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
 
+KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(int port,
+                                                           int buffer_size,
+                                                           int recv_buffer_size)
+    : port(port), buffer_size(buffer_size), recv_buffer_size(recv_buffer_size) {
+
+  LOG_INFO("UDP Server with concurrent processing starting on port {}...",
+           port);
+  // Create UDP socket
+  sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
+  if (sockfd < 0) {
+    perror("socket");
+  }
+  // Allow address reuse
+  int reuse = 1;
+  if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+    perror("setsockopt");
+  }
+
+  // Setup server address
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin6_family = AF_INET6;
+  server_addr.sin6_addr.s_addr = in6addr_any;
+  server_addr.sin6_port = htons(port);
+
+  // Bind socket
+  if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    perror("bind");
+    close(sockfd);
+  }
+
+  LOG_INFO("Server listening on [::]:{}", port);
+  LOG_INFO("Press Ctrl+C to stop\n");
+}
+
+KernelSocketIP6PacketCapture::~KernelSocketIP6PacketCapture() { close(sockfd); }
+
 PCAPPacketCapture::PCAPPacketCapture(const std::string &pcap_filename,
                                      bool loop, uint64_t seq_jump_per_packet)
     : filename_(pcap_filename), loop_(loop),

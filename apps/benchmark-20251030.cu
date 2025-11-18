@@ -152,10 +152,10 @@ int main() {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
-  int port = 12345;
-  // KernelSocketPacketCapture socket_capture(port, BUFFER_SIZE);
-  PCAPPacketCapture capture(
-      "/tmp/cuda-spatial-filtering/cap_13Dec2024_0.pcapng", false);
+  int port = 36001;
+  KernelSocketIP6PacketCapture capture(port, BUFFER_SIZE);
+  // PCAPPacketCapture capture(
+  //    "/tmp/cuda-spatial-filtering/cap_13Dec2024_0.pcapng", false);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });
