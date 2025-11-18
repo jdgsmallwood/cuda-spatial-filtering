@@ -32,8 +32,8 @@ public:
   std::atomic<int> execute_count{0};
   std::atomic<int> release_count{0};
   std::vector<int> buffer_indices_received;
-  std::vector<int> start_seqs_received;
-  std::vector<int> end_seqs_received;
+  std::vector<unsigned long long> start_seqs_received;
+  std::vector<unsigned long long> end_seqs_received;
   std::mutex data_mutex;
   FinalPacketData *last_packet_data;
 
@@ -55,7 +55,7 @@ public:
     }
   }
 
-  void dump_visibilities(const int end_seq_num = -1) override {}
+  void dump_visibilities(const unsigned long long end_seq_num = 0) override {}
 
   int get_execute_count() const { return execute_count.load(); }
   int get_release_count() const { return release_count.load(); }
