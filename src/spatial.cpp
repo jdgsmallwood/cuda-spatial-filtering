@@ -26,9 +26,9 @@
 #include <library_types.h>
 #include <libtcc/Correlator.h>
 #include <linux/filter.h>
-#include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
+#include <net/if.h>
 #include <pcap/pcap.h>
 #include <string.h>
 #include <sys/time.h>
@@ -426,7 +426,7 @@ KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(std::string &ifname,
     throw std::runtime_error("Failed to attach BPF filter");
   }
 
-  LOG_INFO("Promiscuous IPv6 UDP port {} capture active on {}", port, ifname)
+  LOG_INFO("Promiscuous IPv6 UDP port {} capture active on {}", port, ifname);
   LOG_INFO("Press Ctrl+C to stop\n");
 }
 
