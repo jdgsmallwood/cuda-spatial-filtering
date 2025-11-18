@@ -366,7 +366,8 @@ public:
       LOG_INFO("Check if buffers are complete for channel {}", channel);
 
       if (std::all_of(std::begin(latest_packet_received[channel]),
-                      std::end(latest_packet_received[channel]), [this](int x) {
+                      std::end(latest_packet_received[channel]),
+                      [this](unsigned long long x) {
                         return x >= buffers[current_buffer].end_seq;
                       })) {
         buffers[current_buffer].is_populated[channel] = true;
