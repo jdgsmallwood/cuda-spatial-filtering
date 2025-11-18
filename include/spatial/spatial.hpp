@@ -262,9 +262,9 @@ public:
     copy_data_to_input_buffer_if_able(parsed);
     if (*parsed.original_packet_processed) {
       packets_processed += 1;
-      modified_since_last_completion_check[parsed.freq_channel -
-                                           MIN_FREQ_CHANNEL] = true;
     }
+    modified_since_last_completion_check[parsed.freq_channel -
+                                         MIN_FREQ_CHANNEL] = true;
   };
 
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};

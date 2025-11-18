@@ -285,3 +285,15 @@ TEST_F(ProcessorStateTest, DiscardOldPacketsTest) {
   // This packet should be discarded
   EXPECT_GT(processor_state->packets_discarded, 0);
 }
+
+TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
+  add_packet(1000, 0, 0);
+
+  // add two packets that are way further along, this will cause
+  // the pipeline to run w/ missing packets.
+  add_packet(20000, 0, 0);
+  add_packet(20000, 0, 1);
+  processor_state->process_all_available_packets();
+
+  EXPECT_GT(processor_state->packets_missing, 0);
+}
