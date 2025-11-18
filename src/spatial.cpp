@@ -432,6 +432,21 @@ KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(std::string &ifname,
 
 KernelSocketIP6PacketCapture::~KernelSocketIP6PacketCapture() { close(sockfd); }
 
+class LibpcapIP6PacketCapture : public PacketInput {
+public:
+  LibpcapIP6PacketCapture(std::string &ifname, int port, int buffer_size,
+                          int recv_buffer_size = 64 * 1024 * 1024);
+  ~LibpcapIP6PacketCapture();
+  void get_packets(ProcessorStateBase &state) override;
+
+private:
+  pcap_t *handle;
+  std::string ifname;
+  int port;
+  int buffer_size;
+  int recv_buffer_size;
+};
+
 PCAPPacketCapture::PCAPPacketCapture(const std::string &pcap_filename,
                                      bool loop, uint64_t seq_jump_per_packet)
     : filename_(pcap_filename), loop_(loop),
