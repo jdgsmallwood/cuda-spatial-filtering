@@ -29,7 +29,6 @@
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
-#include <net/if.h>
 #include <pcap/pcap.h>
 #include <string.h>
 #include <sys/time.h>
