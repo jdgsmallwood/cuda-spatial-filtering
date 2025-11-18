@@ -359,32 +359,68 @@ KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(int port,
                                                            int recv_buffer_size)
     : port(port), buffer_size(buffer_size), recv_buffer_size(recv_buffer_size) {
 
-  LOG_INFO("UDP Server with concurrent processing starting on port {}...",
-           port);
-  // Create UDP socket
-  sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
-  if (sockfd < 0) {
-    perror("socket");
-  }
-  // Allow address reuse
-  int reuse = 1;
-  if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-    perror("setsockopt");
-  }
+  LOG_INFO("Starting promiscuous IPv6 UDP capture on interface {} port {}...",
+           ifname, port);
 
-  // Setup server address
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin6_family = AF_INET6;
-  server_addr.sin6_addr = in6addr_any;
-  server_addr.sin6_port = htons(port);
+  // 1. Raw IPv6 socket
+  sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IPV6));
+  if (sockfd < 0)
+    throw std::runtime_error("socket(AF_PACKET) failed");
 
-  // Bind socket
-  if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror("bind");
+  // 2. Enable promiscuous mode on this socket
+  int ifindex = if_nametoindex(ifname.c_str());
+  if (ifindex == 0) {
     close(sockfd);
+    throw std::runtime_error("Invalid interface");
   }
 
-  LOG_INFO("Server listening on [::]:{}", port);
+  struct packet_mreq mreq = {};
+  mreq.mr_ifindex = ifindex;
+  mreq.mr_type = PACKET_MR_PROMISC;
+
+  if (setsockopt(sockfd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq,
+                 sizeof(mreq)) < 0) {
+    perror("PACKET_MR_PROMISC");
+    close(sockfd);
+    throw std::runtime_error("Cannot enable promiscuous mode");
+  }
+
+  // 3. Bind the raw socket to the NIC
+  struct sockaddr_ll sll = {};
+  sll.sll_family = AF_PACKET;
+  sll.sll_protocol = htons(ETH_P_IPV6);
+  sll.sll_ifindex = ifindex;
+
+  if (bind(sockfd, (struct sockaddr *)&sll, sizeof(sll)) < 0)
+    throw std::runtime_error("bind(AF_PACKET) failed");
+
+  // 4. Attach a BPF filter: "udp and port X"
+  struct sock_filter code[] = {
+      // Load first byte of IP header (version)
+      BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 14),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x60, 0, 8), // IPv6 next-header=UDP?
+      // Load Next Header field at offset 20
+      BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 20),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_UDP, 0, 6),
+      // Load UDP dest port (offset: Ethernet 14 + IPv6 40 + UDP 2 = 56)
+      BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 56),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, htons(port), 0, 3),
+      // Accept packet
+      BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFF),
+      // Reject
+      BPF_STMT(BPF_RET | BPF_K, 0),
+  };
+  struct sock_fprog bpf = {
+      .len = sizeof(code) / sizeof(code[0]),
+      .filter = code,
+  };
+
+  if (setsockopt(sockfd, SOL_SOCKET, SO_ATTACH_FILTER, &bpf, sizeof(bpf)) < 0) {
+    perror("SO_ATTACH_FILTER");
+    throw std::runtime_error("Failed to attach BPF filter");
+  }
+
+  LOG_INFO("Promiscuous IPv6 UDP port {} capture active on {}", port, ifname)
   LOG_INFO("Press Ctrl+C to stop\n");
 }
 
