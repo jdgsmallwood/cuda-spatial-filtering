@@ -33,8 +33,8 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
                     const int tile_size_x, const int tile_size_y);
 template <size_t NR_CHANNELS> struct BufferState {
   bool is_ready;
-  int start_seq;
-  int end_seq;
+  unsigned long long start_seq;
+  unsigned long long end_seq;
   std::array<bool, NR_CHANNELS> is_populated{};
 };
 
@@ -215,7 +215,7 @@ public:
     }
   }
 
-  void initialize_buffers(const int first_count) {
+  void initialize_buffers(const unsigned long long first_count) {
     LOG_INFO("[BufferInitialization] First count was {}...", first_count);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       buffers[i].start_seq =
@@ -308,7 +308,8 @@ public:
              buffer_index, buffers[buffer_index].start_seq);
   };
 
-  void advance_to_next_buffer(const int current_buffer_start_seq) {
+  void
+  advance_to_next_buffer(const unsigned long long current_buffer_start_seq) {
 
     // Move to next buffer
     // This is not necessarily the next buffer as the buffers can be
@@ -483,7 +484,8 @@ public:
       // the start/end seqs we need to capture the
       // start_seq, then execute the pipeline, then advance using
       // the saved copy of the start_seq.
-      const int current_buffer_start_seq = buffers[current_buffer].start_seq;
+      const unsigned long long current_buffer_start_seq =
+          buffers[current_buffer].start_seq;
       LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
       {
         if (!synchronous_pipeline) {
@@ -573,7 +575,7 @@ private:
 
   struct BufferOrder {
     int index;
-    int start_seq;
+    unsigned long long start_seq;
 
     // Compare to make the priority queue a min-heap based on start_seq
     bool operator>(const BufferOrder &other) const {

@@ -749,7 +749,7 @@ public:
     }
   };
 
-  void dump_visibilities(const int end_seq_num = -1) override {
+  void dump_visibilities(const unsigned long long end_seq_num = 0) override {
 
     LOG_INFO("Dumping correlations to host...");
     int current_num_integrated_units_processed =
