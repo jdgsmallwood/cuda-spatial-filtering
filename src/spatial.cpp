@@ -375,7 +375,7 @@ KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(int port,
   // Setup server address
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin6_family = AF_INET6;
-  server_addr.sin6_addr.s_addr = in6addr_any;
+  server_addr.sin6_addr = in6addr_any;
   server_addr.sin6_port = htons(port);
 
   // Bind socket
