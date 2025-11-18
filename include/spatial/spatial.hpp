@@ -51,6 +51,7 @@ public:
   std::atomic<int> running = 1;
   unsigned long long packets_received = 0;
   unsigned long long packets_processed = 0;
+  unsigned long long packets_missing = 0;
   unsigned long long packets_discarded = 0;
   unsigned long long pipeline_runs_queued = 0;
   virtual void *get_next_write_pointer() = 0;
@@ -476,6 +477,9 @@ public:
       cpu_start = clock::now();
       LOG_INFO("Zeroing missing packets...");
       d_samples[current_buffer]->zero_missing_packets();
+      int num_missing_packets =
+          d_samples[current_buffer]->get_num_missing_packets();
+      packets_missing += num_missing_packets;
       cpu_end = clock::now();
       LOG_DEBUG("CPU time for zeroing packets: {} us",
                 std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -

@@ -173,6 +173,7 @@ int main() {
     // This is nice to see outside of log files.
     std::cout << "Stats: Received=" << state.packets_received
               << ", Processed=" << state.packets_processed
+              << ", Missing=" << state.packets_missing
               << ", Discarded=" << state.packets_discarded << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;

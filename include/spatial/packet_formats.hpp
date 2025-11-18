@@ -61,6 +61,7 @@ struct FinalPacketData {
   virtual size_t get_arrivals_size() = 0;
 
   virtual void zero_missing_packets() = 0;
+  virtual int get_num_missing_packets() = 0;
 };
 
 // This one needs to be like this because it will be defined in the
@@ -102,6 +103,19 @@ struct LambdaFinalPacketData : public FinalPacketData {
         }
       }
     }
+  };
+  int get_num_missing_packets() override {
+    int sum = 0;
+    for (auto i = 0; i < NR_CHANNELS; ++i) {
+      for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
+        for (auto k = 0; k < NR_FPGAS; ++k) {
+          if (arrivals[0][i][j][k] == 0) {
+            sum++;
+          }
+        }
+      }
+    }
+    return sum;
   };
   LambdaFinalPacketData() {
 
