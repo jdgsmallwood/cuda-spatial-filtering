@@ -216,7 +216,7 @@ public:
   }
 
   void initialize_buffers(const int first_count) {
-
+    LOG_INFO("[BufferInitialization] First count was {}...", first_count);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       buffers[i].start_seq =
           first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
@@ -224,7 +224,8 @@ public:
           first_count +
           ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
       buffers[i].is_ready = true;
-
+      LOG_INFO("[BufferInitialization] Buffer {} goes from {} to {}", i,
+               buffers[i].start_seq, buffers[i].end_seq);
       // we know 0 will be the first one - so no need to add zero
       if (i != 0) {
         buffer_ordering_queue.push({i, buffers[i].start_seq});
