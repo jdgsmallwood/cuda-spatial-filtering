@@ -691,7 +691,7 @@ public:
 
 private:
   int sockfd;
-  struct sockaddr_in server_addr;
+  struct sockaddr_in6 server_addr;
   int port;
   int buffer_size;
   int recv_buffer_size;
