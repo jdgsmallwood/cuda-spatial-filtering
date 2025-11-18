@@ -153,7 +153,8 @@ int main() {
   pipeline.set_state(&state);
   pipeline.set_output(output);
   int port = 36001;
-  KernelSocketIP6PacketCapture capture(port, BUFFER_SIZE);
+  std::string ifname = "enp216s0np0";
+  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
   // PCAPPacketCapture capture("capture.pcap", false);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");

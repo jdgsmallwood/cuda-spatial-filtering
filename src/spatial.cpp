@@ -354,10 +354,12 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size,
 
 KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
 
-KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(int port,
+KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(std::string &ifname,
+                                                           int port,
                                                            int buffer_size,
                                                            int recv_buffer_size)
-    : port(port), buffer_size(buffer_size), recv_buffer_size(recv_buffer_size) {
+    : ifname(ifname), port(port), buffer_size(buffer_size),
+      recv_buffer_size(recv_buffer_size) {
 
   LOG_INFO("Starting promiscuous IPv6 UDP capture on interface {} port {}...",
            ifname, port);

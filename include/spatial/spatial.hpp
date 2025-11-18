@@ -659,7 +659,7 @@ private:
 
 class KernelSocketIP6PacketCapture : public PacketInput {
 public:
-  KernelSocketIP6PacketCapture(int port, int buffer_size,
+  KernelSocketIP6PacketCapture(std::string &ifname, int port, int buffer_size,
                                int recv_buffer_size = 64 * 1024 * 1024);
   ~KernelSocketIP6PacketCapture();
 
@@ -700,6 +700,7 @@ public:
 private:
   int sockfd;
   struct sockaddr_in6 server_addr;
+  std::string ifname;
   int port;
   int buffer_size;
   int recv_buffer_size;
