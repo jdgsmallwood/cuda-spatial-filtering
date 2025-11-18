@@ -345,6 +345,10 @@ public:
     // buffer has all the data it needs.
     std::memset(std::begin(buffers[current_buffer].is_populated), (int)false,
                 T::NR_CHANNELS);
+    // Set modified to true so that all channels get checked on next
+    // completion check in case there are packets that went ahead.
+    std::fill(modified_since_last_completion_check.begin(),
+              modified_since_last_completion_check.end(), true);
     LOG_INFO(
         "Current buffer is all complete. Moving to next buffer which is #{}",
         current_buffer);
