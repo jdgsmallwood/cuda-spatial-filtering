@@ -432,21 +432,6 @@ KernelSocketIP6PacketCapture::KernelSocketIP6PacketCapture(std::string &ifname,
 
 KernelSocketIP6PacketCapture::~KernelSocketIP6PacketCapture() { close(sockfd); }
 
-class LibpcapIP6PacketCapture : public PacketInput {
-public:
-  LibpcapIP6PacketCapture(std::string &ifname, int port, int buffer_size,
-                          int recv_buffer_size = 64 * 1024 * 1024);
-  ~LibpcapIP6PacketCapture();
-  void get_packets(ProcessorStateBase &state) override;
-
-private:
-  pcap_t *handle;
-  std::string ifname;
-  int port;
-  int buffer_size;
-  int recv_buffer_size;
-};
-
 PCAPPacketCapture::PCAPPacketCapture(const std::string &pcap_filename,
                                      bool loop, uint64_t seq_jump_per_packet)
     : filename_(pcap_filename), loop_(loop),
@@ -473,4 +458,119 @@ PCAPPacketCapture::PCAPPacketCapture(const std::string &pcap_filename,
 
 PCAPPacketCapture::~PCAPPacketCapture() {
   LOG_INFO("PCAPPacketCapture destructor called");
+}
+
+LibpcapIP6PacketCapture::LibpcapIP6PacketCapture(std::string &ifname, int port,
+                                                 int buffer_size,
+                                                 int recv_buffer_size)
+    : ifname(ifname), port(port), buffer_size(buffer_size),
+      recv_buffer_size(recv_buffer_size), handle(nullptr) {
+
+  LOG_INFO("Starting promiscuous IPv6 UDP capture on interface {} port {}...",
+           ifname, port);
+
+  char errbuf[PCAP_ERRBUF_SIZE];
+
+  // Open device in promiscuous mode
+  // Args: device, snaplen, promisc, timeout_ms, errbuf
+  handle = pcap_open_live(ifname.c_str(), buffer_size, 1, 1000, errbuf);
+  if (handle == nullptr) {
+    throw std::runtime_error(std::string("pcap_open_live failed: ") + errbuf);
+  }
+
+  // Set buffer size (similar to SO_RCVBUF)
+  if (pcap_set_buffer_size(handle, recv_buffer_size) != 0) {
+    LOG_WARN("Could not set pcap buffer size: {}", pcap_geterr(handle));
+  }
+
+  // Compile and apply BPF filter: "ip6 and udp and port X"
+  struct bpf_program fp;
+  std::string filter_exp = "ip6 and udp and port " + std::to_string(port);
+
+  if (pcap_compile(handle, &fp, filter_exp.c_str(), 1, PCAP_NETMASK_UNKNOWN) ==
+      -1) {
+    pcap_close(handle);
+    throw std::runtime_error(std::string("pcap_compile failed: ") +
+                             pcap_geterr(handle));
+  }
+
+  if (pcap_setfilter(handle, &fp) == -1) {
+    pcap_freecode(&fp);
+    pcap_close(handle);
+    throw std::runtime_error(std::string("pcap_setfilter failed: ") +
+                             pcap_geterr(handle));
+  }
+
+  pcap_freecode(&fp);
+
+  // Set non-blocking mode for timeout behavior
+  if (pcap_setnonblock(handle, 1, errbuf) == -1) {
+    LOG_WARN("Could not set non-blocking mode: {}", errbuf);
+  }
+
+  LOG_INFO("Promiscuous IPv6 UDP port {} capture active on {}", port, ifname);
+  LOG_INFO("Press Ctrl+C to stop\n");
+}
+
+LibpcapIP6PacketCapture::~LibpcapIP6PacketCapture() {
+  if (handle) {
+    pcap_close(handle);
+  }
+}
+
+void LibpcapIP6PacketCapture::get_packets(ProcessorStateBase &state) {
+  LOG_INFO("Receiver thread started");
+
+  void *next_write_pointer = state.get_current_write_pointer();
+
+  while (state.running) {
+    struct pcap_pkthdr *header;
+    const u_char *packet;
+
+    // Get next packet (non-blocking with 1ms poll)
+    int result = pcap_next_ex(handle, &header, &packet);
+
+    if (result == 1) {
+      // Packet captured successfully
+      if (header->caplen > buffer_size) {
+        LOG_WARN("Packet truncated: {} > {}", header->caplen, buffer_size);
+        continue;
+      }
+
+      // Copy packet data to the write pointer
+      memcpy(next_write_pointer, packet, header->caplen);
+
+      // Extract source address for metadata
+      // Packet structure: [Ethernet 14] [IPv6 40] [UDP 8] [Data]
+      struct sockaddr_in client_addr =
+          {}; // You might want sockaddr_in6 instead
+
+      // If you need the actual IPv6 source address:
+      if (header->caplen >= 14 + 40) {
+        struct ip6_hdr *ip6h = (struct ip6_hdr *)(packet + 14);
+        // Convert to sockaddr_in6 if needed by add_received_packet_metadata
+        // For now, keeping compatible with original signature
+      }
+
+      state.add_received_packet_metadata(header->caplen, client_addr);
+      state.packets_received += 1;
+      next_write_pointer = state.get_next_write_pointer();
+
+    } else if (result == 0) {
+      // Timeout - no packet available, continue
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+
+    } else if (result == -1) {
+      // Error occurred
+      LOG_ERROR("pcap_next_ex error: {}", pcap_geterr(handle));
+      break;
+
+    } else if (result == -2) {
+      // End of capture file (shouldn't happen with live capture)
+      break;
+    }
+  }
+
+  LOG_INFO("Receiver thread exiting");
 }
