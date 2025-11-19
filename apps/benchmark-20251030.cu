@@ -157,7 +157,7 @@ int main() {
   std::string ifname = "enp216s0np0";
   //  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
   // LibpcapIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  PCAPPacketCapture capture("capture.pcap", false);
+  PCAPPacketCapture capture("capture_r1p0_v2.pcap", false);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });

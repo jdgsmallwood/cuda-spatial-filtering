@@ -322,6 +322,7 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
       (bool *)mock_pipeline->last_packet_data->get_arrivals_ptr();
   int arrivals_length =
       mock_pipeline->last_packet_data->get_arrivals_size() / sizeof(bool);
+  // If missing - all scales should be zero.
   for (int i = 0; i < scales_length; ++i) {
     EXPECT_EQ(scales_last_packet[i], 0);
   }
