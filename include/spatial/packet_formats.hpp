@@ -99,11 +99,11 @@ struct LambdaFinalPacketData : public FinalPacketData {
                 std::cout << "Zeroing i=" << i << ", j=" << j << ", k=" << k
                           << ", m=" << m << ", n=" << n << std::endl;
                 std::cout << "Value before is "
-                          << *scales[i][j][k * NR_RECEIVERS + m][n]
+                          << scales[0][i][j][k * NR_RECEIVERS + m][n]
                           << std::endl;
-                *scales[i][j][k * NR_RECEIVERS + m][n] = 0;
+                scales[0][i][j][k * NR_RECEIVERS + m][n] = 0;
                 std::cout << "Value after is "
-                          << *scales[i][j][k * NR_RECEIVERS + m][n]
+                          << scales[0][i][j][k * NR_RECEIVERS + m][n]
                           << std::endl;
               }
             }
