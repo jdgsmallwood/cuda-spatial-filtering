@@ -294,6 +294,6 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   add_packet(20000, 0, 0);
   add_packet(20000, 0, 1);
   processor_state->process_all_available_packets();
-
+  processor_state->handle_buffer_completion();
   EXPECT_GT(processor_state->packets_missing, 0);
 }
