@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <iostream>
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -89,14 +90,21 @@ struct LambdaFinalPacketData : public FinalPacketData {
   size_t get_arrivals_size() override { return sizeof(ArrivalsType); };
 
   void zero_missing_packets() override {
-
     for (auto i = 0; i < NR_CHANNELS; ++i) {
       for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
           if (arrivals[0][i][j][k] == 0) {
             for (auto m = 0; m < NR_RECEIVERS; ++m) {
               for (auto n = 0; n < NR_POLARIZATIONS; ++n) {
+                std::cout << "Zeroing i=" << i << ", j=" << j << ", k=" << k
+                          << ", m=" << m << ", n=" << n << std::endl;
+                std::cout << "Value before is "
+                          << *scales[i][j][k * NR_RECEIVERS + m][n]
+                          << std::endl;
                 *scales[i][j][k * NR_RECEIVERS + m][n] = 0;
+                std::cout << "Value after is "
+                          << *scales[i][j][k * NR_RECEIVERS + m][n]
+                          << std::endl;
               }
             }
           }
