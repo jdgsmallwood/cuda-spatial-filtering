@@ -295,7 +295,7 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
       for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
         for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
           uint64_t sample = start_sample +
-                            buf * TestConfig::NR_PACKETS_FOR_CORRELATIONS * 64 +
+                            buf * TestConfig::NR_PACKETS_FOR_CORRELATION * 64 +
                             pkt * 64; // 64 = NR_BETWEEN_SAMPLES
           add_packet(sample, fpga, channel);
         }
@@ -314,7 +314,7 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   EXPECT_EQ(processor_state->packets_missing, -1);
 
   int16_t *scales_last_packet =
-      mock_pipeline->last_packet_data->get_scales_ptr();
+      (int16_t *)mock_pipeline->last_packet_data->get_scales_ptr();
   int scales_length =
       mock_pipeline->last_packet_data->get_scales_element_size() /
       sizeof(int16_t);
