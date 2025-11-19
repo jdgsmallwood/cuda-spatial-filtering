@@ -60,7 +60,7 @@ void writeVectorToCSV(const std::vector<float> &times,
   std::cout << "Data successfully written to " << filename << "\n";
 }
 
-int main() {
+int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
   std::string pcap_filename;
