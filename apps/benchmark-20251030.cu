@@ -68,6 +68,14 @@ int main() {
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
 
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::exception &err) {
+    std::cerr << err.what() << std::endl;
+    std::cerr << program;
+    std::exit(1);
+  }
+
   std::signal(SIGINT, signal_handler);
   static auto tp = std::make_shared<spdlog::details::thread_pool>(4 * 8192, 2);
   auto app_logger = std::make_shared<spdlog::async_logger>(
