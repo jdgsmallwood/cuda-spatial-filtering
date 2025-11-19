@@ -25,7 +25,7 @@ using TestConfig = LambdaConfig<2,  // NR_CHANNELS
                                 32, // NR_PADDED_RECEIVERS_PER_BLOCK
                                 1   // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
                                 >;
-
+constexpr static size_t NR_BUFFERS = 3;
 // Simple mock pipeline that just tracks what it receives
 class SimpleMockPipeline : public GPUPipeline {
 public:
@@ -64,15 +64,15 @@ public:
 // Test fixture
 class ProcessorStateTest : public ::testing::Test {
 protected:
-  ProcessorState<TestConfig, 3> *processor_state;
+  ProcessorState<TestConfig, NR_BUFFERS> *processor_state;
   SimpleMockPipeline *mock_pipeline;
 
   void SetUp() override {
-    processor_state =
-        new ProcessorState<TestConfig, 3>(10, // nr_packets_for_correlation
-                                          64, // nr_between_samples
-                                          0   // min_freq_channel
-        );
+    processor_state = new ProcessorState<TestConfig, NR_BUFFERS>(
+        10, // nr_packets_for_correlation
+        64, // nr_between_samples
+        0   // min_freq_channel
+    );
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -287,8 +287,23 @@ TEST_F(ProcessorStateTest, DiscardOldPacketsTest) {
 }
 
 TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
-  add_packet(1000, 0, 0);
-
+  // fill up buffers so that there is definitely a non-zero scale in
+  // every slot.
+  int start_sample = 1000;
+  for (int buf = 0; buf < NR_BUFFERS; ++buf) {
+    for (int channel = 0; channel < TestConfig::NR_CHANNELS; channel++) {
+      for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
+        for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
+          uint64_t sample = start_sample +
+                            buf * TestConfig::NR_PACKETS_FOR_CORRELATIONS * 64 +
+                            pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+          add_packet(sample, fpga, channel);
+        }
+      }
+    }
+    processor_state->process_all_available_packets();
+    processor_state->handle_buffer_completion();
+  }
   // add two packets that are way further along, this will cause
   // the pipeline to run w/ missing packets.
   add_packet(20000, 0, 0);
@@ -296,4 +311,14 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion();
   EXPECT_GT(processor_state->packets_missing, 0);
+  EXPECT_EQ(processor_state->packets_missing, -1);
+
+  int16_t *scales_last_packet =
+      mock_pipeline->last_packet_data->get_scales_ptr();
+  int scales_length =
+      mock_pipeline->last_packet_data->get_scales_element_size() /
+      sizeof(int16_t);
+  for (int i = 0; i < scales_length; ++i) {
+    EXPECT_EQ(scales_last_packet[i], 0);
+  }
 }
