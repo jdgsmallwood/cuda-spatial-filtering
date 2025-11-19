@@ -214,6 +214,7 @@ public:
       int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
       read_index.store(new_read_index, std::memory_order_release);
     }
+    handle_buffer_completion();
   }
 
   void initialize_buffers(const unsigned long long first_count) {
