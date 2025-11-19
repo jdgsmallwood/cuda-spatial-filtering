@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <iostream>
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -96,15 +95,7 @@ struct LambdaFinalPacketData : public FinalPacketData {
           if (arrivals[0][i][j][k] == 0) {
             for (auto m = 0; m < NR_RECEIVERS; ++m) {
               for (auto n = 0; n < NR_POLARIZATIONS; ++n) {
-                std::cout << "Zeroing i=" << i << ", j=" << j << ", k=" << k
-                          << ", m=" << m << ", n=" << n << std::endl;
-                std::cout << "Value before is "
-                          << scales[0][i][j][k * NR_RECEIVERS + m][n]
-                          << std::endl;
                 scales[0][i][j][k * NR_RECEIVERS + m][n] = 0;
-                std::cout << "Value after is "
-                          << scales[0][i][j][k * NR_RECEIVERS + m][n]
-                          << std::endl;
               }
             }
           }

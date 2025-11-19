@@ -310,8 +310,7 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   add_packet(20000, 0, 1);
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion();
-  EXPECT_GT(processor_state->packets_missing, 0);
-  EXPECT_EQ(processor_state->packets_missing, -1);
+  EXPECT_EQ(processor_state->packets_missing, 20);
 
   int16_t *scales_last_packet =
       (int16_t *)mock_pipeline->last_packet_data->get_scales_ptr();
