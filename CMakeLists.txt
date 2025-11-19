@@ -92,6 +92,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(xtl)
 
+
+FetchContent_Declare(
+  argparse
+  SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/argparse
+)
+FetchContent_MakeAvailable(argparse)
+
 FetchContent_Declare(
   xtensor
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtensor

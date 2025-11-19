@@ -6,6 +6,7 @@
 #include "spatial/spatial.hpp"
 #include "spatial/writers.hpp"
 #include <algorithm>
+#include <argparse/argparse.hpp>
 #include <arpa/inet.h>
 #include <atomic>
 #include <complex>
@@ -61,6 +62,12 @@ void writeVectorToCSV(const std::vector<float> &times,
 
 int main() {
   std::cout << "Starting....\n";
+  argparse::ArgumentParser program("pipeline");
+  std::string pcap_filename;
+  program.add_argument("-p", "--pcap_file")
+      .help("specify a PCAP file to replay")
+      .store_into(pcap_filename);
+
   std::signal(SIGINT, signal_handler);
   static auto tp = std::make_shared<spdlog::details::thread_pool>(4 * 8192, 2);
   auto app_logger = std::make_shared<spdlog::async_logger>(
@@ -157,7 +164,7 @@ int main() {
   std::string ifname = "enp216s0np0";
   //  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
   // LibpcapIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  PCAPPacketCapture capture("capture_r1p0_v2.pcap", false);
+  PCAPPacketCapture capture(pcap_filename, false);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });
