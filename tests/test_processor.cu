@@ -18,7 +18,7 @@ using TestConfig = LambdaConfig<2,  // NR_CHANNELS
                                 8,  // NR_TIME_STEPS_PER_PACKET
                                 32, // NR_RECEIVERS
                                 2,  // NR_POLARIZATIONS
-                                16, // NR_RECEIVERS_PER_PACKET
+                                32, // NR_RECEIVERS_PER_PACKET
                                 10, // NR_PACKETS_FOR_CORRELATION
                                 1,  // NR_BEAMS
                                 32, // NR_PADDED_RECEIVERS
