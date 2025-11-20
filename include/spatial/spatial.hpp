@@ -60,6 +60,7 @@ public:
                                             const sockaddr_in &client_addr) = 0;
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
+  virtual void process_all_available_packets() = 0;
 };
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000>

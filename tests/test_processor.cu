@@ -211,10 +211,7 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
 TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
   add_packet(1000, 0, 0);
 
-  // Process the packet
-  int read_idx = processor_state->read_index.load();
-  processor_state->process_packet_data(
-      processor_state->d_packet_data[read_idx]);
+  processor_state->process_all_available_packets();
 
   EXPECT_EQ(processor_state->packets_processed, 1);
 }
@@ -224,9 +221,7 @@ TEST_F(ProcessorStateTest, BufferInitializationTest) {
 
   add_packet(1000, 0, 0);
 
-  int read_idx = processor_state->read_index.load();
-  processor_state->process_packet_data(
-      processor_state->d_packet_data[read_idx]);
+  processor_state->process_all_available_packets();
 
   EXPECT_TRUE(processor_state->buffers_initialized);
 }
@@ -367,7 +362,7 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGATest) {
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
         uint64_t sample =
             start_sample +
-            buf * TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION * 64 +
+            TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION * 64 +
             pkt * 64; // 64 = NR_BETWEEN_SAMPLES
         add_packet(sample, fpga, channel);
       }
