@@ -292,20 +292,12 @@ TEST_F(ProcessorStateTest, OnePacketPlacementTest2) {
 TEST_F(ProcessorStateTest, DiscardOldPacketsTest) {
   // Initialize with a packet at sample 1000
   add_packet(1000, 0, 0);
-  int read_idx = processor_state->read_index.load();
-  processor_state->process_packet_data(
-      processor_state->d_packet_data[read_idx]);
-  processor_state->read_index.store((read_idx + 1) % 1000,
-                                    std::memory_order_release);
-
+  processor_state->process_all_available_packets();
   EXPECT_TRUE(processor_state->buffers_initialized);
 
   // Try to add a packet that's too old (before current buffer)
   add_packet(500, 0, 0);
-  read_idx = processor_state->read_index.load();
-  processor_state->process_packet_data(
-      processor_state->d_packet_data[read_idx]);
-
+  processor_state->process_all_available_packets();
   // This packet should be discarded
   EXPECT_GT(processor_state->packets_discarded, 0);
 }

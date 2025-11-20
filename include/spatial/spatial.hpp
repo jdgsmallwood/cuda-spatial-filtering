@@ -61,6 +61,8 @@ public:
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
   virtual void process_all_available_packets() = 0;
+
+  virtual void handle_buffer_completion(bool force_flush = false) = 0;
 };
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000>

@@ -23,6 +23,7 @@ struct FakeProcessorState : public ProcessorStateBase {
                                     const sockaddr_in &client_addr) override {};
   void set_pipeline(GPUPipeline *pipeline) override {};
   void process_all_available_packets() override {};
+  void handle_buffer_completion(bool force_flush = false) override {};
 };
 
 // A fake FinalPacketData for tests, minimal stub
