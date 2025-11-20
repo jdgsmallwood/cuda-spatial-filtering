@@ -22,6 +22,7 @@ struct FakeProcessorState : public ProcessorStateBase {
   void add_received_packet_metadata(const int length,
                                     const sockaddr_in &client_addr) override {};
   void set_pipeline(GPUPipeline *pipeline) override {};
+  void process_all_available_packets() override {};
 };
 
 // A fake FinalPacketData for tests, minimal stub
