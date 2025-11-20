@@ -79,3 +79,4 @@ scripts/.venv
 *.pcapng
 *.uvfits
 *.npy
+*.pcap

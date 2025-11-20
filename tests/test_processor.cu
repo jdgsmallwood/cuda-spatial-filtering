@@ -25,6 +25,19 @@ using TestConfig = LambdaConfig<2,  // NR_CHANNELS
                                 32, // NR_PADDED_RECEIVERS_PER_BLOCK
                                 1   // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
                                 >;
+using TestMultipleFPGAConfig =
+    LambdaConfig<2,  // NR_CHANNELS
+                 2,  // NR_FPGA_SOURCES
+                 8,  // NR_TIME_STEPS_PER_PACKET
+                 20, // NR_RECEIVERS
+                 2,  // NR_POLARIZATIONS
+                 10, // NR_RECEIVERS_PER_PACKET
+                 10, // NR_PACKETS_FOR_CORRELATION
+                 1,  // NR_BEAMS
+                 32, // NR_PADDED_RECEIVERS
+                 32, // NR_PADDED_RECEIVERS_PER_BLOCK
+                 1   // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                 >;
 constexpr static size_t NR_BUFFERS = 3;
 // Simple mock pipeline that just tracks what it receives
 class SimpleMockPipeline : public GPUPipeline {
@@ -64,7 +77,7 @@ public:
 // Test fixture
 class ProcessorStateTest : public ::testing::Test {
 protected:
-  ProcessorState<TestConfig, NR_BUFFERS> *processor_state;
+  ProcessorStateBase *processor_state;
   SimpleMockPipeline *mock_pipeline;
 
   void SetUp() override {
@@ -178,6 +191,22 @@ protected:
     processor_state->get_next_write_pointer();
   }
 };
+
+class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
+
+  void SetUp() override {
+    processor_state = new ProcessorState<TestMultipleFPGAConfig, NR_BUFFERS>(
+        10, // nr_packets_for_correlation
+        64, // nr_between_samples
+        0   // min_freq_channel
+    );
+
+    mock_pipeline = new SimpleMockPipeline();
+    mock_pipeline->set_state(processor_state);
+    processor_state->set_pipeline(mock_pipeline);
+    processor_state->synchronous_pipeline = true;
+  }
+}
 
 TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
   add_packet(1000, 0, 0);
@@ -326,4 +355,27 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   for (int i = 0; i < scales_length; ++i) {
     EXPECT_EQ(scales_last_packet[i], 0);
   }
+}
+
+TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGATest) {
+
+  int start_sample = 1000;
+  for (int channel = 0; channel < TestMultipleFPGAConfig::NR_CHANNELS;
+       channel++) {
+    for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES; fpga++) {
+      for (int pkt = 0;
+           pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
+        uint64_t sample =
+            start_sample +
+            buf * TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION * 64 +
+            pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        add_packet(sample, fpga, channel);
+      }
+    }
+
+    processor_state->process_all_available_packets();
+    processor_state->handle_buffer_completion();
+  }
+
+  EXPECT_EQ(processor_state->packets_missing, 0);
 }

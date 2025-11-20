@@ -253,9 +253,10 @@ struct LambdaConfig {
   using HalfPacketSamplesPlanarType = LambdaPacketSamplesPlanarT<__half>;
   using PaddedPacketSamplesPlanarType =
       LambdaPacketSamplesPlanarT<__half, NR_PADDED_RECEIVERS>;
-  using PacketScaleStructure = int16_t[NR_RECEIVERS][NR_POLARIZATIONS];
+  using PacketScaleStructure =
+      int16_t[NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
   using PacketDataStructure =
-      std::complex<int8_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS]
+      std::complex<int8_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
                           [NR_POLARIZATIONS];
   using PacketPayloadType =
       PacketPayload<PacketScaleStructure, PacketDataStructure>;
