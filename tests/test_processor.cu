@@ -352,16 +352,13 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGABasicTest) {
     for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES; fpga++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        uint64_t sample =
-            start_sample +
-            TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION * 64 +
-            pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
         add_packet(sample, fpga, channel);
       }
     }
 
     processor_state->process_all_available_packets();
-    processor_state->handle_buffer_completion();
+    processor_state->handle_buffer_completion(true);
   }
 
   EXPECT_EQ(processor_state->packets_missing, 0);
@@ -378,10 +375,7 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
     for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES; fpga++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        uint64_t sample =
-            start_sample +
-            TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION * 64 +
-            pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
         add_packet(sample, fpga, channel, fpga + 1);
       }
     }
