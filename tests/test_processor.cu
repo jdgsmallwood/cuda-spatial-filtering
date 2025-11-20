@@ -358,7 +358,6 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGABasicTest) {
     }
 
     processor_state->process_all_available_packets();
-    processor_state->handle_buffer_completion(true);
   }
 
   EXPECT_EQ(processor_state->packets_missing, 0);
