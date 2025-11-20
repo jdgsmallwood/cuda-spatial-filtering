@@ -206,7 +206,7 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
     processor_state->set_pipeline(mock_pipeline);
     processor_state->synchronous_pipeline = true;
   }
-}
+};
 
 TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
   add_packet(1000, 0, 0);

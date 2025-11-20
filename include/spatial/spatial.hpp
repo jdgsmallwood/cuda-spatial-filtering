@@ -48,6 +48,7 @@ public:
   std::atomic<int> read_index = 0;
   std::vector<uint32_t> fpga_ids{};
   bool buffers_initialized = false;
+  bool synchronous_pipeline = false;
   std::atomic<int> running = 1;
   unsigned long long packets_received = 0;
   unsigned long long packets_processed = 0;
@@ -73,8 +74,6 @@ public:
   size_t MIN_FREQ_CHANNEL;
   size_t NR_BETWEEN_SAMPLES;
   size_t NR_PACKETS_FOR_CORRELATION;
-
-  bool synchronous_pipeline = false;
 
   std::array<BufferState<T::NR_CHANNELS>, NR_INPUT_BUFFERS> buffers;
   uint64_t latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES] = {};
