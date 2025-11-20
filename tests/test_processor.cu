@@ -407,7 +407,7 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
 
   for (int channel = 0; channel < TestMultipleFPGAConfig::NR_CHANNELS;
        channel++) {
-    for (int receiver = 0; fpga < TestMultipleFPGAConfig::NR_RECEIVERS;
+    for (int receiver = 0; receiver < TestMultipleFPGAConfig::NR_RECEIVERS;
          receiver++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
