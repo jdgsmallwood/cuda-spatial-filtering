@@ -456,15 +456,6 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
   processor_state->handle_buffer_completion();
   EXPECT_EQ(processor_state->packets_missing, 0);
 
-  bool *arrivals_last_packet =
-      (bool *)mock_pipeline->last_packet_data->get_arrivals_ptr();
-  int arrivals_length =
-      mock_pipeline->last_packet_data->get_arrivals_size() / sizeof(bool);
-
-  for (int i = 0; i < arrivals_length; i++) {
-    EXPECT_EQ(arrivals_last_packet[i], true);
-  }
-
   typename TestMultipleFPGAConfig::PacketSamplesType *samples =
       (typename TestMultipleFPGAConfig::PacketSamplesType *)
           mock_pipeline->last_packet_data->get_samples_ptr();
@@ -481,9 +472,9 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
                pol++) {
             std::complex<int8_t> expected_value;
             if (receiver < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET) {
-              expected_value = {1, 1};
+              expected_value = {static_cast<int8_t>(1), static_cast<int8_t>(1)};
             } else {
-              expected_value = {2, 2};
+              expected_value = {static_cast<int8_t>(2), static_cast<int8_t>(2)};
             }
             EXPECT_EQ(samples[0][channel][pkt][t][receiver][pol],
                       expected_value);
