@@ -101,8 +101,8 @@ protected:
   }
 
   // Helper to create a properly formatted Lambda packet
-  void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
-                            uint16_t freq_channel, int val) {
+  virtual void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
+                                    uint16_t freq_channel, int val) {
     // Get the current write pointer
     void *write_ptr = processor_state->get_current_write_pointer();
     uint8_t *data_ptr = (uint8_t *)write_ptr;
@@ -185,8 +185,8 @@ protected:
   }
 
   // Add packet and advance write pointer
-  void add_packet(uint64_t sample_count, uint32_t fpga_id,
-                  uint16_t freq_channel, int val = 1) {
+  virtual void add_packet(uint64_t sample_count, uint32_t fpga_id,
+                          uint16_t freq_channel, int val = 1) {
     create_lambda_packet(sample_count, fpga_id, freq_channel, val);
     processor_state->get_next_write_pointer();
   }
