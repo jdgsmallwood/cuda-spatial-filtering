@@ -450,11 +450,10 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
         add_packet(sample, fpga, channel, fpga + 1);
       }
     }
-
-    processor_state->process_all_available_packets();
-    processor_state->handle_buffer_completion();
   }
 
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion();
   EXPECT_EQ(processor_state->packets_missing, 0);
 
   bool *arrivals_last_packet =
