@@ -82,9 +82,9 @@ protected:
 
   void SetUp() override {
     processor_state = new ProcessorState<TestConfig, NR_BUFFERS>(
-        10, // nr_packets_for_correlation
-        64, // nr_between_samples
-        0   // min_freq_channel
+        10,                                   // nr_packets_for_correlation
+        TestConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
+        0                                     // min_freq_channel
     );
 
     mock_pipeline = new SimpleMockPipeline();
@@ -142,7 +142,7 @@ protected:
     // Fill scales with test data
     for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
       for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
-        payload->scales[r][p] = 1 + r; // Non-zero scales
+        payload->scales[r][p] = static_cast<int16_t>(1 + r); // Non-zero scales
       }
     }
 
@@ -197,8 +197,8 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
   void SetUp() override {
     processor_state = new ProcessorState<TestMultipleFPGAConfig, NR_BUFFERS>(
         10, // nr_packets_for_correlation
-        64, // nr_between_samples
-        0   // min_freq_channel
+        TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
+        0                                                 // min_freq_channel
     );
 
     mock_pipeline = new SimpleMockPipeline();
@@ -308,7 +308,8 @@ TEST_F(ProcessorStateTest, FillOneBufferTest) {
   for (int channel = 0; channel < TestConfig::NR_CHANNELS; channel++) {
     for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
       for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        uint64_t sample =
+            start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
         add_packet(sample, fpga, channel);
       }
     }
@@ -328,7 +329,7 @@ TEST_F(ProcessorStateTest, OnePacketPlacementTest) {
   int pkt = 1;
   int fpga = 0;
   int channel = 0;
-  uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+  uint64_t sample = start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
   add_packet(start_sample, fpga, channel, 1);
   add_packet(sample, fpga, channel, 10);
 
@@ -347,7 +348,7 @@ TEST_F(ProcessorStateTest, OnePacketPlacementTest2) {
   int pkt = 2;
   int fpga = 0;
   int channel = 1;
-  uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+  uint64_t sample = start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
   add_packet(start_sample, fpga, channel, 1);
   add_packet(sample, fpga, channel, 10);
 
@@ -382,8 +383,9 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
       for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
         for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
           uint64_t sample = start_sample +
-                            buf * TestConfig::NR_PACKETS_FOR_CORRELATION * 64 +
-                            pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+                            buf * TestConfig::NR_PACKETS_FOR_CORRELATION *
+                                TestConfig::NR_TIME_STEPS_PER_PACKET +
+                            pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
           add_packet(sample, fpga, channel);
         }
       }
@@ -423,7 +425,9 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGABasicTest) {
     for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES; fpga++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        uint64_t sample =
+            start_sample +
+            pkt * TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
         add_packet(sample, fpga, channel);
       }
     }
@@ -446,7 +450,9 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
     for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES; fpga++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        uint64_t sample = start_sample + pkt * 64; // 64 = NR_BETWEEN_SAMPLES
+        uint64_t sample =
+            start_sample +
+            pkt * TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
         add_packet(sample, fpga, channel, fpga + 1);
       }
     }
