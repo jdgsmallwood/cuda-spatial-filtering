@@ -206,6 +206,77 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
     processor_state->set_pipeline(mock_pipeline);
     processor_state->synchronous_pipeline = true;
   }
+
+  void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
+                            uint16_t freq_channel, int val) {
+    // Get the current write pointer
+    void *write_ptr = processor_state->get_current_write_pointer();
+    uint8_t *data_ptr = (uint8_t *)write_ptr;
+
+    // Ethernet header (14 bytes)
+    EthernetHeader *eth = (EthernetHeader *)data_ptr;
+    memset(eth, 0, sizeof(EthernetHeader));
+    eth->ethertype = htons(0x0800); // IPv4
+    data_ptr += sizeof(EthernetHeader);
+
+    // IP header (20 bytes)
+    IPHeader *ip = (IPHeader *)data_ptr;
+    memset(ip, 0, sizeof(IPHeader));
+    ip->version_ihl = 0x45; // IPv4, 20 byte header
+    data_ptr += sizeof(IPHeader);
+
+    // UDP header (8 bytes)
+    UDPHeader *udp = (UDPHeader *)data_ptr;
+    memset(udp, 0, sizeof(UDPHeader));
+    data_ptr += sizeof(UDPHeader);
+
+    // Custom header (22 bytes: 8 + 4 + 2 + 8)
+    CustomHeader *custom = (CustomHeader *)data_ptr;
+    custom->sample_count = sample_count;
+    custom->fpga_id = fpga_id;
+    custom->freq_channel = freq_channel;
+    memset(custom->padding, 0, sizeof(custom->padding));
+    data_ptr += sizeof(CustomHeader);
+
+    // Payload: PacketPayload<PacketScaleStructure, PacketDataStructure>
+    // PacketScaleStructure: int16_t[NR_RECEIVERS][NR_POLARIZATIONS]
+    // PacketDataStructure:
+    // complex<int8_t>[NR_TIME_STEPS][NR_RECEIVERS][NR_POLARIZATIONS]
+    auto *payload =
+        reinterpret_cast<typename TestMultipleFPGAConfig::PacketPayloadType *>(
+            data_ptr);
+
+    // Fill scales with test data
+    for (int r = 0; r < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET; r++) {
+      for (int p = 0; p < TestMultipleFPGAConfig::NR_POLARIZATIONS; p++) {
+        payload->scales[r][p] = 1 + r; // Non-zero scales
+      }
+    }
+
+    // Fill data with test pattern
+    for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET; t++) {
+      for (int r = 0; r < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET;
+           r++) {
+        for (int p = 0; p < TestMultipleFPGAConfig::NR_POLARIZATIONS; p++) {
+          payload->data[t][r][p] = std::complex<int8_t>(
+              static_cast<int8_t>(val), static_cast<int8_t>(val));
+        }
+      }
+    }
+
+    // Set packet metadata
+    int total_length =
+        sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader) +
+        sizeof(CustomHeader) +
+        sizeof(typename TestMultipleFPGAConfig::PacketPayloadType);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    processor_state->add_received_packet_metadata(total_length, addr);
+  }
 };
 
 TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
@@ -358,6 +429,7 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGABasicTest) {
     }
 
     processor_state->process_all_available_packets();
+    processor_state->handle_buffer_completion();
   }
 
   EXPECT_EQ(processor_state->packets_missing, 0);
