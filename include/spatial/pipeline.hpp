@@ -121,18 +121,31 @@ private:
 
   using BeamWeights = BeamWeightsT<T>;
 
-  // c = channel
   // b = block
-  // r = receiver
+  // c = channel
   // d = padded receivers
-  // p = polarization
-  // q = second polarization
-  // t = time
-  // z = complex
+  // f = fpga
   // l = baseline
   // m = beam
+  // n = receivers per packet
+  // o = packets for correlation
+  // p = polarization
+  // q = second polarization
+  // r = receiver
   // s = time consolidated <block x time>
-  inline static const std::vector<int> modePacket{'c', 'b', 't', 'r', 'p', 'z'};
+  // t = times per block
+  // u = time steps per packet
+  // z = complex
+
+  inline static const std::vector<int> modePacket{'c', 'o', 'f', 'u',
+                                                  'n', 'p', 'z'};
+  // o and u need to end up together and will be interpreted as b x t in the
+  // next transformation. Similarly f x n = r in next transformation.
+  inline static const std::vector<int> modePacketFPGAAligned{'c', 'o', 'u', 'f',
+                                                             'n', 'p', 'z'};
+
+  inline static const std::vector<int> modePacketFPGAAlignedPadding{
+      'c', 'b', 't', 'r', 'p', 'z'};
 
   inline static const std::vector<int> modePacketPadding{'r', 'c', 'b',
                                                          't', 'p', 'z'};
@@ -162,17 +175,21 @@ private:
 
   inline static const std::unordered_map<int, int64_t> extent = {
 
-      {'c', T::NR_CHANNELS},
       {'b', NR_BLOCKS_FOR_CORRELATION},
-      {'r', T::NR_RECEIVERS},
+      {'c', T::NR_CHANNELS},
       {'d', T::NR_PADDED_RECEIVERS},
-      {'p', T::NR_POLARIZATIONS},
-      {'q', T::NR_POLARIZATIONS}, // 2nd polarization for baselines
-      {'t', NR_TIMES_PER_BLOCK},
-      {'z', 2}, // real, imaginary
+      {'f', T::NR_FPGA_SOURCES},
       {'l', NR_BASELINES},
       {'m', T::NR_BEAMS},
+      {'n', T::NR_RECEIVERS_PER_PACKET},
+      {'o', T::NR_PACKETS_FOR_CORRELATION},
+      {'p', T::NR_POLARIZATIONS},
+      {'q', T::NR_POLARIZATIONS}, // 2nd polarization for baselines
+      {'r', T::NR_RECEIVERS},
       {'s', NR_BLOCKS_FOR_CORRELATION *NR_TIMES_PER_BLOCK},
+      {'t', NR_TIMES_PER_BLOCK},
+      {'u', T::NR_TIME_STEPS_PER_PACKET},
+      {'z', 2}, // real, imaginary
 
   };
 
@@ -188,10 +205,10 @@ private:
 
   tcc::Correlator correlator;
 
-  std::vector<typename T::PacketSamplesType *> d_samples_entry,
+  std::vector<typename T::InputPacketSamplesType *> d_samples_entry,
       d_samples_scaled;
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
+      d_samples_padding, d_samples_fpga;
   std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
       d_samples_reord; // This is not the right type for reord
                        // - but it will do I guess. Size will be correct.
@@ -283,13 +300,14 @@ public:
     // scale_and_convert_to_half kernel
     cpu_start = clock::now();
     scale_and_convert_to_half<
-        typename T::PacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_TIME_STEPS_PER_PACKET,
-        T::NR_PACKETS_FOR_CORRELATION>(
-        (typename T::PacketSamplesPlanarType *)d_samples_entry[current_buffer],
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        (typename T::InputPacketSamplesPlanarType *)
+            d_samples_entry[current_buffer],
         d_scales[current_buffer],
-        (typename T::HalfPacketSamplesPlanarType *)
+        (typename T::HalfInputPacketSamplesPlanarType *)
             d_samples_half[current_buffer],
         streams[current_buffer]);
     cpu_end = clock::now();
@@ -298,13 +316,24 @@ public:
                                                                     cpu_start)
                   .count());
 
-    // tensor_16.runPermutation "packetToPadding"
+    // tensor_16.runPermutation "packetToFPGA"
     cpu_start = clock::now();
     tensor_16.runPermutation(
-        "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
+        "packetToFPGA", alpha, (__half *)d_samples_half[current_buffer],
+        (__half *)d_samples_fpga[current_buffer], streams[current_buffer]);
+    cpu_end = clock::now();
+    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToFPGA: {} us",
+              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                                    cpu_start)
+                  .count());
+
+    // tensor_16.runPermutation "FPGAToPadding"
+    cpu_start = clock::now();
+    tensor_16.runPermutation(
+        "FPGAToPadding", alpha, (__half *)d_samples_fpga[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
     cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToPadding: {} us",
+    LOG_DEBUG("CPU time for tensor_16.runPermutation FPGAtoPadding: {} us",
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
                                                                     cpu_start)
                   .count());
@@ -384,15 +413,16 @@ public:
                   .count());
 
     cpu_start = clock::now();
-    tensor_16.runPermutation("packetToPlanar", alpha,
-                             (__half *)d_samples_half[current_buffer],
+    tensor_16.runPermutation("FPGAAlignedToPlanar", alpha,
+                             (__half *)d_samples_fpga[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
     cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToPlanar: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+    LOG_DEBUG(
+        "CPU time for tensor_16.runPermutation FPGAAlignedToPlanar: {} us",
+        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
+                                                              cpu_start)
+            .count());
 
     cpu_start = clock::now();
     tensor_16.runPermutation(
@@ -545,6 +575,7 @@ public:
     d_scales.resize(num_buffers);
     d_samples_scaled.resize(num_buffers);
     d_samples_half.resize(num_buffers);
+    d_samples_fpga.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
     d_samples_consolidated.resize(num_buffers);
@@ -562,10 +593,12 @@ public:
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
-                            sizeof(typename T::PacketSamplesType)));
+                            sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_scaled[i],
-                            sizeof(typename T::PacketSamplesType)));
+                            sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
+                            sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_fpga[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
                             sizeof(typename T::HalfPacketSamplesType)));
@@ -634,6 +667,9 @@ public:
 
     cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
+    tensor_16.addTensor(modePacketFPGAAligned, "packet_fpga_aligned");
+    tensor_16.addTensor(modePacketFPGAAlignedPadding,
+                        "packet_fpga_aligned_padding");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
     tensor_16.addTensor(modePacketPadded, "packet_padded");
     tensor_16.addTensor(modeCorrelatorInput, "corr_input");
@@ -649,13 +685,16 @@ public:
     tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
     tensor_32.addTensor(modeBeamOutput, "beamOutput");
 
-    tensor_16.addPermutation("packet", "packet_padding",
-                             CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
+    tensor_16.addPermutation("packet", "packet_fpga_aligned",
+                             CUTENSOR_COMPUTE_DESC_16F, "packetToFPGA");
+    tensor_16.addPermutation("packet_fpga_aligned",
+                             "packet_fpga_aligned_padding",
+                             CUTENSOR_COMPUTE_DESC_16F, "FPGAToPadding");
 
     tensor_16.addPermutation("packet_padded", "corr_input",
                              CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
-    tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
-                             "packetToPlanar");
+    tensor_16.addPermutation("packet_fpga_aligned_padding", "planar",
+                             CUTENSOR_COMPUTE_DESC_16F, "FPGAAlignedToPlanar");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
@@ -723,6 +762,14 @@ public:
 
     for (auto samples_padding : d_samples_padding) {
       cudaFree(samples_padding);
+    }
+
+    for (auto samples_fpga : d_samples_fpga) {
+      cudaFree(samples_fpga);
+    }
+
+    for (auto samples_half : d_samples_half) {
+      cudaFree(samples_half);
     }
 
     for (auto samples_padded : d_samples_padded) {

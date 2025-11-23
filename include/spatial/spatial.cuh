@@ -28,7 +28,8 @@ void accumulate_visibilities(const float *d_visibilities,
 
 template <typename inputT, typename scaleT, typename outputT,
           size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
-          size_t NR_TIME_STEPS_PER_PACKET, size_t NR_PACKETS>
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS>
 __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
                                                  const scaleT *d_scale,
                                                  outputT *d_output) {
@@ -36,23 +37,27 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
   int channel_idx = blockIdx.x % NR_CHANNELS;
   int packet_idx = blockIdx.x / NR_CHANNELS;
   int receiver_idx = blockIdx.y / NR_POLARIZATIONS;
+  int fpga_idx = receiver_idx / NR_RECEIVERS_PER_PACKET;
+  int receiver_idx_in_pkt = receiver_idx % NR_RECEIVERS_PER_PACKET;
   int polarization_idx = blockIdx.y % NR_POLARIZATIONS;
   int time_idx = threadIdx.x / 2;
   int complex_idx = threadIdx.x % 2;
-
-  int val =
-      static_cast<int>(d_input[0][channel_idx][packet_idx][time_idx]
-                              [receiver_idx][polarization_idx][complex_idx]);
+  // Can I cast directly from int8_t to __half and then I don't need to
+  // convert from int to __half as well.
+  int val = static_cast<int>(
+      d_input[0][channel_idx][packet_idx][fpga_idx][time_idx]
+             [receiver_idx_in_pkt][polarization_idx][complex_idx]);
   int scale_factor = static_cast<int>(
       d_scale[0][channel_idx][packet_idx][receiver_idx][polarization_idx]);
 
   int result = val * scale_factor;
-  d_output[0][channel_idx][packet_idx][time_idx][receiver_idx][polarization_idx]
-          [complex_idx] = __int2half_rn(result);
+  d_output[0][channel_idx][packet_idx][fpga_idx][time_idx][receiver_idx_in_pkt]
+          [polarization_idx][complex_idx] = __int2half_rn(result);
 };
 template <typename inputT, typename scaleT, typename outputT,
           size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
-          size_t NR_TIME_STEPS_PER_PACKET, size_t NR_PACKETS>
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS>
 void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
                                outputT *d_output, cudaStream_t stream) {
 
@@ -63,7 +68,7 @@ void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
 
   (scale_and_convert_to_half_kernel<
       inputT, scaleT, outputT, NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
-      NR_TIME_STEPS_PER_PACKET,
+      NR_RECEIVERS_PER_PACKET, NR_TIME_STEPS_PER_PACKET,
       NR_PACKETS>)<<<dim3(num_blocks_x, num_blocks_y, 1),
                      dim3(num_threads_x, 1, 1), 0, stream>>>(d_input, d_scale,
                                                              d_output);
