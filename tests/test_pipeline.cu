@@ -28,7 +28,7 @@ struct FakeProcessorState : public ProcessorStateBase {
 
 // A fake FinalPacketData for tests, minimal stub
 template <typename T> struct DummyFinalPacketData : public FinalPacketData {
-  using sampleT = typename T::PacketSamplesType;
+  using sampleT = typename T::InputPacketSamplesType;
   using scaleT = typename T::PacketScalesType;
   sampleT *samples;
   scaleT *scales;
@@ -87,7 +87,8 @@ TEST(LambdaGPUPipelineTest, Ex1) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
           }
         }
@@ -167,9 +168,10 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
     for (auto j = 0; j < NR_PACKETS; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
-          packet_data.samples[0][i][j][k][l][0] = std::complex<int8_t>(2, -2);
+          packet_data.samples[0][i][j][0][k][l][0] =
+              std::complex<int8_t>(2, -2);
           packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
-          packet_data.samples[0][i][j][k][l][1] = std::complex<int8_t>(0, 0);
+          packet_data.samples[0][i][j][0][k][l][1] = std::complex<int8_t>(0, 0);
           // Deliberately have the scale non-zero.
           packet_data.scales[0][i][j][l][1] = static_cast<int16_t>(1);
         }
@@ -263,9 +265,10 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
     for (auto j = 0; j < NR_PACKETS; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
-          packet_data.samples[0][i][j][k][l][0] = std::complex<int8_t>(0, 0);
+          packet_data.samples[0][i][j][0][k][l][0] = std::complex<int8_t>(0, 0);
           packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
-          packet_data.samples[0][i][j][k][l][1] = std::complex<int8_t>(2, -2);
+          packet_data.samples[0][i][j][0][k][l][1] =
+              std::complex<int8_t>(2, -2);
           // Deliberately have the scale non-zero.
           packet_data.scales[0][i][j][l][1] = static_cast<int16_t>(1);
         }
@@ -355,7 +358,8 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
           }
         }
@@ -429,7 +433,8 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
           }
         }
@@ -504,12 +509,12 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
             if (i == 0) {
-              packet_data.samples[0][i][j][k][l][m] =
+              packet_data.samples[0][i][j][0][k][l][m] =
                   std::complex<int8_t>(2, -2);
               packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
             } else {
 
-              packet_data.samples[0][i][j][k][l][m] =
+              packet_data.samples[0][i][j][0][k][l][m] =
                   std::complex<int8_t>(0, 0);
               packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
             }
@@ -574,7 +579,8 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(2);
           }
         }
@@ -661,7 +667,8 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(2, -2);
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(j);
           }
         }
@@ -745,7 +752,8 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][k][l][m] = std::complex<int8_t>(l, -l);
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(l, -l);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(l);
           }
         }

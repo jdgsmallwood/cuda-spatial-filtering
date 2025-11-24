@@ -144,6 +144,7 @@ private:
   inline static const std::vector<int> modePacketFPGAAligned{'c', 'o', 'u', 'f',
                                                              'n', 'p', 'z'};
 
+  // f x n = r
   inline static const std::vector<int> modePacketFPGAAlignedPadding{
       'c', 'b', 't', 'r', 'p', 'z'};
 
@@ -687,8 +688,7 @@ public:
 
     tensor_16.addPermutation("packet", "packet_fpga_aligned",
                              CUTENSOR_COMPUTE_DESC_16F, "packetToFPGA");
-    tensor_16.addPermutation("packet_fpga_aligned",
-                             "packet_fpga_aligned_padding",
+    tensor_16.addPermutation("packet_fpga_aligned_padding", "packet_padding",
                              CUTENSOR_COMPUTE_DESC_16F, "FPGAToPadding");
 
     tensor_16.addPermutation("packet_padded", "corr_input",

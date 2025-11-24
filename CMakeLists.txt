@@ -16,6 +16,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_EXTENSIONS OFF)
+  set(CMAKE_CUDA_FLAGS_DEBUG "-G -g --ptxas-options=-v -Xptxas -O0 -Xcompiler -fno-inline")
   #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)

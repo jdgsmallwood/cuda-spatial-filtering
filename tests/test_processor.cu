@@ -471,22 +471,23 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
 
   for (int channel = 0; channel < TestMultipleFPGAConfig::NR_CHANNELS;
        channel++) {
-    for (int receiver = 0; receiver < TestMultipleFPGAConfig::NR_RECEIVERS;
+    for (int receiver = 0;
+         receiver < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET;
          receiver++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
-             t++) {
-          for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
-               pol++) {
-            std::complex<int8_t> expected_value;
-            if (receiver < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET) {
-              expected_value = {static_cast<int8_t>(1), static_cast<int8_t>(1)};
-            } else {
-              expected_value = {static_cast<int8_t>(2), static_cast<int8_t>(2)};
+        for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES;
+             fpga++) {
+          for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
+               t++) {
+            for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
+                 pol++) {
+              std::complex<int8_t> expected_value;
+              expected_value = {static_cast<int8_t>(fpga + 1),
+                                static_cast<int8_t>(fpga + 1)};
+              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol],
+                        expected_value);
             }
-            EXPECT_EQ(samples[0][channel][pkt][t][receiver][pol],
-                      expected_value);
           }
         }
       }

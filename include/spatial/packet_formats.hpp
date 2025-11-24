@@ -234,7 +234,7 @@ struct LambdaConfig {
       NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
   static constexpr size_t COMPLEX = 2;
 
-  template <typename T, int RECEIVERS = NR_RECEIVERS_PER_PACKET>
+  template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesT =
       std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
@@ -260,6 +260,7 @@ struct LambdaConfig {
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
   using HalfInputPacketSamplesPlanarType =
       LambdaInputPacketSamplesPlanarT<__half>;
+
   using PaddedPacketSamplesType =
       LambdaPacketSamplesT<__half, NR_PADDED_RECEIVERS>;
   using PacketSamplesPlanarType = LambdaPacketSamplesPlanarT<int8_t>;
