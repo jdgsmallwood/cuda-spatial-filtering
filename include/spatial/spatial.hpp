@@ -180,10 +180,9 @@ public:
         LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
                   "receiver_index {} of buffer {}",
                   packet_index, freq_channel, receiver_index, buffer_index);
-        std::memcpy(
-            &(*(*d_samples[buffer_index])
-                   .samples)[freq_channel][packet_index][receiver_index],
-            pkt.payload->data, sizeof(typename T::PacketDataStructure));
+        std::memcpy(&(*(*d_samples[buffer_index])
+                           .samples)[freq_channel][packet_index][fpga_index],
+                    pkt.payload->data, sizeof(typename T::PacketDataStructure));
         std::memcpy(&(*(*d_samples[buffer_index])
                            .scales)[freq_channel][packet_index][receiver_index],
                     pkt.payload->scales,

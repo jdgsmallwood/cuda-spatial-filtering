@@ -171,12 +171,15 @@ protected:
 
   void validate_packet_contents(FinalPacketData *parcel, int channel,
                                 int packet_number, int val) {
-    typename TestConfig::PacketSamplesType *packet_samples =
-        (typename TestConfig::PacketSamplesType *)parcel->get_samples_ptr();
+    typename TestConfig::InputPacketSamplesType *packet_samples =
+        (typename TestConfig::InputPacketSamplesType *)
+            parcel->get_samples_ptr();
     for (int t = 0; t < TestConfig::NR_TIME_STEPS_PER_PACKET; t++) {
       for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
         for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
-          EXPECT_EQ(packet_samples[0][channel][packet_number][t][r][p],
+          EXPECT_EQ(packet_samples[0][channel][packet_number][0][t][r]
+                                  [p], // [0] is for FPGA and there is only one
+                                       // in the config.
                     std::complex<int8_t>(static_cast<int8_t>(val),
                                          static_cast<int8_t>(val)));
         }
@@ -462,28 +465,29 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
   processor_state->handle_buffer_completion();
   EXPECT_EQ(processor_state->packets_missing, 0);
 
-  typename TestMultipleFPGAConfig::PacketSamplesType *samples =
-      (typename TestMultipleFPGAConfig::PacketSamplesType *)
+  typename TestMultipleFPGAConfig::InputPacketSamplesType *samples =
+      (typename TestMultipleFPGAConfig::InputPacketSamplesType *)
           mock_pipeline->last_packet_data->get_samples_ptr();
 
   for (int channel = 0; channel < TestMultipleFPGAConfig::NR_CHANNELS;
        channel++) {
-    for (int receiver = 0; receiver < TestMultipleFPGAConfig::NR_RECEIVERS;
+    for (int receiver = 0;
+         receiver < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET;
          receiver++) {
       for (int pkt = 0;
            pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
-        for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
-             t++) {
-          for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
-               pol++) {
-            std::complex<int8_t> expected_value;
-            if (receiver < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET) {
-              expected_value = {static_cast<int8_t>(1), static_cast<int8_t>(1)};
-            } else {
-              expected_value = {static_cast<int8_t>(2), static_cast<int8_t>(2)};
+        for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES;
+             fpga++) {
+          for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
+               t++) {
+            for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
+                 pol++) {
+              std::complex<int8_t> expected_value;
+              expected_value = {static_cast<int8_t>(fpga + 1),
+                                static_cast<int8_t>(fpga + 1)};
+              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol],
+                        expected_value);
             }
-            EXPECT_EQ(samples[0][channel][pkt][t][receiver][pol],
-                      expected_value);
           }
         }
       }

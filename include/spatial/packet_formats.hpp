@@ -68,7 +68,8 @@ struct FinalPacketData {
 // PacketStructure struct.
 template <typename PacketSamplesType, typename PacketScalesType,
           size_t NR_CHANNELS, size_t NR_PACKETS_FOR_CORRELATION,
-          size_t NR_RECEIVERS, size_t NR_POLARIZATIONS, size_t NR_FPGAS>
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_POLARIZATIONS,
+          size_t NR_FPGAS>
 struct LambdaFinalPacketData : public FinalPacketData {
   using ArrivalsType = bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGAS];
   PacketSamplesType *samples = nullptr;
@@ -93,9 +94,9 @@ struct LambdaFinalPacketData : public FinalPacketData {
       for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
           if (arrivals[0][i][j][k] == 0) {
-            for (auto m = 0; m < NR_RECEIVERS; ++m) {
+            for (auto m = 0; m < NR_RECEIVERS_PER_PACKET; ++m) {
               for (auto n = 0; n < NR_POLARIZATIONS; ++n) {
-                scales[0][i][j][k * NR_RECEIVERS + m][n] = 0;
+                scales[0][i][j][k * NR_RECEIVERS_PER_PACKET + m][n] = 0;
               }
             }
           }
@@ -237,6 +238,11 @@ struct LambdaConfig {
   using LambdaPacketSamplesT =
       std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
+
+  template <typename T>
+  using LambdaInputPacketSamplesPlanarT =
+      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES]
+       [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS][2];
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesPlanarT =
       T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_TIME_STEPS_PER_PACKET]
@@ -245,8 +251,16 @@ struct LambdaConfig {
   using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                                   [NR_RECEIVERS][NR_POLARIZATIONS];
   using Sample = std::complex<int8_t>;
+  using InputPacketSamplesType =
+      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+                          [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
+                          [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
+  using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<int8_t>;
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
+  using HalfInputPacketSamplesPlanarType =
+      LambdaInputPacketSamplesPlanarT<__half>;
+
   using PaddedPacketSamplesType =
       LambdaPacketSamplesT<__half, NR_PADDED_RECEIVERS>;
   using PacketSamplesPlanarType = LambdaPacketSamplesPlanarT<int8_t>;
@@ -265,9 +279,10 @@ struct LambdaConfig {
   using PacketEntryType =
       LambdaPacketEntry<PacketScaleStructure, PacketDataStructure>;
   using PacketFinalDataType =
-      LambdaFinalPacketData<PacketSamplesType, PacketScalesType, NR_CHANNELS,
-                            NR_PACKETS_FOR_CORRELATION, NR_RECEIVERS,
-                            NR_POLARIZATIONS, NR_FPGA_SOURCES>;
+      LambdaFinalPacketData<InputPacketSamplesType, PacketScalesType,
+                            NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
+                            NR_RECEIVERS_PER_PACKET, NR_POLARIZATIONS,
+                            NR_FPGA_SOURCES>;
   using BeamOutputType =
       float[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
            [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
