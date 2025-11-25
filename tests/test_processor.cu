@@ -252,7 +252,8 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
     // Fill scales with test data
     for (int r = 0; r < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET; r++) {
       for (int p = 0; p < TestMultipleFPGAConfig::NR_POLARIZATIONS; p++) {
-        payload->scales[r][p] = static_cast<int16_t>(1 + r); // Non-zero scales
+        payload->scales[r][p] =
+            static_cast<int16_t>(1 + r + fpga_id); // Non-zero scales
       }
     }
 

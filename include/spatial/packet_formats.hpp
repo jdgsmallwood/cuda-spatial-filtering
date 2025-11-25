@@ -145,13 +145,13 @@ struct PacketPayload {
 template <typename PacketScaleStructure, typename PacketDataStructure>
 struct ProcessedPacket {
   uint64_t sample_count;
-  uint32_t fpga_id;
-  uint16_t freq_channel;
-  PacketPayload<PacketScaleStructure, PacketDataStructure> *payload;
-  int payload_size;
-  struct timeval timestamp;
+  uint64_t timestamp;
+  const PacketPayload<PacketScaleStructure, PacketDataStructure> *payload;
   bool *original_packet_processed;
-};
+  uint32_t fpga_id;
+  uint32_t payload_size;
+  uint16_t freq_channel;
+} __attribute__((aligned(64)));
 
 // Packet storage for ring buffer
 template <typename PacketScaleStructure, typename PacketDataStructure>
@@ -169,40 +169,34 @@ struct PacketEntry {
 template <typename PacketScaleStructure, typename PacketDataStructure>
 struct LambdaPacketEntry
     : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
-  ProcessedPacket<PacketScaleStructure, PacketDataStructure> parse() override {
+  __attribute__((hot)) __attribute__((flatten))
+  ProcessedPacket<PacketScaleStructure, PacketDataStructure>
+  parse() noexcept override {
 
-    LOG_DEBUG("Entering parser...\n");
-    ProcessedPacket<PacketScaleStructure, PacketDataStructure> result = {0};
-
-    if (this->length < MIN_PCAP_HEADER_SIZE) {
-      LOG_WARN("Packet too small for custom headers\n");
-      this->processed = true;
-      return result;
+    // LOG_DEBUG("Entering parser...\n");
+    const int length = this->length;
+    const uint8_t *__restrict__ base = this->data;
+    __builtin_prefetch(base + 42, 0, 3);
+    if (length < MIN_PCAP_HEADER_SIZE ||
+        __builtin_bswap16(*reinterpret_cast<const uint16_t *>(base + 12)) !=
+            0x0800) [[unlikely]] {
+      this->processed = (length < MIN_PCAP_HEADER_SIZE);
+      return {};
     }
 
-    const EthernetHeader *eth = (const EthernetHeader *)this->data;
-    if (ntohs(eth->ethertype) != 0x0800) {
-      LOG_ERROR("Not IPv4 packet\n");
-      return result;
-    }
+    const CustomHeader *__restrict__ custom = (const CustomHeader *)(base + 42);
 
-    const CustomHeader *custom = (const CustomHeader *)(this->data + 42);
-
-    result.sample_count = custom->sample_count;
-    result.fpga_id = custom->fpga_id;
-    result.freq_channel = custom->freq_channel;
-    result.timestamp = this->timestamp;
-
-    // Point to payload (after headers)
-    result.payload = reinterpret_cast<
-        PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
-        this->data + MIN_PCAP_HEADER_SIZE);
-    result.payload_size = this->length - MIN_PCAP_HEADER_SIZE;
-    // This adds a pointer to the original processed boolean on the queue
-    // so that we can update it later once it's been processed.
-    result.original_packet_processed = &this->processed;
-
-    return result;
+    return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
+        .sample_count = custom->sample_count,
+        .timestamp =
+            this->timestamp.tv_sec * 1000000ULL + this->timestamp.tv_usec,
+        .payload = reinterpret_cast<
+            const PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
+            base + MIN_PCAP_HEADER_SIZE),
+        .original_packet_processed = &this->processed,
+        .fpga_id = custom->fpga_id,
+        .payload_size = static_cast<uint32_t>(length - MIN_PCAP_HEADER_SIZE),
+        .freq_channel = custom->freq_channel};
   };
 };
 

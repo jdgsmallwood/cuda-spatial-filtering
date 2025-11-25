@@ -9,10 +9,12 @@
 #include <netinet/in.h>
 // #include <sys/socket.h>
 #include <atomic>
+#include <bitset>
 #include <chrono>
 #include <mutex>
 #include <pcap/pcap.h>
 #include <queue>
+#include <stdatomic.h>
 #include <sys/time.h>
 
 #define MIN_PCAP_HEADER_SIZE 64
@@ -35,7 +37,7 @@ template <size_t NR_CHANNELS> struct BufferState {
   bool is_ready;
   unsigned long long start_seq;
   unsigned long long end_seq;
-  std::array<bool, NR_CHANNELS> is_populated{};
+  std::bitset<NR_CHANNELS> is_populated;
 };
 
 // forward declaration of GPUPipeline.
@@ -47,13 +49,12 @@ public:
   std::atomic<int> write_index = 0;
   std::atomic<int> read_index = 0;
   std::vector<uint32_t> fpga_ids{};
-  bool buffers_initialized = false;
   bool synchronous_pipeline = false;
   std::atomic<int> running = 1;
   unsigned long long packets_received = 0;
-  unsigned long long packets_processed = 0;
+  std::atomic<unsigned long long> packets_processed = 0;
   unsigned long long packets_missing = 0;
-  unsigned long long packets_discarded = 0;
+  std::atomic<unsigned long long> packets_discarded = 0;
   unsigned long long pipeline_runs_queued = 0;
   virtual void *get_next_write_pointer() = 0;
   virtual void *get_current_write_pointer() = 0;
@@ -139,79 +140,98 @@ public:
     LOG_DEBUG("Next write index is...{}", next_write_index);
     return true;
   };
-  void copy_data_to_input_buffer_if_able(
-      ProcessedPacket<typename T::PacketScaleStructure,
-                      typename T::PacketDataStructure> &pkt) {
 
-    auto it = std::find(fpga_ids.begin(), fpga_ids.end(), pkt.fpga_id);
+  __attribute__((hot)) void copy_data_to_input_buffer_if_able(
+      ProcessedPacket<typename T::PacketScaleStructure,
+                      typename T::PacketDataStructure> &pkt,
+      const int current_read_index) {
+
     size_t fpga_index;
-    if (it != fpga_ids.end()) {
-      fpga_index = std::distance(fpga_ids.begin(), it);
-    } else {
-      fpga_ids.push_back(pkt.fpga_id);
-      fpga_index = fpga_ids.size() - 1;
+    {
+      std::lock_guard lock(fpga_mutex);
+      auto it = std::find(fpga_ids.begin(), fpga_ids.end(), pkt.fpga_id);
+      if (it != fpga_ids.end()) {
+        fpga_index = std::distance(fpga_ids.begin(), it);
+      } else {
+        fpga_ids.push_back(pkt.fpga_id);
+        fpga_index = fpga_ids.size() - 1;
+      }
     }
 
-    int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
+    const int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
 
-    latest_packet_received[freq_channel][fpga_index] = std::max(
-        latest_packet_received[freq_channel][fpga_index], pkt.sample_count);
-
+    {
+      std::lock_guard lock(latest_packet_mutex);
+      latest_packet_received[freq_channel][fpga_index] = std::max(
+          latest_packet_received[freq_channel][fpga_index], pkt.sample_count);
+    }
+    const int current_buf = current_buffer;
+    const uint64_t sample_count = pkt.sample_count;
+    if (sample_count > global_max_end_seq.load(std::memory_order_relaxed)) {
+      std::lock_guard lock(future_packet_queue_mutex);
+      future_packet_queue.push({current_read_index, sample_count});
+      return;
+    }
     // copy to correct place or leave it.
     for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
-      int buffer_index = (current_buffer + buffer) % NR_INPUT_BUFFERS;
-      int packet_index = (pkt.sample_count - buffers[buffer_index].start_seq) /
-                         NR_BETWEEN_SAMPLES;
+      const int buffer_index = (current_buf + buffer) % NR_INPUT_BUFFERS;
+      const unsigned long long buffer_start = buffers[buffer_index].start_seq;
+      const int packet_index =
+          (sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
 
-      if (buffer == 0 && packet_index < 0) {
+      if (buffer == 0 && packet_index < 0) [[unlikely]] {
         // This means that this packet is less than the lowest possible
         // start token. Maybe an out-of-order packet that's coming in?
         // Regardless we can't do anything with this.
         LOG_INFO("Discarding packet as it is before current buffer with "
                  "begin_seq {} actually has packet_index {}",
-                 buffers[current_buffer].start_seq, pkt.sample_count);
-        packets_discarded += 1;
+                 buffer_start, pkt.sample_count);
+        packets_discarded.fetch_add(1);
         *pkt.original_packet_processed = true;
         return;
       }
 
       if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
-        int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
-                  "receiver_index {} of buffer {}",
-                  packet_index, freq_channel, receiver_index, buffer_index);
-        std::memcpy(&(*(*d_samples[buffer_index])
-                           .samples)[freq_channel][packet_index][fpga_index],
-                    pkt.payload->data, sizeof(typename T::PacketDataStructure));
-        std::memcpy(&(*(*d_samples[buffer_index])
-                           .scales)[freq_channel][packet_index][receiver_index],
-                    pkt.payload->scales,
+        const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
+        // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
+        //           "receiver_index {} of buffer {}",
+        //           packet_index, freq_channel, receiver_index, buffer_index);
+
+        auto &buffer = d_samples[buffer_index];
+        auto &samples =
+            (*buffer->samples)[freq_channel][packet_index][fpga_index];
+        auto &scales =
+            (*buffer->scales)[freq_channel][packet_index][receiver_index];
+        auto &arrival =
+            buffer->arrivals[0][freq_channel][packet_index][fpga_index];
+        std::memcpy(&samples, pkt.payload->data,
+                    sizeof(typename T::PacketDataStructure));
+        std::memcpy(&scales, pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
-        d_samples[buffer_index]
-            ->arrivals[0][freq_channel][packet_index][fpga_index] = true;
-        LOG_DEBUG("Setting original_packet_processed as true...");
-        LOG_DEBUG("original_packet_processed_before={}",
-                  *pkt.original_packet_processed);
+        arrival = true;
+        // LOG_DEBUG("Setting original_packet_processed as true...");
+        // LOG_DEBUG("original_packet_processed_before={}",
+        //           *pkt.original_packet_processed);
         *(pkt.original_packet_processed) = true;
-        LOG_DEBUG("DEBUG: original_packet_processed_after={}",
-                  *pkt.original_packet_processed);
+        // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
+        //           *pkt.original_packet_processed);
 
         return;
       }
     }
-    int current_read_index = read_index.load(std::memory_order_relaxed);
-    LOG_INFO("Packet with seq number {} and read index {} was unable to find a "
-             "home. Adding to "
-             "future_packet_queue...",
-             pkt.sample_count, current_read_index);
-    future_packet_queue.push(current_read_index);
+    // LOG_DEBUG(
+    //     "Packet with seq number {} and read index {} was unable to find a "
+    //     "home. Adding to "
+    //     "future_packet_queue...",
+    //     sample_count, current_read_index);
   };
   void process_all_available_packets() {
     // This exists mainly for testing purposes
     // to allow us to add some packets then process them all.
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
-      process_packet_data(d_packet_data[current_read_index]);
+      process_packet_data(d_packet_data[current_read_index],
+                          current_read_index);
       int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
       read_index.store(new_read_index, std::memory_order_release);
     }
@@ -219,6 +239,7 @@ public:
 
   void initialize_buffers(const unsigned long long first_count) {
     LOG_INFO("[BufferInitialization] First count was {}...", first_count);
+    std::lock_guard lock(buffer_ordering_mutex);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       buffers[i].start_seq =
           first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
@@ -233,36 +254,40 @@ public:
         buffer_ordering_queue.push({i, buffers[i].start_seq});
       };
     }
+    std::lock_guard lock_index(buffer_index_mutex);
+    global_max_end_seq.store(buffers[NR_INPUT_BUFFERS - 1].end_seq,
+                             std::memory_order_release);
   };
-  void process_packet_data(typename T::PacketEntryType *pkt) {
+
+  __attribute__((hot)) void
+  process_packet_data(typename T::PacketEntryType *pkt,
+                      const int current_read_index) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
 
     ProcessedPacket parsed = pkt->parse();
 
-    if (pkt->processed) {
+    if (pkt->processed) [[unlikely]] {
       return;
     }
-    LOG_DEBUG(
-        "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
-        "payload={} bytes",
-        parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
-        parsed.payload_size);
+    // LOG_DEBUG(
+    //     "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
+    //     "payload={} bytes",
+    //     parsed.sample_count, parsed.freq_channel, parsed.fpga_id,
+    //     parsed.payload_size);
 
-    LOG_DEBUG("First data point...{} + {} i",
-              parsed.payload->data[0][0][0].real(),
-              parsed.payload->data[0][0][0].imag());
+    // LOG_DEBUG("First data point...{} + {} i",
+    //           parsed.payload->data[0][0][0].real(),
+    //           parsed.payload->data[0][0][0].imag());
 
-    if (!buffers_initialized) {
+    std::call_once(buffer_init_flag, [&]() {
       LOG_INFO("Initializing buffers as this is the first packet...");
       initialize_buffers(parsed.sample_count);
-      buffers_initialized = true;
-    }
-    // Simulate processing time
-    copy_data_to_input_buffer_if_able(parsed);
-    if (*parsed.original_packet_processed) {
-      packets_processed += 1;
+    });
+    copy_data_to_input_buffer_if_able(parsed, current_read_index);
+    if (*parsed.original_packet_processed) [[likely]] {
+      packets_processed.fetch_add(1);
     }
     modified_since_last_completion_check[parsed.freq_channel -
                                          MIN_FREQ_CHANNEL] = true;
@@ -270,252 +295,271 @@ public:
 
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
-  void release_buffer(const int buffer_index) {
-    LOG_INFO("[ProcessorState] Releasing buffer with index {}", buffer_index);
-    // This is called to let the processor know that the buffer has been
-    // copied to the GPU and now can be overwritten.
-    unsigned long long max_end_seq_in_buffers = 0;
-    // This is necessary to avoid multiple GPU threads competing / racing.
-    LOG_DEBUG(
-        "[ProcessorState - release_buffer] acquiring lock for index {}...",
-        buffer_index);
-    std::lock_guard<std::mutex> lock(buffer_index_mutex);
-    LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index {}...",
-              buffer_index);
-    for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      max_end_seq_in_buffers =
-          std::max(max_end_seq_in_buffers, buffers[i].end_seq);
-    }
-
-    buffers[buffer_index].start_seq =
+  __attribute__((hot)) void release_buffer(const int buffer_index) {
+    // LOG_INFO("[ProcessorState] Releasing buffer with index {}",
+    // buffer_index);
+    //  This is called to let the processor know that the buffer has been
+    //  copied to the GPU and now can be overwritten.
+    unsigned long long max_end_seq_in_buffers =
+        global_max_end_seq.load(std::memory_order_relaxed);
+    const unsigned long long new_start =
         max_end_seq_in_buffers + 1 * NR_BETWEEN_SAMPLES;
-    buffers[buffer_index].end_seq =
-        buffers[buffer_index].start_seq +
-        (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-    LOG_DEBUG("[ProcessorState - release_buffer] filling arrivals as false for "
-              "buffer {}...",
-              buffer_index);
-    std::fill_n((bool *)d_samples[buffer_index]->arrivals,
-                T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
-                    T::NR_FPGA_SOURCES,
-                false);
-    LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index {} "
-              "with seq {}",
-              buffer_index, buffers[buffer_index].start_seq);
+    const unsigned long long new_end =
+        new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+    // This is necessary to avoid multiple GPU threads competing / racing.
+    // LOG_DEBUG(
+    //    "[ProcessorState - release_buffer] acquiring lock for index {}...",
+    //    buffer_index);
+    {
+      std::lock_guard<std::mutex> lock(buffer_index_mutex);
+      // LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index
+      // {}...",
+      //           buffer_index);
+      // for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+      //  max_end_seq_in_buffers =
+      //      std::max(max_end_seq_in_buffers, buffers[i].end_seq);
+      //}
+      const int buf_idx = buffer_index;
+      auto &buffer = buffers[buf_idx];
+      buffer.start_seq = new_start;
+      buffer.end_seq = new_end;
+      global_max_end_seq.store(new_end, std::memory_order_release);
+      // LOG_DEBUG("[ProcessorState - release_buffer] filling arrivals as false
+      // for "
+      //           "buffer {}...",
+      //           buffer_index);
+      std::memset(d_samples[buf_idx]->arrivals, 0,
+                  T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
+                      T::NR_FPGA_SOURCES * sizeof(bool));
+      // LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index
+      // {} "
+      //           "with seq {}",
+      //           buffer_index, buffers[buffer_index].start_seq);
 
-    buffers[buffer_index].is_ready = true;
-    buffer_ordering_queue.push({buffer_index, buffers[buffer_index].start_seq});
-    LOG_INFO("[ProcessorState] added buffer index {} back to queue with "
-             "start_seq {}",
-             buffer_index, buffers[buffer_index].start_seq);
+      buffer.is_ready = true;
+      buffer_ordering_queue.push({buf_idx, new_start});
+    }
+    buffer_available_cv.notify_one();
+    // LOG_INFO("[ProcessorState] added buffer index {} back to queue with "
+    //          "start_seq {}",
+    //          buffer_index, buffers[buffer_index].start_seq);
   };
-
-  void
+  __attribute__((hot)) void
   advance_to_next_buffer(const unsigned long long current_buffer_start_seq) {
 
     // Move to next buffer
     // This is not necessarily the next buffer as the buffers can be
     // updated in any order. This will be the buffer that has the next
     // highest start_seq.
-    LOG_INFO("advancing to next buffer...");
-    {
-      while (buffer_ordering_queue.empty()) {
-        LOG_INFO("waiting for buffer to become available...");
-      }
-      std::lock_guard<std::mutex> lock(buffer_index_mutex);
-      BufferOrder b = buffer_ordering_queue.top();
-      buffer_ordering_queue.pop();
-      LOG_INFO("Current buffer start seq is {}", current_buffer_start_seq);
-      current_buffer = b.index;
-    }
+    // LOG_INFO("advancing to next buffer...");
+    BufferOrder b;
+    std::unique_lock<std::mutex> lock(buffer_index_mutex);
+    buffer_available_cv.wait(lock,
+                             [this] { return !buffer_ordering_queue.empty(); });
+    b = buffer_ordering_queue.top();
+    buffer_ordering_queue.pop();
+    lock.unlock();
+    // LOG_INFO("Current buffer start seq is {}", current_buffer_start_seq);
+    current_buffer = b.index;
 
-    LOG_INFO(
-        "next current_buffer is {} and has start_seq {} and is it ready? {}",
-        current_buffer, buffers[current_buffer].start_seq,
-        buffers[current_buffer].is_ready);
+    // LOG_INFO(
+    //     "next current_buffer is {} and has start_seq {} and is it ready? {}",
+    //     current_buffer, buffers[current_buffer].start_seq,
+    //     buffers[current_buffer].is_ready);
 
     // this is kinda assuming there's an async callback that will
     // ready the buffer after the data has been transferred out.
     // This async callback will come from the GPUPipeline class.
-    while (!buffers[current_buffer].is_ready) {
-      LOG_INFO("Waiting for buffer to be ready...");
-    }
-
     // Reset new current buffer
     // This is just NR_CHANNELS_DEF booleans that tell us if the current
     // buffer has all the data it needs.
-    std::memset(std::begin(buffers[current_buffer].is_populated), (int)false,
-                T::NR_CHANNELS);
+    buffers[current_buffer].is_populated.reset();
     // Set modified to true so that all channels get checked on next
     // completion check in case there are packets that went ahead.
     std::fill(modified_since_last_completion_check.begin(),
               modified_since_last_completion_check.end(), true);
-    LOG_INFO(
-        "Current buffer is all complete. Moving to next buffer which is #{}",
-        current_buffer);
-    LOG_INFO("New buffer starts at packet {} and ends at {}",
-             buffers[current_buffer].start_seq,
-             buffers[current_buffer].end_seq);
+    //  LOG_INFO(
+    //      "Current buffer is all complete. Moving to next buffer which is
+    //      #{}", current_buffer);
+    //  LOG_INFO("New buffer starts at packet {} and ends at {}",
+    //           buffers[current_buffer].start_seq,
+    //           buffers[current_buffer].end_seq);
   }
 
   void check_buffer_completion() {
 
-    if (!buffers_initialized) {
-      return;
-    }
+    const int buf_idx = current_buffer;
+    auto &buffer = buffers[buf_idx];
+    const unsigned long long end_seq = buffer.end_seq;
 
     for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
-      if (buffers[current_buffer].is_populated[channel] ||
+      if (buffer.is_populated[channel] ||
           !modified_since_last_completion_check[channel]) {
         continue;
       }
-      LOG_INFO("Check if buffers are complete for channel {}", channel);
-
-      if (std::all_of(std::begin(latest_packet_received[channel]),
-                      std::end(latest_packet_received[channel]),
-                      [this](unsigned long long x) {
-                        return x >= buffers[current_buffer].end_seq;
-                      })) {
-        buffers[current_buffer].is_populated[channel] = true;
-        LOG_INFO("Buffer is complete for channel {}", channel);
-      } else {
-        LOG_INFO("Buffer is not complete for channel {} as end_seq is {} and "
-                 "latest_packet_receives are:",
-                 channel, buffers[current_buffer].end_seq);
-        for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
-          LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
-                   latest_packet_received[channel][check]);
+      // LOG_INFO("Check if buffers are complete for channel {}", channel);
+      bool all_fpgas_complete = true;
+      for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
+        // we wait for halfway through the next buffer to be complete to avoid
+        // missing out of order packets.
+        if (latest_packet_received[channel][fpga] <
+            end_seq + NR_BETWEEN_SAMPLES / 2) {
+          all_fpgas_complete = false;
+          break;
         }
       }
+      if (all_fpgas_complete) {
+        buffer.is_populated[channel] = true;
+      }
+      // LOG_INFO("Buffer is complete for channel {}", channel);
+      // else {
+      //  LOG_INFO("Buffer is not complete for channel {} as end_seq is {} and "
+      //          "latest_packet_receives are:",
+      //         channel, buffers[current_buffer].end_seq);
+      // for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
+      //   LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
+      //            latest_packet_received[channel][check]);
+      // }
+      // }
       modified_since_last_completion_check[channel] = false;
     }
   };
 
-  void process_packets() {
+  __attribute__((hot)) void process_packets() {
 
-    using clock = std::chrono::high_resolution_clock;
-    auto cpu_start = clock::now();
-    auto cpu_end = clock::now();
+    // using clock = std::chrono::high_resolution_clock;
+    // auto cpu_start = clock::now();
+    // auto cpu_end = clock::now();
     LOG_INFO("Processor thread started");
     int current_read_index;
-    bool from_queue = false;
-    constexpr int num_loops_before_completion_check = 50;
-    int loops_since_completion_check = 0;
-    int new_read_index = 0;
-    while (running) {
-      current_read_index = -1;
-      from_queue = false;
+    constexpr int num_loops_before_completion_check = 2;
+    int packets_until_completion_check = num_loops_before_completion_check;
+    current_read_index = read_index.load(std::memory_order_relaxed);
 
-      while (true) {
-        current_read_index = read_index.load(std::memory_order_relaxed);
+    constexpr int REGULAR_BATCH_SIZE = 40;
+    while (running.load(std::memory_order_relaxed)) [[likely]] {
+      int regular_count = 0;
+      const int current_write_index =
+          write_index.load(std::memory_order_acquire);
 
-        if (current_read_index != write_index.load(std::memory_order_acquire)) {
-          break;
+      while (current_read_index != current_write_index &&
+             regular_count < REGULAR_BATCH_SIZE) [[likely]] {
+        typename T::PacketEntryType *entry = d_packet_data[current_read_index];
+
+        const int next_idx = (current_read_index + 1) % RING_BUFFER_SIZE;
+        __builtin_prefetch(d_packet_data[next_idx], 0, 3);
+        __builtin_prefetch(d_packet_data[next_idx]->data, 0, 3);
+        __builtin_prefetch(d_packet_data[next_idx]->data + 12, 0, 3);
+        __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
+
+        if (entry->length > 0 && !entry->processed) [[likely]] {
+          process_packet_data(entry, current_read_index);
         }
-        if (future_packet_queue.size()) {
-          current_read_index = future_packet_queue.front();
-          LOG_DEBUG("Reading from future packet queue...position {}",
-                    current_read_index);
-          from_queue = true;
-          future_packet_queue.pop();
-          break;
-        }
-
-        if (!running) {
-          // Will want to update this to finish buffer that's been processed.
-          return;
-        }
-      }
-      typename T::PacketEntryType *entry = d_packet_data[current_read_index];
-
-      if (entry->length == 0 || entry->processed == true) {
-        // if we don't increment the read index here it can get stuck!
-        new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
-        read_index.store(new_read_index, std::memory_order_release);
-        LOG_DEBUG("New read index is {}", new_read_index);
-        continue;
+        regular_count++;
+        current_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
       }
 
-      process_packet_data(entry);
-      if (!from_queue) {
-        new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
-        read_index.store(new_read_index, std::memory_order_release);
-        LOG_DEBUG("New read index is {}", new_read_index);
-      }
-      if (loops_since_completion_check > num_loops_before_completion_check) {
-        cpu_start = clock::now();
+      read_index.store(current_read_index, std::memory_order_release);
+
+      if (--packets_until_completion_check == 0) {
+        // Before checking buffer completion drain any packets from the
+        // queue that should be in this buffer
+        unsigned long long current_buffer_end_seq =
+            buffers[current_buffer].end_seq;
+        {
+          std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
+                                            std::try_to_lock);
+          if (lock.owns_lock()) {
+            while (!future_packet_queue.empty()) {
+              auto pkt = future_packet_queue.top();
+              if (pkt.packet_num > current_buffer_end_seq) {
+                break;
+              }
+              future_packet_queue.pop();
+              lock.unlock();
+              auto *entry = d_packet_data[pkt.index];
+              if (entry->length > 0 && !entry->processed) {
+                process_packet_data(entry, pkt.index);
+              }
+              lock.lock();
+            }
+          }
+        }
+        //    cpu_start = clock::now();
         handle_buffer_completion();
-        cpu_end = clock::now();
-
-        LOG_DEBUG("CPU time for buffer completion check: {} us",
-                  std::chrono::duration_cast<std::chrono::microseconds>(
-                      cpu_end - cpu_start)
-                      .count());
+        //  cpu_end = clock::now();
+        packets_until_completion_check = num_loops_before_completion_check;
+        // LOG_DEBUG("CPU time for buffer completion check: {} us",
+        //           std::chrono::duration_cast<std::chrono::microseconds>(
+        //               cpu_end - cpu_start)
+        //               .count());
       }
-      loops_since_completion_check += 1;
     }
     // shut down pipeline thread
     buffer_ready_for_pipeline.notify_all();
     LOG_INFO("Processor thread exiting");
   };
 
-  void handle_buffer_completion(bool force_flush = false) {
+  __attribute__((hot)) void handle_buffer_completion(bool force_flush = false) {
     using clock = std::chrono::high_resolution_clock;
     auto cpu_start = clock::now();
     auto cpu_end = clock::now();
-    LOG_INFO("Checking buffer completion...");
+    // LOG_INFO("Checking buffer completion...");
     check_buffer_completion();
-    if (std::all_of(buffers[current_buffer].is_populated.begin(),
-                    buffers[current_buffer].is_populated.end(),
-                    [](bool i) { return i; }) ||
-        force_flush) {
-      LOG_INFO("Buffer is complete - passing to output pipeline...");
-      // Send off data to be processed by CUDA pipeline.
-      // Then advance to next buffer and keep iterating.
-      if (pipeline_ == nullptr) {
-        throw std::logic_error(
-            "Pipeline has not been set. Ensure that set_pipeline has been "
-            "called on ProcessorState class.");
-      }
+    auto &buffer = buffers[current_buffer];
+    int current_buf = current_buffer;
 
-      buffers[current_buffer].is_ready = false;
-      cpu_start = clock::now();
-      LOG_INFO("Zeroing missing packets...");
-      d_samples[current_buffer]->zero_missing_packets();
-      int num_missing_packets =
-          d_samples[current_buffer]->get_num_missing_packets();
-      packets_missing += num_missing_packets;
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for zeroing packets: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
-      // order here is important. As the pipeline can async update
-      // the start/end seqs we need to capture the
-      // start_seq, then execute the pipeline, then advance using
-      // the saved copy of the start_seq.
-      const unsigned long long current_buffer_start_seq =
-          buffers[current_buffer].start_seq;
-      LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
-      {
-        if (!synchronous_pipeline) {
-          std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
-          buffers_ready_for_pipeline.push(current_buffer);
-          buffer_ready_for_pipeline.notify_one();
-        } else {
-          pipeline_->execute_pipeline(d_samples[current_buffer]);
-          pipeline_runs_queued += 1;
-        }
-      }
-      cpu_start = clock::now();
-      advance_to_next_buffer(current_buffer_start_seq);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for advancing to next buffer: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
-      LOG_INFO("Done!");
+    bool is_complete = force_flush || buffer.is_populated.all();
+    if (!is_complete) [[likely]] {
+      return;
     }
+    // LOG_INFO("Buffer is complete - passing to output pipeline...");
+    //  Send off data to be processed by CUDA pipeline.
+    //  Then advance to next buffer and keep iterating.
+    if (pipeline_ == nullptr) [[unlikely]] {
+      throw std::logic_error(
+          "Pipeline has not been set. Ensure that set_pipeline has been "
+          "called on ProcessorState class.");
+    }
+
+    buffer.is_ready = false;
+    cpu_start = clock::now();
+    // LOG_INFO("Zeroing missing packets...");
+    d_samples[current_buf]->zero_missing_packets();
+    packets_missing += d_samples[current_buf]->get_num_missing_packets();
+    cpu_end = clock::now();
+    // LOG_DEBUG("CPU time for zeroing packets: {} us",
+    //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
+    //           -
+    //                                                                 cpu_start)
+    //               .count());
+    //  order here is important. As the pipeline can async update
+    //  the start/end seqs we need to capture the
+    //  start_seq, then execute the pipeline, then advance using
+    //  the saved copy of the start_seq.
+    const unsigned long long current_buffer_start_seq = buffer.start_seq;
+    // LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
+    {
+      if (!synchronous_pipeline) [[likely]] {
+        {
+          std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
+          buffers_ready_for_pipeline.push(current_buf);
+        }
+        buffer_ready_for_pipeline.notify_one();
+      } else [[unlikely]] {
+        pipeline_->execute_pipeline(d_samples[current_buf]);
+        pipeline_runs_queued += 1;
+      }
+    }
+    cpu_start = clock::now();
+    advance_to_next_buffer(current_buffer_start_seq);
+    cpu_end = clock::now();
+    // LOG_DEBUG("CPU time for advancing to next buffer: {} us",
+    //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
+    //           -
+    //                                                                 cpu_start)
+    //               .count());
+    // LOG_INFO("Done!");
   };
 
   void shutdown() {
@@ -593,6 +637,15 @@ private:
     }
   };
 
+  struct PacketOrder {
+    int index;
+    unsigned long long packet_num;
+
+    bool operator>(const PacketOrder &other) const {
+      return packet_num > other.packet_num;
+    }
+  };
+
   std::queue<size_t> buffers_ready_for_pipeline;
   mutable std::mutex buffers_ready_for_pipeline_lock;
   std::condition_variable buffer_ready_for_pipeline;
@@ -600,11 +653,21 @@ private:
   // The read pointer moves on but keep these as things to process.
   // They will not be overwritten by the write pointer as it checks whether or
   // not they have been processed.
-  std::queue<size_t> future_packet_queue;
+  std::priority_queue<PacketOrder, std::vector<PacketOrder>,
+                      std::greater<PacketOrder>>
+      future_packet_queue;
+  std::mutex future_packet_queue_mutex;
   std::array<bool, T::NR_CHANNELS> modified_since_last_completion_check;
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
       buffer_ordering_queue;
+  std::mutex buffer_ordering_mutex;
+  std::condition_variable buffer_available_cv;
+  std::atomic<unsigned long long> global_max_end_seq{0};
+  std::once_flag buffer_init_flag;
+
+  std::mutex fpga_mutex;
+  std::mutex latest_packet_mutex;
 };
 
 class PacketInput {

@@ -45,11 +45,11 @@
 #)
 #target_link_libraries(packet_processor PRIVATE spatial CUDA::cudart cuda cutensor)
 
-add_executable(
-  packet_processor_live
-  ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cu
-)
-target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
+#add_executable(
+#  packet_processor_live
+#  ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cu
+#)
+#target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
 
 set(NUMBER_PACKETS_TO_CORRELATE 16 CACHE STRING "Number of packets to correlate while benchmarking")
 set(NUMBER_BEAMS 10 CACHE STRING "Number of beams to correlate while benchmarking")
