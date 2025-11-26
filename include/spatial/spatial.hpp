@@ -168,7 +168,9 @@ public:
     }
     const int current_buf = current_buffer;
     const uint64_t sample_count = pkt.sample_count;
-    if (sample_count > global_max) {
+    // on the first run global_max will not be set initially so will be 0.
+    // We don't want it to seize up on this.
+    if (sample_count > global_max && global_max > 0) {
       std::lock_guard lock(future_packet_queue_mutex);
       future_packet_queue.push({current_read_index, sample_count});
       return;

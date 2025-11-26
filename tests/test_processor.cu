@@ -392,11 +392,10 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   add_packet(20000, 0, 1);
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion();
-  // we need to do this an additional time because of the fact that
-  // it only is good to go if the sample_num is halfway into the next
-  // buffer to deal with missing packets.
-  processor_state->handle_buffer_completion();
-  EXPECT_EQ(processor_state->packets_missing, 20);
+  // there will be two buffers worth missing. The third buffer from above was
+  // full but hadn't yet run because it waits until halfway through the next
+  // buffer.
+  EXPECT_EQ(processor_state->packets_missing, 2 * 20);
 
   int16_t *scales_last_packet =
       (int16_t *)mock_pipeline->last_packet_data->get_scales_ptr();
