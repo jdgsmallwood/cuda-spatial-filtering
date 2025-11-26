@@ -291,16 +291,6 @@ TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
   EXPECT_EQ(processor_state->packets_processed, 1);
 }
 
-TEST_F(ProcessorStateTest, BufferInitializationTest) {
-  EXPECT_FALSE(processor_state->buffers_initialized);
-
-  add_packet(1000, 0, 0);
-
-  processor_state->process_all_available_packets();
-
-  EXPECT_TRUE(processor_state->buffers_initialized);
-}
-
 TEST_F(ProcessorStateTest, FillOneBufferTest) {
   const uint64_t start_sample = 1000;
 
@@ -369,7 +359,6 @@ TEST_F(ProcessorStateTest, DiscardOldPacketsTest) {
   // Initialize with a packet at sample 1000
   add_packet(1000, 0, 0);
   processor_state->process_all_available_packets();
-  EXPECT_TRUE(processor_state->buffers_initialized);
 
   // Try to add a packet that's too old (before current buffer)
   add_packet(500, 0, 0);
@@ -402,6 +391,10 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   add_packet(20000, 0, 0);
   add_packet(20000, 0, 1);
   processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion();
+  // we need to do this an additional time because of the fact that
+  // it only is good to go if the sample_num is halfway into the next
+  // buffer to deal with missing packets.
   processor_state->handle_buffer_completion();
   EXPECT_EQ(processor_state->packets_missing, 20);
 
@@ -463,7 +456,7 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
   }
 
   processor_state->process_all_available_packets();
-  processor_state->handle_buffer_completion();
+  processor_state->handle_buffer_completion(true);
   EXPECT_EQ(processor_state->packets_missing, 0);
 
   typename TestMultipleFPGAConfig::InputPacketSamplesType *samples =

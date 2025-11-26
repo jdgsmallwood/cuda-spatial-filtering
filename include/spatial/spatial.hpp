@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 // #include <sys/socket.h>
 #include <atomic>
+#include <barrier>
 #include <bitset>
 #include <chrono>
 #include <mutex>
@@ -388,39 +389,47 @@ public:
 
   void check_buffer_completion() {
 
-    const int buf_idx = current_buffer;
-    auto &buffer = buffers[buf_idx];
-    const unsigned long long end_seq = buffer.end_seq;
-
-    for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
-      if (buffer.is_populated[channel] ||
-          !modified_since_last_completion_check[channel]) {
+    for (int i = 0; i < NR_INPUT_BUFFERS; ++i) {
+      const int buf_idx = i;
+      auto &buffer = buffers[buf_idx];
+      if (!buffer.is_ready) {
         continue;
       }
-      // LOG_INFO("Check if buffers are complete for channel {}", channel);
-      bool all_fpgas_complete = true;
-      for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
-        // we wait for halfway through the next buffer to be complete to avoid
-        // missing out of order packets.
-        if (latest_packet_received[channel][fpga] <
-            end_seq + NR_BETWEEN_SAMPLES / 2) {
-          all_fpgas_complete = false;
-          break;
+      const unsigned long long end_seq = buffer.end_seq;
+
+      for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
+        if (buffer.is_populated[channel] ||
+            !modified_since_last_completion_check[channel]) {
+          continue;
         }
+        // LOG_INFO("Check if buffers are complete for channel {}", channel);
+        bool all_fpgas_complete = true;
+        for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
+          // we wait for halfway through the next buffer to be complete to avoid
+          // missing out of order packets.
+          if (latest_packet_received[channel][fpga] <
+              end_seq + NR_BETWEEN_SAMPLES / 2) {
+            all_fpgas_complete = false;
+            break;
+          }
+        }
+        if (all_fpgas_complete) {
+          buffer.is_populated[channel] = true;
+        }
+        // LOG_INFO("Buffer is complete for channel {}", channel);
+        // else {
+        //  LOG_INFO("Buffer is not complete for channel {} as end_seq is {} and
+        //  "
+        //          "latest_packet_receives are:",
+        //         channel, buffers[current_buffer].end_seq);
+        // for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
+        //   LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
+        //            latest_packet_received[channel][check]);
+        // }
+        // }
       }
-      if (all_fpgas_complete) {
-        buffer.is_populated[channel] = true;
-      }
-      // LOG_INFO("Buffer is complete for channel {}", channel);
-      // else {
-      //  LOG_INFO("Buffer is not complete for channel {} as end_seq is {} and "
-      //          "latest_packet_receives are:",
-      //         channel, buffers[current_buffer].end_seq);
-      // for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
-      //   LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
-      //            latest_packet_received[channel][check]);
-      // }
-      // }
+    }
+    for (int channel = 0; channel < T::NR_CHANNELS; channel++) {
       modified_since_last_completion_check[channel] = false;
     }
   };
@@ -431,33 +440,64 @@ public:
     // auto cpu_start = clock::now();
     // auto cpu_end = clock::now();
     LOG_INFO("Processor thread started");
+    start_processing_threads();
     int current_read_index;
-    constexpr int num_loops_before_completion_check = 2;
+    constexpr int num_loops_before_completion_check = 1;
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
-    constexpr int REGULAR_BATCH_SIZE = 40;
-    while (running.load(std::memory_order_relaxed)) [[likely]] {
-      int regular_count = 0;
+    constexpr int REGULAR_BATCH_SIZE = 200;
+    while (running.load(std::memory_order_acquire)) [[likely]] {
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
 
-      while (current_read_index != current_write_index &&
-             regular_count < REGULAR_BATCH_SIZE) [[likely]] {
-        typename T::PacketEntryType *entry = d_packet_data[current_read_index];
-
-        const int next_idx = (current_read_index + 1) % RING_BUFFER_SIZE;
-        __builtin_prefetch(d_packet_data[next_idx], 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data, 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data + 12, 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
-
-        if (entry->length > 0 && !entry->processed) [[likely]] {
-          process_packet_data(entry, current_read_index);
-        }
-        regular_count++;
-        current_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
+      int slice_end = current_read_index;
+      for (auto i = 0; i < REGULAR_BATCH_SIZE; ++i) {
+        if (slice_end == current_write_index)
+          break;
+        slice_end = (slice_end + 1) % RING_BUFFER_SIZE;
       }
+
+      int slice_len = (slice_end - current_read_index + RING_BUFFER_SIZE) %
+                      RING_BUFFER_SIZE;
+      int per_worker = (slice_len + WORKER_COUNT - 1) / WORKER_COUNT;
+      int start = current_read_index;
+
+      {
+        std::lock_guard<std::mutex> lock(work_mutex);
+        int workers_with_tasks = 0;
+        for (auto i = 0; i < WORKER_COUNT; ++i) {
+          int worker_start = start;
+          int worker_end = start;
+
+          for (int j = 0; j < per_worker; ++j) {
+            if (worker_end == slice_end)
+              break;
+            worker_end = (worker_end + 1) % RING_BUFFER_SIZE;
+          }
+
+          if (worker_start == worker_end) {
+            worker_has_task[i].store(false, std::memory_order_release);
+          } else {
+            worker_tasks[i] = {worker_start, worker_end};
+            worker_has_task[i].store(true, std::memory_order_release);
+            worker_completed_task[i].store(false, std::memory_order_release);
+            workers_with_tasks++;
+          }
+          start = worker_end;
+        }
+        num_workers_with_tasks.store(workers_with_tasks,
+                                     std::memory_order_release);
+      }
+      work_cv.notify_all();
+      {
+        std::unique_lock<std::mutex> lock(work_mutex);
+        work_cv.wait(lock, [this] {
+          return !running.load() || num_workers_with_tasks.load() == 0;
+        });
+      }
+
+      current_read_index = slice_end;
 
       read_index.store(current_read_index, std::memory_order_release);
 
@@ -497,8 +537,58 @@ public:
     }
     // shut down pipeline thread
     buffer_ready_for_pipeline.notify_all();
+    stop_processing_threads();
     LOG_INFO("Processor thread exiting");
   };
+
+  __attribute__((hot)) void worker_thread_fn(int worker_id) {
+    std::cout << "Starting worker with id " << worker_id << std::endl;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(worker_id, &cpuset);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+
+    while (running.load(std::memory_order_acquire)) {
+      std::unique_lock<std::mutex> lock(work_mutex);
+      work_cv.wait(lock, [&] {
+        return !running.load() || worker_has_task[worker_id].load();
+      });
+      if (!running.load(std::memory_order_acquire)) {
+        std::cout << "Worker " << worker_id << " exiting at the top\n";
+        break;
+      }
+
+      auto [start, end] = worker_tasks[worker_id];
+      lock.unlock();
+      // std::cout << "Worker with id " << worker_id
+      //           << " task started with start " << start << " and end " <<
+      //           end
+      //           << std::endl;
+      int idx = start;
+
+      while (idx != end) {
+
+        auto *entry = d_packet_data[idx];
+
+        const int next_idx = (idx + 1) % RING_BUFFER_SIZE;
+        __builtin_prefetch(d_packet_data[next_idx], 0, 3);
+        __builtin_prefetch(d_packet_data[next_idx]->data, 0, 3);
+        __builtin_prefetch(d_packet_data[next_idx]->data + 12, 0, 3);
+        __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
+
+        if (entry->length > 0 && !entry->processed) {
+          process_packet_data(entry, idx);
+        }
+        idx = (idx + 1) % RING_BUFFER_SIZE;
+      }
+
+      lock.lock();
+      worker_completed_task[worker_id].store(true);
+      worker_has_task[worker_id].store(false);
+      num_workers_with_tasks.fetch_sub(1);
+      work_cv.notify_all();
+    }
+  }
 
   __attribute__((hot)) void handle_buffer_completion(bool force_flush = false) {
     using clock = std::chrono::high_resolution_clock;
@@ -508,7 +598,6 @@ public:
     check_buffer_completion();
     auto &buffer = buffers[current_buffer];
     int current_buf = current_buffer;
-
     bool is_complete = force_flush || buffer.is_populated.all();
     if (!is_complete) [[likely]] {
       return;
@@ -554,6 +643,7 @@ public:
     cpu_start = clock::now();
     advance_to_next_buffer(current_buffer_start_seq);
     cpu_end = clock::now();
+
     // LOG_DEBUG("CPU time for advancing to next buffer: {} us",
     //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
     //           -
@@ -565,9 +655,11 @@ public:
   void shutdown() {
     {
       std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
+      std::lock_guard<std::mutex> lock_stop(work_mutex);
       running.store(0, std::memory_order_release);
     };
     buffer_ready_for_pipeline.notify_all();
+    work_cv.notify_all();
   };
 
   void pipeline_feeder() {
@@ -580,7 +672,6 @@ public:
       });
 
       if (running.load(std::memory_order_acquire) == 0) {
-        lock.unlock();
         break;
       }
       size_t buffer_index = buffers_ready_for_pipeline.front();
@@ -668,6 +759,34 @@ private:
 
   std::mutex fpga_mutex;
   std::mutex latest_packet_mutex;
+  static constexpr int WORKER_COUNT = 3;
+  struct WorkRange {
+    int start;
+    int end;
+  };
+
+  std::array<std::atomic<bool>, WORKER_COUNT> worker_has_task;
+  std::array<std::atomic<bool>, WORKER_COUNT> worker_completed_task;
+  std::array<WorkRange, WORKER_COUNT> worker_tasks;
+
+  std::mutex work_mutex;
+  std::condition_variable work_cv;
+  std::atomic<int> num_workers_with_tasks = 0;
+
+  std::vector<std::thread> workers;
+
+  void start_processing_threads() {
+    for (int i = 0; i < WORKER_COUNT; i++) {
+      worker_has_task[i].store(false);
+      workers.emplace_back(&ProcessorState::worker_thread_fn, this, i);
+    };
+  };
+  void stop_processing_threads() {
+    work_cv.notify_all();
+    for (auto &t : workers) {
+      t.join();
+    }
+  }
 };
 
 class PacketInput {

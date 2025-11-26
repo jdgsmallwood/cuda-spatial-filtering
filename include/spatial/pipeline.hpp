@@ -53,7 +53,7 @@ static void release_buffer_host_func(void *data) {
 
   auto *ctx = static_cast<BufferReleaseContext *>(data);
   if (!ctx->dummy_run) {
-    LOG_DEBUG("Releasing buffer #{}", ctx->buffer_index);
+    // LOG_DEBUG("Releasing buffer #{}", ctx->buffer_index);
     ctx->state->release_buffer(ctx->buffer_index);
   }
   delete ctx;
@@ -289,7 +289,8 @@ public:
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
                                  .dummy_run = dummy_run};
-    CUDA_CHECK(cudaLaunchHostFunc(streams[current_buffer],
+    // do in separate thread - no need to tie up GPU pipeline.
+    CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
     cpu_end = clock::now();
     LOG_DEBUG(
@@ -568,7 +569,7 @@ public:
               << ", NR_BLOCKS_FOR_CORRELATION: " << NR_BLOCKS_FOR_CORRELATION
               << ", NR_RECEIVERS_PER_BLOCK: "
               << T::NR_PADDED_RECEIVERS_PER_BLOCK << std::endl;
-    streams.resize(num_buffers);
+    streams.resize(2 * num_buffers);
     d_weights.resize(num_buffers);
     d_weights_updated.resize(num_buffers);
     d_weights_permuted.resize(num_buffers);
@@ -593,6 +594,8 @@ public:
     d_eigenvalues.resize(num_buffers);
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
+      CUDA_CHECK(cudaStreamCreateWithFlags(&streams[num_buffers + i],
+                                           cudaStreamNonBlocking));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
                             sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_scaled[i],
