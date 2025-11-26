@@ -93,25 +93,27 @@ int main(int argc, char *argv[]) {
 
   spatial::Logger::set(app_logger);
 
-  int num_buffers = 2;
+  constexpr int num_buffers = 3;
+  constexpr int nr_fpga_sources = 4;
   constexpr size_t num_packet_buffers = 24;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
-  constexpr int nr_lambda_receivers = 10;
-  constexpr int nr_lambda_padded_receivers = 32;
+  constexpr int nr_lambda_receivers_per_packet = 10;
+  constexpr int nr_lambda_receivers =
+      nr_lambda_receivers_per_packet * nr_fpga_sources;
+  constexpr int nr_lambda_padded_receivers = 64;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
-  constexpr int nr_lambda_receivers_per_block = 32;
+  constexpr int nr_lambda_receivers_per_block = 64;
   constexpr int nr_lambda_packets_for_correlation =
       256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_fpga_sources = 1;
   constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 100000000;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
-                   nr_lambda_polarizations, nr_lambda_receivers,
+                   nr_lambda_polarizations, nr_lambda_receivers_per_packet,
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
                    nr_correlation_blocks_to_integrate>;
@@ -172,7 +174,7 @@ int main(int argc, char *argv[]) {
   std::string ifname = "enp216s0np0";
   //  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
   // LibpcapIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  PCAPPacketCapture capture(pcap_filename, true);
+  PCAPMultiFPGAPacketCapture capture(pcap_filename, true, nr_fpga_sources);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });

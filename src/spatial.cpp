@@ -460,6 +460,35 @@ PCAPPacketCapture::~PCAPPacketCapture() {
   LOG_INFO("PCAPPacketCapture destructor called");
 }
 
+PCAPMultiFPGAPacketCapture::PCAPMultiFPGAPacketCapture(
+    const std::string &pcap_filename, bool loop, int num_fpgas,
+    uint64_t seq_jump_per_packet)
+    : filename_(pcap_filename), loop_(loop), num_fpgas(num_fpgas),
+      seq_jump_per_packet_(seq_jump_per_packet) {
+
+  // Verify file exists and can be opened
+  char errbuf[PCAP_ERRBUF_SIZE];
+  pcap_t *test_handle = pcap_open_offline(filename_.c_str(), errbuf);
+  if (!test_handle) {
+    throw std::runtime_error("Failed to open PCAP file '" + filename_ +
+                             "': " + std::string(errbuf));
+  }
+  pcap_close(test_handle);
+
+  LOG_INFO("PCAP file '{}' opened successfully", filename_);
+  if (loop_) {
+    LOG_INFO("Looping enabled - will replay file continuously");
+    if (seq_jump_per_packet_ > 0) {
+      LOG_INFO("Sequence numbers will be adjusted with jump of {} per packet",
+               seq_jump_per_packet_);
+    }
+  }
+}
+
+PCAPMultiFPGAPacketCapture::~PCAPMultiFPGAPacketCapture() {
+  LOG_INFO("PCAPMultiFPGAPacketCapture destructor called");
+}
+
 LibpcapIP6PacketCapture::LibpcapIP6PacketCapture(std::string &ifname, int port,
                                                  int buffer_size,
                                                  int recv_buffer_size)

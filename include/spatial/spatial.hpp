@@ -145,7 +145,7 @@ public:
   __attribute__((hot)) void copy_data_to_input_buffer_if_able(
       ProcessedPacket<typename T::PacketScaleStructure,
                       typename T::PacketDataStructure> &pkt,
-      const int current_read_index) {
+      const int current_read_index, const unsigned long long global_max) {
 
     size_t fpga_index;
     {
@@ -168,7 +168,7 @@ public:
     }
     const int current_buf = current_buffer;
     const uint64_t sample_count = pkt.sample_count;
-    if (sample_count > global_max_end_seq.load(std::memory_order_relaxed)) {
+    if (sample_count > global_max) {
       std::lock_guard lock(future_packet_queue_mutex);
       future_packet_queue.push({current_read_index, sample_count});
       return;
@@ -229,10 +229,12 @@ public:
   void process_all_available_packets() {
     // This exists mainly for testing purposes
     // to allow us to add some packets then process them all.
+    const unsigned long long global_max =
+        global_max_end_seq.load(std::memory_order_acquire);
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
-      process_packet_data(d_packet_data[current_read_index],
-                          current_read_index);
+      process_packet_data(d_packet_data[current_read_index], current_read_index,
+                          global_max);
       int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
       read_index.store(new_read_index, std::memory_order_release);
     }
@@ -262,7 +264,8 @@ public:
 
   __attribute__((hot)) void
   process_packet_data(typename T::PacketEntryType *pkt,
-                      const int current_read_index) {
+                      const int current_read_index,
+                      const unsigned long long global_max) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
@@ -286,7 +289,7 @@ public:
       LOG_INFO("Initializing buffers as this is the first packet...");
       initialize_buffers(parsed.sample_count);
     });
-    copy_data_to_input_buffer_if_able(parsed, current_read_index);
+    copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
     if (*parsed.original_packet_processed) [[likely]] {
       packets_processed.fetch_add(1);
     }
@@ -301,18 +304,19 @@ public:
     // buffer_index);
     //  This is called to let the processor know that the buffer has been
     //  copied to the GPU and now can be overwritten.
-    unsigned long long max_end_seq_in_buffers =
-        global_max_end_seq.load(std::memory_order_relaxed);
-    const unsigned long long new_start =
-        max_end_seq_in_buffers + 1 * NR_BETWEEN_SAMPLES;
-    const unsigned long long new_end =
-        new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
     // This is necessary to avoid multiple GPU threads competing / racing.
     // LOG_DEBUG(
     //    "[ProcessorState - release_buffer] acquiring lock for index {}...",
     //    buffer_index);
     {
       std::lock_guard<std::mutex> lock(buffer_index_mutex);
+
+      unsigned long long max_end_seq_in_buffers =
+          global_max_end_seq.load(std::memory_order_acquire);
+      const unsigned long long new_start =
+          max_end_seq_in_buffers + 1 * NR_BETWEEN_SAMPLES;
+      const unsigned long long new_end =
+          new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
       // LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index
       // {}...",
       //           buffer_index);
@@ -332,6 +336,7 @@ public:
       std::memset(d_samples[buf_idx]->arrivals, 0,
                   T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
                       T::NR_FPGA_SOURCES * sizeof(bool));
+      buffer.is_populated.reset();
       // LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index
       // {} "
       //           "with seq {}",
@@ -345,8 +350,7 @@ public:
     //          "start_seq {}",
     //          buffer_index, buffers[buffer_index].start_seq);
   };
-  __attribute__((hot)) void
-  advance_to_next_buffer(const unsigned long long current_buffer_start_seq) {
+  __attribute__((hot)) int advance_to_next_buffer() {
 
     // Move to next buffer
     // This is not necessarily the next buffer as the buffers can be
@@ -374,7 +378,7 @@ public:
     // Reset new current buffer
     // This is just NR_CHANNELS_DEF booleans that tell us if the current
     // buffer has all the data it needs.
-    buffers[current_buffer].is_populated.reset();
+    buffers[b.index].is_populated.reset();
     // Set modified to true so that all channels get checked on next
     // completion check in case there are packets that went ahead.
     std::fill(modified_since_last_completion_check.begin(),
@@ -385,18 +389,21 @@ public:
     //  LOG_INFO("New buffer starts at packet {} and ends at {}",
     //           buffers[current_buffer].start_seq,
     //           buffers[current_buffer].end_seq);
+    return b.index;
   }
 
-  void check_buffer_completion() {
+  void check_buffer_completion(std::vector<int> &buffers_complete) {
 
+    const int current_buf = current_buffer;
     for (int i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      const int buf_idx = i;
+      // i want current buffer to be the first one in the list to preserve
+      // ordering.
+      const int buf_idx = (current_buf + i) % NR_INPUT_BUFFERS;
       auto &buffer = buffers[buf_idx];
       if (!buffer.is_ready) {
         continue;
       }
       const unsigned long long end_seq = buffer.end_seq;
-
       for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
         if (buffer.is_populated[channel] ||
             !modified_since_last_completion_check[channel]) {
@@ -428,6 +435,9 @@ public:
         // }
         // }
       }
+      if (buffer.is_populated.all()) {
+        buffers_complete.push_back(buf_idx);
+      }
     }
     for (int channel = 0; channel < T::NR_CHANNELS; channel++) {
       modified_since_last_completion_check[channel] = false;
@@ -446,7 +456,7 @@ public:
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
-    constexpr int REGULAR_BATCH_SIZE = 200;
+    constexpr int REGULAR_BATCH_SIZE = 600;
     while (running.load(std::memory_order_acquire)) [[likely]] {
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
@@ -505,7 +515,7 @@ public:
         // Before checking buffer completion drain any packets from the
         // queue that should be in this buffer
         unsigned long long current_buffer_end_seq =
-            buffers[current_buffer].end_seq;
+            global_max_end_seq.load(std::memory_order_acquire);
         {
           std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
                                             std::try_to_lock);
@@ -519,7 +529,7 @@ public:
               lock.unlock();
               auto *entry = d_packet_data[pkt.index];
               if (entry->length > 0 && !entry->processed) {
-                process_packet_data(entry, pkt.index);
+                process_packet_data(entry, pkt.index, current_buffer_end_seq);
               }
               lock.lock();
             }
@@ -558,6 +568,9 @@ public:
         break;
       }
 
+      const unsigned long long global_max =
+          global_max_end_seq.load(std::memory_order_acquire);
+
       auto [start, end] = worker_tasks[worker_id];
       lock.unlock();
       // std::cout << "Worker with id " << worker_id
@@ -577,7 +590,7 @@ public:
         __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
 
         if (entry->length > 0 && !entry->processed) {
-          process_packet_data(entry, idx);
+          process_packet_data(entry, idx, global_max);
         }
         idx = (idx + 1) % RING_BUFFER_SIZE;
       }
@@ -591,59 +604,72 @@ public:
   }
 
   __attribute__((hot)) void handle_buffer_completion(bool force_flush = false) {
-    using clock = std::chrono::high_resolution_clock;
-    auto cpu_start = clock::now();
-    auto cpu_end = clock::now();
-    // LOG_INFO("Checking buffer completion...");
-    check_buffer_completion();
-    auto &buffer = buffers[current_buffer];
-    int current_buf = current_buffer;
-    bool is_complete = force_flush || buffer.is_populated.all();
-    if (!is_complete) [[likely]] {
-      return;
-    }
-    // LOG_INFO("Buffer is complete - passing to output pipeline...");
-    //  Send off data to be processed by CUDA pipeline.
-    //  Then advance to next buffer and keep iterating.
+
     if (pipeline_ == nullptr) [[unlikely]] {
       throw std::logic_error(
           "Pipeline has not been set. Ensure that set_pipeline has been "
           "called on ProcessorState class.");
     }
+    using clock = std::chrono::high_resolution_clock;
+    auto cpu_start = clock::now();
+    auto cpu_end = clock::now();
+    // LOG_INFO("Checking buffer completion...");
+    std::vector<int> buffers_complete;
+    check_buffer_completion(buffers_complete);
 
-    buffer.is_ready = false;
-    cpu_start = clock::now();
-    // LOG_INFO("Zeroing missing packets...");
-    d_samples[current_buf]->zero_missing_packets();
-    packets_missing += d_samples[current_buf]->get_num_missing_packets();
-    cpu_end = clock::now();
-    // LOG_DEBUG("CPU time for zeroing packets: {} us",
-    //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
-    //           -
-    //                                                                 cpu_start)
-    //               .count());
-    //  order here is important. As the pipeline can async update
-    //  the start/end seqs we need to capture the
-    //  start_seq, then execute the pipeline, then advance using
-    //  the saved copy of the start_seq.
-    const unsigned long long current_buffer_start_seq = buffer.start_seq;
-    // LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
-    {
-      if (!synchronous_pipeline) [[likely]] {
-        {
-          std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
-          buffers_ready_for_pipeline.push(current_buf);
-        }
-        buffer_ready_for_pipeline.notify_one();
-      } else [[unlikely]] {
-        pipeline_->execute_pipeline(d_samples[current_buf]);
-        pipeline_runs_queued += 1;
-      }
+    if (force_flush && buffers_complete.empty()) {
+      buffers_complete.push_back(current_buffer);
     }
-    cpu_start = clock::now();
-    advance_to_next_buffer(current_buffer_start_seq);
-    cpu_end = clock::now();
 
+    if (buffers_complete.empty()) {
+      return;
+    }
+
+    int current_buf = buffers_complete[0];
+    for (int i = 0; i < buffers_complete.size(); ++i) {
+      LOG_INFO("pipeline feeding {}", current_buf);
+      auto &buffer = buffers[current_buf];
+
+      if (std::find(buffers_complete.begin(), buffers_complete.end(),
+                    current_buf) == buffers_complete.end()) [[unlikely]] {
+        return;
+      }
+      // LOG_INFO("Buffer is complete - passing to output pipeline...");
+      //  Send off data to be processed by CUDA pipeline.
+      //  Then advance to next buffer and keep iterating.
+
+      buffer.is_ready = false;
+      cpu_start = clock::now();
+      // LOG_INFO("Zeroing missing packets...");
+      d_samples[current_buf]->zero_missing_packets();
+      packets_missing += d_samples[current_buf]->get_num_missing_packets();
+      cpu_end = clock::now();
+      // LOG_DEBUG("CPU time for zeroing packets: {} us",
+      //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
+      //           -
+      //                                                                 cpu_start)
+      //               .count());
+      //  order here is important. As the pipeline can async update
+      //  the start/end seqs we need to capture the
+      //  start_seq, then execute the pipeline, then advance using
+      //  the saved copy of the start_seq.
+      // LOG_INFO("Enqueueing buffer {} for pipeline...", current_buffer);
+      {
+        if (!synchronous_pipeline) [[likely]] {
+          {
+            std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
+            buffers_ready_for_pipeline.push(current_buf);
+          }
+          buffer_ready_for_pipeline.notify_one();
+        } else [[unlikely]] {
+          pipeline_->execute_pipeline(d_samples[current_buf]);
+          pipeline_runs_queued += 1;
+        }
+      }
+      cpu_start = clock::now();
+      current_buf = advance_to_next_buffer();
+      cpu_end = clock::now();
+    }
     // LOG_DEBUG("CPU time for advancing to next buffer: {} us",
     //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
     //           -
@@ -1077,6 +1103,196 @@ private:
       seq_jump_per_packet_; // Sequence number jump between packets (e.g., 64)
 };
 
+class PCAPMultiFPGAPacketCapture : public PacketInput {
+public:
+  PCAPMultiFPGAPacketCapture(const std::string &pcap_filename,
+                             bool loop = false, int num_fpgas = 4,
+                             uint64_t seq_jump_per_packet = 64);
+  ~PCAPMultiFPGAPacketCapture();
+
+  void get_packets(ProcessorStateBase &state) override {
+    LOG_INFO("PCAP reader thread started for file: {}", filename_);
+
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t *handle = nullptr;
+    struct pcap_pkthdr *header;
+    const u_char *data;
+    int res;
+
+    // Statistics
+    unsigned long long total_packets = 0;
+    unsigned long long total_bytes = 0;
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_stats_time = start_time;
+
+    // For sample number incrementing across loops
+    uint64_t current_loop = 0;
+    uint64_t sample_offset = 0;
+    uint64_t min_sample_in_loop = UINT64_MAX;
+    uint64_t max_sample_in_loop = 0;
+    bool first_loop = true;
+
+    if (loop_ && seq_jump_per_packet_ > 0) {
+      LOG_INFO("Sample incrementing enabled with seq jump per packet: {}",
+               seq_jump_per_packet_);
+    }
+
+    do {
+      handle = pcap_open_offline(filename_.c_str(), errbuf);
+      if (!handle) {
+        LOG_ERROR("Failed to open PCAP file '{}': {}", filename_, errbuf);
+        state.running = 0;
+        return;
+      }
+
+      if (current_loop > 0) {
+        LOG_INFO("Starting loop {} with sample offset {}", current_loop,
+                 sample_offset);
+      } else {
+        LOG_INFO("Reading packets from PCAP file...");
+      }
+
+      while ((res = pcap_next_ex(handle, &header, &data)) >= 0 &&
+             state.running) {
+        // Get pointer to write location
+        for (int i = 0; i < num_fpgas; ++i) {
+          void *write_pointer = state.get_current_write_pointer();
+
+          if (header->caplen <= header->len) {
+            std::memcpy(write_pointer, data, header->caplen);
+
+            // Extract and potentially modify the sample number
+            // Structure: Ethernet (14) + IP (20) + UDP (8) + CustomHeader
+            // CustomHeader layout: sample_count (8), fpga_id (4), freq_channel
+            // (2), padding (8)
+            const size_t CUSTOM_HEADER_OFFSET = 42; // Ethernet + IP + UDP
+
+            if (header->caplen > CUSTOM_HEADER_OFFSET + sizeof(uint64_t)) {
+              // sample_count is the first field in CustomHeader (uint64_t)
+              uint8_t *custom_header_start =
+                  static_cast<uint8_t *>(write_pointer) + CUSTOM_HEADER_OFFSET;
+              uint64_t *sample_count_ptr =
+                  reinterpret_cast<uint64_t *>(custom_header_start);
+
+              uint32_t *fpga_id_ptr =
+                  reinterpret_cast<uint32_t *>(custom_header_start + 8);
+
+              *fpga_id_ptr = i;
+              uint64_t original_sample = *sample_count_ptr;
+
+              // Track min/max for first loop to calculate range
+              if (first_loop) {
+                min_sample_in_loop =
+                    std::min(min_sample_in_loop, original_sample);
+                max_sample_in_loop =
+                    std::max(max_sample_in_loop, original_sample);
+              }
+
+              // Apply offset for loops after the first
+              if (!first_loop && sample_offset > 0) {
+                *sample_count_ptr = original_sample + sample_offset;
+                LOG_DEBUG("Modified sample count: {} -> {}", original_sample,
+                          *sample_count_ptr);
+              }
+            }
+
+            // Create a fake sender address since PCAP doesn't provide this
+            // This might not be necessary.
+            struct sockaddr_in client_addr;
+            std::memset(&client_addr, 0, sizeof(client_addr));
+            client_addr.sin_family = AF_INET;
+            client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            client_addr.sin_port = htons(0);
+
+            // Add metadata
+            state.add_received_packet_metadata(header->caplen, client_addr);
+            state.packets_received += 1;
+
+            total_packets++;
+            total_bytes += header->caplen;
+
+            // Get next write pointer for next iteration
+            state.get_next_write_pointer();
+          } else {
+            LOG_WARN("Packet truncated: caplen={} < len={}", header->caplen,
+                     header->len);
+          }
+        }
+        // Periodic statistics (every 5 seconds)
+        auto now = std::chrono::steady_clock::now();
+        auto stats_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                 now - last_stats_time)
+                                 .count();
+
+        if (stats_elapsed >= 5) {
+          auto total_elapsed =
+              std::chrono::duration_cast<std::chrono::seconds>(now - start_time)
+                  .count();
+          double avg_pps = total_packets / (double)total_elapsed;
+          double avg_mbps = (total_bytes * 8.0) / (total_elapsed * 1e6);
+          LOG_INFO("PCAP stats: {:.2f} kpps, {:.2f} Mbps (total: {} packets, "
+                   "loop: {})",
+                   avg_pps / 1000.0, avg_mbps, total_packets, current_loop);
+          last_stats_time = now;
+        }
+      }
+
+      if (res == -1) {
+        LOG_ERROR("Error reading PCAP: {}", pcap_geterr(handle));
+      } else {
+        LOG_INFO("Reached end of PCAP file. Total packets read: {}",
+                 total_packets);
+      }
+
+      pcap_close(handle);
+      handle = nullptr;
+
+      if (loop_ && state.running) {
+        // Calculate offset for next loop
+        if (first_loop) {
+          if (max_sample_in_loop > min_sample_in_loop) {
+            // Range of samples in this loop
+            uint64_t sample_range = max_sample_in_loop - min_sample_in_loop;
+            // Next loop starts at: max + seq_jump_per_packet
+            sample_offset = sample_range + seq_jump_per_packet_;
+
+            LOG_INFO("First loop complete. Sample range: {} to {} (span: {})",
+                     min_sample_in_loop, max_sample_in_loop, sample_range);
+            LOG_INFO("Next loop offset will be: {}", sample_offset);
+          } else {
+            LOG_WARN("Could not determine sample range, using "
+                     "seq_jump_per_packet only");
+            sample_offset = seq_jump_per_packet_;
+          }
+          first_loop = false;
+        } else {
+          // For subsequent loops, keep adding the same offset
+          uint64_t sample_range = max_sample_in_loop - min_sample_in_loop;
+          sample_offset += sample_range + seq_jump_per_packet_;
+        }
+
+        current_loop++;
+        LOG_INFO(
+            "Looping back to beginning (loop {}, cumulative offset: {})...",
+            current_loop, sample_offset);
+
+        // Small delay before restarting to avoid tight loop
+        // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    } while (loop_ && state.running);
+
+    LOG_INFO("PCAP reader thread exiting. Total packets: {}, Total bytes: {}, "
+             "Loops: {}",
+             total_packets, total_bytes, current_loop);
+  }
+
+private:
+  std::string filename_;
+  bool loop_; // Whether to loop the PCAP file
+  uint64_t
+      seq_jump_per_packet_; // Sequence number jump between packets (e.g., 64)
+  int num_fpgas;
+};
 class LibpcapIP6PacketCapture : public PacketInput {
 public:
   LibpcapIP6PacketCapture(std::string &ifname, int port, int buffer_size,
