@@ -64,10 +64,20 @@ int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
   std::string pcap_filename;
+  std::string vis_filename;
+  bool loop_pcap;
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
 
+  program.add_argument("-l", "--loop")
+      .help("loop the specified PCAP file")
+      .default_value(false)
+      .implicit_value(true)
+      .store_into(loop_pcap);
+  program.add_argument("-v", "--vis_output_file")
+      .help("specify a file name for the output visibilities")
+      .store_into(vis_filename);
   try {
     program.parse_args(argc, argv);
   } catch (const std::exception &err) {
@@ -124,7 +134,7 @@ int main(int argc, char *argv[]) {
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
-  std::string vis_filename = "hdf5_trial_vis.hdf5";
+  // std::string vis_filename = "hdf5_trial_vis.hdf5";
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
@@ -174,7 +184,7 @@ int main(int argc, char *argv[]) {
   std::string ifname = "enp216s0np0";
   //  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
   // LibpcapIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  PCAPMultiFPGAPacketCapture capture(pcap_filename, true, nr_fpga_sources);
+  PCAPMultiFPGAPacketCapture capture(pcap_filename, loop_pcap, nr_fpga_sources);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });
