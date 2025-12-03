@@ -476,6 +476,7 @@ public:
     vis_seq_dataset_ = file_.createDataSet<int>(
         "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
         vis_seq_props);
+    write_baseline_ids();
   }
 
   void write_visibilities_block(const T *data, const int start_seq,
@@ -502,6 +503,40 @@ public:
   void flush() override { file_.flush(); }
 
 private:
+  void write_baseline_ids() {
+    // Extract NR_BASELINES from T.
+    // T is float[CH][BL][POL][POL][CPLX].
+    // extent<T, 0> is Channels, extent<T, 1> is Baselines.
+    constexpr size_t nr_baselines = std::extent<T, 1>::value;
+
+    // Calculate number of antennas from triangular number formula:
+    // B = A(A+1)/2  =>  A^2 + A - 2B = 0
+    // A = (-1 + sqrt(1 + 8B)) / 2
+    size_t nr_antennas =
+        static_cast<size_t>((std::sqrt(1 + 8 * nr_baselines) - 1) / 2);
+
+    std::vector<int> baseline_ids;
+    baseline_ids.reserve(nr_baselines);
+
+    // Generate FITS IDs (256 * ant1 + ant2) based on triangular order
+    // Order: 0-0, 0-1, 1-1, 0-2, 1-2, 2-2 ...
+    for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
+      for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
+        baseline_ids.push_back(256 * ant1 + ant2);
+      }
+    }
+
+    // Sanity check
+    if (baseline_ids.size() != nr_baselines) {
+      // Handle error/log warning here if dimensions don't match expectation
+    }
+
+    // Write to HDF5 (Static dataset, no need for Unlimited/Chunking)
+    file_
+        .createDataSet<int>("baseline_ids",
+                            HighFive::DataSpace::From(baseline_ids))
+        .write(baseline_ids);
+  }
   HighFive::File &file_;
   size_t element_count_;
   HighFive::DataSet vis_dataset_;
