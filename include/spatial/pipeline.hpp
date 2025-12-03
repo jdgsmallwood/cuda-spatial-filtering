@@ -141,19 +141,8 @@ private:
                                                   'n', 'p', 'z'};
   // o and u need to end up together and will be interpreted as b x t in the
   // next transformation. Similarly f x n = r in next transformation.
-  // inline static const std::vector<int> modePacketFPGAAligned{'c', 'o', 'u',
-  // 'f',
-  //                                                           'n', 'p', 'z'};
-
-  //// f x n = r
-  // inline static const std::vector<int> modePacketFPGAAlignedPadding{
-  //     'c', 'b', 't', 'r', 'p', 'z'};
-
-  //  inline static const std::vector<int> modePacketPadding{'r', 'c', 'b',
-  //                                                         't', 'p', 'z'};
-
-  inline static const std::vector<int> modePacketPadding2{'f', 'n', 'c', 'o',
-                                                          'u', 'p', 'z'};
+  inline static const std::vector<int> modePacketPadding{'f', 'n', 'c', 'o',
+                                                         'u', 'p', 'z'};
   inline static const std::vector<int> modePacketPadded{'d', 'c', 'b',
                                                         't', 'p', 'z'};
   inline static const std::vector<int> modeCorrelatorInput{'c', 'b', 'd',
@@ -333,17 +322,6 @@ public:
               std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
                                                                     cpu_start)
                   .count());
-
-    // tensor_16.runPermutation "FPGAToPadding"
-    // cpu_start = clock::now();
-    // tensor_16.runPermutation(
-    //    "FPGAToPadding", alpha, (__half *)d_samples_fpga[current_buffer],
-    //    (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
-    // cpu_end = clock::now();
-    // LOG_DEBUG("CPU time for tensor_16.runPermutation FPGAtoPadding: {} us",
-    //          std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-    //                                                                cpu_start)
-    //              .count());
 
     // cudaMemcpyAsync for padding
     cpu_start = clock::now();
@@ -672,10 +650,7 @@ public:
 
     cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
-    // tensor_16.addTensor(modePacketFPGAAligned, "packet_fpga_aligned");
-    // tensor_16.addTensor(modePacketFPGAAlignedPadding,
-    //                     "packet_fpga_aligned_padding");
-    tensor_16.addTensor(modePacketPadding2, "packet_padding");
+    tensor_16.addTensor(modePacketPadding, "packet_padding");
     tensor_16.addTensor(modePacketPadded, "packet_padded");
     tensor_16.addTensor(modeCorrelatorInput, "corr_input");
     tensor_16.addTensor(modePlanar, "planar");
@@ -692,10 +667,6 @@ public:
 
     tensor_16.addPermutation("packet", "packet_padding",
                              CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
-    //    tensor_16.addPermutation("packet_fpga_aligned_padding",
-    //    "packet_padding",
-    //                             CUTENSOR_COMPUTE_DESC_16F, "FPGAToPadding");
-
     tensor_16.addPermutation("packet_padded", "corr_input",
                              CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
     tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
