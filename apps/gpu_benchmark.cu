@@ -78,7 +78,7 @@ struct FakeProcessorState : public ProcessorStateBase {
   void handle_buffer_completion(bool force_flush = false) override {};
 };
 
-void main() {
+int main() {
   FakeProcessorState state;
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
