@@ -9,7 +9,7 @@
 #include <iostream>
 #include <thread>
 
-constexpr size_t NR_CHANNELS = 1;
+constexpr size_t NR_CHANNELS = 8;
 constexpr size_t NR_FPGA_SOURCES = 1;
 constexpr size_t NR_RECEIVERS = 32;
 constexpr size_t NR_RECEIVERS_PER_PACKET = NR_RECEIVERS;
@@ -18,7 +18,7 @@ constexpr size_t NR_POLARIZATIONS = 2;
 constexpr size_t NR_BEAMS = 1;
 constexpr size_t NR_PADDED_RECEIVERS = 32;
 constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = NR_PADDED_RECEIVERS;
-constexpr size_t NR_PACKETS_FOR_CORRELATION = 256;
+constexpr size_t NR_PACKETS_FOR_CORRELATION = 128;
 constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 1000000000;
 using Config =
     LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
