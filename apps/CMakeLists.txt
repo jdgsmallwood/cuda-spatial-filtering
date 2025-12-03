@@ -66,3 +66,10 @@ add_executable(
   ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp
 )
 target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)
+
+
+add_executable(
+  gpu_benchmark
+  ${PROJECT_SOURCE_DIR}/apps/gpu_benchmark.cu
+)
+target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse)
