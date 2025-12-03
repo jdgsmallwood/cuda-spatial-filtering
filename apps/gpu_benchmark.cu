@@ -7,6 +7,8 @@
 #include "spatial/writers.hpp"
 #include <chrono>
 #include <iostream>
+#include <spdlog/async.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <thread>
 
 constexpr size_t NR_CHANNELS = 8;
@@ -19,7 +21,7 @@ constexpr size_t NR_BEAMS = 1;
 constexpr size_t NR_PADDED_RECEIVERS = 32;
 constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = NR_PADDED_RECEIVERS;
 constexpr size_t NR_PACKETS_FOR_CORRELATION = 128;
-constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 1000000000;
+constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 100000;
 using Config =
     LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
@@ -79,6 +81,23 @@ struct FakeProcessorState : public ProcessorStateBase {
 };
 
 int main() {
+
+  static auto tp = std::make_shared<spdlog::details::thread_pool>(4 * 8192, 2);
+  auto app_logger = std::make_shared<spdlog::async_logger>(
+      "async_logger",
+      std::make_shared<spdlog::sinks::basic_file_sink_mt>("app.log", true), tp,
+      spdlog::async_overflow_policy::overrun_oldest);
+
+  // auto app_logger = spdlog::basic_logger_mt<spdlog::async_factory>(
+  //   "async_logger", "app.log", true);
+
+  // auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
+  //                                         "app.log", /*truncate*/ true);
+  app_logger->set_level(spdlog::level::info);
+  app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
+
+  spatial::Logger::set(app_logger);
+
   FakeProcessorState state;
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
@@ -109,19 +128,45 @@ int main() {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(5, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  unsigned long long pipeline_runs = 0;
   auto start_time = std::chrono::steady_clock::now();
   auto run_duration = std::chrono::seconds(60); // Run for 60 seconds
 
   while (std::chrono::steady_clock::now() - start_time < run_duration) {
     pipeline.execute_pipeline(&packet_data);
-    std::this_thread::sleep_for(std::chrono::microseconds(20));
+    pipeline_runs++;
+    std::this_thread::sleep_for(std::chrono::microseconds(10));
   }
 
   cudaDeviceSynchronize();
+  auto end_time = std::chrono::steady_clock::now();
+  std::chrono::duration<double> elapsed = end_time - start_time;
+  double elapsed_seconds = elapsed.count();
+
+  std::cout << "Finished running for 60 seconds." << std::endl;
+  std::cout << "Number of pipeline runs: " << pipeline_runs << std::endl;
+  std::cout << "Total time (s): " << elapsed_seconds << std::endl;
+
+  // Example: sizeof some types (in MB)
+  size_t size_packet_data = sizeof(Config::InputPacketSamplesType);
+  size_t size_config = sizeof(Config::BeamOutputType);
+
+  double size_packet_data_MB =
+      static_cast<double>(size_packet_data) / (1024 * 1024);
+  double size_config_MB = static_cast<double>(size_config) / (1024 * 1024);
+
+  std::cout << "Size of PacketData: " << size_packet_data_MB << " MB"
+            << std::endl;
+  std::cout << "Size of Config: " << size_config_MB << " MB" << std::endl;
+
+  double GB_sec = ((size_packet_data_MB + size_config_MB) / 1024) *
+                  pipeline_runs / elapsed_seconds;
+  std::cout << "GB/sec: " << GB_sec << std::endl;
+
   std::cout << "Finished running for 60 seconds." << std::endl;
   return 0;
 }
