@@ -66,6 +66,7 @@ int main(int argc, char *argv[]) {
   std::string pcap_filename;
   std::string vis_filename;
   bool loop_pcap;
+  int min_freq_channel;
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
@@ -78,6 +79,10 @@ int main(int argc, char *argv[]) {
   program.add_argument("-v", "--vis_output_file")
       .help("specify a file name for the output visibilities")
       .store_into(vis_filename);
+
+  program.add_argument("-f", "--min_freq_channel")
+      .help("specify the lowest frequency channel.")
+      .store_into(min_freq_channel);
   try {
     program.parse_args(argc, argv);
   } catch (const std::exception &err) {
@@ -117,7 +122,6 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers_per_block = 64;
   constexpr int nr_lambda_packets_for_correlation =
       256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int min_freq_channel = 252;
   constexpr int nr_correlation_blocks_to_integrate = 100000000;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
