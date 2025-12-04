@@ -11,18 +11,6 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <thread>
 
-#define TIME_US(expr)                                                          \
-  ([&]() {                                                                     \
-    auto _start = std::chrono::high_resolution_clock::now();                   \
-    auto _result = (expr);                                                     \
-    auto _end = std::chrono::high_resolution_clock::now();                     \
-    auto _us =                                                                 \
-        std::chrono::duration_cast<std::chrono::microseconds>(_end - _start)   \
-            .count();                                                          \
-    printf("%s took %lld µs\n", #expr, (long long)_us);                        \
-    return _result;                                                            \
-  })()
-
 constexpr size_t NR_CHANNELS = 8;
 constexpr size_t NR_FPGA_SOURCES = 1;
 constexpr size_t NR_RECEIVERS = 32;
@@ -149,7 +137,7 @@ int main() {
   auto run_duration = std::chrono::seconds(60); // Run for 60 seconds
 
   while (std::chrono::steady_clock::now() - start_time < run_duration) {
-    TIME_US(pipeline.execute_pipeline(&packet_data));
+    pipeline.execute_pipeline(&packet_data);
     pipeline_runs++;
   }
 
