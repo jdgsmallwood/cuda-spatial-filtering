@@ -186,7 +186,7 @@ void CutensorSetup::runPermutation(const std::string &name, const __half &alpha,
                                    const __half *d_in, __half *d_out,
                                    cudaStream_t stream) {
   const PermutationOp *perm = getPermutation(name);
-  LOG_INFO("Running permutation {}...", name);
+  // LOG_INFO("Running permutation {}...", name);
 
   checkCutensorStatus(
       cutensorPermute(handle, perm->plan, &alpha, d_in, d_out, stream),

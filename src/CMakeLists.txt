@@ -27,6 +27,7 @@ target_include_directories(
 )
 
 set_target_properties(spatial PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+set_target_properties(spatial PROPERTIES CUDA_ARCHITECTURES "native")
 
 
 if(CMAKE_BUILD_TYPE MATCHES Debug)
