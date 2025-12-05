@@ -1,4 +1,4 @@
-#pragma once
+#pragma oncespatial.hpp
 #include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline_base.hpp"
@@ -826,7 +826,7 @@ public:
 
 class KernelSocketPacketCapture : public PacketInput {
 public:
-  KernelSocketPacketCapture(int port, int buffer_size,
+  KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
                             int recv_buffer_size = 64 * 1024 * 1024);
   ~KernelSocketPacketCapture();
 
@@ -870,6 +870,7 @@ private:
   int port;
   int buffer_size;
   int recv_buffer_size;
+  std::string ifname;
 };
 
 class KernelSocketIP6PacketCapture : public PacketInput {

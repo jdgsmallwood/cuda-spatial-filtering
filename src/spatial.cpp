@@ -323,9 +323,11 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
   CUDA_CHECK(cudaFree(d_C));
 }
 
-KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size,
+KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
+                                                     int port, int buffer_size,
                                                      int recv_buffer_size)
-    : port(port), buffer_size(buffer_size), recv_buffer_size(recv_buffer_size) {
+    : ifname(ifname), port(port), buffer_size(buffer_size),
+      recv_buffer_size(recv_buffer_size) {
 
   LOG_INFO("UDP Server with concurrent processing starting on port {}...",
            port);
@@ -339,7 +341,10 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(int port, int buffer_size,
   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
     perror("setsockopt");
   }
-
+  if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
+                 ifname.size()) < 0) {
+    perror("SO_BINDTODEVICE");
+  }
   // Setup server address
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
