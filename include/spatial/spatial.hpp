@@ -1,4 +1,4 @@
-#pragma oncespatial.hpp
+#pragma once
 #include "spatial/logging.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline_base.hpp"
