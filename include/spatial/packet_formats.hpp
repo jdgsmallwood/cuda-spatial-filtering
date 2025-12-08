@@ -172,10 +172,17 @@ struct LambdaPacketEntry
   __attribute__((hot)) __attribute__((flatten))
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() noexcept override {
-
+    // if PCAP file - it has headers. take only the last 2622 bytes.
+    constexpr int MAX_TOTAL_SIZE = 2622;
     // LOG_DEBUG("Entering parser...\n");
     const int length = this->length;
-    const uint8_t *__restrict__ base = this->data;
+    uint8_t *__restrict__ base = this->data;
+
+    if (length > MAX_TOTAL_SIZE) [[unlikely]] {
+      base = base + (length - MAX_TOTAL_SIZE);
+      length = MAX_TOTAL_SIZE;
+    }
+
     __builtin_prefetch(base, 0, 3);
     // we get only the UDP payload.
     if (length < MIN_PCAP_HEADER_SIZE)
