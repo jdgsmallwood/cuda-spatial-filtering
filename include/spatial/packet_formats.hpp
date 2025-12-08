@@ -194,7 +194,7 @@ struct LambdaPacketEntry
     }
 
     const CustomHeader *__restrict__ custom = (const CustomHeader *)(base);
-
+// we get the UDP payload without any of the other headers.
     return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
         .sample_count = custom->sample_count,
         .timestamp =

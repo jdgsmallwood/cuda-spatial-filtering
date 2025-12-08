@@ -134,7 +134,7 @@ int main() {
   pipeline.set_output(output);
   unsigned long long pipeline_runs = 0;
   auto start_time = std::chrono::steady_clock::now();
-  auto run_duration = std::chrono::seconds(60); // Run for 60 seconds
+  auto run_duration = std::chrono::seconds(2); // Run for 60 seconds
 
   while (std::chrono::steady_clock::now() - start_time < run_duration) {
     pipeline.execute_pipeline(&packet_data);

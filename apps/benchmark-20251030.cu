@@ -109,20 +109,20 @@ int main(int argc, char *argv[]) {
   spatial::Logger::set(app_logger);
 
   constexpr int num_buffers = 3;
-  constexpr int nr_fpga_sources = 4;
+  constexpr int nr_fpga_sources = 1;
   constexpr size_t num_packet_buffers = 24;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers_per_packet = 10;
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
-  constexpr int nr_lambda_padded_receivers = 64;
+  constexpr int nr_lambda_padded_receivers = 32;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
-  constexpr int nr_lambda_receivers_per_block = 64;
+  constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
       256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_correlation_blocks_to_integrate = 100000000;
+  constexpr int nr_correlation_blocks_to_integrate = 56;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
@@ -186,9 +186,9 @@ int main(int argc, char *argv[]) {
   pipeline.set_output(output);
   int port = 36001;
   std::string ifname = "enp216s0np0";
-  //  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
+   KernelSocketPacketCapture capture(ifname, port, BUFFER_SIZE);
   // LibpcapIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  PCAPMultiFPGAPacketCapture capture(pcap_filename, loop_pcap, nr_fpga_sources);
+  //PCAPPacketCapture capture(pcap_filename, loop_pcap);
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
   std::thread receiver([&capture, &state]() { capture.get_packets(state); });
