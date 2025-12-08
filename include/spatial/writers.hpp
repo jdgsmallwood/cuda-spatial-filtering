@@ -28,7 +28,9 @@ template <typename T> class VisibilitiesWriter {
 public:
   virtual ~VisibilitiesWriter() = default;
   virtual void write_visibilities_block(const T *data, const int start_seq,
-                                        const int end_seq) = 0;
+                                        const int end_seq,
+                                        const int num_missing_packets,
+                                        const int num_total_packets) = 0;
   virtual void flush() = 0;
 };
 
@@ -476,11 +478,21 @@ public:
     vis_seq_dataset_ = file_.createDataSet<int>(
         "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
         vis_seq_props);
+
+    DataSetCreateProps vis_missing_props;
+    vis_missing_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    vis_missing_dataset_ = file_.createDataSet<int>(
+        "vis_missing_nums",
+        DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
+        vis_missing_props);
+
     write_baseline_ids();
   }
 
   void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq) override {
+                                const int end_seq,
+                                const int num_missing_packets,
+                                const int num_total_packets) override {
     LOG_INFO("writing visibilities block {} to {}", start_seq, end_seq);
     auto current_size = vis_dataset_.getDimensions()[0];
     std::vector<size_t> new_dims = {current_size + 1};
@@ -498,6 +510,16 @@ public:
     vis_seq_dataset_.resize({seq_size + 1, 2});
     std::vector<int> seq_nums = {start_seq, end_seq};
     vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+
+    auto missing_size = vis_missing_dataset_.getDimensions()[0];
+    vis_missing_dataset_.resize({missing_size + 1, 3});
+    float num_missing_packets_fl = static_cast<float>(num_missing_packets);
+    float num_total_packets_fl = static_cast<float>(num_total_packets);
+    std::vector<float> missing_nums = {
+        num_missing_packets_fl, num_total_packets_fl,
+        100 * num_missing_packets_fl / num_total_packets_fl};
+    vis_missing_dataset_.select({missing_size, 0}, {missing_size + 1, 3})
+        .write_raw(missing_nums.data());
   }
 
   void flush() override { file_.flush(); }
@@ -541,6 +563,7 @@ private:
   size_t element_count_;
   HighFive::DataSet vis_dataset_;
   HighFive::DataSet vis_seq_dataset_;
+  HighFive::DataSet vis_missing_dataset_;
   std::vector<size_t> vis_dims_;
 };
 
@@ -1074,7 +1097,9 @@ public:
   }
 
   void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq) override {
+                                const int end_seq,
+                                const int num_missing_packets,
+                                const int num_total_packets) override {
     double center_seq = 0.5 * (start_seq + end_seq);
     double time_jd = ref_jd_ + center_seq * (int_time_sec_ / 86400.0);
 

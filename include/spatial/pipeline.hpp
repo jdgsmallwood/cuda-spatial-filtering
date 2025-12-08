@@ -223,6 +223,9 @@ private:
 
   int visibilities_start_seq_num;
   int visibilities_end_seq_num;
+  static constexpr int visibilities_total_packets_per_block =
+      T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
+  int visibilities_missing_packets;
 
 public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
@@ -243,6 +246,7 @@ public:
     if (visibilities_start_seq_num == -1) {
       visibilities_start_seq_num = packet_data->start_seq_id;
     }
+    visibilities_missing_packets += packet_data->get_num_missing_packets();
 
     // Record GPU start event
     auto cpu_start = clock::now();
@@ -623,8 +627,6 @@ public:
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
-    visibilities_start_seq_num = -1;
-    visibilities_end_seq_num = -1;
     current_buffer = 0;
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
@@ -691,6 +693,10 @@ public:
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
+    // these need to be set after the dummy run.
+    visibilities_start_seq_num = -1;
+    visibilities_end_seq_num = -1;
+    visibilities_missing_packets = 0;
   };
   ~LambdaGPUPipeline() {
     // If there are visibilities in the accumulator on the GPU - dump them
@@ -772,7 +778,7 @@ public:
 
     LOG_INFO("Dumping correlations to host...");
     int current_num_integrated_units_processed =
-        num_integrated_units_processed.fetch_add(1);
+        num_correlation_units_integrated;
     LOG_INFO("Current num integrated units processed is {}",
              current_num_integrated_units_processed);
     cudaDeviceSynchronize();
@@ -784,9 +790,14 @@ public:
                               streams[current_buffer]);
     }
     cudaDeviceSynchronize();
+    const int visibilities_total_packets =
+        current_num_integrated_units_processed *
+        visibilities_total_packets_per_block;
     size_t block_num = output_->register_visibilities_block(
-        visibilities_start_seq_num, end_seq_num);
+        visibilities_start_seq_num, end_seq_num, visibilities_missing_packets,
+        visibilities_total_packets);
     visibilities_start_seq_num = -1;
+    visibilities_missing_packets = 0;
     void *landing_pointer =
         output_->get_visibilities_landing_pointer(block_num);
     cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator[0],

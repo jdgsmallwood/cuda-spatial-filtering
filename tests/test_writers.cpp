@@ -93,7 +93,7 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
 
   writer.write_visibilities_block(&vis_data,
                                   /*start_seq=*/100,
-                                  /*end_seq=*/200);
+                                  /*end_seq=*/200, 0, 400);
   writer.flush();
 
   // Reopen and verify
