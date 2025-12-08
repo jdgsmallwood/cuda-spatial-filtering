@@ -176,15 +176,17 @@ struct LambdaPacketEntry
     // LOG_DEBUG("Entering parser...\n");
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
-    __builtin_prefetch(base + 42, 0, 3);
-    if (length < MIN_PCAP_HEADER_SIZE ||
-        __builtin_bswap16(*reinterpret_cast<const uint16_t *>(base + 12)) !=
-            0x0800) [[unlikely]] {
+    __builtin_prefetch(base, 0, 3);
+    // we get only the UDP payload.
+    if (length < MIN_PCAP_HEADER_SIZE)
+        //__builtin_bswap16(*reinterpret_cast<const uint16_t *>(base + 12)) !=
+        //  0x0800) [[unlikely]] {
+        [[unlikely]] {
       this->processed = (length < MIN_PCAP_HEADER_SIZE);
       return {};
     }
 
-    const CustomHeader *__restrict__ custom = (const CustomHeader *)(base + 42);
+    const CustomHeader *__restrict__ custom = (const CustomHeader *)(base);
 
     return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
         .sample_count = custom->sample_count,
@@ -192,10 +194,10 @@ struct LambdaPacketEntry
             this->timestamp.tv_sec * 1000000ULL + this->timestamp.tv_usec,
         .payload = reinterpret_cast<
             const PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
-            base + MIN_PCAP_HEADER_SIZE),
+            base + sizeof(CustomHeader)),
         .original_packet_processed = &this->processed,
         .fpga_id = custom->fpga_id,
-        .payload_size = static_cast<uint32_t>(length - MIN_PCAP_HEADER_SIZE),
+        .payload_size = static_cast<uint32_t>(length - sizeof(CustomHeader)),
         .freq_channel = custom->freq_channel};
   };
 };
