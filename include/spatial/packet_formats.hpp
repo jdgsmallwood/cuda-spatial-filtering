@@ -175,7 +175,7 @@ struct LambdaPacketEntry
     // if PCAP file - it has headers. take only the last 2622 bytes.
     constexpr int MAX_TOTAL_SIZE = 2622;
     // LOG_DEBUG("Entering parser...\n");
-    const int length = this->length;
+    int length = this->length;
     uint8_t *__restrict__ base = this->data;
 
     if (length > MAX_TOTAL_SIZE) [[unlikely]] {
