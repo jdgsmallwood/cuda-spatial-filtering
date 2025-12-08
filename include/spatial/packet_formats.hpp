@@ -172,28 +172,22 @@ struct LambdaPacketEntry
   __attribute__((hot)) __attribute__((flatten))
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() noexcept override {
-    // if PCAP file - it has headers. take only the last 2622 bytes.
-    constexpr int MAX_TOTAL_SIZE = 2622;
+
     // LOG_DEBUG("Entering parser...\n");
-    int length = this->length;
-    uint8_t *__restrict__ base = this->data;
-
-    if (length > MAX_TOTAL_SIZE) [[unlikely]] {
-      base = base + (length - MAX_TOTAL_SIZE);
-      length = MAX_TOTAL_SIZE;
+    const int length = this->length;
+    const uint8_t *__restrict__ base = this->data;
+    uint32_t offset = 0;
+    if (length > 2622) {
+      offset = 42;
     }
-
-    __builtin_prefetch(base, 0, 3);
-    // we get only the UDP payload.
-    if (length < MIN_PCAP_HEADER_SIZE)
-        //__builtin_bswap16(*reinterpret_cast<const uint16_t *>(base + 12)) !=
-        //  0x0800) [[unlikely]] {
-        [[unlikely]] {
+    __builtin_prefetch(base + offset, 0, 3);
+    if (length < MIN_PCAP_HEADER_SIZE) [[unlikely]] {
       this->processed = (length < MIN_PCAP_HEADER_SIZE);
       return {};
     }
 
-    const CustomHeader *__restrict__ custom = (const CustomHeader *)(base);
+    const CustomHeader *__restrict__ custom =
+        (const CustomHeader *)(base + offset);
 
     return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
         .sample_count = custom->sample_count,
@@ -201,10 +195,11 @@ struct LambdaPacketEntry
             this->timestamp.tv_sec * 1000000ULL + this->timestamp.tv_usec,
         .payload = reinterpret_cast<
             const PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
-            base + sizeof(CustomHeader)),
+            base + offset + sizeof(CustomHeader)),
         .original_packet_processed = &this->processed,
         .fpga_id = custom->fpga_id,
-        .payload_size = static_cast<uint32_t>(length - sizeof(CustomHeader)),
+        .payload_size =
+            static_cast<uint32_t>(length - (offset + sizeof(CustomHeader))),
         .freq_channel = custom->freq_channel};
   };
 };
