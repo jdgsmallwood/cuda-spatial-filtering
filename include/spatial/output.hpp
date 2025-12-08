@@ -19,7 +19,9 @@ public:
   virtual size_t register_beam_data_block(const int start_seq_num,
                                           const int end_seq_num) = 0;
   virtual size_t register_visibilities_block(const int start_seq_num,
-                                             const int end_seq_num) = 0;
+                                             const int end_seq_num,
+                                             const int num_missing_packets,
+                                             const int num_total_packets) = 0;
 
   virtual void *get_beam_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_visibilities_landing_pointer(const size_t block_num) = 0;
@@ -52,7 +54,9 @@ public:
     return 1;
   };
   size_t register_visibilities_block(const int start_seq_num,
-                                     const int end_seq_num) override {
+                                     const int end_seq_num,
+                                     const int num_missing_packets,
+                                     const int num_total_packets) override {
     return 1;
   };
 
@@ -104,9 +108,13 @@ public:
     typename T::VisibilitiesOutputType data;
     int start_seq_num;
     int end_seq_num;
+    int num_missing_packets;
+    int num_total_packets;
     bool transfer_complete;
 
-    VisBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {}
+    VisBlock()
+        : start_seq_num(0), end_seq_num(0), num_missing_packets(0),
+          num_total_packets(0), transfer_complete(false) {}
   };
 
   BufferedOutput(
@@ -157,7 +165,9 @@ public:
   }
 
   size_t register_visibilities_block(const int start_seq_num,
-                                     const int end_seq_num) override {
+                                     const int end_seq_num,
+                                     const int num_missing_packets,
+                                     const int num_total_packets) override {
     size_t block_num = vis_write_idx_;
     vis_write_idx_ = (block_num + 1) % vis_blocks_.size();
 
@@ -168,6 +178,8 @@ public:
     auto &block = vis_blocks_[block_num];
     block.start_seq_num = start_seq_num;
     block.end_seq_num = end_seq_num;
+    block.num_missing_packets = num_missing_packets;
+    block.num_total_packets = num_total_packets;
     block.transfer_complete = false;
 
     return block_num;
@@ -262,8 +274,9 @@ private:
 
       const auto &block = vis_blocks_[vis_read_idx_];
 
-      vis_writer_->write_visibilities_block(&block.data, block.start_seq_num,
-                                            block.end_seq_num);
+      vis_writer_->write_visibilities_block(
+          &block.data, block.start_seq_num, block.end_seq_num,
+          block.num_missing_packets, block.num_total_packets);
 
       vis_read_idx_ = (vis_read_idx_ + 1) % vis_blocks_.size();
     }

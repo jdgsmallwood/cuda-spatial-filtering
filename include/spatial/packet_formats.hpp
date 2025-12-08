@@ -117,6 +117,7 @@ struct LambdaFinalPacketData : public FinalPacketData {
     }
     return sum;
   };
+
   LambdaFinalPacketData() {
 
     // allocate samples
