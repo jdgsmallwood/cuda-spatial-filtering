@@ -518,7 +518,7 @@ public:
     std::vector<float> missing_nums = {
         num_missing_packets_fl, num_total_packets_fl,
         100 * num_missing_packets_fl / num_total_packets_fl};
-    vis_missing_dataset_.select({missing_size, 0}, {missing_size + 1, 3})
+    vis_missing_dataset_.select({missing_size, 0}, {1, 3})
         .write_raw(missing_nums.data());
   }
 
