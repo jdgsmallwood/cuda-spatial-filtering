@@ -481,7 +481,7 @@ public:
 
     DataSetCreateProps vis_missing_props;
     vis_missing_props.add(Chunking(std::vector<hsize_t>{1, 3}));
-    vis_missing_dataset_ = file_.createDataSet<int>(
+    vis_missing_dataset_ = file_.createDataSet<float>(
         "vis_missing_nums",
         DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
         vis_missing_props);
