@@ -178,7 +178,8 @@ struct LambdaPacketEntry
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
     uint32_t offset = 0;
-    if (length > 2622) {
+    if (length > sizeof(PacketScaleStructure) + sizeof(PacketDataStructure) +
+                     sizeof(CustomHeader)) {
       offset = 42;
     }
     __builtin_prefetch(base + offset, 0, 3);
