@@ -244,7 +244,7 @@ public:
 
   void initialize_buffers(const unsigned long long first_count) {
     LOG_INFO("[BufferInitialization] First count was {}...", first_count);
-    std::lock_guard lock(buffer_ordering_mutex);
+    std::lock_guard lock(buffer_index_mutex);
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       buffers[i].start_seq =
           first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
@@ -259,7 +259,6 @@ public:
         buffer_ordering_queue.push({i, buffers[i].start_seq});
       };
     }
-    std::lock_guard lock_index(buffer_index_mutex);
     global_max_end_seq.store(buffers[NR_INPUT_BUFFERS - 1].end_seq,
                              std::memory_order_release);
   };
@@ -780,7 +779,6 @@ private:
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
       buffer_ordering_queue;
-  std::mutex buffer_ordering_mutex;
   std::condition_variable buffer_available_cv;
   std::atomic<unsigned long long> global_max_end_seq{0};
   std::once_flag buffer_init_flag;
