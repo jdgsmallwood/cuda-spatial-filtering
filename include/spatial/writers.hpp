@@ -452,7 +452,9 @@ private:
 template <typename T>
 class HDF5VisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
-  HDF5VisibilitiesWriter(HighFive::File &file)
+  HDF5VisibilitiesWriter(
+      HighFive::File &file,
+      const std::unordered_map<int, int> *antenna_map = nullptr)
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
@@ -485,6 +487,12 @@ public:
         "vis_missing_nums",
         DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
         vis_missing_props);
+
+    if (antenna_map && !antenna_map->empty()) {
+      this->antenna_map_ = *antenna_map;
+    } else {
+      generate_identity_map();
+    }
 
     write_baseline_ids();
   }
@@ -544,7 +552,7 @@ private:
     // Order: 0-0, 0-1, 1-1, 0-2, 1-2, 2-2 ...
     for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
       for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
-        baseline_ids.push_back(256 * ant1 + ant2);
+        baseline_ids.push_back(256 * antenna_map_[ant1] + antenna_map_[ant2]);
       }
     }
 
@@ -559,12 +567,20 @@ private:
                             HighFive::DataSpace::From(baseline_ids))
         .write(baseline_ids);
   }
+
+  void generate_identity_map() {
+    for (int i = 0; i < 256; i++) {
+      antenna_map_[i] = i;
+    }
+  }
+
   HighFive::File &file_;
   size_t element_count_;
   HighFive::DataSet vis_dataset_;
   HighFive::DataSet vis_seq_dataset_;
   HighFive::DataSet vis_missing_dataset_;
   std::vector<size_t> vis_dims_;
+  std::unordered_map<int, int> antenna_map_;
 };
 
 // Factory function for easy creation
