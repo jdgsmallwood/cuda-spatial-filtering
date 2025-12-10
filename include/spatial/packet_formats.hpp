@@ -205,7 +205,7 @@ struct LambdaPacketEntry
         .original_packet_processed = &this->processed,
         // for now - take the IP address as the fpga_id.
         // i.e. 10.0.3.10 = FPGA ID 3.
-        .fpga_id = third_octet, // custom->fpga_id,
+        .fpga_id = (uint32_t)third_octet, // custom->fpga_id,
         .payload_size =
             static_cast<uint32_t>(length - (offset + sizeof(CustomHeader))),
         .freq_channel = custom->freq_channel};
