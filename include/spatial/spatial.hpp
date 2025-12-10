@@ -728,6 +728,8 @@ public:
     d_packet_data[write_index]->length = length;
     d_packet_data[write_index]->sender_addr = client_addr;
     d_packet_data[write_index]->processed = false;
+    char source_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), source_ip, INET_ADDRSTRLEN);
     gettimeofday(&d_packet_data[write_index]->timestamp, NULL);
   }
 
