@@ -13,8 +13,8 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
   # Let's ensure -std=c++xx instead of -std=g++xx
   set(CMAKE_CXX_EXTENSIONS OFF)
-  set(CMAKE_CXX_STANDARD 20)
-  set(CMAKE_CUDA_STANDARD 20)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_EXTENSIONS OFF)
   set(CMAKE_CUDA_FLAGS_DEBUG "-G -g --ptxas-options=-v -Xptxas -O0 -Xcompiler -fno-inline")
   #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
@@ -72,9 +72,6 @@ include(FetchContent)
 add_subdirectory(src)
 
 # The executable code is here
-if(${USER_BUILD_TESTING} STREQUAL "OFF")
-add_subdirectory(apps)
-endif()
 
 message(STATUS "Including dependencies...")
 message(STATUS "cudawrappers...")
@@ -139,6 +136,10 @@ target_include_directories(spdlog PRIVATE ${spdlog_SOURCE_DIR})
 find_package(ZLIB REQUIRED)
 find_package(HDF5 REQUIRED COMPONENTS C)
 find_package(CFITSIO REQUIRED)
+find_package(CasaCore REQUIRED)
+
+message(STATUS "CASACORE_FOUND is ${CASACORE_FOUND}")
+message(STATUS "CASACORE_LIBRARIES are ${CASACORE_LIBRARIES}")
 
 message(STATUS "HDF5_FOUND is ${HDF5_FOUND}")
 message(STATUS "HDF5_ROOT is ${HDF5_ROOT}")
@@ -158,6 +159,9 @@ FetchContent_MakeAvailable(HighFive)
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
 
+if(${USER_BUILD_TESTING} STREQUAL "OFF")
+add_subdirectory(apps)
+endif()
 
 # Silence warnings from external dependencies
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/extern)

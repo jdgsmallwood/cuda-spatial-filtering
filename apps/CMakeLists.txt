@@ -50,14 +50,13 @@
 #  ${PROJECT_SOURCE_DIR}/apps/packet_processor_live.cu
 #)
 #target_link_libraries(packet_processor_live PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc)
-
 set(NUMBER_PACKETS_TO_CORRELATE 16 CACHE STRING "Number of packets to correlate while benchmarking")
 set(NUMBER_BEAMS 10 CACHE STRING "Number of beams to correlate while benchmarking")
 add_executable(
   benchmark
   ${PROJECT_SOURCE_DIR}/apps/benchmark-20251030.cu
 )
-target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse)
+target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES})
 target_compile_definitions(benchmark PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS} NUMBER_PACKETS_TO_CORRELATE=${NUMBER_PACKETS_TO_CORRELATE} )
 
 set_target_properties(benchmark PROPERTIES CUDA_ARCHITECTURES "native")
@@ -73,6 +72,6 @@ add_executable(
   gpu_benchmark
   ${PROJECT_SOURCE_DIR}/apps/gpu_benchmark.cu
 )
-target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse)
+target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES})
 
 set_target_properties(gpu_benchmark PROPERTIES CUDA_ARCHITECTURES "native")

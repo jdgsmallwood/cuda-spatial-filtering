@@ -15,6 +15,17 @@
 #include <type_traits>
 #include <vector>
 
+#include <casacore/casa/Arrays/ArrayMath.h>
+#include <casacore/casa/Arrays/Matrix.h>
+#include <casacore/casa/Arrays/Vector.h>
+#include <casacore/measures/Measures/MDirection.h>
+#include <casacore/ms/MeasurementSets/MSColumns.h>
+#include <casacore/ms/MeasurementSets/MeasurementSet.h>
+#include <casacore/tables/Tables/ArrColDesc.h>
+#include <casacore/tables/Tables/ScaColDesc.h>
+#include <casacore/tables/Tables/SetupNewTab.h>
+#include <casacore/tables/Tables/TableDesc.h>
+
 template <typename BeamT, typename ArrivalsT> class BeamWriter {
 public:
   virtual ~BeamWriter() = default;
@@ -1210,4 +1221,247 @@ private:
   std::vector<double> antpos_;
   std::vector<int> bl1_, bl2_;
   long row_counter_;
+};
+
+template <typename T>
+class MSVisibilitiesWriter : public VisibilitiesWriter<T> {
+public:
+  // T is expected to be float[CH][BL][POL][POL][CPLX]
+  // We derive dimensions from T at compile time/runtime
+  static constexpr size_t NUM_CHANNELS = std::extent<T, 0>::value;
+  static constexpr size_t NUM_BASELINES = std::extent<T, 1>::value;
+  // Assuming [POL][POL][CPLX] flattens to 4 complex numbers
+  static constexpr size_t NUM_CORRELATIONS = 4;
+
+  MSVisibilitiesWriter(
+      const std::string &filename,
+      const std::unordered_map<int, int> *antenna_map = nullptr)
+      : current_row_(0) {
+    // 1. Setup the MS Definition
+    casacore::TableDesc td = casacore::MS::requiredTableDesc();
+    casacore::MS::addColumnToDesc(
+        td, casacore::MS::DATA); // Add DATA column (Standard MS doesn't imply
+                                 // DATA/CORRECTED_DATA by default)
+
+    casacore::SetupNewTable newTab(filename, td, casacore::Table::New);
+
+    // 2. Create the MeasurementSet
+    ms_ = std::make_unique<casacore::MeasurementSet>(newTab);
+
+    // 3. Initialize Subtables (Antenna, Field, SpectralWindow, etc.)
+    setup_subtables();
+
+    // 4. Initialize Columns accessors
+    // We use MSMainColumns for convenience, or individual column accessors
+    msc_ = std::make_unique<casacore::MSColumns>(*ms_);
+
+    // Handle Antenna Map
+    if (antenna_map && !antenna_map->empty()) {
+      this->antenna_map_ = *antenna_map;
+    } else {
+      generate_identity_map();
+    }
+
+    // Pre-calculate baseline pairs (Ant1, Ant2) to save time in the loop
+    calculate_baseline_pairs();
+  }
+
+  ~MSVisibilitiesWriter() {
+    if (ms_) {
+      ms_->flush();
+    }
+  }
+
+  void write_visibilities_block(const T *data, const int start_seq,
+                                const int end_seq,
+                                const int num_missing_packets,
+                                const int num_total_packets) override {
+    // Add rows for this block (1 timestamp * NR_BASELINES)
+    size_t start_row = current_row_;
+    ms_->addRow(NUM_BASELINES);
+
+    // Pointers/Refs for raw data
+    // T is float[CH][BL][POL][POL][2] (Real/Imag)
+    // We cast the raw pointer to complex<float> for easier iteration
+    // Shape becomes: [CH][BL][4] complex elements
+    const auto *complex_data =
+        reinterpret_cast<const std::complex<float> *>(data);
+
+    // Placeholder time: using sequence number as seconds for now.
+    // In reality, this should be MJD Seconds.
+    double timestamp = static_cast<double>(start_seq);
+
+    for (size_t bl = 0; bl < NUM_BASELINES; ++bl) {
+      size_t row_idx = start_row + bl;
+      auto &pair = baseline_pairs_[bl];
+
+      // 1. Metadata Columns
+      msc_->antenna1().put(row_idx, pair.first);
+      msc_->antenna2().put(row_idx, pair.second);
+      msc_->time().put(row_idx, timestamp);
+      msc_->interval().put(row_idx, 1.0); // 1 second integration placeholder
+      msc_->scanNumber().put(row_idx, 1);
+      msc_->fieldId().put(row_idx, 0); // Pointing to index 0 in Field table
+      msc_->dataDescId().put(row_idx,
+                             0); // Pointing to index 0 in DataDesc table
+
+      // 2. UVW (Placeholder: Blank/Zero)
+      casacore::Vector<double> uvw(3, 0.0);
+      msc_->uvw().put(row_idx, uvw);
+
+      // 3. Data
+      // Casacore expects Matrix<Complex> of shape (NumPol, NumChan)
+      casacore::Matrix<casacore::Complex> vis_matrix(NUM_CORRELATIONS,
+                                                     NUM_CHANNELS);
+
+      for (size_t ch = 0; ch < NUM_CHANNELS; ++ch) {
+        // Input data layout calculation:
+        // Global Index = ch * (NUM_BASELINES * 4) + bl * 4 + pol
+        size_t base_idx =
+            ch * (NUM_BASELINES * NUM_CORRELATIONS) + bl * NUM_CORRELATIONS;
+
+        for (size_t pol = 0; pol < NUM_CORRELATIONS; ++pol) {
+          std::complex<float> val = complex_data[base_idx + pol];
+          vis_matrix(pol, ch) = casacore::Complex(val.real(), val.imag());
+        }
+      }
+
+      msc_->data().put(row_idx, vis_matrix);
+
+      // Flags/Sigmas (Standard defaults)
+      msc_->flagRow().put(row_idx, false);
+      // Initialize weights to 1.0
+      casacore::Vector<float> weight(NUM_CORRELATIONS, 1.0f);
+      msc_->weight().put(row_idx, weight);
+      msc_->sigma().put(row_idx, weight);
+    }
+
+    current_row_ += NUM_BASELINES;
+  }
+
+  void flush() override {
+    if (ms_)
+      ms_->flush();
+  }
+
+private:
+  std::unique_ptr<casacore::MeasurementSet> ms_;
+  std::unique_ptr<casacore::MSColumns> msc_;
+  size_t current_row_;
+  std::unordered_map<int, int> antenna_map_;
+  std::vector<std::pair<int, int>> baseline_pairs_;
+
+  void calculate_baseline_pairs() {
+    size_t nr_antennas =
+        static_cast<size_t>((std::sqrt(1 + 8 * NUM_BASELINES) - 1) / 2);
+    baseline_pairs_.reserve(NUM_BASELINES);
+
+    // Same triangular logic as HDF5 writer
+    for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
+      for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
+        baseline_pairs_.emplace_back(antenna_map_[ant1], antenna_map_[ant2]);
+      }
+    }
+  }
+
+  void generate_identity_map() {
+    for (int i = 0; i < 256; i++) {
+      antenna_map_[i] = i;
+    }
+  }
+
+  void setup_subtables() {
+    // --- 1. POLARIZATION ---
+    // Setup 4 correlations (XX, XY, YX, YY)
+    {
+      casacore::MSPolarization &polTable = ms_->polarization();
+      polTable.addRow(1);
+      casacore::MSPolarizationColumns polCols(polTable);
+
+      casacore::Vector<int> corrType(4);
+      corrType[0] = 9;  // XX
+      corrType[1] = 10; // XY
+      corrType[2] = 11; // YX
+      corrType[3] = 12; // YY
+
+      casacore::Matrix<int> corrProduct(2, 4);
+      // Map receptor pairs to correlations (placeholder logic)
+      corrProduct = 0;
+
+      polCols.numCorr().put(0, 4);
+      polCols.corrType().put(0, corrType);
+      polCols.corrProduct().put(0, corrProduct);
+    }
+
+    // --- 2. SPECTRAL WINDOW ---
+    {
+      casacore::MSSpectralWindow &spwTable = ms_->spectralWindow();
+      spwTable.addRow(1);
+      casacore::MSSpWindowColumns spwCols(spwTable);
+
+      spwCols.numChan().put(0, NUM_CHANNELS);
+      spwCols.name().put(0, "Subband_0");
+
+      // Frequencies (Placeholder: 1GHz + 1MHz channels)
+      casacore::Vector<double> chanFreqs(NUM_CHANNELS);
+      casacore::Vector<double> chanWidths(NUM_CHANNELS);
+      double start_freq = 1.0e9;
+      double width = 1.0e6;
+
+      for (size_t i = 0; i < NUM_CHANNELS; ++i) {
+        chanFreqs[i] = start_freq + i * width;
+        chanWidths[i] = width;
+      }
+
+      spwCols.chanFreq().put(0, chanFreqs);
+      spwCols.chanWidth().put(0, chanWidths);
+      spwCols.resolution().put(0, chanWidths);
+      spwCols.refFrequency().put(0, start_freq);
+      spwCols.totalBandwidth().put(0, width * NUM_CHANNELS);
+    }
+
+    // --- 3. DATA DESCRIPTION ---
+    // Links Pol and SpW
+    {
+      casacore::MSDataDescription &ddTable = ms_->dataDescription();
+      ddTable.addRow(1);
+      casacore::MSDataDescColumns ddCols(ddTable);
+      ddCols.spectralWindowId().put(0, 0);
+      ddCols.polarizationId().put(0, 0);
+    }
+
+    // --- 4. ANTENNA ---
+    {
+      size_t nr_antennas =
+          static_cast<size_t>((std::sqrt(1 + 8 * NUM_BASELINES) - 1) / 2);
+      casacore::MSAntenna &antTable = ms_->antenna();
+      antTable.addRow(nr_antennas);
+      casacore::MSAntennaColumns antCols(antTable);
+
+      for (size_t i = 0; i < nr_antennas; ++i) {
+        antCols.name().put(i, "ANT" + std::to_string(antenna_map_[i]));
+        antCols.station().put(i, "STATION" + std::to_string(antenna_map_[i]));
+        antCols.mount().put(i, "ALT-AZ");
+        // Placeholder Position (ITRF)
+        casacore::Vector<double> pos(3, 0.0);
+        antCols.position().put(i, pos);
+      }
+    }
+
+    // --- 5. FIELD (Placeholder) ---
+    {
+      casacore::MSField &fieldTable = ms_->field();
+      fieldTable.addRow(1);
+      casacore::MSFieldColumns fieldCols(fieldTable);
+
+      fieldCols.name().put(0, "PLACEHOLDER_SOURCE");
+      fieldCols.code().put(0, "NONE");
+
+      // Direction (RA/DEC) - Zero for now
+      casacore::Matrix<double> dir(2, 1, 0.0);
+      fieldCols.delayDir().put(0, dir);
+      fieldCols.phaseDir().put(0, dir);
+      fieldCols.referenceDir().put(0, dir);
+    }
+  }
 };
