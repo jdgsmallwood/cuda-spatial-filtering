@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libunwind-dev \
     less \
     libcfitsio-dev \
+    casacore-dev \
     && rm -rf /var/lib/apt/lists/*
 
 
