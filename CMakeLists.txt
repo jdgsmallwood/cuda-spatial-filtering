@@ -148,6 +148,28 @@ message(STATUS "ZLIB_LIBRARIES: ${ZLIB_LIBRARIES}")
 message(STATUS "ZLIB_INCLUDE_DIRS: ${ZLIB_INCLUDE_DIRS}")
 
 #include_directories(${ZLIB_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+# --------------------------------------------
+# Fetch hiredis (dependency of redis-plus-plus)
+# --------------------------------------------
+FetchContent_Declare(
+    hiredis
+    GIT_REPOSITORY https://github.com/redis/hiredis.git
+    GIT_TAG v1.2.0
+)
+FetchContent_MakeAvailable(hiredis)
+
+# --------------------------------------------
+# Fetch redis-plus-plus
+# --------------------------------------------
+FetchContent_Declare(
+    redis_plus_plus
+    GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
+    GIT_TAG 1.3.11   # or latest stable
+)
+set(REDIS_PLUS_PLUS_CXX_STANDARD 17)
+set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
+set(REDIS_PLUS_PLUS_BUILD_SHARED ON)
+FetchContent_MakeAvailable(redis_plus_plus)
 
 FetchContent_Declare(
   HighFive
