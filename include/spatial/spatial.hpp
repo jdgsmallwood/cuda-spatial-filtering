@@ -598,7 +598,7 @@ public:
         break;
       }
 
-      const std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max;
+      std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max{};
       get_global_max_packet_array(global_max);
       auto [start, end] = worker_tasks[worker_id];
       lock.unlock();
