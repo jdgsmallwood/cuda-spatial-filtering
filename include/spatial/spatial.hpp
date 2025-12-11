@@ -302,9 +302,9 @@ public:
     //           parsed.payload->data[0][0][0].real(),
     //           parsed.payload->data[0][0][0].imag());
 
-    std::call_once(buffer_init_flag[fpga_ids[pkt.fpga_id]], [&]() {
+    std::call_once(buffer_init_flag[fpga_ids[parsed.fpga_id]], [&]() {
       LOG_INFO("Initializing buffers as this is the first packet...");
-      initialize_buffers(parsed.sample_count, pkt.fpga_id);
+      initialize_buffers(parsed.sample_count, parsed.fpga_id);
     });
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
     if (*parsed.original_packet_processed) [[likely]] {
