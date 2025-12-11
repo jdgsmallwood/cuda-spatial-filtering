@@ -25,6 +25,7 @@
 #include <casacore/tables/Tables/ScaColDesc.h>
 #include <casacore/tables/Tables/SetupNewTab.h>
 #include <casacore/tables/Tables/TableDesc.h>
+#include <sw/redis++/redis++.h>
 
 template <typename BeamT, typename ArrivalsT> class BeamWriter {
 public:
@@ -592,6 +593,149 @@ private:
   HighFive::DataSet vis_missing_dataset_;
   std::vector<size_t> vis_dims_;
   std::unordered_map<int, int> antenna_map_;
+};
+
+template <typename T>
+class HDF5AndRedisVisibilitiesWriter : public VisibilitiesWriter<T> {
+public:
+  HDF5AndRedisVisibilitiesWriter(
+      HighFive::File &file,
+      const std::unordered_map<int, int> *antenna_map = nullptr)
+      : file_(file),
+        element_count_(sizeof(T) /
+                       sizeof(typename std::remove_all_extents<T>::type)),
+        redis("tcp://127.0.0.1:6379") {
+    using namespace HighFive;
+    vis_dims_ = get_array_dims<T>();
+    std::vector<size_t> vis_dataset_dims = {0};
+    std::vector<size_t> vis_dataset_max_dims = {DataSpace::UNLIMITED};
+
+    vis_dataset_dims.insert(vis_dataset_dims.end(), vis_dims_.begin(),
+                            vis_dims_.end());
+    vis_dataset_max_dims.insert(vis_dataset_max_dims.end(), vis_dims_.begin(),
+                                vis_dims_.end());
+    std::vector<hsize_t> vis_chunk = {1};
+    vis_chunk.insert(vis_chunk.end(), vis_dims_.begin(), vis_dims_.end());
+    DataSpace vis_space(vis_dataset_dims, vis_dataset_max_dims);
+    DataSetCreateProps props;
+    props.add(HighFive::Chunking(vis_chunk));
+    // I imagine createDataSet needs a primitive type
+    vis_dataset_ = file_.createDataSet<float>("visibilities", vis_space, props);
+
+    DataSetCreateProps vis_seq_props;
+    vis_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    vis_seq_dataset_ = file_.createDataSet<int>(
+        "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
+        vis_seq_props);
+
+    DataSetCreateProps vis_missing_props;
+    vis_missing_props.add(Chunking(std::vector<hsize_t>{1, 3}));
+    vis_missing_dataset_ = file_.createDataSet<float>(
+        "vis_missing_nums",
+        DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
+        vis_missing_props);
+
+    if (antenna_map && !antenna_map->empty()) {
+      this->antenna_map_ = *antenna_map;
+    } else {
+      generate_identity_map();
+    }
+
+    write_baseline_ids();
+
+    redis.set("hello", "world");
+  }
+
+  void write_visibilities_block(const T *data, const int start_seq,
+                                const int end_seq,
+                                const int num_missing_packets,
+                                const int num_total_packets) override {
+    LOG_INFO("writing visibilities block {} to {}", start_seq, end_seq);
+    auto current_size = vis_dataset_.getDimensions()[0];
+    std::vector<size_t> new_dims = {current_size + 1};
+    new_dims.insert(new_dims.end(), vis_dims_.begin(), vis_dims_.end());
+    vis_dataset_.resize(new_dims);
+
+    std::vector<size_t> vis_offset = {current_size};
+    vis_offset.insert(vis_offset.end(), vis_dims_.size(), 0);
+    std::vector<size_t> vis_count = {1};
+    vis_count.insert(vis_count.end(), vis_dims_.begin(), vis_dims_.end());
+
+    vis_dataset_.select(vis_offset, vis_count).write(data);
+
+    auto seq_size = vis_seq_dataset_.getDimensions()[0];
+    vis_seq_dataset_.resize({seq_size + 1, 2});
+    std::vector<int> seq_nums = {start_seq, end_seq};
+    vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+
+    auto missing_size = vis_missing_dataset_.getDimensions()[0];
+    vis_missing_dataset_.resize({missing_size + 1, 3});
+    float num_missing_packets_fl = static_cast<float>(num_missing_packets);
+    float num_total_packets_fl = static_cast<float>(num_total_packets);
+    std::vector<float> missing_nums = {
+        num_missing_packets_fl, num_total_packets_fl,
+        100 * num_missing_packets_fl / num_total_packets_fl};
+    vis_missing_dataset_.select({missing_size, 0}, {1, 3})
+        .write_raw(missing_nums.data());
+
+    redis.command<void>("TS.ADD", "vis:0:0-0:0-0:real", "*",
+                        data[0][0][0][0][0][0]);
+    redis.command<void>("TS.ADD", "vis:0:0-0:0-0:imag", "*",
+                        data[0][0][0][0][0][1]);
+  }
+
+  void flush() override { file_.flush(); }
+
+private:
+  void write_baseline_ids() {
+    // Extract NR_BASELINES from T.
+    // T is float[CH][BL][POL][POL][CPLX].
+    // extent<T, 0> is Channels, extent<T, 1> is Baselines.
+    constexpr size_t nr_baselines = std::extent<T, 1>::value;
+
+    // Calculate number of antennas from triangular number formula:
+    // B = A(A+1)/2  =>  A^2 + A - 2B = 0
+    // A = (-1 + sqrt(1 + 8B)) / 2
+    size_t nr_antennas =
+        static_cast<size_t>((std::sqrt(1 + 8 * nr_baselines) - 1) / 2);
+
+    std::vector<int> baseline_ids;
+    baseline_ids.reserve(nr_baselines);
+
+    // Generate FITS IDs (256 * ant1 + ant2) based on triangular order
+    // Order: 0-0, 0-1, 1-1, 0-2, 1-2, 2-2 ...
+    for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
+      for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
+        baseline_ids.push_back(256 * antenna_map_[ant1] + antenna_map_[ant2]);
+      }
+    }
+
+    // Sanity check
+    if (baseline_ids.size() != nr_baselines) {
+      // Handle error/log warning here if dimensions don't match expectation
+    }
+
+    // Write to HDF5 (Static dataset, no need for Unlimited/Chunking)
+    file_
+        .createDataSet<int>("baseline_ids",
+                            HighFive::DataSpace::From(baseline_ids))
+        .write(baseline_ids);
+  }
+
+  void generate_identity_map() {
+    for (int i = 0; i < 256; i++) {
+      antenna_map_[i] = i;
+    }
+  }
+
+  HighFive::File &file_;
+  size_t element_count_;
+  HighFive::DataSet vis_dataset_;
+  HighFive::DataSet vis_seq_dataset_;
+  HighFive::DataSet vis_missing_dataset_;
+  std::vector<size_t> vis_dims_;
+  std::unordered_map<int, int> antenna_map_;
+  sw::redis::Redis redis;
 };
 
 // Factory function for easy creation
