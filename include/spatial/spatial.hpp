@@ -256,7 +256,7 @@ public:
                           const uint32_t fpga_id) {
     LOG_INFO("[BufferInitialization] First count for FPGA ID {} was {}...",
              fpga_id, first_count);
-    std::lock_guard lock(buffer_ordering_mutex);
+    std::lock_guard lock(buffer_index_mutex);
     const int fpga_index = fpga_ids[fpga_id];
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       buffers[i].start_seq[fpga_index] =
@@ -275,7 +275,6 @@ public:
         buffer_ordering_queue.push({i, buffers[i].start_seq[0]});
       };
     }
-    std::lock_guard lock_index(buffer_index_mutex);
     global_max_end_seq[fpga_index].store(
         buffers[NR_INPUT_BUFFERS - 1].end_seq[fpga_index],
         std::memory_order_release);
@@ -808,7 +807,6 @@ private:
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
       buffer_ordering_queue;
-  std::mutex buffer_ordering_mutex;
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<unsigned long long>, T::NR_FPGA_SOURCES>
       global_max_end_seq{0};

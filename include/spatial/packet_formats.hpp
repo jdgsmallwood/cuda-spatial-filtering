@@ -178,7 +178,8 @@ struct LambdaPacketEntry
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
     uint32_t offset = 0;
-    if (length > 2622) {
+    if (length > sizeof(PacketScaleStructure) + sizeof(PacketDataStructure) +
+                     sizeof(CustomHeader)) {
       offset = 42;
     }
     __builtin_prefetch(base + offset, 0, 3);
@@ -190,6 +191,10 @@ struct LambdaPacketEntry
     const CustomHeader *__restrict__ custom =
         (const CustomHeader *)(base + offset);
 
+    const uint8_t *ip_bytes =
+        (const uint8_t *)&this->sender_addr.sin_addr.s_addr;
+    uint8_t third_octet = ip_bytes[2];
+
     return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
         .sample_count = custom->sample_count,
         .timestamp =
@@ -198,7 +203,9 @@ struct LambdaPacketEntry
             const PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
             base + offset + sizeof(CustomHeader)),
         .original_packet_processed = &this->processed,
-        .fpga_id = custom->fpga_id,
+        // for now - take the IP address as the fpga_id.
+        // i.e. 10.0.3.10 = FPGA ID 3.
+        .fpga_id = (uint32_t)third_octet, // custom->fpga_id,
         .payload_size =
             static_cast<uint32_t>(length - (offset + sizeof(CustomHeader))),
         .freq_channel = custom->freq_channel};

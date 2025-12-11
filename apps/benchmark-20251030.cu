@@ -65,8 +65,10 @@ int main(int argc, char *argv[]) {
   argparse::ArgumentParser program("pipeline");
   std::string pcap_filename;
   std::string vis_filename;
+  std::string ifname;
   bool loop_pcap;
   int min_freq_channel;
+  int port;
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
@@ -83,6 +85,17 @@ int main(int argc, char *argv[]) {
   program.add_argument("-f", "--min_freq_channel")
       .help("specify the lowest frequency channel.")
       .store_into(min_freq_channel);
+
+  program.add_argument("-i", "--network-interface")
+      .help("Network interface to bind on")
+      .default_value("enp216s0np0")
+      .store_into(ifname);
+
+  program.add_argument("-L", "--port")
+      .help("Port to bind on")
+      .default_value(36001)
+      .store_into(port);
+
   try {
     program.parse_args(argc, argv);
   } catch (const std::exception &err) {
@@ -159,9 +172,14 @@ int main(int argc, char *argv[]) {
   //      UVFITSVisibilitiesWriter<Config::VisibilitiesOutputType>>(
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
+
+  static const std::unordered_map<int, int> antenna_mapping = {
+      {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+      {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
+  };
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
-          vis_file);
+          vis_file, &antenna_mapping);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), 100, 100);
@@ -184,14 +202,20 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
-  int port = 36001;
-  std::string ifname = "enp216s0np0";
-  //  KernelSocketIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  // LibpcapIP6PacketCapture capture(ifname, port, BUFFER_SIZE);
-  PCAPMultiFPGAPacketCapture capture(pcap_filename, loop_pcap, nr_fpga_sources);
+  // int port = 36001;
+  //   std::string ifname = "enp216s0np0";
+
+  std::unique_ptr<PacketInput> capture;
+
+  if (!pcap_filename.empty()) {
+    capture = std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap);
+  } else {
+    capture =
+        std::make_unique<KernelSocketPacketCapture>(ifname, port, BUFFER_SIZE);
+  }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
-  std::thread receiver([&capture, &state]() { capture.get_packets(state); });
+  std::thread receiver([&capture, &state]() { capture->get_packets(state); });
 
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
