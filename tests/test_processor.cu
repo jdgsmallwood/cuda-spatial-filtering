@@ -38,6 +38,20 @@ using TestMultipleFPGAConfig =
                  32, // NR_PADDED_RECEIVERS_PER_BLOCK
                  1   // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
                  >;
+using TestMultipleFPGAWithOctetConfig =
+    LambdaConfig<2,   // NR_CHANNELS
+                 4,   // NR_FPGA_SOURCES
+                 8,   // NR_TIME_STEPS_PER_PACKET
+                 20,  // NR_RECEIVERS
+                 2,   // NR_POLARIZATIONS
+                 10,  // NR_RECEIVERS_PER_PACKET
+                 10,  // NR_PACKETS_FOR_CORRELATION
+                 1,   // NR_BEAMS
+                 32,  // NR_PADDED_RECEIVERS
+                 32,  // NR_PADDED_RECEIVERS_PER_BLOCK
+                 1,   // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                 true // OCTET override
+                 >;
 constexpr static size_t NR_BUFFERS = 3;
 // Simple mock pipeline that just tracks what it receives
 class SimpleMockPipeline : public GPUPipeline {
@@ -76,7 +90,7 @@ public:
 
 // Test fixture
 class ProcessorStateTest : public ::testing::Test {
-protected:
+public:
   ProcessorStateBase *processor_state;
   SimpleMockPipeline *mock_pipeline;
 
@@ -210,6 +224,7 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
     processor_state->synchronous_pipeline = true;
   }
 
+public:
   void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
                             uint16_t freq_channel, int val) {
     // Get the current write pointer
@@ -276,10 +291,134 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
+    int desired_src_ip_third_octet = 0;
+    uint32_t host_ip =
+        0x0a000001; // This is (10 << 24) | (0 << 16) | (0 << 8) | 1
+
+    // 2. Clear the current 3rd octet (bits 8-15) and set the new one
+    // The mask ~0x0000FF00U clears the 3rd octet.
+    host_ip &= ~0x0000FF00U;
+
+    // 3. Set the new 3rd octet value
+    host_ip |= (static_cast<uint32_t>(desired_src_ip_third_octet) << 8);
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(host_ip);
 
     processor_state->add_received_packet_metadata(total_length, addr);
+  }
+};
+
+class ProcessorStateMultipleFPGAWithOctetTest
+    : public ProcessorStateMultipleFPGATest {
+
+  void SetUp() override {
+    using MapType = std::unordered_map<uint32_t, int>;
+    std::unique_ptr<MapType> fpga_ids =
+        std::make_unique<MapType>(std::initializer_list<MapType::value_type>{
+            {10, 0}, {11, 1}, {12, 2}, {13, 3}});
+    processor_state = new ProcessorState<TestMultipleFPGAWithOctetConfig,
+                                         NR_BUFFERS>(
+        10, // nr_packets_for_correlation
+        TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
+        0,                                                // min_freq_channel
+        &fpga_ids);
+
+    mock_pipeline = new SimpleMockPipeline();
+    mock_pipeline->set_state(processor_state);
+    processor_state->set_pipeline(mock_pipeline);
+    processor_state->synchronous_pipeline = true;
+  }
+
+public:
+  void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
+                            uint16_t freq_channel, int val,
+                            int desired_src_ip_third_octet = 0) {
+    // Get the current write pointer
+    void *write_ptr = processor_state->get_current_write_pointer();
+    uint8_t *data_ptr = (uint8_t *)write_ptr;
+
+    // Ethernet header (14 bytes)
+    EthernetHeader *eth = (EthernetHeader *)data_ptr;
+    memset(eth, 0, sizeof(EthernetHeader));
+    eth->ethertype = htons(0x0800); // IPv4
+    data_ptr += sizeof(EthernetHeader);
+
+    // IP header (20 bytes)
+    IPHeader *ip = (IPHeader *)data_ptr;
+    memset(ip, 0, sizeof(IPHeader));
+    ip->version_ihl = 0x45; // IPv4, 20 byte header
+    data_ptr += sizeof(IPHeader);
+
+    // UDP header (8 bytes)
+    UDPHeader *udp = (UDPHeader *)data_ptr;
+    memset(udp, 0, sizeof(UDPHeader));
+    data_ptr += sizeof(UDPHeader);
+
+    // Custom header (22 bytes: 8 + 4 + 2 + 8)
+    CustomHeader *custom = (CustomHeader *)data_ptr;
+    custom->sample_count = sample_count;
+    custom->fpga_id = fpga_id;
+    custom->freq_channel = freq_channel;
+    memset(custom->padding, 0, sizeof(custom->padding));
+    data_ptr += sizeof(CustomHeader);
+
+    // Payload: PacketPayload<PacketScaleStructure, PacketDataStructure>
+    // PacketScaleStructure: int16_t[NR_RECEIVERS][NR_POLARIZATIONS]
+    // PacketDataStructure:
+    // complex<int8_t>[NR_TIME_STEPS][NR_RECEIVERS][NR_POLARIZATIONS]
+    auto *payload =
+        reinterpret_cast<typename TestMultipleFPGAConfig::PacketPayloadType *>(
+            data_ptr);
+
+    // Fill scales with test data
+    for (int r = 0; r < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET; r++) {
+      for (int p = 0; p < TestMultipleFPGAConfig::NR_POLARIZATIONS; p++) {
+        payload->scales[r][p] =
+            static_cast<int16_t>(1 + r + fpga_id); // Non-zero scales
+      }
+    }
+
+    // Fill data with test pattern
+    for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET; t++) {
+      for (int r = 0; r < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET;
+           r++) {
+        for (int p = 0; p < TestMultipleFPGAConfig::NR_POLARIZATIONS; p++) {
+          payload->data[t][r][p] = std::complex<int8_t>(
+              static_cast<int8_t>(val), static_cast<int8_t>(val));
+        }
+      }
+    }
+
+    // Set packet metadata
+    int total_length =
+        sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader) +
+        sizeof(CustomHeader) +
+        sizeof(typename TestMultipleFPGAConfig::PacketPayloadType);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+
+    uint32_t host_ip =
+        0x0a000001; // This is (10 << 24) | (0 << 16) | (0 << 8) | 1
+
+    // 2. Clear the current 3rd octet (bits 8-15) and set the new one
+    // The mask ~0x0000FF00U clears the 3rd octet.
+    host_ip &= ~0x0000FF00U;
+
+    // 3. Set the new 3rd octet value
+    host_ip |= (static_cast<uint32_t>(desired_src_ip_third_octet) << 8);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(host_ip);
+
+    processor_state->add_received_packet_metadata(total_length, addr);
+  }
+
+  virtual void add_packet(uint64_t sample_count, uint32_t fpga_id,
+                          uint16_t freq_channel, int val = 1,
+                          int desired_src_ip_third_octet = 0) {
+    create_lambda_packet(sample_count, fpga_id, freq_channel, val,
+                         desired_src_ip_third_octet);
+    processor_state->get_next_write_pointer();
   }
 };
 
@@ -295,7 +434,8 @@ TEST_F(ProcessorStateTest, FillOneBufferTest) {
   const uint64_t start_sample = 1000;
 
   // For one complete buffer, we need packets from all channels and all FPGAs
-  // Total packets = NR_CHANNELS * NR_FPGA_SOURCES * NR_PACKETS_FOR_CORRELATION
+  // Total packets = NR_CHANNELS * NR_FPGA_SOURCES *
+  // NR_PACKETS_FOR_CORRELATION
   int total_packets = TestConfig::NR_CHANNELS * TestConfig::NR_FPGA_SOURCES *
                       TestConfig::NR_PACKETS_FOR_CORRELATION;
 
@@ -474,6 +614,65 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
           for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
                t++) {
             for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
+                 pol++) {
+              std::complex<int8_t> expected_value;
+              expected_value = {static_cast<int8_t>(fpga + 1),
+                                static_cast<int8_t>(fpga + 1)};
+              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol],
+                        expected_value);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST_F(ProcessorStateMultipleFPGAWithOctetTest,
+       MultipleFPGAPlacementWithDifferentIDTest) {
+  // This will give different values to different FPGAs.
+  // We'll use 1 and 2 so that the second batch of receivers should
+  // be double the first.
+
+  int start_sample = 1000;
+  for (int channel = 0; channel < TestMultipleFPGAWithOctetConfig::NR_CHANNELS;
+       channel++) {
+    for (int fpga = 0; fpga < TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES;
+         fpga++) {
+      for (int pkt = 0;
+           pkt < TestMultipleFPGAWithOctetConfig::NR_PACKETS_FOR_CORRELATION;
+           pkt++) {
+        uint64_t sample =
+            start_sample +
+            pkt * TestMultipleFPGAWithOctetConfig::NR_TIME_STEPS_PER_PACKET;
+        add_packet(sample, fpga, channel, fpga + 1, fpga + 10);
+      }
+    }
+  }
+
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion(true);
+  EXPECT_EQ(processor_state->packets_missing, 0);
+
+  typename TestMultipleFPGAWithOctetConfig::InputPacketSamplesType *samples =
+      (typename TestMultipleFPGAWithOctetConfig::InputPacketSamplesType *)
+          mock_pipeline->last_packet_data->get_samples_ptr();
+
+  for (int channel = 0; channel < TestMultipleFPGAWithOctetConfig::NR_CHANNELS;
+       channel++) {
+    for (int receiver = 0;
+         receiver < TestMultipleFPGAWithOctetConfig::NR_RECEIVERS_PER_PACKET;
+         receiver++) {
+      for (int pkt = 0;
+           pkt < TestMultipleFPGAWithOctetConfig::NR_PACKETS_FOR_CORRELATION;
+           pkt++) {
+        for (int fpga = 0;
+             fpga < TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES; fpga++) {
+          for (int t = 0;
+               t < TestMultipleFPGAWithOctetConfig::NR_TIME_STEPS_PER_PACKET;
+               t++) {
+            for (int pol = 0;
+                 pol < TestMultipleFPGAWithOctetConfig::NR_POLARIZATIONS;
                  pol++) {
               std::complex<int8_t> expected_value;
               expected_value = {static_cast<int8_t>(fpga + 1),

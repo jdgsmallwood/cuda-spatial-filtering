@@ -7,9 +7,9 @@ constexpr size_t HEADER_SIZE = sizeof(EthernetHeader) + sizeof(IPHeader) +
                                sizeof(UDPHeader) + sizeof(CustomHeader);
 
 template <typename T>
-typename T::PacketEntryType create_valid_test_packet(const int sample_count,
-                                                     const int fpga_id,
-                                                     const int channel) {
+typename T::PacketEntryType
+create_valid_test_packet(const int sample_count, const int fpga_id,
+                         const int channel, const int src_ip_octet3 = 0) {
   typename T::PacketEntryType entry;
   memset(&entry, 0, sizeof(entry)); // Zero everything
 
@@ -30,10 +30,21 @@ typename T::PacketEntryType create_valid_test_packet(const int sample_count,
   ip.total_length =
       htons(sizeof(IPHeader) + sizeof(UDPHeader) + sizeof(CustomHeader) +
             sizeof(typename T::PacketPayloadType));
-  ip.protocol = 17;              // UDP
-  ip.src_ip = htonl(0x0a000001); // 10.0.0.1
-  ip.dst_ip = htonl(0x0a000002); // 10.0.0.2
+  ip.protocol = 17; // UDP
+                    // 1. Start with the full host-order IP address (10.0.0.1)
+  uint32_t host_ip =
+      0x0a000001; // This is (10 << 24) | (0 << 16) | (0 << 8) | 1
 
+  // 2. Clear the current 3rd octet (bits 8-15) and set the new one
+  // The mask ~0x0000FF00U clears the 3rd octet.
+  host_ip &= ~0x0000FF00U;
+
+  // 3. Set the new 3rd octet value
+  host_ip |= (static_cast<uint32_t>(src_ip_octet3) << 8);
+
+  // 4. Convert the final value to network byte order
+  ip.src_ip = htonl(host_ip);
+  ip.dst_ip = htonl(0x0a000002); // 10.0.0.2
   std::memcpy(ptr, &ip, sizeof(ip));
   ptr += sizeof(ip);
 
@@ -77,10 +88,15 @@ typename T::PacketEntryType create_valid_test_packet(const int sample_count,
   std::memcpy(ptr, &payload, sizeof(payload));
   ptr += sizeof(payload);
 
+  struct sockaddr_in sender_addr = {};
+  sender_addr.sin_family = AF_INET;
+  sender_addr.sin_addr.s_addr = htonl(host_ip);
+
   // Finalize
   entry.length = ptr - entry.data;
   entry.timestamp = {1234567890, 123456}; // fake timestamp
   entry.processed = false;
+  entry.sender_addr = sender_addr;
 
   return entry;
 }
@@ -113,4 +129,22 @@ TEST(PacketFormatTests, TestLambdaPacketEntryParsedFormat) {
 
   ASSERT_EQ(processed_packet.payload->data[0][0][0],
             std::complex<int8_t>(0, 0));
+}
+
+TEST(PacketFormatTests, TestIPThirdOctetFPGAIDParsing) {
+  // When ThirdOctetFPGAIDParsing is used the FPGA ID will be equal to the
+  // third octet i.e. 10.0.5.10 = 5
+  // regardless of what is put in the fpga_id header.
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000, true>;
+  int sample_count = 1;
+  int fpga_id = 100;
+  int channel = 4;
+  int desired_fpga_id = 5;
+
+  Config::PacketEntryType test_packet = create_valid_test_packet<Config>(
+      sample_count, fpga_id, channel, desired_fpga_id);
+
+  ProcessedPacket<Config::PacketScaleStructure, Config::PacketDataStructure>
+      processed_packet = test_packet.parse();
+  ASSERT_EQ(processed_packet.fpga_id, desired_fpga_id);
 }

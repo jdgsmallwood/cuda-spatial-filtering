@@ -167,7 +167,8 @@ struct PacketEntry {
   parse() = 0;
 };
 
-template <typename PacketScaleStructure, typename PacketDataStructure>
+template <typename PacketScaleStructure, typename PacketDataStructure,
+          bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>
 struct LambdaPacketEntry
     : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
   __attribute__((hot)) __attribute__((flatten))
@@ -191,9 +192,15 @@ struct LambdaPacketEntry
     const CustomHeader *__restrict__ custom =
         (const CustomHeader *)(base + offset);
 
-    const uint8_t *ip_bytes =
-        (const uint8_t *)&this->sender_addr.sin_addr.s_addr;
-    uint8_t third_octet = ip_bytes[2];
+    uint32_t fpga_id;
+    if (OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET) {
+      const uint8_t *ip_bytes =
+          (const uint8_t *)&this->sender_addr.sin_addr.s_addr;
+      uint8_t third_octet = ip_bytes[2];
+      fpga_id = (uint32_t)third_octet;
+    } else {
+      fpga_id = custom->fpga_id;
+    }
 
     return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
         .sample_count = custom->sample_count,
@@ -205,7 +212,7 @@ struct LambdaPacketEntry
         .original_packet_processed = &this->processed,
         // for now - take the IP address as the fpga_id.
         // i.e. 10.0.3.10 = FPGA ID 3.
-        .fpga_id = (uint32_t)third_octet, // custom->fpga_id,
+        .fpga_id = fpga_id, // custom->fpga_id,
         .payload_size =
             static_cast<uint32_t>(length - (offset + sizeof(CustomHeader))),
         .freq_channel = custom->freq_channel};
@@ -217,7 +224,8 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_POLARIZATIONS_T, size_t NR_RECEIVERS_PER_PACKET_T,
           size_t NR_PACKETS_FOR_CORRELATION_T, size_t NR_BEAMS_T,
           size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T,
-          size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T>
+          size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T,
+          bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false>
 struct LambdaConfig {
 
   static constexpr size_t NR_CHANNELS = NR_CHANNELS_T;
@@ -283,7 +291,8 @@ struct LambdaConfig {
   using ProcessedPacketType =
       ProcessedPacket<PacketScaleStructure, PacketDataStructure>;
   using PacketEntryType =
-      LambdaPacketEntry<PacketScaleStructure, PacketDataStructure>;
+      LambdaPacketEntry<PacketScaleStructure, PacketDataStructure,
+                        OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>;
   using PacketFinalDataType =
       LambdaFinalPacketData<InputPacketSamplesType, PacketScalesType,
                             NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,

@@ -35,7 +35,7 @@ target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE GTest::gtest_main spa
 add_executable(
   WriterTests test_writers.cpp
 )
-target_link_libraries(WriterTests PRIVATE GTest::gtest_main spatial HighFive::HighFive)
+target_link_libraries(WriterTests PRIVATE GTest::gtest_main spatial HighFive::HighFive ${CASACORE_LIBRARIES})
 
 add_executable(
   ProcessorTests test_processor.cu
