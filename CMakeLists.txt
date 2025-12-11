@@ -158,6 +158,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(hiredis)
 
+set(HIREDIS_HEADER "${hiredis_SOURCE_DIR}/hiredis/hiredis.h" CACHE STRING "" FORCE)
+
 # --------------------------------------------
 # Fetch redis-plus-plus
 # --------------------------------------------
