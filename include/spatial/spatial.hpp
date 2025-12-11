@@ -34,10 +34,10 @@ void ccglib_mma(__half *A, __half *B, float *C, const int n_row,
 void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
                     const int n_col, const int batch_size, int n_inner,
                     const int tile_size_x, const int tile_size_y);
-template <size_t NR_CHANNELS> struct BufferState {
+template <size_t NR_CHANNELS, size_t NR_FPGA_SOURCES> struct BufferState {
   bool is_ready;
-  unsigned long long start_seq;
-  unsigned long long end_seq;
+  std::array<unsigned long long, NR_FPGA_SOURCES> start_seq;
+  std::array<unsigned long long, NR_FPGA_SOURCES> end_seq;
   std::bitset<NR_CHANNELS> is_populated;
 };
 
@@ -49,7 +49,7 @@ public:
   int current_buffer = 0;
   std::atomic<int> write_index = 0;
   std::atomic<int> read_index = 0;
-  std::vector<uint32_t> fpga_ids{};
+  std::unordered_map<uint32_t, int> fpga_ids;
   bool synchronous_pipeline = false;
   std::atomic<int> running = 1;
   unsigned long long packets_received = 0;
@@ -77,16 +77,27 @@ public:
   size_t NR_BETWEEN_SAMPLES;
   size_t NR_PACKETS_FOR_CORRELATION;
 
-  std::array<BufferState<T::NR_CHANNELS>, NR_INPUT_BUFFERS> buffers;
+  std::array<BufferState<T::NR_CHANNELS, T::NR_FPGA_SOURCES>, NR_INPUT_BUFFERS>
+      buffers;
   uint64_t latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES] = {};
   mutable std::mutex buffer_index_mutex;
   GPUPipeline *pipeline_;
   // Constructor / Destructor
-  ProcessorState(size_t nr_packets_for_correlation, size_t nr_between_samples,
-                 size_t min_freq_channel)
+  ProcessorState(
+      size_t nr_packets_for_correlation, size_t nr_between_samples,
+      size_t min_freq_channel,
+      std::unique_ptr<std::unordered_map<uint32_t, int>> fpga_ids_ = nullptr)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel) {
+
+    if (fpga_ids_ && !fpga_ids_->empty()) {
+      fpga_ids = *fpga_ids_;
+    } else {
+      for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+        fpga_ids[i] = i;
+      }
+    }
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     std::fill(modified_since_last_completion_check.begin(),
@@ -145,18 +156,14 @@ public:
   __attribute__((hot)) void copy_data_to_input_buffer_if_able(
       ProcessedPacket<typename T::PacketScaleStructure,
                       typename T::PacketDataStructure> &pkt,
-      const int current_read_index, const unsigned long long global_max) {
-
+      const int current_read_index,
+      const std::array<unsigned long long, T::NR_FPGA_SOURCES> &global_max) {
     size_t fpga_index;
-    {
-      std::lock_guard lock(fpga_mutex);
-      auto it = std::find(fpga_ids.begin(), fpga_ids.end(), pkt.fpga_id);
-      if (it != fpga_ids.end()) {
-        fpga_index = std::distance(fpga_ids.begin(), it);
-      } else {
-        fpga_ids.push_back(pkt.fpga_id);
-        fpga_index = fpga_ids.size() - 1;
-      }
+    if (fpga_ids.count(pkt.fpga_id)) {
+      fpga_index = fpga_ids[pkt.fpga_id];
+    } else {
+      LOG_ERROR("FPGA ID {} not found.", pkt.fpga_id);
+      throw std::out_of_range("FPGA ID not found. Check logs.");
     }
 
     const int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
@@ -170,15 +177,16 @@ public:
     const uint64_t sample_count = pkt.sample_count;
     // on the first run global_max will not be set initially so will be 0.
     // We don't want it to seize up on this.
-    if (sample_count > global_max && global_max > 0) {
+    if (sample_count > global_max[fpga_index] && global_max[fpga_index] > 0) {
       std::lock_guard lock(future_packet_queue_mutex);
-      future_packet_queue.push({current_read_index, sample_count});
+      future_packet_queue[fpga_index].push({current_read_index, sample_count});
       return;
     }
     // copy to correct place or leave it.
     for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
       const int buffer_index = (current_buf + buffer) % NR_INPUT_BUFFERS;
-      const unsigned long long buffer_start = buffers[buffer_index].start_seq;
+      const unsigned long long buffer_start =
+          buffers[buffer_index].start_seq[fpga_index];
       const int packet_index =
           (sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
 
@@ -231,8 +239,10 @@ public:
   void process_all_available_packets() {
     // This exists mainly for testing purposes
     // to allow us to add some packets then process them all.
-    const unsigned long long global_max =
-        global_max_end_seq.load(std::memory_order_acquire);
+    const std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max;
+    for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+      global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
+    }
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
       process_packet_data(d_packet_data[current_read_index], current_read_index,
@@ -242,32 +252,38 @@ public:
     }
   }
 
-  void initialize_buffers(const unsigned long long first_count) {
-    LOG_INFO("[BufferInitialization] First count was {}...", first_count);
+  void initialize_buffers(const unsigned long long first_count,
+                          const uint32_t fpga_id) {
+    LOG_INFO("[BufferInitialization] First count for FPGA ID {} was {}...",
+             fpga_id, first_count);
     std::lock_guard lock(buffer_ordering_mutex);
+    const int fpga_index = fpga_ids[fpga_id];
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      buffers[i].start_seq =
+      buffers[i].start_seq[fpga_index] =
           first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
-      buffers[i].end_seq =
+      buffers[i].end_seq[fpga_index] =
           first_count +
           ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
       buffers[i].is_ready = true;
       LOG_INFO("[BufferInitialization] Buffer {} goes from {} to {}", i,
-               buffers[i].start_seq, buffers[i].end_seq);
+               buffers[i].start_seq[fpga_index],
+               buffers[i].end_seq[fpga_index]);
       // we know 0 will be the first one - so no need to add zero
-      if (i != 0) {
-        buffer_ordering_queue.push({i, buffers[i].start_seq});
+      if (i != 0 && fpga_index == 0) {
+        // can just use the first FPGA for checking which buffer should
+        // come next.
+        buffer_ordering_queue.push({i, buffers[i].start_seq[0]});
       };
     }
     std::lock_guard lock_index(buffer_index_mutex);
-    global_max_end_seq.store(buffers[NR_INPUT_BUFFERS - 1].end_seq,
-                             std::memory_order_release);
+    global_max_end_seq[fpga_index].store(
+        buffers[NR_INPUT_BUFFERS - 1].end_seq[fpga_index],
+        std::memory_order_release);
   };
 
-  __attribute__((hot)) void
-  process_packet_data(typename T::PacketEntryType *pkt,
-                      const int current_read_index,
-                      const unsigned long long global_max) {
+  __attribute__((hot)) void process_packet_data(
+      typename T::PacketEntryType *pkt, const int current_read_index,
+      const std::array<unsigned long long, T::NR_FPGA_SOURCES> &global_max) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
@@ -287,9 +303,9 @@ public:
     //           parsed.payload->data[0][0][0].real(),
     //           parsed.payload->data[0][0][0].imag());
 
-    std::call_once(buffer_init_flag, [&]() {
+    std::call_once(buffer_init_flag[fpga_ids[pkt.fpga_id]], [&]() {
       LOG_INFO("Initializing buffers as this is the first packet...");
-      initialize_buffers(parsed.sample_count);
+      initialize_buffers(parsed.sample_count, pkt.fpga_id);
     });
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
     if (*parsed.original_packet_processed) [[likely]] {
@@ -298,6 +314,13 @@ public:
     modified_since_last_completion_check[parsed.freq_channel -
                                          MIN_FREQ_CHANNEL] = true;
   };
+
+  void get_global_max_packet_array(
+      std::array<unsigned long long, T::NR_FPGA_SOURCES> &arr) {
+    for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+      arr[i] = global_max_end_seq[i].load(std::memory_order_acquire);
+    }
+  }
 
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
@@ -313,24 +336,26 @@ public:
     {
       std::lock_guard<std::mutex> lock(buffer_index_mutex);
 
-      unsigned long long max_end_seq_in_buffers =
-          global_max_end_seq.load(std::memory_order_acquire);
-      const unsigned long long new_start =
-          max_end_seq_in_buffers + 1 * NR_BETWEEN_SAMPLES;
-      const unsigned long long new_end =
-          new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-      // LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index
-      // {}...",
-      //           buffer_index);
-      // for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      //  max_end_seq_in_buffers =
-      //      std::max(max_end_seq_in_buffers, buffers[i].end_seq);
-      //}
+      std::array<unsigned long long, T::NR_FPGA_SOURCES> max_end_seq_in_buffers;
+      get_global_max_packet_array(max_end_seq_in_buffers);
       const int buf_idx = buffer_index;
       auto &buffer = buffers[buf_idx];
-      buffer.start_seq = new_start;
-      buffer.end_seq = new_end;
-      global_max_end_seq.store(new_end, std::memory_order_release);
+      for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+        const unsigned long long new_start =
+            max_end_seq_in_buffers[i] + 1 * NR_BETWEEN_SAMPLES;
+        const unsigned long long new_end =
+            new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+        // LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index
+        // {}...",
+        //           buffer_index);
+        // for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
+        //  max_end_seq_in_buffers =
+        //      std::max(max_end_seq_in_buffers, buffers[i].end_seq);
+        //}
+        buffer.start_seq[i] = new_start;
+        buffer.end_seq[i] = new_end;
+        global_max_end_seq[i].store(new_end, std::memory_order_release);
+      }
       // LOG_DEBUG("[ProcessorState - release_buffer] filling arrivals as false
       // for "
       //           "buffer {}...",
@@ -345,7 +370,7 @@ public:
       //           buffer_index, buffers[buffer_index].start_seq);
 
       buffer.is_ready = true;
-      buffer_ordering_queue.push({buf_idx, new_start});
+      buffer_ordering_queue.push({buf_idx, buffer.start_seq[0]});
     }
     buffer_available_cv.notify_one();
     // LOG_INFO("[ProcessorState] added buffer index {} back to queue with "
@@ -405,7 +430,8 @@ public:
       if (!buffer.is_ready) {
         continue;
       }
-      const unsigned long long end_seq = buffer.end_seq;
+      const std::array<unsigned long long, T::NR_FPGA_SOURCES> end_seq =
+          buffer.end_seq;
       for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
         if (buffer.is_populated[channel] ||
             !modified_since_last_completion_check[channel]) {
@@ -417,7 +443,7 @@ public:
           // we wait for halfway through the next buffer to be complete to avoid
           // missing out of order packets.
           if (latest_packet_received[channel][fpga] <
-              end_seq + NR_BETWEEN_SAMPLES / 2) {
+              end_seq[fpga] + NR_BETWEEN_SAMPLES / 2) {
             all_fpgas_complete = false;
             break;
           }
@@ -516,24 +542,26 @@ public:
       if (--packets_until_completion_check == 0) {
         // Before checking buffer completion drain any packets from the
         // queue that should be in this buffer
-        unsigned long long current_buffer_end_seq =
-            global_max_end_seq.load(std::memory_order_acquire);
+        const std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max;
+        get_global_max_packet_array(global_max);
         {
           std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
                                             std::try_to_lock);
           if (lock.owns_lock()) {
-            while (!future_packet_queue.empty()) {
-              auto pkt = future_packet_queue.top();
-              if (pkt.packet_num > current_buffer_end_seq) {
-                break;
+            for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+              while (!future_packet_queue[i].empty()) {
+                auto pkt = future_packet_queue[i].top();
+                if (pkt.packet_num > global_max[i]) {
+                  break;
+                }
+                future_packet_queue[i].pop();
+                lock.unlock();
+                auto *entry = d_packet_data[pkt.index];
+                if (entry->length > 0 && !entry->processed) {
+                  process_packet_data(entry, pkt.index, global_max);
+                }
+                lock.lock();
               }
-              future_packet_queue.pop();
-              lock.unlock();
-              auto *entry = d_packet_data[pkt.index];
-              if (entry->length > 0 && !entry->processed) {
-                process_packet_data(entry, pkt.index, current_buffer_end_seq);
-              }
-              lock.lock();
             }
           }
         }
@@ -570,9 +598,8 @@ public:
         break;
       }
 
-      const unsigned long long global_max =
-          global_max_end_seq.load(std::memory_order_acquire);
-
+      const std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max;
+      get_global_max_packet_array(global_max);
       auto [start, end] = worker_tasks[worker_id];
       lock.unlock();
       // std::cout << "Worker with id " << worker_id
@@ -772,8 +799,9 @@ private:
   // The read pointer moves on but keep these as things to process.
   // They will not be overwritten by the write pointer as it checks whether or
   // not they have been processed.
-  std::priority_queue<PacketOrder, std::vector<PacketOrder>,
-                      std::greater<PacketOrder>>
+  std::array<std::priority_queue<PacketOrder, std::vector<PacketOrder>,
+                                 std::greater<PacketOrder>>,
+             T::NR_FPGA_SOURCES>
       future_packet_queue;
   std::mutex future_packet_queue_mutex;
   std::array<bool, T::NR_CHANNELS> modified_since_last_completion_check;
@@ -782,10 +810,10 @@ private:
       buffer_ordering_queue;
   std::mutex buffer_ordering_mutex;
   std::condition_variable buffer_available_cv;
-  std::atomic<unsigned long long> global_max_end_seq{0};
-  std::once_flag buffer_init_flag;
+  std::array<std::atomic<unsigned long long>, T::NR_FPGA_SOURCES>
+      global_max_end_seq{0};
+  std::array<std::once_flag, T::NR_FPGA_SOURCES> buffer_init_flag;
 
-  std::mutex fpga_mutex;
   std::mutex latest_packet_mutex;
   static constexpr int WORKER_COUNT = 3;
   struct WorkRange {
