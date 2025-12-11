@@ -86,13 +86,13 @@ public:
   ProcessorState(
       size_t nr_packets_for_correlation, size_t nr_between_samples,
       size_t min_freq_channel,
-      std::unique_ptr<std::unordered_map<uint32_t, int>> fpga_ids_ = nullptr)
+      std::unique_ptr<std::unordered_map<uint32_t, int>> *fpga_ids_ = nullptr)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel) {
 
-    if (fpga_ids_ && !fpga_ids_->empty()) {
-      fpga_ids = *fpga_ids_;
+    if (fpga_ids_ && !(*fpga_ids_)->empty()) {
+      fpga_ids = **fpga_ids_;
     } else {
       for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
         fpga_ids[i] = i;
@@ -239,7 +239,7 @@ public:
   void process_all_available_packets() {
     // This exists mainly for testing purposes
     // to allow us to add some packets then process them all.
-    const std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max;
+    std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max{};
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
     }
@@ -335,7 +335,8 @@ public:
     {
       std::lock_guard<std::mutex> lock(buffer_index_mutex);
 
-      std::array<unsigned long long, T::NR_FPGA_SOURCES> max_end_seq_in_buffers;
+      std::array<unsigned long long, T::NR_FPGA_SOURCES>
+          max_end_seq_in_buffers{};
       get_global_max_packet_array(max_end_seq_in_buffers);
       const int buf_idx = buffer_index;
       auto &buffer = buffers[buf_idx];
@@ -541,7 +542,7 @@ public:
       if (--packets_until_completion_check == 0) {
         // Before checking buffer completion drain any packets from the
         // queue that should be in this buffer
-        const std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max;
+        std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max{};
         get_global_max_packet_array(global_max);
         {
           std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
