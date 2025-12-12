@@ -641,12 +641,11 @@ public:
       generate_identity_map();
     }
 
-    write_baseline_ids();
-    create_all_timeseries_keys();
-
     NR_CHANNELS = vis_dims_[0];
     NR_BASELINES = vis_dims_[1];
     NR_POLARIZATIONS = vis_dims_[2];
+    write_baseline_ids();
+    create_all_timeseries_keys();
   }
 
   void write_visibilities_block(const T *data, const int start_seq,
