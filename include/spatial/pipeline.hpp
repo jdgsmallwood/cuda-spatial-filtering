@@ -88,6 +88,8 @@ private:
       NR_TIMES_PER_BLOCK;
   static constexpr int NR_BASELINES =
       T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
+  static constexpr int NR_UNPADDED_BASELINES =
+      T::NR_RECEIVERS * (T::NR_RECEIVERS + 1) / 2;
   static constexpr int NR_TIME_STEPS_FOR_CORRELATION =
       T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET;
   static constexpr int COMPLEX = 2;
@@ -111,6 +113,10 @@ private:
       std::complex<float>[T::NR_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
                          [T::NR_POLARIZATIONS];
 
+  using TrimmedVisibilities =
+      std::complex<float>[T::NR_CHANNELS][NR_UNPADDED_BASELINES]
+                         [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS];
+
   using BeamformerInput =
       __half[T::NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][T::NR_PADDED_RECEIVERS]
             [T::NR_POLARIZATIONS][NR_TIMES_PER_BLOCK][COMPLEX];
@@ -121,6 +127,7 @@ private:
 
   using BeamWeights = BeamWeightsT<T>;
 
+  // a = unpadded baselines
   // b = block
   // c = channel
   // d = padded receivers
@@ -158,7 +165,14 @@ private:
   inline static const std::vector<int> modePlanarColMajCons = {'c', 'p', 'z',
                                                                's', 'f', 'n'};
   inline static const std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
-  inline static const std::vector<int> modeVisDecomp{'c', 'p', 'q', 'l', 'z'};
+  inline static const std::vector<int> modeVisCorrBaseline{'l', 'c', 'p', 'q',
+                                                           'z'};
+  inline static const std::vector<int> modeVisCorrBaselineTrimmed{'a', 'c', 'p',
+                                                                  'q', 'z'};
+
+  inline static const std::vector<int> modeVisCorrTrimmed{'c', 'a', 'p', 'q',
+                                                          'z'};
+  inline static const std::vector<int> modeVisDecomp{'c', 'p', 'q', 'a', 'z'};
   // Convert back to interleaved instead of planar output.
   // This is not strictly necessary to do in the pipeline.
   inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
@@ -170,6 +184,7 @@ private:
 
   inline static const std::unordered_map<int, int64_t> extent = {
 
+      {'a', NR_UNPADDED_BASELINES},
       {'b', NR_BLOCKS_FOR_CORRELATION},
       {'c', T::NR_CHANNELS},
       {'d', T::NR_PADDED_RECEIVERS},
@@ -210,8 +225,11 @@ private:
   std::vector<CorrelatorInput *> d_correlator_input;
   std::vector<CorrelatorOutput *> d_correlator_output;
 
-  std::vector<Visibilities *> d_visibilities_converted, d_visibilities_permuted;
-  Visibilities *d_visibilities_accumulator;
+  std::vector<Visibilities *> d_visibilities_converted;
+  std::vector<TrimmedVisibilities *> d_visibilities_baseline,
+      d_visibilities_trimmed_baseline, d_visibilities_trimmed,
+      d_visibilities_permuted;
+  TrimmedVisibilities *d_visibilities_accumulator;
   std::vector<BeamformerInput *> d_beamformer_input;
   std::vector<BeamformerOutput *> d_beamformer_output, d_beamformer_data_output;
   std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
@@ -376,10 +394,24 @@ public:
                                                                     cpu_start)
                   .count());
 
+    tensor_32.runPermutation("visCorrToBaseline", alpha_32,
+                             (float *)d_correlator_output[current_buffer],
+                             (float *)d_visibilities_baseline[current_buffer],
+                             streams[current_buffer]);
+    CUDA_CHECK(cudaMemcpyAsync(d_visibilities_trimmed_baseline[current_buffer],
+                               d_visibilities_baseline[current_buffer],
+                               sizeof(TrimmedVisibilities), cudaMemcpyDefault,
+                               streams[current_buffer]));
+
+    tensor_32.runPermutation(
+        "visBaselineTrimmedToTrimmed", alpha_32,
+        (float *)d_visibilities_trimmed_baseline[current_buffer],
+        (float *)d_visibilities_trimmed[current_buffer],
+        streams[current_buffer]);
     // tensor_32.runPermutation "visCorrToDecomp"
     cpu_start = clock::now();
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
-                             (float *)d_correlator_output[current_buffer],
+                             (float *)d_visibilities_trimmed[current_buffer],
                              (float *)d_visibilities_permuted[current_buffer],
                              streams[current_buffer]);
     cpu_end = clock::now();
@@ -390,9 +422,9 @@ public:
 
     // accumulate_visibilities (CPU wrapper)
     cpu_start = clock::now();
-    accumulate_visibilities((float *)d_correlator_output[current_buffer],
+    accumulate_visibilities((float *)d_visibilities_trimmed[current_buffer],
                             (float *)d_visibilities_accumulator,
-                            2 * NR_BASELINES * T::NR_POLARIZATIONS *
+                            2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
     cpu_end = clock::now();
@@ -575,6 +607,9 @@ public:
     d_beamformer_data_output.resize(num_buffers);
     d_visibilities_converted.resize(num_buffers);
     d_visibilities_permuted.resize(num_buffers);
+    d_visibilities_baseline.resize(num_buffers);
+    d_visibilities_trimmed_baseline.resize(num_buffers);
+    d_visibilities_trimmed.resize(num_buffers);
     d_eigenvalues.resize(num_buffers);
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
@@ -616,13 +651,19 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_converted[i],
                             sizeof(Visibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_permuted[i],
+                            sizeof(TrimmedVisibilities)));
+      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_baseline[i],
                             sizeof(Visibilities)));
+      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed_baseline[i],
+                            sizeof(TrimmedVisibilities)));
+      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed[i],
+                            sizeof(TrimmedVisibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_eigenvalues[i],
                             sizeof(float) * T::NR_PADDED_RECEIVERS));
     }
 
-    CUDA_CHECK(
-        cudaMalloc((void **)&d_visibilities_accumulator, sizeof(Visibilities)));
+    CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
+                          sizeof(TrimmedVisibilities)));
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
@@ -662,6 +703,9 @@ public:
     tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
     tensor_32.addTensor(modeVisCorr, "visCorr");
     tensor_32.addTensor(modeVisDecomp, "visDecomp");
+    tensor_32.addTensor(modeVisCorrBaseline, "visBaseline");
+    tensor_32.addTensor(modeVisCorrBaselineTrimmed, "visBaselineTrimmed");
+    tensor_32.addTensor(modeVisCorrTrimmed, "visCorrTrimmed");
 
     tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
     tensor_32.addTensor(modeBeamOutput, "beamOutput");
@@ -676,10 +720,15 @@ public:
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
                              CUTENSOR_COMPUTE_DESC_16F, "weightsInputToCCGLIB");
-    tensor_32.addPermutation("visCorr", "visDecomp", CUTENSOR_COMPUTE_DESC_32F,
-                             "visCorrToDecomp");
+    tensor_32.addPermutation("visCorrTrimmed", "visDecomp",
+                             CUTENSOR_COMPUTE_DESC_32F, "visCorrToDecomp");
     tensor_32.addPermutation("beamCCGLIB", "beamOutput",
                              CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
+    tensor_32.addPermutation("visCorr", "visBaseline",
+                             CUTENSOR_COMPUTE_DESC_32F, "visCorrToBaseline");
+    tensor_32.addPermutation("visBaselineTrimmed", "visCorrTrimmed",
+                             CUTENSOR_COMPUTE_DESC_32F,
+                             "visBaselineTrimmedToTrimmed");
 
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time
@@ -765,6 +814,18 @@ public:
       cudaFree(eigenvalues);
     }
 
+    for (auto vis : d_visibilities_trimmed_baseline) {
+      cudaFree(vis);
+    }
+
+    for (auto vis : d_visibilities_baseline) {
+      cudaFree(vis);
+    }
+
+    for (auto vis : d_visibilities_trimmed) {
+      cudaFree(vis);
+    }
+
     for (auto event : start_run) {
       cudaEventDestroy(event);
     }
@@ -792,14 +853,14 @@ public:
     void *landing_pointer =
         output_->get_visibilities_landing_pointer(block_num);
     cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
-                    sizeof(Visibilities), cudaMemcpyDefault, streams[0]);
+                    sizeof(TrimmedVisibilities), cudaMemcpyDefault, streams[0]);
     auto *output_ctx = new OutputTransferCompleteContext{
         .output = this->output_, .block_index = block_num};
 
     cudaLaunchHostFunc(streams[0],
                        output_visibilities_transfer_complete_host_func,
                        output_ctx);
-    cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(Visibilities),
+    cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(TrimmedVisibilities),
                     streams[0]);
     num_correlation_units_integrated.store(0);
     cudaDeviceSynchronize();

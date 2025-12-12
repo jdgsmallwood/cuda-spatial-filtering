@@ -41,8 +41,8 @@ public:
            [T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET][2];
   static constexpr int NR_BASELINES =
       T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
-  using Visibilities = float[T::NR_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
-                            [T::NR_POLARIZATIONS][2];
+  using Visibilities = float[T::NR_CHANNELS][T::NR_BASELINES_UNPADDED]
+                            [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS][2];
   using Arrivals =
       bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION][T::NR_FPGA_SOURCES];
   BeamOutput *beam_data;

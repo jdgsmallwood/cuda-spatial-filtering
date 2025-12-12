@@ -304,6 +304,6 @@ struct LambdaConfig {
   using ArrivalsOutputType =
       bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
-      float[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS][NR_POLARIZATIONS]
-           [COMPLEX];
+      float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
+           [NR_POLARIZATIONS][COMPLEX];
 };
