@@ -599,12 +599,12 @@ template <typename T>
 class HDF5AndRedisVisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
   HDF5AndRedisVisibilitiesWriter(
-      HighFive::File &file,
+      HighFive::File &file, const int NR_BASELINES,
       const std::unordered_map<int, int> *antenna_map = nullptr)
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://127.0.0.1:6379") {
+        redis("tcp://127.0.0.1:6379"), NR_BASELINES(NR_BASELINES) {
     using namespace HighFive;
     vis_dims_ = get_array_dims<T>();
     std::vector<size_t> vis_dataset_dims = {0};
@@ -642,7 +642,6 @@ public:
     }
 
     NR_CHANNELS = vis_dims_[0];
-    NR_BASELINES = vis_dims_[1];
     NR_POLARIZATIONS = vis_dims_[2];
     write_baseline_ids();
     create_all_timeseries_keys();
