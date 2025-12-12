@@ -642,8 +642,11 @@ public:
     }
 
     write_baseline_ids();
+    create_all_timeseries_keys();
 
-    redis.set("hello", "world");
+    NR_CHANNELS = vis_dims_[0];
+    NR_BASELINES = vis_dims_[1];
+    NR_POLARIZATIONS = vis_dims_[2];
   }
 
   void write_visibilities_block(const T *data, const int start_seq,
@@ -680,10 +683,75 @@ public:
     auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::system_clock::now().time_since_epoch())
                   .count();
-    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:real", ts,
-                             data[0][0][0][0][0][0]);
-    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:imag", ts,
-                             data[0][0][0][0][0][1]);
+
+    std::vector<std::string> madd_args = {"TS.MADD"};
+
+    // Reserve space for efficiency: 4 metrics * 3 arguments (Key, TS, Value)
+    madd_args.reserve(1 + NR_CHANNELS * NR_BASELINES * NR_POLARIZATIONS *
+                              NR_POLARIZATIONS * 4 * 3);
+
+    // Iterate over all dimensions
+    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+      for (int bl_idx = 0; bl_idx < NR_BASELINES; ++bl_idx) {
+        for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
+          for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+
+            // --- 1. Data Access & Calculation ---
+            const float real_val =
+                data[0][ch_idx][bl_idx][pol_r_idx][pol_c_idx][0];
+            const float imag_val =
+                data[0][ch_idx][bl_idx][pol_r_idx][pol_c_idx][1];
+
+            const float amplitude =
+                std::sqrt(real_val * real_val + imag_val * imag_val);
+            const float phase = std::atan2(imag_val, real_val);
+
+            // --- 2. Create Descriptive Strings ---
+            std::string channel_id = std::to_string(ch_idx);
+            std::string baseline_pair = std::to_string(bl_idx);
+            std::string pol_pair =
+                std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
+
+            // --- 3. Key Prefix: ts:ch:<ID>:bl:<A-B>:p:<R-C> ---
+            std::string key_prefix = "ts:ch:" + channel_id +
+                                     ":bl:" + baseline_pair + ":p:" + pol_pair;
+
+            // Convert timestamp to string once
+            std::string ts_str = std::to_string(ts);
+
+            // --- 4. Build TS.MADD Arguments (4 metrics per data point) ---
+
+            // Metric 1: Real
+            madd_args.push_back(key_prefix + ":real");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(real_val));
+
+            // Metric 2: Imaginary
+            madd_args.push_back(key_prefix + ":imag");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(imag_val));
+
+            // Metric 3: Amplitude
+            madd_args.push_back(key_prefix + ":amp");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(amplitude));
+
+            // Metric 4: Phase
+            madd_args.push_back(key_prefix + ":phase");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(phase));
+          }
+        }
+      }
+    }
+
+    // --- 5. Execute TS.MADD using redis-plus-plus ---
+    if (madd_args.size() > 1) { // Check if we have arguments beyond "TS.MADD"
+      // This is the correct call signature for redis-plus-plus command with a
+      // list of arguments The return type can often be void or a future/reply
+      // type depending on sync/async usage
+      redis.command(madd_args.begin(), madd_args.end());
+    }
   }
 
   void flush() override { file_.flush(); }
@@ -729,7 +797,61 @@ private:
       antenna_map_[i] = i;
     }
   }
+  void create_all_timeseries_keys() {
 
+    std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
+    std::cout << "Total keys to create: "
+              << NR_CHANNELS * NR_BASELINES * 4 * NR_POLARIZATIONS *
+                     NR_POLARIZATIONS
+              << std::endl;
+
+    const std::vector<std::string> components = {"real", "imag", "amp",
+                                                 "phase"};
+
+    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+      std::string channel_id = std::to_string(ch_idx);
+
+      for (int bl_idx = 0; bl_idx < NR_BASELINES; ++bl_idx) {
+        int ant1, ant2;
+        std::string baseline_pair = std::to_string(bl_idx);
+
+        for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
+          for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+            std::string pol_pair =
+                std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
+
+            for (const auto &component : components) {
+              // --- 1. Construct the Key ---
+              std::string key = "ts:ch:" + channel_id + ":bl:" + baseline_pair +
+                                ":p:" + pol_pair + ":" + component;
+
+              // --- 2. Build the TS.CREATE Command Arguments ---
+              std::vector<std::string> args = {
+                  "TS.CREATE", key,         "LABELS",      "channel",
+                  channel_id,  "baseline",  baseline_pair, "polarization",
+                  pol_pair,    "component", component // Add the final unique
+                                                      // label
+              };
+
+              // --- 3. Execute the Command ---
+              // Use the `command` method which accepts iterators for arguments
+              try {
+                redis.command(args.begin(), args.end());
+                // std::cout << "Created key: " << key << std::endl; //
+                // Uncomment for debugging
+              } catch (const std::exception &e) {
+                std::cerr << "Error creating key " << key << ": " << e.what()
+                          << std::endl;
+                // Handle error (e.g., key already exists, server down)
+              }
+            } // end component loop
+          } // end pol_c_idx loop
+        } // end pol_r_idx loop
+      } // end bl_idx loop
+    } // end ch_idx loop
+
+    std::cout << "TimeSeries key pre-creation complete." << std::endl;
+  }
   HighFive::File &file_;
   size_t element_count_;
   HighFive::DataSet vis_dataset_;
@@ -738,6 +860,9 @@ private:
   std::vector<size_t> vis_dims_;
   std::unordered_map<int, int> antenna_map_;
   sw::redis::Redis redis;
+  int NR_CHANNELS;
+  int NR_BASELINES;
+  int NR_POLARIZATIONS;
 };
 
 // Factory function for easy creation
