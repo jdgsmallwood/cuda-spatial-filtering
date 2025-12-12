@@ -210,8 +210,8 @@ private:
   std::vector<CorrelatorInput *> d_correlator_input;
   std::vector<CorrelatorOutput *> d_correlator_output;
 
-  std::vector<Visibilities *> d_visibilities_converted,
-      d_visibilities_accumulator, d_visibilities_permuted;
+  std::vector<Visibilities *> d_visibilities_converted, d_visibilities_permuted;
+  Visibilities *d_visibilities_accumulator;
   std::vector<BeamformerInput *> d_beamformer_input;
   std::vector<BeamformerOutput *> d_beamformer_output, d_beamformer_data_output;
   std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
@@ -391,7 +391,7 @@ public:
     // accumulate_visibilities (CPU wrapper)
     cpu_start = clock::now();
     accumulate_visibilities((float *)d_correlator_output[current_buffer],
-                            (float *)d_visibilities_accumulator[current_buffer],
+                            (float *)d_visibilities_accumulator,
                             2 * NR_BASELINES * T::NR_POLARIZATIONS *
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
@@ -573,7 +573,6 @@ public:
     d_beamformer_input.resize(num_buffers);
     d_beamformer_output.resize(num_buffers);
     d_beamformer_data_output.resize(num_buffers);
-    d_visibilities_accumulator.resize(num_buffers);
     d_visibilities_converted.resize(num_buffers);
     d_visibilities_permuted.resize(num_buffers);
     d_eigenvalues.resize(num_buffers);
@@ -616,14 +615,14 @@ public:
                             sizeof(BeamformerOutput)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_converted[i],
                             sizeof(Visibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator[i],
-                            sizeof(Visibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_permuted[i],
                             sizeof(Visibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_eigenvalues[i],
                             sizeof(float) * T::NR_PADDED_RECEIVERS));
     }
 
+    CUDA_CHECK(
+        cudaMalloc((void **)&d_visibilities_accumulator, sizeof(Visibilities)));
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
@@ -782,14 +781,6 @@ public:
     LOG_INFO("Current num integrated units processed is {}",
              current_num_integrated_units_processed);
     cudaDeviceSynchronize();
-    for (auto i = 1; i < num_buffers; ++i) {
-      accumulate_visibilities((float *)d_visibilities_accumulator[i],
-                              (float *)d_visibilities_accumulator[0],
-                              NR_BASELINES * 2 * T::NR_CHANNELS *
-                                  T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
-                              streams[current_buffer]);
-    }
-    cudaDeviceSynchronize();
     const int visibilities_total_packets =
         current_num_integrated_units_processed *
         visibilities_total_packets_per_block;
@@ -800,7 +791,7 @@ public:
     visibilities_missing_packets = 0;
     void *landing_pointer =
         output_->get_visibilities_landing_pointer(block_num);
-    cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator[0],
+    cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
                     sizeof(Visibilities), cudaMemcpyDefault, streams[0]);
     auto *output_ctx = new OutputTransferCompleteContext{
         .output = this->output_, .block_index = block_num};
@@ -808,10 +799,9 @@ public:
     cudaLaunchHostFunc(streams[0],
                        output_visibilities_transfer_complete_host_func,
                        output_ctx);
-    for (auto i = 0; i < num_buffers; ++i) {
-      cudaMemsetAsync(d_visibilities_accumulator[i], 0, sizeof(Visibilities),
-                      streams[i]);
-    }
+    cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(Visibilities),
+                    streams[0]);
     num_correlation_units_integrated.store(0);
+    cudaDeviceSynchronize();
   };
 };
