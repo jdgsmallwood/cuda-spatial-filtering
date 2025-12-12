@@ -155,10 +155,14 @@ FetchContent_Declare(
     hiredis
     GIT_REPOSITORY https://github.com/redis/hiredis.git
     GIT_TAG v1.2.0
+    GIT_SHALLOW TRUE
+    SOURCE_DIR _deps/hiredis
+    OVERRIDE_FIND_PACKAGE
 )
-FetchContent_MakeAvailable(hiredis)
+#FetchContent_MakeAvailable(hiredis)
 
-set(HIREDIS_HEADER "${hiredis_SOURCE_DIR}/hiredis/hiredis.h" CACHE STRING "" FORCE)
+#find_path(HIREDIS_HEADER hiredis)
+#find_library(HIREDIS_LIB hiredis)
 
 # --------------------------------------------
 # Fetch redis-plus-plus
@@ -166,7 +170,8 @@ set(HIREDIS_HEADER "${hiredis_SOURCE_DIR}/hiredis/hiredis.h" CACHE STRING "" FOR
 FetchContent_Declare(
     redis_plus_plus
     GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
-    GIT_TAG 1.3.11   # or latest stable
+    GIT_TAG origin/master#1.3.11   # or latest stable
+    GIT_SHALLOW TRUE
 )
 set(REDIS_PLUS_PLUS_CXX_STANDARD 17)
 set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
