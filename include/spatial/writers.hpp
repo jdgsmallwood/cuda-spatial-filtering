@@ -677,7 +677,7 @@ public:
         100 * num_missing_packets_fl / num_total_packets_fl};
     vis_missing_dataset_.select({missing_size, 0}, {1, 3})
         .write_raw(missing_nums.data());
-    auto ts = std::chrono::duration_cast<std::chrono::microseconds>(
+    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::system_clock::now().time_since_epoch())
                   .count();
     redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:real", ts,
