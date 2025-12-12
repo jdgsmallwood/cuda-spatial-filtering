@@ -604,7 +604,7 @@ public:
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://127.0.0.1:6379") {
+        redis("tcp://128.0.0.1:6379") {
     using namespace HighFive;
     vis_dims_ = get_array_dims<T>();
     std::vector<size_t> vis_dataset_dims = {0};
@@ -678,10 +678,10 @@ public:
     vis_missing_dataset_.select({missing_size, 0}, {1, 3})
         .write_raw(missing_nums.data());
 
-    redis.command<void>("TS.ADD", "vis:0:0-0:0-0:real", "*",
-                        data[0][0][0][0][0][0]);
-    redis.command<void>("TS.ADD", "vis:0:0-0:0-0:imag", "*",
-                        data[0][0][0][0][0][1]);
+    redis.command<int>("TS.ADD", "vis:0:0-0:0-0:real", "*",
+                       data[0][0][0][0][0][0]);
+    redis.command<int>("TS.ADD", "vis:0:0-0:0-0:imag", "*",
+                       data[0][0][0][0][0][1]);
   }
 
   void flush() override { file_.flush(); }
