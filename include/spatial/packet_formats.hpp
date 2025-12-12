@@ -299,8 +299,8 @@ struct LambdaConfig {
                             NR_RECEIVERS_PER_PACKET, NR_POLARIZATIONS,
                             NR_FPGA_SOURCES>;
   using BeamOutputType =
-      float[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
-           [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
+      __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+            [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
   using ArrivalsOutputType =
       bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
