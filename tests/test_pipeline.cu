@@ -131,7 +131,8 @@ TEST(LambdaGPUPipelineTest, Ex1) {
             } else {
               expected = -8.0f;
             }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected);
           }
         }
       }
@@ -218,7 +219,8 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected);
           }
         }
       }
@@ -315,7 +317,8 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected);
           }
         }
       }
@@ -409,7 +412,8 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected);
           }
         }
       }
@@ -484,7 +488,8 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected);
           }
         }
       }
@@ -562,7 +567,8 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(output->beam_data[0][i][j][k][l][m], expected);
+            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected);
           }
         }
       }
@@ -624,10 +630,11 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
             } else {
               expected = -16.0f;
             }
-            EXPECT_EQ(output->beam_data[0][i][j][k][l][m], expected)
+            EXPECT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected)
                 << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
-                << ", l=" << l << ", m=" << m
-                << " → actual=" << output->beam_data[0][i][j][k][l][m]
+                << ", l=" << l << ", m=" << m << " → actual="
+                << __half2float(output->beam_data[0][i][j][k][l][m])
                 << ", expected=" << expected;
           }
         }
@@ -711,10 +718,11 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
             } else {
               expected = -8.0f;
             }
-            EXPECT_EQ(output->beam_data[0][i][j][k][l][m], expected)
+            EXPECT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected)
                 << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
-                << ", l=" << l << ", m=" << m
-                << " → actual=" << output->beam_data[0][i][j][k][l][m]
+                << ", l=" << l << ", m=" << m << " → actual="
+                << __half2float(output->beam_data[0][i][j][k][l][m])
                 << ", expected=" << expected;
           }
         }
@@ -790,10 +798,11 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
             } else {
               expected = -14.0f;
             }
-            EXPECT_EQ(output->beam_data[0][i][j][k][l][m], expected)
+            EXPECT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected)
                 << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
-                << ", l=" << l << ", m=" << m
-                << " → actual=" << output->beam_data[0][i][j][k][l][m]
+                << ", l=" << l << ", m=" << m << " → actual="
+                << __half2float(output->beam_data[0][i][j][k][l][m])
                 << ", expected=" << expected;
           }
         }

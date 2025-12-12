@@ -26,6 +26,12 @@ void accumulate_visibilities(const float *d_visibilities,
                              float *d_visibilities_accumulated, const int n,
                              cudaStream_t stream);
 
+__global__ void convert_float_to_half_kernel(const float *input, __half *output,
+                                             const int n);
+
+void convert_float_to_half(const float *d_input, __half *d_output, const int n,
+                           cudaStream_t stream);
+
 template <typename inputT, typename scaleT, typename outputT,
           size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,

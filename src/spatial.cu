@@ -56,6 +56,17 @@ accumulate_visibilities_kernel(const float *d_visibilities,
     idx += stride;
   }
 }
+
+__global__ void convert_float_to_half_kernel(const float *input, __half *output,
+                                             const int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+  while (i < n) {
+    output[i] = __float2half(input[i]);
+    i += stride;
+  }
+}
+
 void convert_int8_to_half(const int8_t *d_input, __half *d_output, const int n,
                           cudaStream_t stream) {
 
@@ -72,6 +83,15 @@ void convert_int_to_float(const int *d_input, float *d_output, const int n,
 
   convert_int_to_float_kernel<<<num_blocks, 1024, 0, stream>>>(d_input,
                                                                d_output, n);
+}
+
+void convert_float_to_half(const float *d_input, __half *d_output, const int n,
+                           cudaStream_t stream) {
+
+  const int num_blocks = std::min(8, n / 1024 + 1);
+
+  convert_float_to_half_kernel<<<num_blocks, 1024, 0, stream>>>(d_input,
+                                                                d_output, n);
 }
 
 void update_weights(const __half *d_weights, __half *d_weights_output,

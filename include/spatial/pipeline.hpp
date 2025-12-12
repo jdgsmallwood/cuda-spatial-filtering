@@ -125,6 +125,10 @@ private:
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
 
+  using HalfBeamformerOutput =
+      __half[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
+            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+
   using BeamWeights = BeamWeightsT<T>;
 
   // a = unpadded baselines
@@ -232,6 +236,7 @@ private:
   TrimmedVisibilities *d_visibilities_accumulator;
   std::vector<BeamformerInput *> d_beamformer_input;
   std::vector<BeamformerOutput *> d_beamformer_output, d_beamformer_data_output;
+  std::vector<HalfBeamformerOutput *> d_beamformer_data_output_half;
   std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
       d_weights, d_weights_updated, d_weights_permuted;
   std::vector<typename T::PacketScalesType *> d_scales;
@@ -502,6 +507,13 @@ public:
                                                                     cpu_start)
                   .count());
 
+    convert_float_to_half(
+        (float *)d_beamformer_data_output[current_buffer],
+        (__half *)d_beamformer_data_output_half[current_buffer],
+        2 * T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_BEAMS *
+            NR_TIME_STEPS_FOR_CORRELATION,
+        streams[current_buffer]);
+
     cpu_start = clock::now();
     cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
     cpu_end = clock::now();
@@ -516,8 +528,9 @@ public:
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
-      cudaMemcpyAsync(landing_pointer, d_beamformer_data_output[current_buffer],
-                      sizeof(BeamformerOutput), cudaMemcpyDefault,
+      cudaMemcpyAsync(landing_pointer,
+                      d_beamformer_data_output_half[current_buffer],
+                      sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
                       streams[current_buffer]);
       cpu_end = clock::now();
       LOG_DEBUG("CPU time for output registration + copying: {} us",
@@ -605,6 +618,7 @@ public:
     d_beamformer_input.resize(num_buffers);
     d_beamformer_output.resize(num_buffers);
     d_beamformer_data_output.resize(num_buffers);
+    d_beamformer_data_output_half.resize(num_buffers);
     d_visibilities_converted.resize(num_buffers);
     d_visibilities_permuted.resize(num_buffers);
     d_visibilities_baseline.resize(num_buffers);
@@ -648,6 +662,8 @@ public:
                             sizeof(BeamformerOutput)));
       CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output[i],
                             sizeof(BeamformerOutput)));
+      CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output_half[i],
+                            sizeof(HalfBeamformerOutput)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_converted[i],
                             sizeof(Visibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_permuted[i],
