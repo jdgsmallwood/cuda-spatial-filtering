@@ -604,7 +604,7 @@ public:
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://128.0.0.1:6379") {
+        redis("tcp://127.0.0.1:6379") {
     using namespace HighFive;
     vis_dims_ = get_array_dims<T>();
     std::vector<size_t> vis_dataset_dims = {0};
