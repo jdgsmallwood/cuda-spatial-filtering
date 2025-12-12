@@ -678,10 +678,10 @@ public:
     vis_missing_dataset_.select({missing_size, 0}, {1, 3})
         .write_raw(missing_nums.data());
 
-    redis.command<int>("TS.ADD", "vis:0:0-0:0-0:real", "*",
-                       data[0][0][0][0][0][0]);
-    redis.command<int>("TS.ADD", "vis:0:0-0:0-0:imag", "*",
-                       data[0][0][0][0][0][1]);
+    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:real", "*",
+                             data[0][0][0][0][0][0]);
+    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:imag", "*",
+                             data[0][0][0][0][0][1]);
   }
 
   void flush() override { file_.flush(); }
