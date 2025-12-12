@@ -677,10 +677,12 @@ public:
         100 * num_missing_packets_fl / num_total_packets_fl};
     vis_missing_dataset_.select({missing_size, 0}, {1, 3})
         .write_raw(missing_nums.data());
-
-    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:real", "*",
+    auto ts = std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
+    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:real", ts,
                              data[0][0][0][0][0][0]);
-    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:imag", "*",
+    redis.command<long long>("TS.ADD", "vis:0:0-0:0-0:imag", ts,
                              data[0][0][0][0][0][1]);
   }
 
