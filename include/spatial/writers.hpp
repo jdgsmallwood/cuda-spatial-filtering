@@ -685,14 +685,13 @@ public:
     std::vector<std::string> madd_args = {"TS.MADD"};
 
     // Reserve space for efficiency: 4 metrics * 3 arguments (Key, TS, Value)
-    madd_args.reserve(1 + NR_CHANNELS * NR_BASELINES * NR_POLARIZATIONS *
-                              NR_POLARIZATIONS * 4 * 3);
+    madd_args.reserve(1 + NR_CHANNELS * NR_BASELINES * 1 * 1 * 4 * 3);
 
     // Iterate over all dimensions
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       for (int bl_idx = 0; bl_idx < NR_BASELINES; ++bl_idx) {
-        for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
-          for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+        for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
+          for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
 
             // --- 1. Data Access & Calculation ---
             const float real_val =
@@ -720,14 +719,14 @@ public:
             // --- 4. Build TS.MADD Arguments (4 metrics per data point) ---
 
             // Metric 1: Real
-            madd_args.push_back(key_prefix + ":real");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(real_val));
+            // madd_args.push_back(key_prefix + ":real");
+            // madd_args.push_back(ts_str);
+            // madd_args.push_back(std::to_string(real_val));
 
-            // Metric 2: Imaginary
-            madd_args.push_back(key_prefix + ":imag");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(imag_val));
+            //// Metric 2: Imaginary
+            // madd_args.push_back(key_prefix + ":imag");
+            // madd_args.push_back(ts_str);
+            // madd_args.push_back(std::to_string(imag_val));
 
             // Metric 3: Amplitude
             madd_args.push_back(key_prefix + ":amp");
@@ -803,9 +802,10 @@ private:
                      NR_POLARIZATIONS
               << std::endl;
 
-    const std::vector<std::string> components = {"real", "imag", "amp",
-                                                 "phase"};
+    //    const std::vector<std::string> components = {"real", "imag", "amp",
+    //                                                 "phase"};
 
+    const std::vector<std::string> components = {"amp", "phase"};
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
 
@@ -813,8 +813,8 @@ private:
         int ant1, ant2;
         std::string baseline_pair = std::to_string(bl_idx);
 
-        for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
-          for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+        for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
+          for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
             std::string pol_pair =
                 std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
 
