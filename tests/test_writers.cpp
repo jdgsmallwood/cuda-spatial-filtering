@@ -20,6 +20,8 @@ struct MockT {
 
   static constexpr size_t NR_BASELINES =
       NR_PADDED_RECEIVERS * (NR_PADDED_RECEIVERS + 1) / 2;
+  static constexpr size_t NR_BASELINES_UNPADDED =
+      NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
 
   using BeamOutputType =
       float[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
@@ -27,8 +29,8 @@ struct MockT {
   using ArrivalOutputType =
       bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
-      float[NR_CHANNELS][NR_BASELINES][NR_POLARIZATIONS][NR_POLARIZATIONS]
-           [COMPLEX];
+      float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
+           [NR_POLARIZATIONS][COMPLEX];
 };
 
 namespace fs = std::filesystem;
@@ -103,7 +105,7 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   auto vis_dims = vis_ds.getDimensions();
   ASSERT_EQ(vis_dims[0], 1);
   ASSERT_EQ(vis_dims[1], MockT::NR_CHANNELS);
-  ASSERT_EQ(vis_dims[2], MockT::NR_BASELINES);
+  ASSERT_EQ(vis_dims[2], MockT::NR_BASELINES_UNPADDED);
   ASSERT_EQ(vis_dims[3], MockT::NR_POLARIZATIONS);
   ASSERT_EQ(vis_dims[4], MockT::NR_POLARIZATIONS);
   ASSERT_EQ(vis_dims[5], MockT::COMPLEX);

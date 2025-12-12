@@ -73,6 +73,6 @@ add_executable(
   gpu_benchmark
   ${PROJECT_SOURCE_DIR}/apps/gpu_benchmark.cu
 )
-target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis::hiredis)
+target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis)
 
 set_target_properties(gpu_benchmark PROPERTIES CUDA_ARCHITECTURES "native")

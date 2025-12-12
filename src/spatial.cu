@@ -52,7 +52,7 @@ accumulate_visibilities_kernel(const float *d_visibilities,
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int stride = blockDim.x * gridDim.x;
   while (idx < n) {
-    d_visibilities_accumulated[idx] += d_visibilities[idx];
+    atomicAdd(&d_visibilities_accumulated[idx], d_visibilities[idx]);
     idx += stride;
   }
 }

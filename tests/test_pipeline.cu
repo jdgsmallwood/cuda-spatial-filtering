@@ -321,9 +321,9 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
       }
       // Now visibilities
       for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
-        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+        for (auto q = 0; q < Config::NR_BASELINES_UNPADDED; ++q) {
           float expected_vis;
-          if (q >= Config::NR_BASELINES_UNPADDED || j == 0 || p == 0) {
+          if (j == 0 || p == 0) {
             expected_vis = 0;
           } else {
             expected_vis = 64.0f;
@@ -579,6 +579,7 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            // 0 is on FPGA_ID
             packet_data.samples[0][i][j][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
             packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(2);
@@ -633,13 +634,9 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
       }
       // Now visibilities
       for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
-        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+        for (auto q = 0; q < Config::NR_BASELINES_UNPADDED; ++q) {
           float expected_vis;
-          if (q >= Config::NR_BASELINES_UNPADDED) {
-            expected_vis = 0;
-          } else {
-            expected_vis = 256.0f;
-          };
+          expected_vis = 256.0f;
           EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
@@ -724,13 +721,9 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
       }
       // Now visibilities
       for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
-        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+        for (auto q = 0; q < Config::NR_BASELINES_UNPADDED; ++q) {
           float expected_vis;
-          if (q >= Config::NR_BASELINES_UNPADDED) {
-            expected_vis = 0;
-          } else {
-            expected_vis = 64.0f;
-          };
+          expected_vis = 64.0f;
           EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
@@ -807,10 +800,9 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
       }
       // Now visibilities
       for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
-        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+        for (auto q = 0; q < Config::NR_BASELINES_UNPADDED; ++q) {
           float expected_vis;
-          if (q == 0 || q == 1 || q == 3 || q == 6 ||
-              q >= Config::NR_BASELINES_UNPADDED) {
+          if (q == 0 || q == 1 || q == 3 || q == 6) {
             expected_vis = 0;
           } else if (q == 2) {
             expected_vis = 16.0f;
@@ -827,7 +819,7 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
           } else {
             expected_vis = 0;
           };
-          EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
+          EXPECT_FLOAT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
               << " → actual=" << output->visibilities[0][i][q][j][p][0]
