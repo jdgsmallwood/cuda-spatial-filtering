@@ -102,3 +102,47 @@ void debug_kernel_launch(
                                        d_samples_half, d_samples_padding,
                                        d_samples_padded);
 };
+
+template <typename T>
+__global__ void unpack_triangular_baseline_batch_kernel(
+    const T *__restrict__ packedData, // Input: [Batch, N*(N+1)/2]
+    T *__restrict__ denseData,        // Output: [Batch, N, N]
+    const int N, const int batchSize) {
+  // from Gemini with alterations
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+
+  const int num_baselines = (N * (N + 1)) / 2;
+  const int total_elements = batchSize * num_baselines;
+
+  for (int i = tid; i < total_elements; i += stride) {
+    int b_idx = i / num_baselines; // Which matrix in the batch
+    int k = i % num_baselines;     // Index inside packed array
+
+    // Inverse mapping of k = j*(j+1)/2 + i (Column-Major Upper Packed)
+    // We find column j and row i
+    // Solving j^2 + j - 2k = 0 approximately
+    int j = (int)((-1.0f + sqrtf(1.0f + 8.0f * k)) / 2.0f);
+    int row = k - (j * (j + 1)) / 2;
+    int col = j;
+
+    // Destination index in Dense Column-Major (N*N)
+    // dense[row + col*N]
+    int dense_idx = b_idx * (N * N) + (col * N + row);
+
+    denseData[dense_idx] = packedData[i];
+  }
+}
+
+template <typename T>
+void unpack_triangular_baseline_batch_launch(const T *packedData, T *denseData,
+                                             const int N, const int batchSize,
+                                             const int NR_CHANNELS,
+                                             cudaStream_t stream) {
+  const int num_blocks_x = NR_CHANNELS;
+  const int num_threads_x = 1024;
+
+  unpack_triangular_baseline_batch_kernel<T>
+      <<<num_blocks_x, num_threads_x, 0, stream>>>(packedData, denseData, N,
+                                                   batchSize);
+}

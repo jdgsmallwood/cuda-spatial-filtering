@@ -26,6 +26,8 @@ target_link_libraries(PipelineTests
             HighFive::HighFive
             cutensor
             tcc
+            CUDA::cufft
+            CUDA::cusolver
 )
 add_executable(
   CUDASpatialFilteringCPUTests test_packet_formats.cpp

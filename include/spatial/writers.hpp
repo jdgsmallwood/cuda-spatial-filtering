@@ -46,6 +46,15 @@ public:
   virtual void flush() = 0;
 };
 
+template <typename TVal, typename TVec> class EigenWriter {
+public:
+  virtual ~EigenWriter() = default;
+  virtual void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
+                                     const int start_seq,
+                                     const int end_seq) = 0;
+  virtual void flush() = 0;
+};
+
 template <typename T, typename U = size_t, size_t N = 0>
 constexpr auto get_array_dims() {
   if constexpr (std::is_array_v<T>) {
@@ -863,6 +872,230 @@ private:
   int NR_POLARIZATIONS;
 };
 
+template <typename TVal, typename TVec>
+class RedisEigendataWriter : public EigenWriter<TVal, TVec> {
+public:
+  RedisEigendataWriter()
+      : val_element_count_(
+            sizeof(TVal) /
+            sizeof(typename std::remove_all_extents<TVal>::type)),
+        vec_element_count_(
+            sizeof(TVec) /
+            sizeof(typename std::remove_all_extents<TVec>::type)),
+        redis("tcp://127.0.0.1:6379") {
+    eigen_dims_ = get_array_dims<TVal>();
+
+    NR_CHANNELS = eigen_dims_[0];
+    NR_POLARIZATIONS = eigen_dims_[1];
+    NR_RECEIVERS = eigen_dims_[3];
+    create_all_timeseries_keys();
+  }
+
+  void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
+                             const int start_seq, const int end_seq) override {
+
+    // NOTE: 'ts' (timestamp) needs to be passed or calculated here. Assuming
+    // 'ts' is available. Example:
+    long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+
+    LOG_INFO("writing eigendata block {} to {}", start_seq, end_seq);
+
+    std::vector<std::string> madd_args = {"TS.MADD"};
+
+    const int N = NR_RECEIVERS;
+
+    // Reinterpret the template pointers to the underlying float/double types
+    // Since TVal is a float array, reinterpret_cast is fine.
+    const float *val_ptr = reinterpret_cast<const float *>(val_data);
+    // Since TVec is a complex<float> array, it is laid out as real, imag, real,
+    // imag...
+    const float *vec_ptr = reinterpret_cast<const float *>(vec_data);
+
+    std::string ts_str = std::to_string(ts);
+
+    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+      std::string channel_id = std::to_string(ch_idx);
+
+      for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
+        for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+
+          std::string pol_pair =
+              std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
+
+          // === EIGENVALUE (val_data) ACCESS ===
+          // TVal layout: [CH][POL_R][POL_C][N] -> 4D array
+          size_t val_base_offset =
+              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N) +
+              pol_r_idx * (NR_POLARIZATIONS * N) + pol_c_idx * N;
+
+          for (int k_idx = 0; k_idx < N; ++k_idx) {
+            // --- 1. Data Access ---
+            const float eigenvalue = val_ptr[val_base_offset + k_idx];
+
+            // --- 2. Build TS.MADD Arg ---
+            std::string k_id = std::to_string(k_idx);
+            std::string key_prefix =
+                "ts:ch:" + channel_id + ":p:" + pol_pair + ":k:" + k_id;
+
+            madd_args.push_back(key_prefix + ":val");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(eigenvalue));
+          } // End EIGENVALUE k_idx loop
+
+          // === EIGENVECTOR (vec_data) ACCESS - ONLY PRINCIPAL (k=0) ===
+          // TVec layout: [CH][POL_R][POL_C][N_ROW][N_COL] -> 5D complex array
+          // (stored as 6D float array)
+          const int PRINCIPAL_EIGEN_IDX = 0;
+          std::string k_id = std::to_string(PRINCIPAL_EIGEN_IDX);
+
+          // Base offset for the 0th eigenvector's complex components
+          // The C++ array layout for TVec is: [CH][P_R][P_C][N_ROW][N_COL]
+          // The k_idx (eigenvalue index) corresponds to N_COL here.
+          size_t vec_base_offset_k0 =
+              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
+              pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N) +
+              PRINCIPAL_EIGEN_IDX; // Offset to the start of the k=0 column in
+                                   // memory (Column-major is assumed for Eigen)
+                                   // If it's Row-major (C default), this index
+                                   // is more complex. Assuming Eigen-standard
+                                   // Col-major for this interpretation.
+
+          for (int i_idx = 0; i_idx < N;
+               ++i_idx) { // Iterate over the N components (receivers)
+            std::string i_id = std::to_string(i_idx);
+
+            // Access the complex number (v[i][k]):
+            // The 'float' index is: (base_offset + i_idx * N) * 2
+            size_t complex_idx =
+                (val_base_offset + i_idx * N + PRINCIPAL_EIGEN_IDX) * 2;
+
+            const float real_val = vec_ptr[complex_idx];
+            const float imag_val = vec_ptr[complex_idx + 1];
+
+            // --- 1. Calculation ---
+            const float amplitude =
+                std::sqrt(real_val * real_val + imag_val * imag_val);
+            const float phase = std::atan2(imag_val, real_val);
+
+            std::string key_prefix = "ts:ch:" + channel_id + ":p:" + pol_pair +
+                                     ":k:" + k_id +
+                                     ":i:" + i_id; // Add receiver index
+
+            // Metric 1: Amplitude
+            madd_args.push_back(key_prefix + ":vec_amp");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(amplitude));
+
+            // Metric 2: Phase
+            madd_args.push_back(key_prefix + ":vec_phase");
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(phase));
+          } // End EIGENVECTOR i_idx loop
+        }
+      }
+    }
+
+    // --- 3. Execute TS.MADD ---
+    if (madd_args.size() > 1) {
+      redis.command(madd_args.begin(), madd_args.end());
+    }
+  }
+
+  void flush() override {}
+
+private:
+  void create_all_timeseries_keys() {
+    const int N = NR_RECEIVERS; // Matrix dimension
+    // Track ALL N eigenvalues: "val"
+    const std::vector<std::string> val_components = {"val"};
+    // Track the Principal (k=0) Eigenvector components:
+    const std::vector<std::string> vec_components = {"vec_amp", "vec_phase"};
+
+    std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
+
+    // Calculate total keys to be created
+    int total_pol_pairs = NR_POLARIZATIONS * NR_POLARIZATIONS;
+    int total_eigenvalue_keys =
+        NR_CHANNELS * total_pol_pairs * N * val_components.size();
+    int total_eigenvector_keys = NR_CHANNELS * total_pol_pairs * 1 * N *
+                                 vec_components.size(); // Only k=0
+
+    std::cout << "Total keys to create: "
+              << (total_eigenvalue_keys + total_eigenvector_keys) << std::endl;
+
+    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+      std::string channel_id = std::to_string(ch_idx);
+
+      for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
+        for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+          std::string pol_pair =
+              std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
+
+          // === 1. EIGENVALUE KEYS (All N components) ===
+          for (int k_idx = 0; k_idx < N; ++k_idx) {
+            std::string k_id = std::to_string(k_idx);
+            for (const auto &component : val_components) {
+
+              // Key: ts:ch:<CH>:p:<P-P>:k:<K>:val
+              std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
+                                ":k:" + k_id + ":" + component;
+
+              std::vector<std::string> args = {
+                  "TS.CREATE",    key,      "LABELS",    "channel", channel_id,
+                  "polarization", pol_pair, "eigen_idx", k_id,      "component",
+                  component};
+              try {
+                redis.command(args.begin(), args.end());
+              } catch (const std::exception &e) {
+                std::cerr << "Error creating key " << key << ": " << e.what()
+                          << std::endl;
+              }
+            }
+          } // End EIGENVALUE k_idx loop
+
+          // === 2. EIGENVECTOR KEYS (Only k=0 component) ===
+          const int PRINCIPAL_EIGEN_IDX = 0;
+          std::string k_id = std::to_string(PRINCIPAL_EIGEN_IDX);
+
+          for (int i_idx = 0; i_idx < N; ++i_idx) {
+            std::string i_id = std::to_string(i_idx); // Receiver/Antenna index
+
+            for (const auto &component : vec_components) {
+
+              // Key: ts:ch:<CH>:p:<P-P>:k:<K>:i:<I>:<COMP>
+              std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
+                                ":k:" + k_id + ":i:" + i_id + ":" + component;
+
+              std::vector<std::string> args = {
+                  "TS.CREATE",    key,         "LABELS",
+                  "channel",      channel_id,  "polarization",
+                  pol_pair,       "eigen_idx", k_id,
+                  "receiver_idx", i_id,        "component",
+                  component};
+              try {
+                redis.command(args.begin(), args.end());
+              } catch (const std::exception &e) {
+                std::cerr << "Error creating key " << key << ": " << e.what()
+                          << std::endl;
+              }
+            }
+          } // End EIGENVECTOR i_idx loop
+        }
+      }
+    }
+    std::cout << "TimeSeries key pre-creation complete." << std::endl;
+  }
+  size_t val_element_count_;
+  size_t vec_element_count_;
+  std::vector<size_t> eigen_dims_;
+  sw::redis::Redis redis;
+  int NR_CHANNELS;
+  int NR_POLARIZATIONS;
+  int NR_RECEIVERS;
+};
+
 // Factory function for easy creation
 // template <typename T>
 // std::unique_ptr<BufferedOutput<T>>
@@ -1516,7 +1749,7 @@ public:
 
     // 2. Create the MeasurementSet
     ms_ = std::make_unique<casacore::MeasurementSet>(newTab);
-
+    ms_->createDefaultSubtables(casacore::Table::New);
     // 3. Initialize Subtables (Antenna, Field, SpectralWindow, etc.)
     setup_subtables();
 
@@ -1558,8 +1791,12 @@ public:
 
     // Placeholder time: using sequence number as seconds for now.
     // In reality, this should be MJD Seconds.
-    double timestamp = static_cast<double>(start_seq);
-
+    //    double timestamp = static_cast<double>(start_seq);
+    constexpr double UNIX_TO_MJD_SECONDS = 40587.0 * 86400.0;
+    double unix_timestamp =
+        std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
     for (size_t bl = 0; bl < NUM_BASELINES; ++bl) {
       size_t row_idx = start_row + bl;
       auto &pair = baseline_pairs_[bl];
@@ -1567,7 +1804,7 @@ public:
       // 1. Metadata Columns
       msc_->antenna1().put(row_idx, pair.first);
       msc_->antenna2().put(row_idx, pair.second);
-      msc_->time().put(row_idx, timestamp);
+      msc_->time().put(row_idx, unix_timestamp + UNIX_TO_MJD_SECONDS);
       msc_->interval().put(row_idx, 1.0); // 1 second integration placeholder
       msc_->scanNumber().put(row_idx, 1);
       msc_->fieldId().put(row_idx, 0); // Pointing to index 0 in Field table

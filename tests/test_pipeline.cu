@@ -8,6 +8,12 @@
 #include <gtest/gtest.h>
 #include <unordered_set>
 
+struct CudaIsolatedTest : ::testing::Test {
+  void TearDown() override {
+    cudaDeviceSynchronize();
+    cudaDeviceReset();
+  }
+};
 struct FakeProcessorState : public ProcessorStateBase {
   bool released = false;
   int last_index = -1;
@@ -78,7 +84,7 @@ using Config =
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                  NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
                  NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
-TEST(LambdaGPUPipelineTest, Ex1) {
+TEST_F(CudaIsolatedTest, Ex1) {
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
@@ -138,13 +144,9 @@ TEST(LambdaGPUPipelineTest, Ex1) {
       }
       // Now visibilities
       for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
-        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+        for (auto q = 0; q < Config::NR_BASELINES_UNPADDED; ++q) {
           float expected_vis;
-          if (q >= Config::NR_BASELINES_UNPADDED) {
-            expected_vis = 0;
-          } else {
-            expected_vis = 64.0f;
-          };
+          expected_vis = 64.0f;
           EXPECT_EQ(output->visibilities[0][i][q][j][p][0], expected_vis)
               << "Mismatch at i=" << i << ", q=" << q << ", j=" << j
               << ", p=" << p
@@ -157,7 +159,7 @@ TEST(LambdaGPUPipelineTest, Ex1) {
   }
 };
 
-TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
+TEST_F(CudaIsolatedTest, PolarizationBlankTest) {
   // Ensure that polarization is respected. Make the samples in one
   // polarization zero and then check that means everything in that polarization
   // is zero too.
@@ -168,7 +170,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
   for (auto i = 0; i < NR_CHANNELS; ++i) {
     for (auto j = 0; j < NR_PACKETS; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
-        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+        for (auto l = 0; l < NR_RECEIVERS_PER_PACKET; ++l) {
           packet_data.samples[0][i][j][0][k][l][0] =
               std::complex<int8_t>(2, -2);
           packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
@@ -226,9 +228,9 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
       }
       // Now visibilities
       for (auto p = 0; p < NR_POLARIZATIONS; ++p) {
-        for (auto q = 0; q < Config::NR_BASELINES; ++q) {
+        for (auto q = 0; q < Config::NR_BASELINES_UNPADDED; ++q) {
           float expected_vis;
-          if (q >= Config::NR_BASELINES_UNPADDED || j == 1 || p == 1) {
+          if (j == 1 || p == 1) {
             expected_vis = 0;
           } else {
             expected_vis = 64.0f;
@@ -245,7 +247,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest) {
   }
 };
 
-TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
+TEST_F(CudaIsolatedTest, PolarizationBlankTest2) {
   // Ensure that polarization is respected. Make the samples in one
   // polarization zero and then check that means everything in that polarization
   // is zero too.
@@ -266,7 +268,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
   for (auto i = 0; i < NR_CHANNELS + 5; ++i) {
     for (auto j = 0; j < NR_PACKETS; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
-        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+        for (auto l = 0; l < NR_RECEIVERS_PER_PACKET; ++l) {
           packet_data.samples[0][i][j][0][k][l][0] = std::complex<int8_t>(0, 0);
           packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
           packet_data.samples[0][i][j][0][k][l][1] =
@@ -343,7 +345,7 @@ TEST(LambdaGPUPipelineTest, PolarizationBlankTest2) {
   }
 };
 
-TEST(LambdaGPUPipelineTest, BeamBlankTest) {
+TEST_F(CudaIsolatedTest, BeamBlankTest) {
   // Ensure that beam weights are respected. Make the weights in one
   // beam zero and then check that means everything in that beam
   // is zero too.
@@ -420,7 +422,7 @@ TEST(LambdaGPUPipelineTest, BeamBlankTest) {
     }
   }
 };
-TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
+TEST_F(CudaIsolatedTest, ChannelWeightBlankTest) {
   // Ensure that channel weights are respected. Make the weights in one
   // channel zero and then check that means everything in that channel output
   // is zero too.
@@ -496,7 +498,7 @@ TEST(LambdaGPUPipelineTest, ChannelWeightBlankTest) {
     }
   }
 };
-TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
+TEST_F(CudaIsolatedTest, ChannelSamplesBlankTest) {
   // Ensure that channel samples are respected. Make the samples in one
   // channel zero and then check that means everything in that channel output
   // is zero too.
@@ -576,7 +578,7 @@ TEST(LambdaGPUPipelineTest, ChannelSamplesBlankTest) {
   }
 };
 
-TEST(LambdaGPUPipelineTest, ScalesTest) {
+TEST_F(CudaIsolatedTest, ScalesTest) {
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
@@ -655,7 +657,7 @@ TEST(LambdaGPUPipelineTest, ScalesTest) {
     }
   }
 };
-TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
+TEST_F(CudaIsolatedTest, ScalesMultiplePacketsTest) {
   FakeProcessorState state;
 
   using Config =
@@ -744,7 +746,7 @@ TEST(LambdaGPUPipelineTest, ScalesMultiplePacketsTest) {
   }
 };
 
-TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
+TEST_F(CudaIsolatedTest, ScalesPerReceiverTest) {
   FakeProcessorState state;
 
   DummyFinalPacketData<Config> packet_data;
@@ -839,7 +841,7 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
     }
   }
 };
-//  TEST(LambdaGPUPipelineTest, StateNotSetThrows) {
+//  TEST_F(CudaIsolatedTest, StateNotSetThrows) {
 //    // Use a small instantiation: e.g., 1 buffer, some dimension args
 //    // You’ll need a valid BeamWeights pointer; you can allocate dummy
 //    using MyPipe = LambdaGPUPipeline<1, 1, 1, 1, 1, 1, 1, 1, 1>;
@@ -879,7 +881,7 @@ TEST(LambdaGPUPipelineTest, ScalesPerReceiverTest) {
 //   }
 // };
 //
-// TEST(LambdaGPUPipelineTest, ExecutePipelineReleasesBuffer) {
+// TEST_F(CudaIsolatedTest, ExecutePipelineReleasesBuffer) {
 //   using MyPipe = TestablePipeline<1, 1, 1, 1, 1, 1, 1, 1, 1>;
 //   BeamWeights<1, 1, 1, 1> weights;
 //   MyPipe pipe(1, &weights, 1);

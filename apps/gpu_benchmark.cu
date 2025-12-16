@@ -13,13 +13,13 @@
 
 constexpr size_t NR_CHANNELS = 8;
 constexpr size_t NR_FPGA_SOURCES = 1;
-constexpr size_t NR_RECEIVERS = 32;
+constexpr size_t NR_RECEIVERS = 40;
 constexpr size_t NR_RECEIVERS_PER_PACKET = NR_RECEIVERS;
 constexpr size_t NR_TIME_STEPS_PER_PACKET = 64;
 constexpr size_t NR_POLARIZATIONS = 2;
 constexpr size_t NR_BEAMS = 1;
-constexpr size_t NR_PADDED_RECEIVERS = 32;
-constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = NR_PADDED_RECEIVERS;
+constexpr size_t NR_PADDED_RECEIVERS = 64;
+constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = 32;
 constexpr size_t NR_PACKETS_FOR_CORRELATION = 128;
 constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 100000;
 using Config =

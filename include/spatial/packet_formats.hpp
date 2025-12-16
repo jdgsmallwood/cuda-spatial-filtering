@@ -306,4 +306,9 @@ struct LambdaConfig {
   using VisibilitiesOutputType =
       float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
            [NR_POLARIZATIONS][COMPLEX];
+  using EigenvalueOutputType =
+      float[NR_CHANNELS][NR_POLARIZATIONS][NR_POLARIZATIONS][NR_RECEIVERS];
+  using EigenvectorOutputType =
+      std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_POLARIZATIONS]
+                         [NR_RECEIVERS][NR_RECEIVERS];
 };

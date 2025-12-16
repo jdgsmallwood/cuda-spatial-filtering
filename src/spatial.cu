@@ -47,8 +47,6 @@ __global__ void convert_int_to_float_kernel(const int *d_input, float *d_output,
 __global__ void
 accumulate_visibilities_kernel(const float *d_visibilities,
                                float *d_visibilities_accumulated, const int n) {
-  // This may need to change to an atomic add at some point. Especially if there
-  // are more than 2 streams.
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int stride = blockDim.x * gridDim.x;
   while (idx < n) {
@@ -88,7 +86,7 @@ void convert_int_to_float(const int *d_input, float *d_output, const int n,
 void convert_float_to_half(const float *d_input, __half *d_output, const int n,
                            cudaStream_t stream) {
 
-  const int num_blocks = std::min(8, n / 1024 + 1);
+  const int num_blocks = std::min(16, n / 1024 + 1);
 
   convert_float_to_half_kernel<<<num_blocks, 1024, 0, stream>>>(d_input,
                                                                 d_output, n);

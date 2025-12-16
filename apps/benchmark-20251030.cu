@@ -155,7 +155,7 @@ int main(int argc, char *argv[]) {
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
+  // HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -178,11 +178,16 @@ int main(int argc, char *argv[]) {
       {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
   };
   auto vis_writer =
-      std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
-          vis_file, &antenna_mapping);
+      std::make_unique<MSVisibilitiesWriter<Config::VisibilitiesOutputType>>(
+          vis_filename, &antenna_mapping);
+
+  auto eigen_writer =
+      std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
+                                            Config::EigenvectorOutputType>>();
 
   auto output = std::make_shared<BufferedOutput<Config>>(
-      std::move(beam_writer), std::move(vis_writer), 100, 100);
+      std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
+      100, 100, 100);
 
   BeamWeightsT<Config> h_weights;
 
