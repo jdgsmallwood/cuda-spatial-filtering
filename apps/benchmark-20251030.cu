@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
       256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_correlation_blocks_to_integrate = 56;
+  constexpr int nr_correlation_blocks_to_integrate = 1;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
@@ -143,11 +143,25 @@ int main(int argc, char *argv[]) {
                    nr_lambda_polarizations, nr_lambda_receivers_per_packet,
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
-                   nr_correlation_blocks_to_integrate>;
+                   nr_correlation_blocks_to_integrate, true>;
+
+  using MapType = std::unordered_map<uint32_t, int>;
+  int fpga_id = -1;
+  if (ifname == "enp216s0np0") {
+	  fpga_id = 3;
+} else if (ifname == "enp175s0np0") {
+	fpga_id = 2;
+} else if (ifname == "enp134s0np0") {
+	fpga_id = 1;
+} else {
+	fpga_id = 0;
+}
+std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
+
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      min_freq_channel);
+      min_freq_channel, &fpga_ids);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
@@ -173,14 +187,19 @@ int main(int argc, char *argv[]) {
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
-  static const std::unordered_map<int, int> antenna_mapping = {
-      {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-      {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
-  };
-  auto vis_writer =
-      std::make_unique<MSVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-          vis_filename, &antenna_mapping);
+  // use for Alveo 3
+  //static const std::unordered_map<int, int> antenna_mapping = {
+  //    {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+  //    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
+  //};
 
+  // use for Alveo 1
+  static const std::unordered_map<int, int> antenna_mapping = {
+      {0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
+      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13},
+  };
+  auto vis_writer = std::make_unique<HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
+          vis_file, 55 /* nr baselines */,  &antenna_mapping);
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
