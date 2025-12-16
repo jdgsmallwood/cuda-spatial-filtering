@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <complex.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <unistd.h>
@@ -13,6 +14,7 @@
 
 template <typename BeamT, typename ArrivalsT> class BeamWriter;
 template <typename T> class VisibilitiesWriter;
+template <typename TVal, typename TVec> class EigenWriter;
 
 class Output {
 public:
@@ -22,15 +24,24 @@ public:
                                              const int end_seq_num,
                                              const int num_missing_packets,
                                              const int num_total_packets) = 0;
+  virtual size_t
+  register_eigendecomposition_data_block(const int start_seq_num,
+                                         const int end_seq_num) = 0;
 
   virtual void *get_beam_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_visibilities_landing_pointer(const size_t block_num) = 0;
   virtual void *get_arrivals_data_landing_pointer(const size_t block_num) = 0;
+  virtual void *
+  get_eigenvalues_data_landing_pointer(const size_t block_num) = 0;
+  virtual void *
+  get_eigenvectors_data_landing_pointer(const size_t block_num) = 0;
 
   virtual void register_beam_data_transfer_complete(const size_t block_num) = 0;
   virtual void
   register_visibilities_transfer_complete(const size_t block_num) = 0;
   virtual void register_arrivals_transfer_complete(const size_t block_num) = 0;
+  virtual void register_eigendecomposition_data_transfer_complete(
+      const size_t block_num) = 0;
 };
 
 template <typename T> class SingleHostMemoryOutput : public Output {
@@ -45,9 +56,13 @@ public:
                             [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS][2];
   using Arrivals =
       bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION][T::NR_FPGA_SOURCES];
+  using Eigenvalues = typename T::EigenvalueOutputType;
+  using Eigenvectors = typename T::EigenvectorOutputType;
   BeamOutput *beam_data;
   Visibilities *visibilities;
   Arrivals *arrivals;
+  Eigenvalues *eigenvalues;
+  Eigenvectors *eigenvectors;
 
   size_t register_beam_data_block(const int start_seq_num,
                                   const int end_seq_num) override {
@@ -57,6 +72,12 @@ public:
                                      const int end_seq_num,
                                      const int num_missing_packets,
                                      const int num_total_packets) override {
+    return 1;
+  };
+
+  size_t
+  register_eigendecomposition_data_block(const int start_seq_num,
+                                         const int end_seq_num) override {
     return 1;
   };
 
@@ -72,25 +93,41 @@ public:
     return (void *)arrivals;
   }
 
+  void *get_eigenvalues_data_landing_pointer(const size_t block_num) override {
+    return (void *)eigenvalues;
+  }
+
+  void *get_eigenvectors_data_landing_pointer(const size_t block_num) override {
+    return (void *)eigenvectors;
+  }
+
   void register_beam_data_transfer_complete(const size_t block_num) override {};
   void
   register_visibilities_transfer_complete(const size_t block_num) override {};
   void register_arrivals_transfer_complete(const size_t block_num) override {};
+  void register_eigendecomposition_data_transfer_complete(
+      const size_t block_num) override {};
 
   SingleHostMemoryOutput() {
     CUDA_CHECK(cudaMallocHost((void **)&beam_data, sizeof(BeamOutput)));
     CUDA_CHECK(cudaMallocHost((void **)&visibilities, sizeof(Visibilities)));
     CUDA_CHECK(cudaMallocHost((void **)&arrivals, sizeof(Arrivals)));
+    CUDA_CHECK(cudaMallocHost((void **)&eigenvalues, sizeof(Eigenvalues)));
+    CUDA_CHECK(cudaMallocHost((void **)&eigenvectors, sizeof(Eigenvectors)));
   };
   ~SingleHostMemoryOutput() {
     cudaFreeHost(beam_data);
     cudaFreeHost(visibilities);
     cudaFreeHost(arrivals);
+    cudaFreeHost(eigenvalues);
+    cudaFreeHost(eigenvectors);
   };
 };
 
 template <typename T> class BufferedOutput : public Output {
 public:
+  using Eigenvalues = typename T::EigenvalueOutputType;
+  using Eigenvectors = typename T::EigenvectorOutputType;
   struct BeamBlock {
     typename T::BeamOutputType beam_data;
     typename T::ArrivalsOutputType arrival_data;
@@ -117,19 +154,35 @@ public:
           num_total_packets(0), transfer_complete(false) {}
   };
 
+  struct EigenBlock {
+    Eigenvalues eigenvalues;
+    Eigenvectors eigenvectors;
+    int start_seq_num;
+    int end_seq_num;
+    bool transfer_complete;
+
+    EigenBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {}
+  };
+
   BufferedOutput(
       std::unique_ptr<BeamWriter<typename T::BeamOutputType,
                                  typename T::ArrivalsOutputType>>
           beam_writer,
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
-      size_t beam_buffer_size, size_t vis_buffer_size)
+      std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
+                                  typename T::EigenvectorOutputType>>
+          eigen_writer,
+      size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size)
       : beam_writer_(std::move(beam_writer)),
-        vis_writer_(std::move(vis_writer)), beam_write_idx_(0),
-        beam_read_idx_(0), vis_write_idx_(0), vis_read_idx_(0), running_(true) {
+        vis_writer_(std::move(vis_writer)),
+        eigen_writer_(std::move(eigen_writer)), beam_write_idx_(0),
+        beam_read_idx_(0), vis_write_idx_(0), vis_read_idx_(0),
+        eigen_write_idx_(0), eigen_read_idx_(0), running_(true) {
     // Allocate ring buffer blocks
     beam_blocks_.resize(beam_buffer_size);
     vis_blocks_.resize(vis_buffer_size);
+    eigen_blocks_.resize(eigen_buffer_size);
   }
 
   ~BufferedOutput() {
@@ -137,6 +190,7 @@ public:
 
     beam_writer_->flush();
     vis_writer_->flush();
+    eigen_writer_->flush();
   }
 
   size_t register_beam_data_block(const int start_seq_num,
@@ -185,6 +239,23 @@ public:
     return block_num;
   }
 
+  size_t
+  register_eigendecomposition_data_block(const int start_seq_num,
+                                         const int end_seq_num) override {
+    size_t block_num = eigen_write_idx_;
+    eigen_write_idx_ = (block_num + 1) % eigen_blocks_.size();
+
+    if (eigen_write_idx_ == eigen_read_idx_) {
+      throw std::runtime_error("Eigendata ring buffer is full");
+    }
+    auto &block = eigen_blocks_[block_num];
+    block.start_seq_num = start_seq_num;
+    block.end_seq_num = end_seq_num;
+    block.transfer_complete = false;
+
+    return block_num;
+  }
+
   void *get_beam_data_landing_pointer(const size_t block_num) override {
     return &beam_blocks_[block_num].beam_data;
   }
@@ -195,6 +266,14 @@ public:
 
   void *get_arrivals_data_landing_pointer(const size_t block_num) override {
     return &beam_blocks_[block_num].arrival_data;
+  }
+
+  void *get_eigenvectors_data_landing_pointer(const size_t block_num) override {
+    return &eigen_blocks_[block_num].eigenvectors;
+  }
+
+  void *get_eigenvalues_data_landing_pointer(const size_t block_num) override {
+    return &eigen_blocks_[block_num].eigenvalues;
   }
 
   void register_beam_data_transfer_complete(const size_t block_num) override {
@@ -208,6 +287,11 @@ public:
 
   void register_arrivals_transfer_complete(const size_t block_num) override {
     beam_blocks_[block_num].arrival_transfer_complete = true;
+  }
+
+  void register_eigendecomposition_data_transfer_complete(
+      const size_t block_num) override {
+    eigen_blocks_[block_num].transfer_complete = true;
   }
 
   void writer_loop() {
@@ -235,6 +319,8 @@ public:
                   std::chrono::duration_cast<std::chrono::microseconds>(
                       cpu_end - cpu_start)
                       .count());
+
+        write_eigendata();
       }
     }
   }
@@ -249,7 +335,9 @@ private:
     bool has_vis = (vis_read_idx_ != vis_write_idx_) &&
                    vis_blocks_[vis_read_idx_].transfer_complete;
 
-    return has_beam || has_vis;
+    bool has_eigen = (eigen_read_idx_ != eigen_write_idx_) &&
+                     eigen_blocks_[eigen_read_idx_].transfer_complete;
+    return has_beam || has_vis || has_eigen;
   }
 
   void write_beam_data() {
@@ -282,17 +370,36 @@ private:
     }
   }
 
+  void write_eigendata() {
+    while (eigen_read_idx_ != eigen_write_idx_ &&
+           eigen_blocks_[eigen_read_idx_].transfer_complete && running_) {
+
+      const auto &block = eigen_blocks_[eigen_read_idx_];
+
+      eigen_writer_->write_eigendata_block(
+          &block.eigenvalues, &block.eigenvectors, block.start_seq_num,
+          block.end_seq_num);
+
+      eigen_read_idx_ = (eigen_read_idx_ + 1) % eigen_blocks_.size();
+    }
+  }
   std::unique_ptr<
       BeamWriter<typename T::BeamOutputType, typename T::ArrivalsOutputType>>
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;
+  std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
+                              typename T::EigenvectorOutputType>>
+      eigen_writer_;
 
   cuda_util::PinnedVector<BeamBlock> beam_blocks_;
   cuda_util::PinnedVector<VisBlock> vis_blocks_;
+  cuda_util::PinnedVector<EigenBlock> eigen_blocks_;
 
   size_t beam_write_idx_;
   size_t beam_read_idx_;
   size_t vis_write_idx_;
   size_t vis_read_idx_;
+  size_t eigen_write_idx_;
+  size_t eigen_read_idx_;
 };

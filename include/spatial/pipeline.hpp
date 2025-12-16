@@ -5,6 +5,7 @@
 #include <complex>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cufftXt.h>
 #include <vector>
 
 #include "ccglib/common/precision.h"
@@ -48,6 +49,11 @@ struct OutputTransferCompleteContext {
   size_t block_index;
 };
 
+struct EigenOutputTransferCompleteContext {
+  std::shared_ptr<Output> output;
+  size_t block_index;
+};
+
 // Static function to be called by cudaLaunchHostFunc
 static void release_buffer_host_func(void *data) {
 
@@ -61,8 +67,8 @@ static void release_buffer_host_func(void *data) {
 
 static void output_transfer_complete_host_func(void *data) {
   auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
-  LOG_INFO("Marking beam data output transfer for block #{} complete",
-           ctx->block_index);
+  LOG_DEBUG("Marking beam data output transfer for block #{} complete",
+            ctx->block_index);
   ctx->output->register_beam_data_transfer_complete(ctx->block_index);
   delete ctx;
 }
@@ -71,6 +77,14 @@ static void output_visibilities_transfer_complete_host_func(void *data) {
   auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
   LOG_INFO("Marking output transfer for block #{} complete", ctx->block_index);
   ctx->output->register_visibilities_transfer_complete(ctx->block_index);
+  delete ctx;
+}
+
+static void eigen_output_transfer_complete_host_func(void *data) {
+  auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
+
+  ctx->output->register_eigendecomposition_data_transfer_complete(
+      ctx->block_index);
   delete ctx;
 }
 
@@ -116,6 +130,13 @@ private:
   using TrimmedVisibilities =
       std::complex<float>[T::NR_CHANNELS][NR_UNPADDED_BASELINES]
                          [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS];
+
+  using DecompositionVisibilities =
+      std::complex<float>[T::NR_CHANNELS][T::NR_POLARIZATIONS]
+                         [T::NR_POLARIZATIONS][T::NR_RECEIVERS]
+                         [T::NR_RECEIVERS];
+  using Eigenvalues = float[T::NR_CHANNELS][T::NR_POLARIZATIONS]
+                           [T::NR_POLARIZATIONS][T::NR_RECEIVERS];
 
   using BeamformerInput =
       __half[T::NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][T::NR_PADDED_RECEIVERS]
@@ -233,6 +254,8 @@ private:
   std::vector<TrimmedVisibilities *> d_visibilities_baseline,
       d_visibilities_trimmed_baseline, d_visibilities_trimmed,
       d_visibilities_permuted;
+  std::vector<DecompositionVisibilities *> d_decomposition_visibilities_input;
+  std::vector<Eigenvalues *> d_eigenvalues;
   TrimmedVisibilities *d_visibilities_accumulator;
   std::vector<BeamformerInput *> d_beamformer_input;
   std::vector<BeamformerOutput *> d_beamformer_output, d_beamformer_data_output;
@@ -240,7 +263,6 @@ private:
   std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
       d_weights, d_weights_updated, d_weights_permuted;
   std::vector<typename T::PacketScalesType *> d_scales;
-  std::vector<float *> d_eigenvalues;
 
   BeamWeights *h_weights;
 
@@ -249,6 +271,19 @@ private:
   static constexpr int visibilities_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int visibilities_missing_packets;
+  cufftHandle fft_plan;
+  void *d_cufft_work_area;
+  std::vector<int *> d_cusolver_info;
+  std::vector<cusolverDnParams_t> cusolver_params;
+  std::vector<void *> d_cusolver_work_area;
+  std::vector<void *> h_cusolver_work_area;
+  std::vector<size_t> d_cusolver_work_area_size;
+  std::vector<size_t> h_cusolver_work_area_size;
+  cusolverEigMode_t cusolver_jobz;
+  cublasFillMode_t cusolver_uplo;
+  std::vector<cusolverDnHandle_t> cusolver_handle;
+  static constexpr int CUSOLVER_BATCH_SIZE =
+      T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS;
 
 public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
@@ -425,6 +460,24 @@ public:
                                                                     cpu_start)
                   .count());
 
+    unpack_triangular_baseline_batch_launch<cuComplex>(
+        (cuComplex *)d_visibilities_permuted[current_buffer],
+        (cuComplex *)d_decomposition_visibilities_input[current_buffer],
+        T::NR_RECEIVERS,
+        T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
+        T::NR_CHANNELS, streams[current_buffer]);
+
+    cusolverDnXsyevBatched(
+        cusolver_handle[current_buffer], cusolver_params[current_buffer],
+        cusolver_jobz, cusolver_uplo, T::NR_RECEIVERS, CUDA_C_32F,
+        (void *)d_decomposition_visibilities_input[current_buffer],
+        T::NR_RECEIVERS, CUDA_R_32F, (void *)d_eigenvalues[current_buffer],
+        CUDA_C_32F, d_cusolver_work_area[current_buffer],
+        d_cusolver_work_area_size[current_buffer],
+        h_cusolver_work_area[current_buffer],
+        h_cusolver_work_area_size[current_buffer],
+        d_cusolver_info[current_buffer], CUSOLVER_BATCH_SIZE);
+
     // accumulate_visibilities (CPU wrapper)
     cpu_start = clock::now();
     accumulate_visibilities((float *)d_visibilities_trimmed[current_buffer],
@@ -464,7 +517,7 @@ public:
     cpu_start = clock::now();
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
-                   T::NR_POLARIZATIONS, d_eigenvalues[current_buffer],
+                   T::NR_POLARIZATIONS, (float *)d_eigenvalues[current_buffer],
                    (float *)d_visibilities_converted[current_buffer],
                    streams[current_buffer]);
     cpu_end = clock::now();
@@ -527,6 +580,9 @@ public:
       cpu_start = clock::now();
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
+      size_t eigenvalue_block_num =
+          output_->register_eigendecomposition_data_block(start_seq_num,
+                                                          end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
       cudaMemcpyAsync(landing_pointer,
                       d_beamformer_data_output_half[current_buffer],
@@ -560,6 +616,29 @@ public:
                 std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
                                                                       cpu_start)
                     .count());
+
+      void *eigenvalues_output_pointer =
+          (void *)output_->get_eigenvalues_data_landing_pointer(
+              eigenvalue_block_num);
+
+      void *eigenvectors_output_pointer =
+          (void *)output_->get_eigenvectors_data_landing_pointer(
+              eigenvalue_block_num);
+
+      cudaMemcpyAsync(eigenvalues_output_pointer, d_eigenvalues[current_buffer],
+                      sizeof(Eigenvalues), cudaMemcpyDefault,
+                      streams[current_buffer]);
+
+      cudaMemcpyAsync(eigenvectors_output_pointer,
+                      d_decomposition_visibilities_input[current_buffer],
+                      sizeof(DecompositionVisibilities), cudaMemcpyDefault,
+                      streams[current_buffer]);
+
+      auto *eig_output_ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = eigenvalue_block_num};
+      cudaLaunchHostFunc(streams[current_buffer],
+                         eigen_output_transfer_complete_host_func,
+                         eig_output_ctx);
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=
           NR_CORRELATED_BLOCKS_TO_ACCUMULATE) {
@@ -588,7 +667,9 @@ public:
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
-        tensor_32(extent, CUTENSOR_R_32F, 128)
+        tensor_32(extent, CUTENSOR_R_32F, 128),
+        cusolver_jobz(CUSOLVER_EIG_MODE_VECTOR),
+        cusolver_uplo(CUBLAS_FILL_MODE_UPPER)
 
   {
     std::cout << "Correlator instantiated with NR_CHANNELS: " << T::NR_CHANNELS
@@ -624,7 +705,17 @@ public:
     d_visibilities_baseline.resize(num_buffers);
     d_visibilities_trimmed_baseline.resize(num_buffers);
     d_visibilities_trimmed.resize(num_buffers);
+    d_decomposition_visibilities_input.resize(num_buffers);
     d_eigenvalues.resize(num_buffers);
+
+    d_cusolver_info.resize(num_buffers);
+    cusolver_params.resize(num_buffers);
+    d_cusolver_work_area.resize(num_buffers);
+    h_cusolver_work_area.resize(num_buffers);
+    d_cusolver_work_area_size.resize(num_buffers);
+    h_cusolver_work_area_size.resize(num_buffers);
+    cusolver_handle.resize(num_buffers);
+
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[num_buffers + i],
@@ -674,8 +765,9 @@ public:
                             sizeof(TrimmedVisibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed[i],
                             sizeof(TrimmedVisibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_eigenvalues[i],
-                            sizeof(float) * T::NR_PADDED_RECEIVERS));
+      CUDA_CHECK(cudaMalloc((void **)&d_eigenvalues[i], sizeof(Eigenvalues)));
+      CUDA_CHECK(cudaMalloc((void **)&d_decomposition_visibilities_input[i],
+                            sizeof(DecompositionVisibilities)));
     }
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
@@ -746,6 +838,56 @@ public:
                              CUTENSOR_COMPUTE_DESC_32F,
                              "visBaselineTrimmedToTrimmed");
 
+    // set up CUFFT plan for fine-channelization
+    const int CUFFT_RANK = 1;
+    const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
+    long long N[] = {CUFFT_FFT_SIZE};
+    const long long CUFFT_ISTRIDE = 1;
+    const long long CUFFT_OSTRIDE = 1;
+    const long long CUFFT_IDIST = CUFFT_FFT_SIZE;
+    const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
+    const size_t NUM_TOTAL_BATCHES =
+        T::NR_CHANNELS * T::NR_RECEIVERS * T::NR_POLARIZATIONS;
+    size_t work_size = 0;
+    cudaDataType input_type = CUDA_C_16F;
+    cudaDataType output_type = CUDA_C_16F;
+    cudaDataType compute_type = CUDA_C_16F;
+
+    // cufftResult status = cufftXtMakePlanMany(
+    //     fft_plan, CUFFT_RANK, N, NULL, CUFFT_ISTRIDE, CUFFT_IDIST,
+    //     input_type, NULL, CUFFT_OSTRIDE, CUFFT_ODIST, output_type,
+    //     compute_type, NUM_TOTAL_BATCHES, &work_size);
+
+    // if (status != CUFFT_SUCCESS) {
+    //   std::cerr << "FATAL: CUFFT Plan creation failed." << std::endl;
+    // }
+    // CUDA_CHECK(cudaMalloc(&d_cufft_work_area, work_size));
+    // status = cufftSetWorkArea(fft_plan, d_cufft_work_area);
+
+    // if (status != CUFFT_SUCCESS) {
+    //   std::cerr << "FATAL: CUFFT Plan creation failed." << std::endl;
+    // }
+    //
+    //
+
+    // set up cuSOLVER for correlation matrix decomposition.
+    for (int i = 0; i < num_buffers; ++i) {
+      cusolverDnCreate(&cusolver_handle[i]);
+      cusolverDnCreateParams(&cusolver_params[i]);
+      cusolverDnXsyevBatched_bufferSize(
+          cusolver_handle[i], cusolver_params[i], cusolver_jobz, cusolver_uplo,
+          T::NR_RECEIVERS, CUDA_C_32F, d_decomposition_visibilities_input[i],
+          T::NR_RECEIVERS, // LDA
+          CUDA_R_32F,      // Eigenvalue Type (Real)
+          d_eigenvalues[i],
+          CUDA_C_32F, // Computation Type
+          &d_cusolver_work_area_size[i], &h_cusolver_work_area_size[i],
+          CUSOLVER_BATCH_SIZE);
+      CUDA_CHECK(cudaMalloc((void **)&d_cusolver_work_area[i],
+                            d_cusolver_work_area_size[i]));
+      CUDA_CHECK(cudaMallocHost((void **)&h_cusolver_work_area[i],
+                                h_cusolver_work_area_size[i]));
+    }
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time
     // Because everything is zeroed it should have negligible effect on output.

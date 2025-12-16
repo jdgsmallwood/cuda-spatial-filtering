@@ -56,7 +56,7 @@ add_executable(
   benchmark
   ${PROJECT_SOURCE_DIR}/apps/benchmark-20251030.cu
 )
-target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis)
+target_link_libraries(benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
 target_compile_definitions(benchmark PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS} NUMBER_PACKETS_TO_CORRELATE=${NUMBER_PACKETS_TO_CORRELATE} )
 
 set_target_properties(benchmark PROPERTIES CUDA_ARCHITECTURES "native")
@@ -72,6 +72,6 @@ add_executable(
   gpu_benchmark
   ${PROJECT_SOURCE_DIR}/apps/gpu_benchmark.cu
 )
-target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis)
+target_link_libraries(gpu_benchmark PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
 
 set_target_properties(gpu_benchmark PROPERTIES CUDA_ARCHITECTURES "native")
