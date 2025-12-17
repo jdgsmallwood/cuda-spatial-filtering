@@ -887,7 +887,11 @@ TEST_F(CudaIsolatedTest, EigenvalueBasic) {
     for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
       for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
         for (auto n = 0; n < NR_RECEIVERS; ++n) {
-          EXPECT_EQ(output->eigenvalues[0][i][j][k][n], 1.0f);
+          float expected_val = 0.0f;
+          if (n == NR_RECEIVERS - 1) {
+            expected_val = 256.0f;
+          }
+          EXPECT_NEAR(output->eigenvalues[0][i][j][k][n], expected_val, 1e-4f);
         }
       }
     }

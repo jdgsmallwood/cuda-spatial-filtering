@@ -871,6 +871,8 @@ public:
     //
 
     // set up cuSOLVER for correlation matrix decomposition.
+    //
+    //
     for (int i = 0; i < num_buffers; ++i) {
 
       CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle[i]));
@@ -889,7 +891,8 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_cusolver_work_area[i],
                             d_cusolver_work_area_size[i]));
       h_cusolver_work_area[i] = std::malloc(h_cusolver_work_area_size[i]);
-      CUDA_CHECK(cudaMalloc((void **)&d_cusolver_info[i], sizeof(int)));
+      CUDA_CHECK(cudaMalloc((void **)&d_cusolver_info[i],
+                            CUSOLVER_BATCH_SIZE * sizeof(int)));
     }
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time
