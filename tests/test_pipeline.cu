@@ -841,6 +841,59 @@ TEST_F(CudaIsolatedTest, ScalesPerReceiverTest) {
     }
   }
 };
+
+TEST_F(CudaIsolatedTest, EigenvalueBasic) {
+  FakeProcessorState state;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_PACKETS; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(2, -2);
+            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+          }
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
+
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+
+  pipeline.set_state(&state);
+  pipeline.set_output(output);
+
+  pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto n = 0; n < NR_RECEIVERS; ++n) {
+          EXPECT_EQ(output->eigenvalues[0][i][j][k][n], 1.0f);
+        }
+      }
+    }
+  }
+};
+
 //  TEST_F(CudaIsolatedTest, StateNotSetThrows) {
 //    // Use a small instantiation: e.g., 1 buffer, some dimension args
 //    // You’ll need a valid BeamWeights pointer; you can allocate dummy
@@ -862,8 +915,8 @@ TEST_F(CudaIsolatedTest, ScalesPerReceiverTest) {
 //
 //// You may subclass pipeline to override GPU parts so no real GPU calls
 // template <int A, int B, int C, int D, int E, int F, int G, int H, int I>
-// class TestablePipeline : public LambdaGPUPipeline<A, B, C, D, E, F, G, H, I>
-// { public:
+// class TestablePipeline : public LambdaGPUPipeline<A, B, C, D, E, F, G, H,
+// I> { public:
 //   using Base = LambdaGPUPipeline<A, B, C, D, E, F, G, H, I>;
 //   using Base::num_buffers;
 //   using Base::streams;

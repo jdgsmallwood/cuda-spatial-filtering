@@ -129,7 +129,6 @@ __global__ void unpack_triangular_baseline_batch_kernel(
     // Destination index in Dense Column-Major (N*N)
     // dense[row + col*N]
     int dense_idx = b_idx * (N * N) + (col * N + row);
-
     denseData[dense_idx] = packedData[i];
   }
 }

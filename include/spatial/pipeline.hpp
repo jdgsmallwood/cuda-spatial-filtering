@@ -467,7 +467,7 @@ public:
         T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
         T::NR_CHANNELS, streams[current_buffer]);
 
-    cusolverDnXsyevBatched(
+    CUSOLVER_CHECK(cusolverDnXsyevBatched(
         cusolver_handle[current_buffer], cusolver_params[current_buffer],
         cusolver_jobz, cusolver_uplo, T::NR_RECEIVERS, CUDA_C_32F,
         (void *)d_decomposition_visibilities_input[current_buffer],
@@ -476,7 +476,7 @@ public:
         d_cusolver_work_area_size[current_buffer],
         h_cusolver_work_area[current_buffer],
         h_cusolver_work_area_size[current_buffer],
-        d_cusolver_info[current_buffer], CUSOLVER_BATCH_SIZE);
+        d_cusolver_info[current_buffer], CUSOLVER_BATCH_SIZE));
 
     // accumulate_visibilities (CPU wrapper)
     cpu_start = clock::now();
@@ -872,9 +872,12 @@ public:
 
     // set up cuSOLVER for correlation matrix decomposition.
     for (int i = 0; i < num_buffers; ++i) {
-      cusolverDnCreate(&cusolver_handle[i]);
-      cusolverDnCreateParams(&cusolver_params[i]);
-      cusolverDnXsyevBatched_bufferSize(
+
+      CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle[i]));
+
+      CUSOLVER_CHECK(cusolverDnCreateParams(&cusolver_params[i]));
+      CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle[i], streams[i]));
+      CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
           cusolver_handle[i], cusolver_params[i], cusolver_jobz, cusolver_uplo,
           T::NR_RECEIVERS, CUDA_C_32F, d_decomposition_visibilities_input[i],
           T::NR_RECEIVERS, // LDA
@@ -882,11 +885,11 @@ public:
           d_eigenvalues[i],
           CUDA_C_32F, // Computation Type
           &d_cusolver_work_area_size[i], &h_cusolver_work_area_size[i],
-          CUSOLVER_BATCH_SIZE);
+          CUSOLVER_BATCH_SIZE));
       CUDA_CHECK(cudaMalloc((void **)&d_cusolver_work_area[i],
                             d_cusolver_work_area_size[i]));
-      CUDA_CHECK(cudaMallocHost((void **)&h_cusolver_work_area[i],
-                                h_cusolver_work_area_size[i]));
+      h_cusolver_work_area[i] = std::malloc(h_cusolver_work_area_size[i]);
+      CUDA_CHECK(cudaMalloc((void **)&d_cusolver_info[i], sizeof(int)));
     }
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time

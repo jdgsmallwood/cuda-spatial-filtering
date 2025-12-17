@@ -18,6 +18,14 @@
     }                                                                          \
   } while (0)
 
+#define CUSOLVER_CHECK(err)                                                    \
+  do {                                                                         \
+    cusolverStatus_t err_ = (err);                                             \
+    if (err_ != CUSOLVER_STATUS_SUCCESS) {                                     \
+      printf("cusolver error %d at %s:%d\n", err_, __FILE__, __LINE__);        \
+    }                                                                          \
+  } while (0)
+
 namespace spatial {
 
 class Logger {
