@@ -911,15 +911,15 @@ public:
     const float *val_ptr = reinterpret_cast<const float *>(val_data);
     // Since TVec is a complex<float> array, it is laid out as real, imag, real,
     // imag...
-    const float *vec_ptr = reinterpret_cast<const float *>(vec_data);
+    //const float *vec_ptr = reinterpret_cast<const float *>(vec_data);
 
     std::string ts_str = std::to_string(ts);
 
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
 
-      for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
-        for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+      for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
+        for (int pol_c_idx = 0; pol_c_idx <1; ++pol_c_idx) {
 
           std::string pol_pair =
               std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
@@ -947,52 +947,52 @@ public:
           // === EIGENVECTOR (vec_data) ACCESS - ONLY PRINCIPAL (k=0) ===
           // TVec layout: [CH][POL_R][POL_C][N_ROW][N_COL] -> 5D complex array
           // (stored as 6D float array)
-          const int PRINCIPAL_EIGEN_IDX = 0;
-          std::string k_id = std::to_string(PRINCIPAL_EIGEN_IDX);
+       //   const int PRINCIPAL_EIGEN_IDX = 0;
+       //   std::string k_id = std::to_string(PRINCIPAL_EIGEN_IDX);
 
-          // Base offset for the 0th eigenvector's complex components
-          // The C++ array layout for TVec is: [CH][P_R][P_C][N_ROW][N_COL]
-          // The k_idx (eigenvalue index) corresponds to N_COL here.
-          size_t vec_base_offset_k0 =
-              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
-              pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N) +
-              PRINCIPAL_EIGEN_IDX; // Offset to the start of the k=0 column in
-                                   // memory (Column-major is assumed for Eigen)
-                                   // If it's Row-major (C default), this index
-                                   // is more complex. Assuming Eigen-standard
-                                   // Col-major for this interpretation.
+       //   // Base offset for the 0th eigenvector's complex components
+       //   // The C++ array layout for TVec is: [CH][P_R][P_C][N_ROW][N_COL]
+       //   // The k_idx (eigenvalue index) corresponds to N_COL here.
+       //   size_t vec_base_offset_k0 =
+       //       ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
+       //       pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N) +
+       //       PRINCIPAL_EIGEN_IDX; // Offset to the start of the k=0 column in
+       //                            // memory (Column-major is assumed for Eigen)
+       //                            // If it's Row-major (C default), this index
+       //                            // is more complex. Assuming Eigen-standard
+       //                            // Col-major for this interpretation.
 
-          for (int i_idx = 0; i_idx < N;
-               ++i_idx) { // Iterate over the N components (receivers)
-            std::string i_id = std::to_string(i_idx);
+       //   for (int i_idx = 0; i_idx < N;
+       //        ++i_idx) { // Iterate over the N components (receivers)
+       //     std::string i_id = std::to_string(i_idx);
 
-            // Access the complex number (v[i][k]):
-            // The 'float' index is: (base_offset + i_idx * N) * 2
-            size_t complex_idx =
-                (val_base_offset + i_idx * N + PRINCIPAL_EIGEN_IDX) * 2;
+       //     // Access the complex number (v[i][k]):
+       //     // The 'float' index is: (base_offset + i_idx * N) * 2
+       //     size_t complex_idx =
+       //         (val_base_offset + i_idx * N + PRINCIPAL_EIGEN_IDX) * 2;
 
-            const float real_val = vec_ptr[complex_idx];
-            const float imag_val = vec_ptr[complex_idx + 1];
+       //     const float real_val = vec_ptr[complex_idx];
+       //     const float imag_val = vec_ptr[complex_idx + 1];
 
-            // --- 1. Calculation ---
-            const float amplitude =
-                std::sqrt(real_val * real_val + imag_val * imag_val);
-            const float phase = std::atan2(imag_val, real_val);
+       //     // --- 1. Calculation ---
+       //     const float amplitude =
+       //         std::sqrt(real_val * real_val + imag_val * imag_val);
+       //     const float phase = std::atan2(imag_val, real_val);
 
-            std::string key_prefix = "ts:ch:" + channel_id + ":p:" + pol_pair +
-                                     ":k:" + k_id +
-                                     ":i:" + i_id; // Add receiver index
+       //     std::string key_prefix = "ts:ch:" + channel_id + ":p:" + pol_pair +
+       //                              ":k:" + k_id +
+       //                              ":i:" + i_id; // Add receiver index
 
-            // Metric 1: Amplitude
-            madd_args.push_back(key_prefix + ":vec_amp");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(amplitude));
+       //     // Metric 1: Amplitude
+       //     madd_args.push_back(key_prefix + ":vec_amp");
+       //     madd_args.push_back(ts_str);
+       //     madd_args.push_back(std::to_string(amplitude));
 
-            // Metric 2: Phase
-            madd_args.push_back(key_prefix + ":vec_phase");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(phase));
-          } // End EIGENVECTOR i_idx loop
+       //     // Metric 2: Phase
+       //     madd_args.push_back(key_prefix + ":vec_phase");
+       //     madd_args.push_back(ts_str);
+       //     madd_args.push_back(std::to_string(phase));
+       //   } // End EIGENVECTOR i_idx loop
         }
       }
     }

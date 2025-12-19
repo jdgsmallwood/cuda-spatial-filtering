@@ -116,13 +116,13 @@ int main(int argc, char *argv[]) {
 
   // auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
   //                                         "app.log", /*truncate*/ true);
-  app_logger->set_level(spdlog::level::debug);
+  app_logger->set_level(spdlog::level::info);
   app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 
   spatial::Logger::set(app_logger);
 
   constexpr int num_buffers = 3;
-  constexpr int nr_fpga_sources = 1;
+  constexpr int nr_fpga_sources = 2;
   constexpr size_t num_packet_buffers = 24;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
@@ -134,8 +134,8 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
-      256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_correlation_blocks_to_integrate = 1;
+      512; // NUMBER_PACKETS_TO_CORRELATE;
+  constexpr int nr_correlation_blocks_to_integrate = 28;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
@@ -156,8 +156,9 @@ int main(int argc, char *argv[]) {
 } else {
 	fpga_id = 0;
 }
-std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
+//std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
 
+std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{1, 0}, {2, 1}});
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
@@ -169,7 +170,7 @@ std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_l
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  // HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
+   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -197,7 +198,15 @@ std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_l
   static const std::unordered_map<int, int> antenna_mapping = {
       {0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
       {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13},
+
+      {10, 4}, {11,6}, {12, 5}, {13, 29}, {14, 10},
+      {15, 20}, {16, 7}, {17, 9}, {18, 2},  {19, 3},
   };
+//  use for Alveo 2
+//  static const std::unordered_map<int, int> antenna_mapping = {
+//      {0, 4}, {1,6}, {2, 5}, {3, 29}, {4, 10},
+//      {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3},
+//  };
   auto vis_writer = std::make_unique<HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, 55 /* nr baselines */,  &antenna_mapping);
   auto eigen_writer =
@@ -233,7 +242,7 @@ std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_l
     capture = std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap);
   } else {
     capture =
-        std::make_unique<KernelSocketPacketCapture>(ifname, port, BUFFER_SIZE);
+        std::make_unique<KernelSocketPacketCapture>(ifname, port, BUFFER_SIZE, 256*1024*1024);
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");

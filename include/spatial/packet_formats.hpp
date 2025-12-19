@@ -110,6 +110,7 @@ struct LambdaFinalPacketData : public FinalPacketData {
       for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
           if (arrivals[0][i][j][k] == 0) {
+		  LOG_DEBUG("Missing Packet: Channel {}, Packet {}, FPGA {}", i, j, k);
             sum++;
           }
         }

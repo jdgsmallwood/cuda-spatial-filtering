@@ -220,6 +220,7 @@ public:
         std::memcpy(&scales, pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
         arrival = true;
+	LOG_DEBUG("Setting arrival = true for buffer_index {}, channel {}, packet index {}, fpga_index {} and now has value {}", buffer_index, freq_channel, packet_index, fpga_index, buffer->arrivals[0][freq_channel][packet_index][fpga_index]);
         // LOG_DEBUG("Setting original_packet_processed as true...");
         // LOG_DEBUG("original_packet_processed_before={}",
         //           *pkt.original_packet_processed);
@@ -437,7 +438,7 @@ public:
             !modified_since_last_completion_check[channel]) {
           continue;
         }
-        // LOG_INFO("Check if buffers are complete for channel {}", channel);
+         LOG_INFO("Check if buffers are complete for channel {}", channel);
         bool all_fpgas_complete = true;
         for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
           // we wait for halfway through the next buffer to be complete to avoid
@@ -445,24 +446,26 @@ public:
           if (latest_packet_received[channel][fpga] <
               end_seq[fpga] + NR_BETWEEN_SAMPLES / 2) {
             all_fpgas_complete = false;
+	    if (i==0) {
+		    return;
+	    }
             break;
           }
         }
         if (all_fpgas_complete) {
           buffer.is_populated[channel] = true;
-        }
-        // LOG_INFO("Buffer is complete for channel {}", channel);
-        // else {
-        //  LOG_INFO("Buffer is not complete for channel {} as end_seq is {} and
-        //  "
-        //          "latest_packet_receives are:",
-        //         channel, buffers[current_buffer].end_seq);
-        // for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
-        //   LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
-        //            latest_packet_received[channel][check]);
-        // }
-        // }
+        
+         LOG_INFO("Buffer is complete for channel {}", channel);
+	} else {
+          LOG_INFO("Buffer is not complete for channel {} as end_seqs are is {}, {}  and latest_packet_receives are:",
+                 channel, buffers[buf_idx].end_seq[0], buffers[buf_idx].end_seq[1]);
+         for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
+           LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
+                    latest_packet_received[channel][check]);
+         }
+         }
       }
+      
       if (buffer.is_populated.all()) {
         buffers_complete.push_back(buf_idx);
       }

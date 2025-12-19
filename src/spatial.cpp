@@ -341,9 +341,11 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
     perror("setsockopt");
   }
+  if (ifname != "" && ifname != "all") {
   if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
                  ifname.size()) < 0) {
     perror("SO_BINDTODEVICE");
+  }
   }
   // Setup server address
   memset(&server_addr, 0, sizeof(server_addr));
