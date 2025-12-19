@@ -24,6 +24,7 @@
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 
 #ifndef NUMBER_BEAMS
 #define NUMBER_BEAMS 1
@@ -59,6 +60,44 @@ void writeVectorToCSV(const std::vector<float> &times,
   file.close();
   std::cout << "Data successfully written to " << filename << "\n";
 }
+
+class AntennaMapRegistry {
+public:
+  AntennaMapRegistry() {
+    // Initialize your 4 base maps here
+    // FPGA 0
+    base_maps[0] = {{0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+                    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
+    // FPGA 1 (Example dummy data)
+    base_maps[1] = {{0, 40}, {1, 41}, {2, 42}, {3, 43}, {4, 44},
+                    {5, 45}, {6, 46}, {7, 47}, {8, 48}, {9, 49}};
+    // FPGA 2, 3...
+  }
+
+  std::unordered_map<int, int>
+  get_combined_map(const std::vector<int> &selected_fpgas) {
+    std::unordered_map<int, int> combined;
+
+    for (size_t i = 0; i < selected_fpgas.size(); ++i) {
+      int fpga_id = selected_fpgas[i];
+      int stream_offset = i * 10; // 0 for 1st, 10 for 2nd, 20 for 3rd...
+
+      if (base_maps.find(fpga_id) == base_maps.end()) {
+        throw std::runtime_error("Unknown FPGA ID: " + std::to_string(fpga_id));
+      }
+
+      const auto &source_map = base_maps[fpga_id];
+      for (const auto &[stream, antenna] : source_map) {
+        // Key: New Offset Stream, Value: Antenna ID
+        combined[stream + stream_offset] = antenna;
+      }
+    }
+    return combined;
+  }
+
+private:
+  std::unordered_map<int, std::unordered_map<int, int>> base_maps;
+};
 
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
@@ -185,9 +224,11 @@ int main(int argc, char *argv[]) {
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
 
+  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>();
+
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
-      100, 100, 100);
+      std::move(fft_writer), 100, 100, 100, 100);
 
   BeamWeightsT<Config> h_weights;
 
