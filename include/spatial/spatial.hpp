@@ -869,6 +869,24 @@ public:
     struct timeval tv;
     tv.tv_sec = 1; // 1 second timeout
     tv.tv_usec = 0;
+    const int BATCH_SIZE = 64;
+    struct mmsghdr msgs[BATCH_SIZE];
+    struct iovec iovecs[BATCH_SIZE];
+
+    std::vector<std::vector<uint8_t>> packet_buffers(
+        BATCH_SIZE, std::vector<uint8_t>(buffer_size));
+    struct sockaddr_in client_addrs[BATCH_SIZE];
+
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+      iovecs[i].iov_base = packet_buffers[i].data();
+      iovecs[i].iov_len = buffer_size;
+
+      memset(&msgs[i], 0, sizeof(msgs[i]));
+      msgs[i].msg_hdr.msg_iov = &iovecs[i];
+      msgs[i].msg_hdr.msg_iovlen = 1;
+      msgs[i].msg_hdr.msg_name = &client_addrs[i];
+      msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
+    }
 
     // Make kernel receive buffer a bit larger to avoid dropping packets
     // during the timeout
@@ -878,18 +896,22 @@ public:
     LOG_INFO("Receiver thread started");
     void *next_write_pointer = state.get_current_write_pointer();
     while (state.running) {
-      int received = recvfrom(sockfd, next_write_pointer, buffer_size, 0,
-                              (struct sockaddr *)&client_addr, &client_len);
-      if (received < 0) {
+      int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
+      if (ret_val < 0) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
         // perror("recvfrom");
         break;
       }
 
-      state.add_received_packet_metadata(received, client_addr);
-      state.packets_received += 1;
-      next_write_pointer = state.get_next_write_pointer();
+      for (int i = 0; i < ret_val; ++i) {
+        int len = msgs[i].msg_len;
+        std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
+        state.add_received_packet_metadata(len, client_addrs[i]);
+        state.packets_received += 1;
+        next_write_pointer = state.get_next_write_pointer();
+        msgs[i].msg_len = 0;
+      }
     }
     LOG_INFO("Receiver thread exiting");
   };
