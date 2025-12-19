@@ -88,7 +88,10 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   std::string filename = make_temp_hdf5_file();
   HighFive::File file(filename, HighFive::File::Truncate);
 
-  HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(file);
+  const int min_channel = 98;
+  const int max_channel = 105;
+  HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(
+      file, min_channel, max_channel);
 
   // Prepare dummy data
   MockT::VisibilitiesOutputType vis_data;
@@ -115,4 +118,10 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   seq_ds.select({0, 0}, {1, 2}).read(seq_out);
   EXPECT_EQ(seq_out[0][0], 100);
   EXPECT_EQ(seq_out[0][1], 200);
+
+  int min_channel_out, max_channel_out;
+  verify_file.getAttribute("min_channel").read(min_channel_out);
+  verify_file.getAttribute("max_channel").read(max_channel_out);
+  EXPECT_EQ(min_channel, min_channel_out);
+  EXPECT_EQ(max_channel, max_channel_out);
 }

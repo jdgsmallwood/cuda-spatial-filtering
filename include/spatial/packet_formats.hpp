@@ -311,4 +311,8 @@ struct LambdaConfig {
   using EigenvectorOutputType =
       std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_POLARIZATIONS]
                          [NR_RECEIVERS][NR_RECEIVERS];
+  using FFTOutputType =
+      std::complex<__half>[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+                          [NR_TIME_STEPS_PER_PACKET *
+                           NR_PACKETS_FOR_CORRELATION];
 };

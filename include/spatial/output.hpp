@@ -15,6 +15,7 @@
 template <typename BeamT, typename ArrivalsT> class BeamWriter;
 template <typename T> class VisibilitiesWriter;
 template <typename TVal, typename TVec> class EigenWriter;
+template <typename T> class FFTWriter;
 
 class Output {
 public:
@@ -28,6 +29,9 @@ public:
   register_eigendecomposition_data_block(const int start_seq_num,
                                          const int end_seq_num) = 0;
 
+  virtual size_t register_fft_block(const int start_seq_num,
+                                    const int end_seq_num) = 0;
+
   virtual void *get_beam_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_visibilities_landing_pointer(const size_t block_num) = 0;
   virtual void *get_arrivals_data_landing_pointer(const size_t block_num) = 0;
@@ -35,6 +39,7 @@ public:
   get_eigenvalues_data_landing_pointer(const size_t block_num) = 0;
   virtual void *
   get_eigenvectors_data_landing_pointer(const size_t block_num) = 0;
+  virtual void *get_fft_landing_pointer(const size_t block_num) = 0;
 
   virtual void register_beam_data_transfer_complete(const size_t block_num) = 0;
   virtual void
@@ -42,6 +47,7 @@ public:
   virtual void register_arrivals_transfer_complete(const size_t block_num) = 0;
   virtual void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) = 0;
+  virtual void register_fft_transfer_complete(const size_t block_num) = 0;
 };
 
 template <typename T> class SingleHostMemoryOutput : public Output {
@@ -58,11 +64,13 @@ public:
       bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION][T::NR_FPGA_SOURCES];
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
+  using FFTOutput = typename T::FFTOutputType;
   BeamOutput *beam_data;
   Visibilities *visibilities;
   Arrivals *arrivals;
   Eigenvalues *eigenvalues;
   Eigenvectors *eigenvectors;
+  FFTOutput *fft_output;
 
   size_t register_beam_data_block(const int start_seq_num,
                                   const int end_seq_num) override {
@@ -80,6 +88,10 @@ public:
                                          const int end_seq_num) override {
     return 1;
   };
+  size_t register_fft_block(const int start_seq_num,
+                            const int end_seq_num) override {
+    return 1;
+  }
 
   void *get_beam_data_landing_pointer(const size_t block_num) override {
     return (void *)beam_data;
@@ -100,6 +112,9 @@ public:
   void *get_eigenvectors_data_landing_pointer(const size_t block_num) override {
     return (void *)eigenvectors;
   }
+  void *get_fft_landing_pointer(const size_t block_num) override {
+    return (void *)fft_output;
+  }
 
   void register_beam_data_transfer_complete(const size_t block_num) override {};
   void
@@ -107,6 +122,7 @@ public:
   void register_arrivals_transfer_complete(const size_t block_num) override {};
   void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) override {};
+  void register_fft_transfer_complete(const size_t block_num) override {};
 
   SingleHostMemoryOutput() {
     CUDA_CHECK(cudaMallocHost((void **)&beam_data, sizeof(BeamOutput)));
@@ -114,6 +130,7 @@ public:
     CUDA_CHECK(cudaMallocHost((void **)&arrivals, sizeof(Arrivals)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvalues, sizeof(Eigenvalues)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvectors, sizeof(Eigenvectors)));
+    CUDA_CHECK(cudaMallocHost((void **)&fft_output, sizeof(FFTOutput)));
   };
   ~SingleHostMemoryOutput() {
     cudaFreeHost(beam_data);
@@ -121,6 +138,7 @@ public:
     cudaFreeHost(arrivals);
     cudaFreeHost(eigenvalues);
     cudaFreeHost(eigenvectors);
+    cudaFreeHost(fft_output);
   };
 };
 
@@ -128,6 +146,7 @@ template <typename T> class BufferedOutput : public Output {
 public:
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
+  using FFTOutput = typename T::FFTOutputType;
   struct BeamBlock {
     typename T::BeamOutputType beam_data;
     typename T::ArrivalsOutputType arrival_data;
@@ -164,6 +183,15 @@ public:
     EigenBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {}
   };
 
+  struct FFTBlock {
+    FFTOutput fft_output;
+    int start_seq_num;
+    int end_seq_num;
+    bool transfer_complete;
+
+    FFTBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {};
+  };
+
   BufferedOutput(
       std::unique_ptr<BeamWriter<typename T::BeamOutputType,
                                  typename T::ArrivalsOutputType>>
@@ -173,16 +201,21 @@ public:
       std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
                                   typename T::EigenvectorOutputType>>
           eigen_writer,
-      size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size)
+      std::unique_ptr<FFTWriter<typename T::FFTOutputType>> fft_writer,
+      size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size,
+      size_t fft_buffer_size)
       : beam_writer_(std::move(beam_writer)),
         vis_writer_(std::move(vis_writer)),
-        eigen_writer_(std::move(eigen_writer)), beam_write_idx_(0),
+        eigen_writer_(std::move(eigen_writer)),
+        fft_writer_(std::move(fft_writer)), beam_write_idx_(0),
         beam_read_idx_(0), vis_write_idx_(0), vis_read_idx_(0),
-        eigen_write_idx_(0), eigen_read_idx_(0), running_(true) {
+        eigen_write_idx_(0), eigen_read_idx_(0), fft_write_idx_(0),
+        fft_read_idx_(0), running_(true) {
     // Allocate ring buffer blocks
     beam_blocks_.resize(beam_buffer_size);
     vis_blocks_.resize(vis_buffer_size);
     eigen_blocks_.resize(eigen_buffer_size);
+    fft_blocks_.resize(fft_buffer_size);
   }
 
   ~BufferedOutput() {
@@ -191,6 +224,7 @@ public:
     beam_writer_->flush();
     vis_writer_->flush();
     eigen_writer_->flush();
+    fft_writer_->flush();
   }
 
   size_t register_beam_data_block(const int start_seq_num,
@@ -256,6 +290,22 @@ public:
     return block_num;
   }
 
+  size_t register_fft_block(const int start_seq_num,
+                            const int end_seq_num) override {
+    size_t block_num = fft_write_idx_;
+    fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
+
+    if (fft_write_idx_ == fft_read_idx_) {
+      throw std::runtime_error("FFT ring buffer is full");
+    }
+    auto &block = fft_blocks_[block_num];
+    block.start_seq_num = start_seq_num;
+    block.end_seq_num = end_seq_num;
+    block.transfer_complete = false;
+
+    return block_num;
+  }
+
   void *get_beam_data_landing_pointer(const size_t block_num) override {
     return &beam_blocks_[block_num].beam_data;
   }
@@ -276,6 +326,10 @@ public:
     return &eigen_blocks_[block_num].eigenvalues;
   }
 
+  void *get_fft_landing_pointer(const size_t block_num) override {
+    return &fft_blocks_[block_num].fft_output;
+  }
+
   void register_beam_data_transfer_complete(const size_t block_num) override {
     beam_blocks_[block_num].beam_transfer_complete = true;
   }
@@ -292,6 +346,10 @@ public:
   void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) override {
     eigen_blocks_[block_num].transfer_complete = true;
+  }
+
+  void register_fft_transfer_complete(const size_t block_num) override {
+    fft_blocks_[block_num].transfer_complete = true;
   }
 
   void writer_loop() {
@@ -321,6 +379,7 @@ public:
                       .count());
 
         write_eigendata();
+        write_fft_data();
       }
     }
   }
@@ -337,7 +396,10 @@ private:
 
     bool has_eigen = (eigen_read_idx_ != eigen_write_idx_) &&
                      eigen_blocks_[eigen_read_idx_].transfer_complete;
-    return has_beam || has_vis || has_eigen;
+
+    bool has_fft = (fft_read_idx_ != fft_write_idx_) &&
+                   fft_blocks_[fft_read_idx_].transfer_complete;
+    return has_beam || has_vis || has_eigen | has_fft;
   }
 
   void write_beam_data() {
@@ -383,6 +445,8 @@ private:
       eigen_read_idx_ = (eigen_read_idx_ + 1) % eigen_blocks_.size();
     }
   }
+
+  void write_fft_data() {};
   std::unique_ptr<
       BeamWriter<typename T::BeamOutputType, typename T::ArrivalsOutputType>>
       beam_writer_;
@@ -391,10 +455,12 @@ private:
   std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
                               typename T::EigenvectorOutputType>>
       eigen_writer_;
+  std::unique_ptr<FFTWriter<typename T::FFTOutputType>> fft_writer_;
 
   cuda_util::PinnedVector<BeamBlock> beam_blocks_;
   cuda_util::PinnedVector<VisBlock> vis_blocks_;
   cuda_util::PinnedVector<EigenBlock> eigen_blocks_;
+  cuda_util::PinnedVector<FFTBlock> fft_blocks_;
 
   size_t beam_write_idx_;
   size_t beam_read_idx_;
@@ -402,4 +468,6 @@ private:
   size_t vis_read_idx_;
   size_t eigen_write_idx_;
   size_t eigen_read_idx_;
+  size_t fft_write_idx_;
+  size_t fft_read_idx_;
 };

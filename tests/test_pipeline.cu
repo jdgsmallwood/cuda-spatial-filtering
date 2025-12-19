@@ -152,7 +152,8 @@ TEST_F(CudaIsolatedTest, Ex1) {
               << ", p=" << p
               << " → actual=" << output->visibilities[0][i][q][j][p][0]
               << ", expected=" << expected_vis;
-          ;
+          // imag should be zero.
+          EXPECT_EQ(output->visibilities[0][i][q][j][p][1], 0.0f);
         }
       }
     }
@@ -892,12 +893,124 @@ TEST_F(CudaIsolatedTest, EigenvalueBasic) {
             expected_val = 256.0f;
           }
           EXPECT_NEAR(output->eigenvalues[0][i][j][k][n], expected_val, 1e-4f);
+
+          for (auto l = 0; l < NR_RECEIVERS; ++l) {
+            // The eigenvector is extracted by keeping n constant and moving
+            // along l.
+            float expected_vec = 0.0f;
+            if (n == NR_RECEIVERS - 1) {
+              // principal eigenvector.
+              expected_vec = 0.5f;
+            } else if (n == 0 && (l == 1 || l == 0)) {
+              expected_vec = -0.0599f;
+            } else if (n == 1 && (l == 0 || l == 1)) {
+              expected_vec = -0.4964f;
+            } else if (n == 2 && (l == 0)) {
+              expected_vec = 0.7071f;
+            } else if (n == 2 && l == 1) {
+              expected_vec = -0.7071f;
+            } else if (n == 0 && l == 2) {
+              expected_vec = -0.6421f;
+            } else if (n == 0 && l == 3) {
+              expected_vec = 0.7619f;
+            } else if (n == 1 && l == 2) {
+              expected_vec = 0.5811f;
+            } else if (n == 1 && l == 3) {
+              expected_vec = 0.4116f;
+            }
+            EXPECT_NEAR(output->eigenvectors[0][i][j][k][n][l].real(),
+                        expected_vec, 1e-4f)
+                << "i: " << i << ", j: " << j << ", k:" << k << ", l: " << l
+                << ", n:" << n;
+            EXPECT_NEAR(output->eigenvectors[0][i][j][k][n][l].imag(), 0.0f,
+                        1e-4f);
+          }
         }
       }
     }
   }
 };
 
+TEST_F(CudaIsolatedTest, FFTBasic) {
+  FakeProcessorState state;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_PACKETS; ++j) {
+      for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+        for (auto l = 0; l < NR_RECEIVERS; ++l) {
+          for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
+            packet_data.samples[0][i][j][0][k][l][m] =
+                std::complex<int8_t>(k, -k);
+            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+          }
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
+
+  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+
+  pipeline.set_state(&state);
+  pipeline.set_output(output);
+
+  pipeline.execute_pipeline(&packet_data);
+  pipeline.dump_visibilities();
+  cudaDeviceSynchronize();
+
+  std::complex<float>
+      expected_vals[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+                   [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto n = 0; n < NR_RECEIVERS; ++n) {
+        expected_vals[i][j][n][0] = {28.0f, -28.0f};
+        expected_vals[i][j][n][1] = {5.6568f, +13.6568f};
+        expected_vals[i][j][n][2] = {0.0f, 8.0f};
+        expected_vals[i][j][n][3] = {
+            -2.3431f,
+            5.6569f,
+        };
+        expected_vals[i][j][n][4] = {-4.0f, 4.0f};
+        expected_vals[i][j][n][5] = {
+            -5.6569f,
+            2.343f,
+        };
+        expected_vals[i][j][n][6] = {-8.0f, 0.0f};
+        expected_vals[i][j][n][7] = {-13.6569f, -5.6569f};
+      }
+    }
+  }
+
+  for (auto i = 0; i < NR_CHANNELS; ++i) {
+    for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+      for (auto k = 0;
+           k < NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION; ++k) {
+        for (auto n = 0; n < NR_RECEIVERS; ++n) {
+          EXPECT_NEAR(__half2float(output->fft_output[0][i][j][n][k].real()),
+                      expected_vals[i][j][n][k].real(), 1e-2f);
+          EXPECT_NEAR(__half2float(output->fft_output[0][i][j][n][k].imag()),
+                      expected_vals[i][j][n][k].imag(), 1e-2f);
+        }
+      }
+    }
+  }
+};
 //  TEST_F(CudaIsolatedTest, StateNotSetThrows) {
 //    // Use a small instantiation: e.g., 1 buffer, some dimension args
 //    // You’ll need a valid BeamWeights pointer; you can allocate dummy

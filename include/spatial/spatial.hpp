@@ -445,6 +445,9 @@ public:
           if (latest_packet_received[channel][fpga] <
               end_seq[fpga] + NR_BETWEEN_SAMPLES / 2) {
             all_fpgas_complete = false;
+            if (i == 0) {
+              return;
+            }
             break;
           }
         }
