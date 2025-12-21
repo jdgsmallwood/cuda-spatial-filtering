@@ -29,6 +29,8 @@ target_link_libraries(PipelineTests
             CUDA::cufft
             CUDA::cusolver
 )
+set_target_properties(PipelineTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 add_executable(
   CUDASpatialFilteringCPUTests test_packet_formats.cpp
 )

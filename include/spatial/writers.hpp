@@ -55,6 +55,14 @@ public:
   virtual void flush() = 0;
 };
 
+template <typename T> class FFTWriter {
+public:
+  virtual ~FFTWriter() = default;
+  virtual void write_fft_block(const T *fft_data, const int start_seq,
+                               const int end_seq) = 0;
+  virtual void flush() = 0;
+};
+
 template <typename T, typename U = size_t, size_t N = 0>
 constexpr auto get_array_dims() {
   if constexpr (std::is_array_v<T>) {
@@ -474,12 +482,22 @@ template <typename T>
 class HDF5VisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
   HDF5VisibilitiesWriter(
-      HighFive::File &file,
+      HighFive::File &file, const int min_channel, const int max_channel,
       const std::unordered_map<int, int> *antenna_map = nullptr)
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
     using namespace HighFive;
+
+    double start_time = std::chrono::duration<double>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                                .count() /
+                            86400.0 +
+                        40587.0;
+    file_.createAttribute<double>("mjd_start", start_time);
+    file_.createAttribute<int>("min_channel", min_channel);
+    file_.createAttribute<int>("max_channel", max_channel);
+
     vis_dims_ = get_array_dims<T>();
     std::vector<size_t> vis_dataset_dims = {0};
     std::vector<size_t> vis_dataset_max_dims = {DataSpace::UNLIMITED};
@@ -608,13 +626,23 @@ template <typename T>
 class HDF5AndRedisVisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
   HDF5AndRedisVisibilitiesWriter(
-      HighFive::File &file, const int NR_BASELINES,
+      HighFive::File &file, const int NR_BASELINES, const int min_channel,
+      const int max_channel,
       const std::unordered_map<int, int> *antenna_map = nullptr)
       : file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
         redis("tcp://127.0.0.1:6379"), NR_BASELINES(NR_BASELINES) {
     using namespace HighFive;
+
+    double start_time = std::chrono::duration<double>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                                .count() /
+                            86400.0 +
+                        40587.0;
+    file_.createAttribute<double>("mjd_start", start_time);
+    file_.createAttribute<int>("min_channel", min_channel);
+    file_.createAttribute<int>("max_channel", max_channel);
     vis_dims_ = get_array_dims<T>();
     std::vector<size_t> vis_dataset_dims = {0};
     std::vector<size_t> vis_dataset_max_dims = {DataSpace::UNLIMITED};
@@ -1090,6 +1118,46 @@ private:
   size_t val_element_count_;
   size_t vec_element_count_;
   std::vector<size_t> eigen_dims_;
+  sw::redis::Redis redis;
+  int NR_CHANNELS;
+  int NR_POLARIZATIONS;
+  int NR_RECEIVERS;
+};
+
+template <typename T> class RedisFFTWriter : public FFTWriter<T> {
+public:
+  RedisFFTWriter()
+      : element_count_(sizeof(T) /
+                       sizeof(typename std::remove_all_extents<T>::type)),
+        redis("tcp://127.0.0.1:6379") {
+    fft_dims_ = get_array_dims<T>();
+
+    NR_CHANNELS = fft_dims_[0];
+    NR_POLARIZATIONS = fft_dims_[1];
+    NR_RECEIVERS = fft_dims_[3];
+    create_all_timeseries_keys();
+  }
+
+  void write_fft_block(const T *fft_data, const int start_seq,
+                       const int end_seq) override {
+
+    long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+
+    LOG_INFO("writing fft block {} to {}", start_seq, end_seq);
+
+    std::vector<std::string> madd_args = {"TS.MADD"};
+
+    const int N = NR_RECEIVERS;
+  }
+
+  void flush() override {}
+
+private:
+  void create_all_timeseries_keys() {}
+  size_t element_count_;
+  std::vector<size_t> fft_dims_;
   sw::redis::Redis redis;
   int NR_CHANNELS;
   int NR_POLARIZATIONS;

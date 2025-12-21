@@ -88,6 +88,13 @@ static void eigen_output_transfer_complete_host_func(void *data) {
   delete ctx;
 }
 
+static void fft_output_transfer_complete_host_func(void *data) {
+  auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
+
+  ctx->output->register_fft_transfer_complete(ctx->block_index);
+  delete ctx;
+}
+
 template <typename T> class LambdaGPUPipeline : public GPUPipeline {
 
 private:
@@ -181,6 +188,8 @@ private:
                                                            'p', 't', 'z'};
   inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'f',
                                                   'n', 'o', 'u'};
+  inline static const std::vector<int> modeCUFFTInput{'c', 'p', 'f', 'n',
+                                                      'o', 'u', 'z'};
   // We need the planar samples matrix to be in column-major memory layout
   // which is equivalent to transposing time and receiver structure here.
   // We also squash the b,t axes into s = block * time
@@ -243,7 +252,7 @@ private:
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry,
       d_samples_scaled;
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
+      d_samples_padding, d_samples_cufft_input, d_samples_cufft_output;
   std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
       d_samples_reord; // This is not the right type for reord
                        // - but it will do I guess. Size will be correct.
@@ -271,8 +280,8 @@ private:
   static constexpr int visibilities_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int visibilities_missing_packets;
-  cufftHandle fft_plan;
-  void *d_cufft_work_area;
+  std::vector<cufftHandle> fft_plan;
+  std::vector<void *> d_cufft_work_area;
   std::vector<int *> d_cusolver_info;
   std::vector<cusolverDnParams_t> cusolver_params;
   std::vector<void *> d_cusolver_work_area;
@@ -385,6 +394,14 @@ public:
                                                                     cpu_start)
                   .count());
 
+    tensor_16.runPermutation("packetToCUFFTInput", alpha,
+                             (__half *)d_samples_half[current_buffer],
+                             (__half *)d_samples_cufft_input[current_buffer],
+                             streams[current_buffer]);
+
+    CUFFT_CHECK(cufftXtExec(
+        fft_plan[current_buffer], (void *)d_samples_cufft_input[current_buffer],
+        (void *)d_samples_cufft_output[current_buffer], CUFFT_FORWARD));
     // cudaMemcpyAsync for padding
     cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
@@ -583,6 +600,8 @@ public:
       size_t eigenvalue_block_num =
           output_->register_eigendecomposition_data_block(start_seq_num,
                                                           end_seq_num);
+      size_t fft_block_num =
+          output_->register_fft_block(start_seq_num, end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
       cudaMemcpyAsync(landing_pointer,
                       d_beamformer_data_output_half[current_buffer],
@@ -639,6 +658,19 @@ public:
       cudaLaunchHostFunc(streams[current_buffer],
                          eigen_output_transfer_complete_host_func,
                          eig_output_ctx);
+
+      auto *fft_output_pointer =
+          (void *)output_->get_fft_landing_pointer(fft_block_num);
+      cudaMemcpyAsync(fft_output_pointer,
+                      d_samples_cufft_output[current_buffer],
+                      sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
+                      streams[current_buffer]);
+
+      auto *fft_output_ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = fft_block_num};
+      cudaLaunchHostFunc(streams[current_buffer],
+                         fft_output_transfer_complete_host_func,
+                         fft_output_ctx);
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=
           NR_CORRELATED_BLOCKS_TO_ACCUMULATE) {
@@ -689,6 +721,8 @@ public:
     d_scales.resize(num_buffers);
     d_samples_scaled.resize(num_buffers);
     d_samples_half.resize(num_buffers);
+    d_samples_cufft_input.resize(num_buffers);
+    d_samples_cufft_output.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
     d_samples_consolidated.resize(num_buffers);
@@ -708,6 +742,8 @@ public:
     d_decomposition_visibilities_input.resize(num_buffers);
     d_eigenvalues.resize(num_buffers);
 
+    fft_plan.resize(num_buffers);
+    d_cufft_work_area.resize(num_buffers);
     d_cusolver_info.resize(num_buffers);
     cusolver_params.resize(num_buffers);
     d_cusolver_work_area.resize(num_buffers);
@@ -725,6 +761,10 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_scaled[i],
                             sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
+                            sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_input[i],
+                            sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_output[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
                             sizeof(typename T::HalfPacketSamplesType)));
@@ -806,6 +846,7 @@ public:
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
     tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
+    tensor_16.addTensor(modeCUFFTInput, "cufftInput");
 
     tensor_16.addTensor(modeWeightsInput, "weightsInput");
     tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
@@ -820,6 +861,8 @@ public:
 
     tensor_16.addPermutation("packet", "packet_padding",
                              CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
+    tensor_16.addPermutation("packet", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
+                             "packetToCUFFTInput");
     tensor_16.addPermutation("packet_padded", "corr_input",
                              CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
     tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
@@ -853,23 +896,17 @@ public:
     cudaDataType output_type = CUDA_C_16F;
     cudaDataType compute_type = CUDA_C_16F;
 
-    // cufftResult status = cufftXtMakePlanMany(
-    //     fft_plan, CUFFT_RANK, N, NULL, CUFFT_ISTRIDE, CUFFT_IDIST,
-    //     input_type, NULL, CUFFT_OSTRIDE, CUFFT_ODIST, output_type,
-    //     compute_type, NUM_TOTAL_BATCHES, &work_size);
+    for (int i = 0; i < num_buffers; ++i) {
+      CUFFT_CHECK(cufftCreate(&fft_plan[i]));
+      CUFFT_CHECK(cufftXtMakePlanMany(
+          fft_plan[i], CUFFT_RANK, N, NULL, CUFFT_ISTRIDE, CUFFT_IDIST,
+          input_type, NULL, CUFFT_OSTRIDE, CUFFT_ODIST, output_type,
+          NUM_TOTAL_BATCHES, &work_size, compute_type));
 
-    // if (status != CUFFT_SUCCESS) {
-    //   std::cerr << "FATAL: CUFFT Plan creation failed." << std::endl;
-    // }
-    // CUDA_CHECK(cudaMalloc(&d_cufft_work_area, work_size));
-    // status = cufftSetWorkArea(fft_plan, d_cufft_work_area);
-
-    // if (status != CUFFT_SUCCESS) {
-    //   std::cerr << "FATAL: CUFFT Plan creation failed." << std::endl;
-    // }
-    //
-    //
-
+      CUFFT_CHECK(cufftSetStream(fft_plan[i], streams[i]));
+      CUDA_CHECK(cudaMalloc(&d_cufft_work_area[i], work_size));
+      CUFFT_CHECK(cufftSetWorkArea(fft_plan[i], d_cufft_work_area[i]));
+    }
     // set up cuSOLVER for correlation matrix decomposition.
     //
     //
@@ -960,6 +997,13 @@ public:
 
     for (auto samples_half : d_samples_half) {
       cudaFree(samples_half);
+    }
+
+    for (auto samples_cufft : d_samples_cufft_input) {
+      cudaFree(samples_cufft);
+    }
+    for (auto samples_cufft : d_samples_cufft_output) {
+      cudaFree(samples_cufft);
     }
 
     for (auto samples_padded : d_samples_padded) {
