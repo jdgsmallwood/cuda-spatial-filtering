@@ -446,7 +446,20 @@ private:
     }
   }
 
-  void write_fft_data() {};
+  void write_fft_data() {
+
+    while (fft_read_idx_ != fft_write_idx_ &&
+           fft_blocks_[fft_read_idx_].transfer_complete && running_) {
+
+      const auto &block = fft_blocks_[fft_read_idx_];
+
+      fft_writer_->write_fft_block(&block.fft_data, block.start_seq_num,
+                                   block.end_seq_num);
+
+      fft_read_idx_ = (fft_read_idx_ + 1) % fft_blocks_.size();
+    }
+  };
+
   std::unique_ptr<
       BeamWriter<typename T::BeamOutputType, typename T::ArrivalsOutputType>>
       beam_writer_;
