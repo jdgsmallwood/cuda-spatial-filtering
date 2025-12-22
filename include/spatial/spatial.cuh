@@ -153,8 +153,8 @@ detect_and_average_fft(const InputT *__restrict__ cufft_data,
                        const int NR_POLARIZATIONS, const int NR_FREQS,
                        const int NR_RECEIVERS, const int DOWNSAMPLE_FACTOR) {
 
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int stride = blockDim.x * gridDim.x;
+  int tid = threadIdx.x;
+  const int stride = blockDim.x;
   const int channel_idx = blockIdx.x / NR_POLARIZATIONS;
   const int pol_idx = blockIdx.x % NR_POLARIZATIONS;
 
