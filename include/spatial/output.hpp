@@ -280,7 +280,7 @@ public:
     eigen_write_idx_ = (block_num + 1) % eigen_blocks_.size();
 
     if (eigen_write_idx_ == eigen_read_idx_) {
-      throw std::runtime_error("Eigendata ring buffer is full");
+      LOG_ERROR("Eigendata ring buffer is full");
     }
     auto &block = eigen_blocks_[block_num];
     block.start_seq_num = start_seq_num;
@@ -296,7 +296,7 @@ public:
     fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
 
     if (fft_write_idx_ == fft_read_idx_) {
-      throw std::runtime_error("FFT ring buffer is full");
+      LOG_ERROR("FFT ring buffer is full");
     }
     auto &block = fft_blocks_[block_num];
     block.start_seq_num = start_seq_num;
