@@ -145,3 +145,47 @@ void unpack_triangular_baseline_batch_launch(const T *packedData, T *denseData,
       <<<num_blocks_x, num_threads_x, 0, stream>>>(packedData, denseData, N,
                                                    batchSize);
 }
+
+template <typename InputT, typename OutputT>
+__global__ void
+detect_and_average_fft(const InputT *__restrict__ cufft_data,
+                       OutputT *__restrict__ output_data, const int NR_CHANNELS,
+                       const int NR_POLARIZATIONS, const int NR_FREQS,
+                       const int NR_RECEIVERS, const int DOWNSAMPLE_FACTOR) {
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+  const int channel_idx = blockIdx.x / NR_POLARIZATIONS;
+  const int pol_idx = blockIdx.x % NR_POLARIZATIONS;
+
+  const int num_output = NR_FREQS / DOWNSAMPLE_FACTOR;
+
+  while (tid < num_output) {
+    float output = 0.0f;
+    int start_freq = tid * DOWNSAMPLE_FACTOR;
+
+    for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
+      for (int i = 0; i < NR_RECEIVERS; ++i) {
+        __half2 in =
+            (__half2)cufft_data[0][channel_idx][pol_idx][i][start_freq + j];
+        output += sqrtf(in.x * in.x + in.y * in.y);
+      }
+    }
+    output /= (NR_RECEIVERS * DOWNSAMPLE_FACTOR);
+    output_data[0][channel_idx][pol_idx][tid] = output;
+    tid += stride;
+  }
+};
+
+template <typename InputT, typename OutputT>
+void detect_and_average_fft_launch(const InputT *cufft_data,
+                                   OutputT *output_data, const int NR_CHANNELS,
+                                   const int NR_POLARIZATIONS,
+                                   const int NR_FREQS, const int NR_RECEIVERS,
+                                   const int DOWNSAMPLE_FACTOR,
+                                   cudaStream_t stream) {
+
+  detect_and_average_fft<<<NR_CHANNELS * NR_POLARIZATIONS, 1024, 0, stream>>>(
+      cufft_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
+      NR_RECEIVERS, DOWNSAMPLE_FACTOR);
+}
