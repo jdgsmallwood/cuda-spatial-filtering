@@ -1054,7 +1054,7 @@ public:
     NR_POLARIZATIONS = fft_dims_[1];
     NR_RECEIVERS = fft_dims_[2];
     NR_FREQS = fft_dims_[3];
-    DOWNSAMPLE_FACTOR = 32;
+    DOWNSAMPLE_FACTOR = 64;
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_POL: " << NR_POLARIZATIONS
               << ", NR_RECEIVERS: " << NR_RECEIVERS
@@ -1084,28 +1084,27 @@ public:
 
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-        for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
 
-          for (int f = 0; f < NUM_FREQS_DOWNSAMPLED; ++f) {
+        for (int f = 0; f < NUM_FREQS_DOWNSAMPLED; ++f) {
 
-            float power_sum = 0.0f;
+          float power_sum = 0.0f;
+          for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
             for (int i = 0; i < DOWNSAMPLE_FACTOR; ++i) {
               const auto &cval = fft_data[0][ch][pol][rx][f];
               float magnitude = complex_half_mag(cval);
               power_sum += magnitude;
             }
-
-            int f_shifted =
-                (f + NUM_FREQS_DOWNSAMPLED / 2) % NUM_FREQS_DOWNSAMPLED;
-            std::string key = "ts:fft:ch:" + std::to_string(ch) +
-                              ":p:" + std::to_string(pol) +
-                              ":r:" + std::to_string(rx) +
-                              ":f:" + std::to_string(f_shifted);
-
-            madd_args.push_back(key);
-            madd_args.push_back(std::to_string(ts));
-            madd_args.push_back(std::to_string(power_sum / DOWNSAMPLE_FACTOR));
           }
+
+          int f_shifted =
+              (f + NUM_FREQS_DOWNSAMPLED / 2) % NUM_FREQS_DOWNSAMPLED;
+          std::string key = "ts:fft:ch:" + std::to_string(ch) +
+                            ":p:" + std::to_string(pol) +
+                            ":f:" + std::to_string(f_shifted);
+
+          madd_args.push_back(key);
+          madd_args.push_back(std::to_string(ts));
+          madd_args.push_back(std::to_string(power_sum / DOWNSAMPLE_FACTOR));
         }
       }
     }
@@ -1124,32 +1123,29 @@ private:
     int NR_FREQS_OUT = NR_FREQS / DOWNSAMPLE_FACTOR;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-        for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
-          for (int f = 0; f < NR_FREQS_OUT; ++f) {
+        for (int f = 0; f < NR_FREQS_OUT; ++f) {
 
-            std::string key = "ts:fft:ch:" + std::to_string(ch) +
-                              ":p:" + std::to_string(pol) +
-                              ":r:" + std::to_string(rx) +
-                              ":f:" + std::to_string(f);
+          std::string key = "ts:fft:ch:" + std::to_string(ch) +
+                            ":p:" + std::to_string(pol) +
+                            ":f:" + std::to_string(f);
 
-            std::vector<std::string> args = {"TS.CREATE",
-                                             key,
-                                             "LABELS",
-                                             "channel",
-                                             std::to_string(ch),
-                                             "polarization",
-                                             std::to_string(pol),
-                                             "receiver",
-                                             std::to_string(rx),
-                                             "freq",
-                                             std::to_string(f)};
+          std::vector<std::string> args = {"TS.CREATE",
+                                           key,
+                                           "LABELS",
+                                           "channel",
+                                           std::to_string(ch),
+                                           "polarization",
+                                           std::to_string(pol),
+                                           "receiver",
+                                           std::to_string(rx),
+                                           "freq",
+                                           std::to_string(f)};
 
-            try {
-              redis.command(args.begin(), args.end());
-            } catch (const std::exception &e) {
-              std::cerr << "Error creating key " << key << ": " << e.what()
-                        << std::endl;
-            }
+          try {
+            redis.command(args.begin(), args.end());
+          } catch (const std::exception &e) {
+            std::cerr << "Error creating key " << key << ": " << e.what()
+                      << std::endl;
           }
         }
       }
