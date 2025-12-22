@@ -1121,7 +1121,7 @@ private:
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
 
-    int NUM_FREQS_OUT = NR_FREQS / DOWNSAMPLE_FACTOR;
+    int NR_FREQS_OUT = NR_FREQS / DOWNSAMPLE_FACTOR;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
