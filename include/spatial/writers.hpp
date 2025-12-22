@@ -1050,7 +1050,17 @@ public:
     NR_CHANNELS = fft_dims_[0];
     NR_POLARIZATIONS = fft_dims_[1];
     NR_RECEIVERS = fft_dims_[3];
+    NR_FREQS = fft_dims_[4];
+    std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
+              << ", NR_POL: " << NR_POLARIZATIONS
+              << ", NR_RECEIVERS: " << NR_RECEIVERS
+              << ", NR_FREQS: " << NR_FREQS << std::endl;
     create_all_timeseries_keys();
+  }
+  float complex_half_mag(const std::complex<__half> &c) {
+    float re = __half2float(c.real());
+    float im = __half2float(c.imag());
+    return std::sqrt(re * re + im * im);
   }
 
   void write_fft_block(const T *fft_data, const int start_seq,
@@ -1064,19 +1074,86 @@ public:
 
     std::vector<std::string> madd_args = {"TS.MADD"};
 
-    const int N = NR_RECEIVERS;
+    const int F = NR_FREQS;
+
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
+
+          for (int f = 0; f < F; ++f) {
+
+            // === FFTSHIFT ===
+            int f_shifted = (f + F / 2) % F;
+
+            const auto &cval = fft_data[0][ch][pol][rx][f];
+            float magnitude = complex_half_mag(cval);
+
+            std::string key = "ts:fft:ch:" + std::to_string(ch) +
+                              ":p:" + std::to_string(pol) +
+                              ":r:" + std::to_string(rx) +
+                              ":f:" + std::to_string(f_shifted);
+
+            madd_args.push_back(key);
+            madd_args.push_back(std::to_string(ts));
+            madd_args.push_back(std::to_string(magnitude));
+          }
+        }
+      }
+    }
+
+    if (madd_args.size() > 1) {
+      redis.command(madd_args.begin(), madd_args.end());
+    }
   }
 
   void flush() override {}
 
 private:
-  void create_all_timeseries_keys() {}
+  void create_all_timeseries_keys() {
+    std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
+
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
+          for (int f = 0; f < NR_FREQS; ++f) {
+
+            std::string key = "ts:fft:ch:" + std::to_string(ch) +
+                              ":p:" + std::to_string(pol) +
+                              ":r:" + std::to_string(rx) +
+                              ":f:" + std::to_string(f);
+
+            std::vector<std::string> args = {"TS.CREATE",
+                                             key,
+                                             "LABELS",
+                                             "channel",
+                                             std::to_string(ch),
+                                             "polarization",
+                                             std::to_string(pol),
+                                             "receiver",
+                                             std::to_string(rx),
+                                             "freq",
+                                             std::to_string(f)};
+
+            try {
+              redis.command(args.begin(), args.end());
+            } catch (const std::exception &e) {
+              std::cerr << "Error creating key " << key << ": " << e.what()
+                        << std::endl;
+            }
+          }
+        }
+      }
+    }
+
+    std::cout << "FFT TimeSeries key creation complete." << std::endl;
+  };
   size_t element_count_;
   std::vector<size_t> fft_dims_;
   sw::redis::Redis redis;
   int NR_CHANNELS;
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
+  int NR_FREQS;
 };
 
 // Factory function for easy creation
