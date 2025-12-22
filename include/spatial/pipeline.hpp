@@ -405,7 +405,8 @@ public:
         fft_plan[current_buffer], (void *)d_samples_cufft_input[current_buffer],
         (void *)d_samples_cufft_output[current_buffer], CUFFT_FORWARD));
 
-    detect_and_average_fft_launch(
+    detect_and_average_fft_launch<typename T::FFTCUFFTOutputType,
+                                  typename T::FFTOutputType>(
         d_samples_cufft_output[current_buffer],
         d_cufft_downsampled_output[current_buffer], T::NR_CHANNELS,
         T::NR_POLARIZATIONS,
