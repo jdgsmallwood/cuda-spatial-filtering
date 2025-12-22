@@ -1054,6 +1054,7 @@ public:
     NR_POLARIZATIONS = fft_dims_[1];
     NR_RECEIVERS = fft_dims_[2];
     NR_FREQS = fft_dims_[3];
+    DOWNSAMPLE_FACTOR = 32;
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_POL: " << NR_POLARIZATIONS
               << ", NR_RECEIVERS: " << NR_RECEIVERS
@@ -1078,7 +1079,6 @@ public:
     std::vector<std::string> madd_args = {"TS.MADD"};
 
     const int F = NR_FREQS;
-    const int DOWNSAMPLE_FACTOR = 16;
     // There will be a little left over.
     const int NUM_FREQS_DOWNSAMPLED = F / DOWNSAMPLE_FACTOR;
 
@@ -1121,10 +1121,11 @@ private:
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
 
+    int NUM_FREQS_OUT = NR_FREQS / DOWNSAMPLE_FACTOR;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
-          for (int f = 0; f < NR_FREQS; ++f) {
+          for (int f = 0; f < NR_FREQS_OUT; ++f) {
 
             std::string key = "ts:fft:ch:" + std::to_string(ch) +
                               ":p:" + std::to_string(pol) +
@@ -1163,6 +1164,8 @@ private:
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
   int NR_FREQS;
+
+  int DOWNSAMPLE_FACTOR;
 };
 
 // Factory function for easy creation
