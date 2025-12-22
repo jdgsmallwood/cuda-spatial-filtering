@@ -1052,19 +1052,11 @@ public:
 
     NR_CHANNELS = fft_dims_[0];
     NR_POLARIZATIONS = fft_dims_[1];
-    NR_RECEIVERS = fft_dims_[2];
-    NR_FREQS = fft_dims_[3];
-    DOWNSAMPLE_FACTOR = 64;
+    NR_FREQS = fft_dims_[2];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
-              << ", NR_POL: " << NR_POLARIZATIONS
-              << ", NR_RECEIVERS: " << NR_RECEIVERS
-              << ", NR_FREQS: " << NR_FREQS << std::endl;
+              << ", NR_POL: " << NR_POLARIZATIONS << ", NR_FREQS: " << NR_FREQS
+              << std::endl;
     create_all_timeseries_keys();
-  }
-  float complex_half_mag(const std::complex<__half> &c) {
-    float re = __half2float(c.real());
-    float im = __half2float(c.imag());
-    return std::sqrt(re * re + im * im);
   }
 
   void write_fft_block(const T *fft_data, const int start_seq,
@@ -1080,32 +1072,19 @@ public:
 
     const int F = NR_FREQS;
     // There will be a little left over.
-    const int NUM_FREQS_DOWNSAMPLED = F / DOWNSAMPLE_FACTOR;
-
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int f = 0; f < F; ++f) {
+          const auto &cval = fft_data[0][ch][pol][f];
 
-        for (int f = 0; f < NUM_FREQS_DOWNSAMPLED; ++f) {
-
-          float power_sum = 0.0f;
-          for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
-            for (int i = 0; i < DOWNSAMPLE_FACTOR; ++i) {
-              const auto &cval = fft_data[0][ch][pol][rx][f];
-              float magnitude = complex_half_mag(cval);
-              power_sum += magnitude;
-            }
-          }
-
-          int f_shifted =
-              (f + NUM_FREQS_DOWNSAMPLED / 2) % NUM_FREQS_DOWNSAMPLED;
+          int f_shifted = (f + F / 2) % F;
           std::string key = "ts:fft:ch:" + std::to_string(ch) +
                             ":p:" + std::to_string(pol) +
                             ":f:" + std::to_string(f_shifted);
 
           madd_args.push_back(key);
           madd_args.push_back(std::to_string(ts));
-          madd_args.push_back(
-              std::to_string(power_sum / (DOWNSAMPLE_FACTOR * NR_RECEIVERS)));
+          madd_args.push_back(std::to_string(cval));
         }
       }
     }
@@ -1121,10 +1100,9 @@ private:
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
 
-    int NR_FREQS_OUT = NR_FREQS / DOWNSAMPLE_FACTOR;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-        for (int f = 0; f < NR_FREQS_OUT; ++f) {
+        for (int f = 0; f < NR_FREQS; ++f) {
 
           std::string key = "ts:fft:ch:" + std::to_string(ch) +
                             ":p:" + std::to_string(pol) +
@@ -1159,8 +1137,6 @@ private:
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
   int NR_FREQS;
-
-  int DOWNSAMPLE_FACTOR;
 };
 
 // Factory function for easy creation

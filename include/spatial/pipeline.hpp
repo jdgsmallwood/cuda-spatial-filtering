@@ -252,7 +252,9 @@ private:
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry,
       d_samples_scaled;
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding, d_samples_cufft_input, d_samples_cufft_output;
+      d_samples_padding, d_samples_cufft_input;
+  std::vector<typename T::FFTCUFFTOutputType *> d_samples_cufft_output;
+  std::vector<typename T::FFTOutputType *> d_cufft_downsampled_output;
   std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
       d_samples_reord; // This is not the right type for reord
                        // - but it will do I guess. Size will be correct.
@@ -402,6 +404,13 @@ public:
     CUFFT_CHECK(cufftXtExec(
         fft_plan[current_buffer], (void *)d_samples_cufft_input[current_buffer],
         (void *)d_samples_cufft_output[current_buffer], CUFFT_FORWARD));
+
+    detect_and_average_fft_launch(
+        d_samples_cufft_output[current_buffer],
+        d_cufft_downsampled_output[current_buffer], T::NR_CHANNELS,
+        T::NR_POLARIZATIONS,
+        T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
+        T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer]);
     // cudaMemcpyAsync for padding
     cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
@@ -662,7 +671,7 @@ public:
       auto *fft_output_pointer =
           (void *)output_->get_fft_landing_pointer(fft_block_num);
       cudaMemcpyAsync(fft_output_pointer,
-                      d_samples_cufft_output[current_buffer],
+                      d_cufft_downsampled_output[current_buffer],
                       sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
                       streams[current_buffer]);
 
@@ -722,6 +731,7 @@ public:
     d_samples_scaled.resize(num_buffers);
     d_samples_half.resize(num_buffers);
     d_samples_cufft_input.resize(num_buffers);
+    d_cufft_downsampled_output.resize(num_buffers);
     d_samples_cufft_output.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
@@ -766,6 +776,8 @@ public:
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_output[i],
                             sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_cufft_downsampled_output[i],
+                            sizeof(typename T::FFTOutputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
@@ -1004,6 +1016,9 @@ public:
     }
     for (auto samples_cufft : d_samples_cufft_output) {
       cudaFree(samples_cufft);
+    }
+    for (auto cufft : d_cufft_downsampled_output) {
+      cudaFree(cufft);
     }
 
     for (auto samples_padded : d_samples_padded) {
