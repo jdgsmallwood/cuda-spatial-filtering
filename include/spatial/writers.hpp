@@ -1078,19 +1078,25 @@ public:
     std::vector<std::string> madd_args = {"TS.MADD"};
 
     const int F = NR_FREQS;
+    const int DOWNSAMPLE_FACTOR = 16;
+    // There will be a little left over.
+    const int NUM_FREQS_DOWNSAMPLED = F / DOWNSAMPLE_FACTOR;
 
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int rx = 0; rx < NR_RECEIVERS; ++rx) {
 
-          for (int f = 0; f < F; ++f) {
+          for (int f = 0; f < NUM_FREQS_DOWNSAMPLED; ++f) {
 
-            // === FFTSHIFT ===
-            int f_shifted = (f + F / 2) % F;
+            float power_sum = 0.0f;
+            for (int i = 0; i < DOWNSAMPLE_FACTOR; ++i) {
+              const auto &cval = fft_data[0][ch][pol][rx][f];
+              float magnitude = complex_half_mag(cval);
+              power_sum += magnitude;
+            }
 
-            const auto &cval = fft_data[0][ch][pol][rx][f];
-            float magnitude = complex_half_mag(cval);
-
+            int f_shifted =
+                (f + NUM_FREQS_DOWNSAMPLED / 2) % NUM_FREQS_DOWNSAMPLED;
             std::string key = "ts:fft:ch:" + std::to_string(ch) +
                               ":p:" + std::to_string(pol) +
                               ":r:" + std::to_string(rx) +
@@ -1098,7 +1104,7 @@ public:
 
             madd_args.push_back(key);
             madd_args.push_back(std::to_string(ts));
-            madd_args.push_back(std::to_string(magnitude));
+            madd_args.push_back(std::to_string(power_sum / DOWNSAMPLE_FACTOR));
           }
         }
       }
