@@ -185,7 +185,8 @@ void detect_and_average_fft_launch(const InputT *cufft_data,
                                    const int DOWNSAMPLE_FACTOR,
                                    cudaStream_t stream) {
 
-  detect_and_average_fft<<<NR_CHANNELS * NR_POLARIZATIONS, 1024, 0, stream>>>(
-      cufft_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
-      NR_RECEIVERS, DOWNSAMPLE_FACTOR);
+  detect_and_average_fft<InputT, OutputT>
+      <<<NR_CHANNELS * NR_POLARIZATIONS, 1024, 0, stream>>>(
+          cufft_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
+          NR_RECEIVERS, DOWNSAMPLE_FACTOR);
 }
