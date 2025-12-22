@@ -168,7 +168,8 @@ detect_and_average_fft(const InputT *__restrict__ cufft_data,
       for (int i = 0; i < NR_RECEIVERS; ++i) {
         __half2 in =
             (__half2)cufft_data[0][channel_idx][pol_idx][i][start_freq + j];
-        output += sqrtf(in.x * in.x + in.y * in.y);
+        float2 in_f = __half22float2(in);
+        output += sqrtf(in_f.x * in_f.x + in_f.y * in_f.y);
       }
     }
     output /= (NR_RECEIVERS * DOWNSAMPLE_FACTOR);
