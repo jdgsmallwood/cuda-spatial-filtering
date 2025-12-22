@@ -1105,7 +1105,8 @@ public:
 
           madd_args.push_back(key);
           madd_args.push_back(std::to_string(ts));
-          madd_args.push_back(std::to_string(power_sum / DOWNSAMPLE_FACTOR));
+          madd_args.push_back(
+              std::to_string(power_sum / (DOWNSAMPLE_FACTOR * NR_RECEIVERS)));
         }
       }
     }
@@ -1137,8 +1138,6 @@ private:
                                            std::to_string(ch),
                                            "polarization",
                                            std::to_string(pol),
-                                           "receiver",
-                                           std::to_string(rx),
                                            "freq",
                                            std::to_string(f)};
 
