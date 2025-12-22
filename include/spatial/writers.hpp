@@ -1120,7 +1120,9 @@ private:
                                            "polarization",
                                            std::to_string(pol),
                                            "freq",
-                                           std::to_string(f)};
+                                           std::to_string(f),
+                                           "component",
+                                           "bandpass"};
 
           try {
             redis.command(args.begin(), args.end());
