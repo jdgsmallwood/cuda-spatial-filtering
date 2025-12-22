@@ -916,6 +916,9 @@ public:
     NR_CHANNELS = eigen_dims_[0];
     NR_POLARIZATIONS = eigen_dims_[1];
     NR_RECEIVERS = eigen_dims_[3];
+    std::cout << "RedisEigendataWriter initialized with NR_CHANNELS: "
+              << NR_CHANNELS << ", NR_POL: " << NR_POLARIZATIONS
+              << ", NR_RECEIVERS" << NR_RECEIVERS << std::endl;
     create_all_timeseries_keys();
   }
 
@@ -1049,8 +1052,8 @@ public:
 
     NR_CHANNELS = fft_dims_[0];
     NR_POLARIZATIONS = fft_dims_[1];
-    NR_RECEIVERS = fft_dims_[3];
-    NR_FREQS = fft_dims_[4];
+    NR_RECEIVERS = fft_dims_[2];
+    NR_FREQS = fft_dims_[3];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_POL: " << NR_POLARIZATIONS
               << ", NR_RECEIVERS: " << NR_RECEIVERS
