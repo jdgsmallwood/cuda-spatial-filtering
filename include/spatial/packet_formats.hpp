@@ -318,7 +318,7 @@ struct LambdaConfig {
                                                  NR_PACKETS_FOR_CORRELATION];
   using FFTCUFFTOutputType = float2[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
                                                   NR_PACKETS_FOR_CORRELATION];
-  constexpr static int FFT_DOWNSAMPLE_FACTOR = 32;
+  constexpr static int FFT_DOWNSAMPLE_FACTOR = 64;
   using FFTOutputType =
       float[NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
