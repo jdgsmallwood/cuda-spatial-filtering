@@ -1055,9 +1055,7 @@ public:
         redis("tcp://127.0.0.1:6379") {
     fft_dims_ = get_array_dims<T>();
 
-    NR_CHANNELS = fft_dims_[0];
-    NR_POLARIZATIONS = fft_dims_[1];
-    NR_FREQS = fft_dims_[2];
+    NR_FREQS = fft_dims_[0];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_POL: " << NR_POLARIZATIONS << ", NR_FREQS: " << NR_FREQS
               << std::endl;
