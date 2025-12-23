@@ -1111,10 +1111,17 @@ private:
           std::string key = "ts:fft:ch:" + std::to_string(ch) +
                             ":p:" + std::to_string(pol) +
                             ":f:" + std::to_string(f);
+          std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
+                                ":p:" + std::to_string(pol) +
+                                ":f:" + std::to_string(f);
 
           std::vector<std::string> args = {"TS.CREATE",
                                            key,
+                                           "RETENTION",
+                                           "60000",
                                            "LABELS",
+                                           "type",
+                                           "raw",
                                            "channel",
                                            std::to_string(ch),
                                            "polarization",
@@ -1124,8 +1131,28 @@ private:
                                            "component",
                                            "bandpass"};
 
+          std::vector<std::string> max_args = {"TS.CREATE",
+                                               max_key,
+                                               "RETENTION",
+                                               "0",
+                                               "LABELS",
+                                               "type",
+                                               "aggregated",
+                                               "channel",
+                                               std::to_string(ch),
+                                               "polarization",
+                                               std::to_string(pol),
+                                               "freq",
+                                               std::to_string(f),
+                                               "component",
+                                               "bandpass_max1s"};
+
+          std::vector<std::string> rule_args = {"TS.CREATERULE", key,   max_key,
+                                                "AGGREGATION",   "max", "1000"};
           try {
             redis.command(args.begin(), args.end());
+            redis.command(max_args.begin(), max_args.end());
+            redis.command(rule_args.begin(), rule_args.end());
           } catch (const std::exception &e) {
             LOG_ERROR("Error creating key {}: {}", key, e.what());
           }
