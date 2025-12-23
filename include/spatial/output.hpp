@@ -30,7 +30,9 @@ public:
                                          const int end_seq_num) = 0;
 
   virtual size_t register_fft_block(const int start_seq_num,
-                                    const int end_seq_num) = 0;
+                                    const int end_seq_num,
+                                    const int channel_idx,
+                                    const int pol_idx) = 0;
 
   virtual void *get_beam_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_visibilities_landing_pointer(const size_t block_num) = 0;
@@ -88,8 +90,8 @@ public:
                                          const int end_seq_num) override {
     return 1;
   };
-  size_t register_fft_block(const int start_seq_num,
-                            const int end_seq_num) override {
+  size_t register_fft_block(const int start_seq_num, const int end_seq_num,
+                            const int channel_idx, const int pol_idx) override {
     return 1;
   }
 
@@ -187,6 +189,8 @@ public:
     FFTOutput fft_output;
     int start_seq_num;
     int end_seq_num;
+    int channel_idx;
+    int pol_idx;
     bool transfer_complete;
 
     FFTBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {};
@@ -290,8 +294,8 @@ public:
     return block_num;
   }
 
-  size_t register_fft_block(const int start_seq_num,
-                            const int end_seq_num) override {
+  size_t register_fft_block(const int start_seq_num, const int end_seq_num,
+                            const int channel_idx, const int pol_idx) override {
     size_t block_num = fft_write_idx_;
     fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
 
@@ -301,6 +305,8 @@ public:
     auto &block = fft_blocks_[block_num];
     block.start_seq_num = start_seq_num;
     block.end_seq_num = end_seq_num;
+    block.channel_idx = channel_idx;
+    block.pol_idx = pol_idx;
     block.transfer_complete = false;
 
     return block_num;
@@ -454,7 +460,8 @@ private:
       const auto &block = fft_blocks_[fft_read_idx_];
 
       fft_writer_->write_fft_block(&block.fft_output, block.start_seq_num,
-                                   block.end_seq_num);
+                                   block.end_seq_num, block.channel_idx,
+                                   block.pol_idx);
 
       fft_read_idx_ = (fft_read_idx_ + 1) % fft_blocks_.size();
     }
