@@ -66,12 +66,25 @@ public:
   AntennaMapRegistry() {
     // Initialize your 4 base maps here
     // FPGA 0
-    base_maps[0] = {{0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-                    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
-    // FPGA 1 (Example dummy data)
-    base_maps[1] = {{0, 40}, {1, 41}, {2, 42}, {3, 43}, {4, 44},
-                    {5, 45}, {6, 46}, {7, 47}, {8, 48}, {9, 49}};
-    // FPGA 2, 3...
+   base_maps[0] = {{0,-100}, {1,35}, {2, 0}, {3, 1}, {4, -100}, {5, 14}, {6, -100}, {7, 36}, {8, 18}, {9,25}};
+
+
+   base_maps[1] = {{0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
+      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13}};
+
+   base_maps[2] = {
+
+      {0, 4}, {1,6}, {2, 5}, {3, 29}, {4, 10},
+      {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3}
+
+   };
+
+   base_maps[3] = {
+
+     {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+      {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}
+   };
+
   }
 
   std::unordered_map<int, int>
@@ -171,7 +184,7 @@ int main(int argc, char *argv[]) {
   spatial::Logger::set(app_logger);
 
   constexpr int num_buffers = 3;
-  constexpr int nr_fpga_sources = 2;
+  constexpr int nr_fpga_sources = 1;
   constexpr size_t num_packet_buffers = 24;
   constexpr int num_lambda_channels = 8;
   constexpr int nr_lambda_polarizations = 2;
@@ -183,8 +196,8 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
-      512; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_correlation_blocks_to_integrate = 28;
+      256; // NUMBER_PACKETS_TO_CORRELATE;
+  constexpr int nr_correlation_blocks_to_integrate = 56;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
@@ -207,7 +220,8 @@ int main(int argc, char *argv[]) {
 }
 //std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
 
-std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{1, 0}, {2, 1}});
+std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
+std::vector<int> fpga_id_vec{fpga_id};
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
@@ -244,20 +258,29 @@ std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_l
   //};
 
   // use for Alveo 1
-  static const std::unordered_map<int, int> antenna_mapping = {
-      {0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
-      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13},
-
-      {10, 4}, {11,6}, {12, 5}, {13, 29}, {14, 10},
-      {15, 20}, {16, 7}, {17, 9}, {18, 2},  {19, 3},
-  };
+//  static const std::unordered_map<int, int> antenna_mapping = {
+//      {0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
+//      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13},
+//
+//      {10, 4}, {11,6}, {12, 5}, {13, 29}, {14, 10},
+//      {15, 20}, {16, 7}, {17, 9}, {18, 2},  {19, 3},
+//  };
 //  use for Alveo 2
 //  static const std::unordered_map<int, int> antenna_mapping = {
 //      {0, 4}, {1,6}, {2, 5}, {3, 29}, {4, 10},
 //      {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3},
 //  };
+AntennaMapRegistry registry;
+
+      std::unordered_map<int, int> antenna_mapping =  registry.get_combined_map(fpga_id_vec); 
+      std::cout << "Antenna mapping is:\n";
+     for (const auto &[key, val] : antenna_mapping) {
+	std::cout << "Key: " << key << ", Val: " << val <<std::endl;
+     }; 
+
+
   auto vis_writer = std::make_unique<HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-          vis_file, 55 /* nr baselines */,  &antenna_mapping);
+          vis_file, 55 /* nr baselines */, min_freq_channel, min_freq_channel + num_lambda_channels - 1,  &antenna_mapping);
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
