@@ -59,7 +59,8 @@ template <typename T> class FFTWriter {
 public:
   virtual ~FFTWriter() = default;
   virtual void write_fft_block(const T *fft_data, const int start_seq,
-                               const int end_seq) = 0;
+                               const int end_seq, const int channel_idx,
+                               const int pol_idx) = 0;
   virtual void flush() = 0;
 };
 
@@ -1061,12 +1062,11 @@ public:
               << ", NR_POL: " << NR_POLARIZATIONS << ", NR_FREQS: " << NR_FREQS
               << std::endl;
     create_all_timeseries_keys();
-    current_channel_to_write = 0;
-    current_polarization_to_write = 0;
   }
 
   void write_fft_block(const T *fft_data, const int start_seq,
-                       const int end_seq) override {
+                       const int end_seq, const int channel_idx,
+                       const int pol_idx) override {
 
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
@@ -1076,12 +1076,12 @@ public:
 
     std::vector<std::string> madd_args = {"TS.MADD"};
 
-    int ch = current_channel_to_write;
-    int pol = current_polarization_to_write;
+    int ch = channel_idx;
+    int pol = pol_idx;
     const int F = NR_FREQS;
     // There will be a little left over.
     for (int f = 0; f < F; ++f) {
-      const auto &cval = fft_data[0][ch][pol][f];
+      const auto &cval = fft_data[0][f];
 
       int f_shifted = (f + F / 2) % F;
       std::string key = "ts:fft:ch:" + std::to_string(ch) +
@@ -1096,9 +1096,6 @@ public:
     if (madd_args.size() > 1) {
       redis.command(madd_args.begin(), madd_args.end());
     }
-    current_channel_to_write = (current_channel_to_write + 1) % NR_CHANNELS;
-    current_polarization_to_write =
-        (current_polarization_to_write + 1) % NR_POLARIZATIONS;
   }
 
   void flush() override {}
@@ -1145,8 +1142,6 @@ private:
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
   int NR_FREQS;
-  int current_channel_to_write;
-  int current_polarization_to_write;
 };
 
 // Factory function for easy creation

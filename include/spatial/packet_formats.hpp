@@ -311,12 +311,15 @@ struct LambdaConfig {
   using EigenvectorOutputType =
       std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_POLARIZATIONS]
                          [NR_RECEIVERS][NR_RECEIVERS];
-  using FFTCUFFTOutputType =
+  using FFTCUFFTPreprocessingType =
       __half2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
              [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
+  using FFTCUFFTInputType = float2[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
+                                                 NR_PACKETS_FOR_CORRELATION];
+  using FFTCUFFTOutputType = float2[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
+                                                  NR_PACKETS_FOR_CORRELATION];
   constexpr static int FFT_DOWNSAMPLE_FACTOR = 32;
   using FFTOutputType =
-      float[NR_CHANNELS][NR_POLARIZATIONS]
-           [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
+      float[NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
 };

@@ -252,7 +252,8 @@ private:
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry,
       d_samples_scaled;
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding, d_samples_cufft_input;
+      d_samples_padding, d_samples_cufft_preprocessing;
+  std::vector<typename T::FFTCUFFTInputType *> d_samples_cufft_input;
   std::vector<typename T::FFTCUFFTOutputType *> d_samples_cufft_output;
   std::vector<typename T::FFTOutputType *> d_cufft_downsampled_output;
   std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
@@ -295,6 +296,7 @@ private:
   std::vector<cusolverDnHandle_t> cusolver_handle;
   static constexpr int CUSOLVER_BATCH_SIZE =
       T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS;
+  int next_fft_channel_pol;
 
 public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
@@ -396,10 +398,21 @@ public:
                                                                     cpu_start)
                   .count());
 
-    tensor_16.runPermutation("packetToCUFFTInput", alpha,
-                             (__half *)d_samples_half[current_buffer],
-                             (__half *)d_samples_cufft_input[current_buffer],
-                             streams[current_buffer]);
+    tensor_16.runPermutation(
+        "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
+        (__half *)d_samples_cufft_preprocessing[current_buffer],
+        streams[current_buffer]);
+
+    int channel_to_fft = (next_fft_channel_pol) % T::NR_CHANNELS;
+    int polarization_to_fft = (next_fft_channel_pol) / T::NR_CHANNELS;
+
+    get_data_for_fft_launch<typename T::FFTCUFFTPreprocessingType,
+                            typename T::FFTCUFFTInputType>(
+        (typename T::FFTCUFFTPreprocessingType *)
+            d_samples_cufft_preprocessing[current_buffer],
+        d_samples_cufft_input[current_buffer], T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, NR_TIME_STEPS_FOR_CORRELATION, T::NR_RECEIVERS,
+        channel_to_fft, polarization_to_fft, streams[current_buffer]);
 
     CUFFT_CHECK(cufftXtExec(
         fft_plan[current_buffer], (void *)d_samples_cufft_input[current_buffer],
@@ -408,8 +421,7 @@ public:
     detect_and_average_fft_launch<typename T::FFTCUFFTOutputType,
                                   typename T::FFTOutputType>(
         d_samples_cufft_output[current_buffer],
-        d_cufft_downsampled_output[current_buffer], T::NR_CHANNELS,
-        T::NR_POLARIZATIONS,
+        d_cufft_downsampled_output[current_buffer],
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
         T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer]);
     // cudaMemcpyAsync for padding
@@ -610,8 +622,8 @@ public:
       size_t eigenvalue_block_num =
           output_->register_eigendecomposition_data_block(start_seq_num,
                                                           end_seq_num);
-      size_t fft_block_num =
-          output_->register_fft_block(start_seq_num, end_seq_num);
+      size_t fft_block_num = output_->register_fft_block(
+          start_seq_num, end_seq_num, channel_to_fft, polarization_to_fft);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
       cudaMemcpyAsync(landing_pointer,
                       d_beamformer_data_output_half[current_buffer],
@@ -676,6 +688,9 @@ public:
                       sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
                       streams[current_buffer]);
 
+      next_fft_channel_pol =
+          (next_fft_channel_pol + 1) % (T::NR_CHANNELS * T::NR_POLARIZATIONS);
+
       auto *fft_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = fft_block_num};
       cudaLaunchHostFunc(streams[current_buffer],
@@ -723,6 +738,9 @@ public:
               << ", NR_BLOCKS_FOR_CORRELATION: " << NR_BLOCKS_FOR_CORRELATION
               << ", NR_RECEIVERS_PER_BLOCK: "
               << T::NR_PADDED_RECEIVERS_PER_BLOCK << std::endl;
+
+    next_fft_channel_pol = 0;
+
     streams.resize(2 * num_buffers);
     d_weights.resize(num_buffers);
     d_weights_updated.resize(num_buffers);
@@ -732,6 +750,7 @@ public:
     d_samples_scaled.resize(num_buffers);
     d_samples_half.resize(num_buffers);
     d_samples_cufft_input.resize(num_buffers);
+    d_samples_cufft_preprocessing.resize(num_buffers);
     d_cufft_downsampled_output.resize(num_buffers);
     d_samples_cufft_output.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
@@ -773,10 +792,12 @@ public:
                             sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
                             sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_preprocessing[i],
+                            sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_input[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
+                            sizeof(typename T::FFTCUFFTInputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_output[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
+                            sizeof(typename T::FFTCUFFTInputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_cufft_downsampled_output[i],
                             sizeof(typename T::FFTOutputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
@@ -902,12 +923,11 @@ public:
     const long long CUFFT_OSTRIDE = 1;
     const long long CUFFT_IDIST = CUFFT_FFT_SIZE;
     const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
-    const size_t NUM_TOTAL_BATCHES =
-        T::NR_CHANNELS * T::NR_RECEIVERS * T::NR_POLARIZATIONS;
+    const size_t NUM_TOTAL_BATCHES = T::NR_RECEIVERS;
     size_t work_size = 0;
-    cudaDataType input_type = CUDA_C_16F;
-    cudaDataType output_type = CUDA_C_16F;
-    cudaDataType compute_type = CUDA_C_16F;
+    cudaDataType input_type = CUDA_C_32F;
+    cudaDataType output_type = CUDA_C_32F;
+    cudaDataType compute_type = CUDA_C_32F;
 
     for (int i = 0; i < num_buffers; ++i) {
       CUFFT_CHECK(cufftCreate(&fft_plan[i]));
@@ -1013,6 +1033,10 @@ public:
     }
 
     for (auto samples_cufft : d_samples_cufft_input) {
+      cudaFree(samples_cufft);
+    }
+
+    for (auto samples_cufft : d_samples_cufft_preprocessing) {
       cudaFree(samples_cufft);
     }
     for (auto samples_cufft : d_samples_cufft_output) {
