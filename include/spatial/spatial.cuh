@@ -158,7 +158,7 @@ __global__ void get_data_for_fft(
   int channel_to_fft_local = channel_to_fft;
   int pol_to_fft_local = pol_to_fft;
 
-  if (tid < NR_FREQS * NR_RECEIVERS) {
+  while (tid < NR_FREQS * NR_RECEIVERS) {
     int receiver_idx = tid / NR_RECEIVERS;
     int time_idx = tid % NR_RECEIVERS;
     float2 output = __half22float2(
