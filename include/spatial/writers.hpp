@@ -875,8 +875,7 @@ private:
                 // std::cout << "Created key: " << key << std::endl; //
                 // Uncomment for debugging
               } catch (const std::exception &e) {
-                std::cerr << "Error creating key " << key << ": " << e.what()
-                          << std::endl;
+                LOG_ERROR("Error creating key {}: {}", key, e.what());
                 // Handle error (e.g., key already exists, server down)
               }
             } // end component loop
@@ -1023,8 +1022,7 @@ private:
               try {
                 redis.command(args.begin(), args.end());
               } catch (const std::exception &e) {
-                std::cerr << "Error creating key " << key << ": " << e.what()
-                          << std::endl;
+                LOG_ERROR("Error creating key {}: {}", key, e.what());
               }
             }
           } // End EIGENVALUE k_idx loop
@@ -1126,8 +1124,7 @@ private:
           try {
             redis.command(args.begin(), args.end());
           } catch (const std::exception &e) {
-            std::cerr << "Error creating key " << key << ": " << e.what()
-                      << std::endl;
+            LOG_ERROR("Error creating key {}: {}", key, e.what());
           }
         }
       }
