@@ -1049,16 +1049,17 @@ private:
 
 template <typename T> class RedisFFTWriter : public FFTWriter<T> {
 public:
-  RedisFFTWriter()
+  RedisFFTWriter(int num_channels, int num_receivers, int num_polarizations)
       : element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://127.0.0.1:6379") {
+        redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
+        NR_RECEIVERS(num_receivers), NR_POLARIZATIONS(num_polarizations) {
     fft_dims_ = get_array_dims<T>();
 
     NR_FREQS = fft_dims_[0];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
-              << ", NR_POL: " << NR_POLARIZATIONS << ", NR_FREQS: " << NR_FREQS
-              << std::endl;
+              << ", NR_RECEIVERS:" << NR_RECEIVERS << ", NR_FREQS: " << NR_FREQS
+              << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
     create_all_timeseries_keys();
   }
 
