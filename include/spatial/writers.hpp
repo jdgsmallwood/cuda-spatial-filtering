@@ -811,11 +811,17 @@ private:
     for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
       for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
         baseline_ids.push_back(256 * antenna_map_[ant1] + antenna_map_[ant2]);
+        LOG_DEBUG("ant1: {}, ant2: {}, antenna_map[ant1]: {} "
+                  "antenna_map[ant2]: {}, baseline: {}",
+                  ant1, ant2, antenna_map_[ant1], antenna_map_[ant2],
+                  256 * antenna_map_[ant1] + antenna_map_[ant2]);
       }
     }
 
     // Sanity check
     if (baseline_ids.size() != nr_baselines) {
+      std::cout << "Baseline IDs do not match size of NR_BASELINES"
+                << std::endl;
       // Handle error/log warning here if dimensions don't match expectation
     }
 
@@ -917,7 +923,7 @@ public:
     NR_RECEIVERS = eigen_dims_[3];
     std::cout << "RedisEigendataWriter initialized with NR_CHANNELS: "
               << NR_CHANNELS << ", NR_POL: " << NR_POLARIZATIONS
-              << ", NR_RECEIVERS" << NR_RECEIVERS << std::endl;
+              << ", NR_RECEIVERS: " << NR_RECEIVERS << std::endl;
     create_all_timeseries_keys();
   }
 
