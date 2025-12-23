@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
   std::string pcap_filename;
   std::string vis_filename;
   std::string ifname;
-  bool loop_pcap;
+  bool loop_pcap, debug_logging;
   int min_freq_channel;
   int port;
   program.add_argument("-p", "--pcap_file")
@@ -135,6 +135,12 @@ int main(int argc, char *argv[]) {
       .default_value(36001)
       .store_into(port);
 
+  program.add_argument("-d", "--debug-logging")
+      .help("Enable debug logging")
+      .default_value(false)
+      .implicit_value(true)
+      .store_into(debug_logging);
+
   try {
     program.parse_args(argc, argv);
   } catch (const std::exception &err) {
@@ -155,7 +161,11 @@ int main(int argc, char *argv[]) {
 
   // auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
   //                                         "app.log", /*truncate*/ true);
-  app_logger->set_level(spdlog::level::info);
+  if (debug_logging) {
+    app_logger->set_level(spdlog::level::debug);
+  } else {
+    app_logger->set_level(spdlog::level::info);
+  }
   app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 
   spatial::Logger::set(app_logger);
