@@ -163,16 +163,25 @@ detect_and_average_fft(const InputT *__restrict__ cufft_data,
   while (tid < num_output) {
     float output = 0.0f;
     int start_freq = tid * DOWNSAMPLE_FACTOR;
-
+    int num_vals = 0;
     for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
       for (int i = 0; i < NR_RECEIVERS; ++i) {
         __half2 in =
             (__half2)cufft_data[0][channel_idx][pol_idx][i][start_freq + j];
         float2 in_f = __half22float2(in);
-        output += sqrtf(in_f.x * in_f.x + in_f.y * in_f.y);
+        float val = sqrtf(in_f.x * in_f.x + in_f.y * in_f.y);
+
+        if (!isnan(val)) {
+          output += val;
+          num_vals++;
+        }
       }
     }
-    output /= (NR_RECEIVERS * DOWNSAMPLE_FACTOR);
+    if (num_vals != 0) {
+      output /= (num_vals);
+    } else {
+      output = 0;
+    }
     output_data[0][channel_idx][pol_idx][tid] = output;
     tid += stride;
   }
