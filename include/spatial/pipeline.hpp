@@ -252,7 +252,9 @@ private:
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry,
       d_samples_scaled;
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding, d_samples_cufft_preprocessing;
+      d_samples_padding;
+  std::vector<typename T::FFTCUFFTPreprocessingType *>
+      d_samples_cufft_preprocessing;
   std::vector<typename T::FFTCUFFTInputType *> d_samples_cufft_input;
   std::vector<typename T::FFTCUFFTOutputType *> d_samples_cufft_output;
   std::vector<typename T::FFTOutputType *> d_cufft_downsampled_output;
@@ -793,11 +795,11 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_preprocessing[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
+                            sizeof(typename T::FFTCUFFTPreprocessingType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_input[i],
                             sizeof(typename T::FFTCUFFTInputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_output[i],
-                            sizeof(typename T::FFTCUFFTInputType)));
+                            sizeof(typename T::FFTCUFFTOutputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_cufft_downsampled_output[i],
                             sizeof(typename T::FFTOutputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
