@@ -216,7 +216,6 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
-  constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
