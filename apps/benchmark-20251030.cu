@@ -136,6 +136,7 @@ int main(int argc, char *argv[]) {
   bool loop_pcap, debug_logging;
   int min_freq_channel;
   int port;
+  int packets_to_receive;
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
@@ -168,6 +169,11 @@ int main(int argc, char *argv[]) {
       .default_value(false)
       .implicit_value(true)
       .store_into(debug_logging);
+
+  program.add_argument("-n", "--num-packets")
+      .help("How many packets to receive before exiting.")
+      .default_value(0)
+      .store_into(packets_to_receive);
 
   try {
     program.parse_args(argc, argv);
@@ -274,25 +280,6 @@ int main(int argc, char *argv[]) {
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
-  // use for Alveo 3
-  // static const std::unordered_map<int, int> antenna_mapping = {
-  //    {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-  //    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
-  //};
-
-  // use for Alveo 1
-  //  static const std::unordered_map<int, int> antenna_mapping = {
-  //      {0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
-  //      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13},
-  //
-  //      {10, 4}, {11,6}, {12, 5}, {13, 29}, {14, 10},
-  //      {15, 20}, {16, 7}, {17, 9}, {18, 2},  {19, 3},
-  //  };
-  //  use for Alveo 2
-  //  static const std::unordered_map<int, int> antenna_mapping = {
-  //      {0, 4}, {1,6}, {2, 5}, {3, 29}, {4, 10},
-  //      {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3},
-  //  };
   AntennaMapRegistry registry;
 
   std::unordered_map<int, int> antenna_mapping =
@@ -387,6 +374,12 @@ int main(int argc, char *argv[]) {
       }
     }
     packets_received = state.packets_received;
+
+    if (packets_to_receive > 0 && packets_received >= packets_to_receive) {
+      std::cout << "Number of packets to observe reached...shutting down\n";
+      state.running.store(0, std::memory_order_release);
+      running = false;
+    }
   }
 
   // Cleanup
