@@ -138,6 +138,7 @@ int main(int argc, char *argv[]) {
   bool loop_pcap, debug_logging;
   int min_freq_channel;
   int port;
+  int packets_to_receive;
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
@@ -170,6 +171,11 @@ int main(int argc, char *argv[]) {
       .default_value(false)
       .implicit_value(true)
       .store_into(debug_logging);
+
+  program.add_argument("-n", "--num-packets")
+      .help("How many packets to receive before exiting.")
+      .default_value(0)
+      .store_into(packets_to_receive);
 
   try {
     program.parse_args(argc, argv);
@@ -366,6 +372,12 @@ std::vector<int> fpga_id_vec{fpga_id};
       }
     }
     packets_received = state.packets_received;
+
+    if (packets_to_receive > 0 && packets_received >= packets_to_receive) {
+      std::cout << "Number of packets to observe reached...shutting down\n";
+      state.running.store(0, std::memory_order_release);
+      running = false;
+    }
   }
 
   // Cleanup
