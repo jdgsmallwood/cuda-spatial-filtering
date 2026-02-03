@@ -254,7 +254,7 @@ int main(int argc, char *argv[]) {
 
   if (!program.is_used("-v")) {
     vis_filename = make_default_visibilities_filename(
-        min_freq_channel, nr_lambda_channels, fpga_id);
+        min_freq_channel, num_lambda_channels, fpga_id);
   }
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
