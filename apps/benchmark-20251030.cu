@@ -204,21 +204,23 @@ int main(int argc, char *argv[]) {
 
   spatial::Logger::set(app_logger);
 
-  constexpr int num_buffers = 3;
-  constexpr int nr_fpga_sources = 1;
+  constexpr int num_buffers = NR_OBSERVING_BUFFERS;
+  constexpr int nr_fpga_sources = NR_OBSERVING_FPGA_SOURCES;
   constexpr size_t num_packet_buffers = 24;
-  constexpr int num_lambda_channels = 8;
+  constexpr int num_lambda_channels = NR_OBSERVING_CHANNELS;
   constexpr int nr_lambda_polarizations = 2;
-  constexpr int nr_lambda_receivers_per_packet = 10;
+  constexpr int nr_lambda_receivers_per_packet =
+      NR_OBSERVING_RECEIVERS_PER_PACKET;
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
-  constexpr int nr_lambda_padded_receivers = 32;
+  constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
-      256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_correlation_blocks_to_integrate = 56;
+      NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
+  constexpr int nr_correlation_blocks_to_integrate =
+      NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
