@@ -251,7 +251,7 @@ std::vector<int> fpga_id_vec{fpga_id};
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   if (!program.is_used("-v")) {
-    vis_filename = make_default_visibilities_file_name(
+    vis_filename = make_default_visibilities_filename(
         min_freq_channel, nr_lambda_channels, fpga_id);
   }
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
