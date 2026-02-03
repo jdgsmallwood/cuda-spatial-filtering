@@ -24,7 +24,7 @@ def _():
     import marimo as mo
     from pathlib import Path
     file_browser = mo.ui.file_browser(
-        initial_path=Path("/home/jay/projects/cuda-spatial-filtering/scripts"), multiple=True
+        initial_path=Path("/home/jay/projects/cuda-spatial-filtering/build/apps"), multiple=True
     )
 
     # Access the selected file path(s):
@@ -99,7 +99,7 @@ def _(d, np):
 def _(data, unpack_triangular_corr):
     _pol = 0
     _channel = 4
-    _t_samp = 4
+    _t_samp = 0
     d = unpack_triangular_corr(data)
     d = d[:, :, 0:10, 0:10, :, :]
     d[_t_samp, _channel, 0:10, 0:10, _pol, _pol]
@@ -295,7 +295,7 @@ def _(file_browser):
     for path in file_paths:
         with h5py.File(path.path, "r") as hdf:
             print(f"Opening {path.path}")
-    
+
             # List all groups in the file
             print("Keys in the file:")
             for key in hdf.keys():
@@ -308,6 +308,10 @@ def _(file_browser):
                 #print(data)
             else:
                 print(f"\nDataset '{dataset_name}' not found in the file.")
+            if "vis_missing_nums" in hdf:
+                print("Vis missing nums:")
+            
+                print(hdf["vis_missing_nums"][:])
     data = np.concat(data_arrays)
     return data, np
 

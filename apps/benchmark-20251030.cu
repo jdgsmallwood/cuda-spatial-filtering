@@ -234,7 +234,8 @@ int main(int argc, char *argv[]) {
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
 
-  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>();
+  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>(
+      num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),

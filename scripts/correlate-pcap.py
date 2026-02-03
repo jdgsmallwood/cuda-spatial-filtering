@@ -1,7 +1,10 @@
 import marimo
 
 __generated_with = "0.18.1"
-app = marimo.App(width="full")
+app = marimo.App(
+    width="full",
+    layout_file="layouts/correlate-pcap.slides.json",
+)
 
 
 @app.cell(hide_code=True)
@@ -208,7 +211,6 @@ def _(file_browser, pcount_slider):
         if pcount >= pcount_max:
            print(f"stopping packet decoding at packet {pcount}")
            break
-
     return (
         N_POL,
         all_samples,
@@ -338,7 +340,6 @@ def _(mo):
     time_series_receiver_slider = mo.ui.slider(start=0,stop=9, step=1, show_value=True, label="Receiver to show:")
     time_series_pol_slider = mo.ui.slider(start=0, stop=1, step=1, show_value=True, label="Pol to show:")
     mo.vstack([time_series_channel_slider, time_series_receiver_slider, time_series_pol_slider])
-
     return (
         time_series_channel_slider,
         time_series_pol_slider,
