@@ -1,4 +1,21 @@
 [build-system]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lambda-observing-config-tui"
+version = "0.1.0"
+dependencies = [
+    "textual",
+]
+
+[tool.hatch.envs.default]
+python = "3.11"  # Or your preferred version
+dev-mode = false
+
+[tool.hatch.envs.default.scripts]
+ui = "python ui.py"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
