@@ -66,12 +66,25 @@ public:
   AntennaMapRegistry() {
     // Initialize your 4 base maps here
     // FPGA 0
-    base_maps[0] = {{0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-                    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
-    // FPGA 1 (Example dummy data)
-    base_maps[1] = {{0, 40}, {1, 41}, {2, 42}, {3, 43}, {4, 44},
-                    {5, 45}, {6, 46}, {7, 47}, {8, 48}, {9, 49}};
-    // FPGA 2, 3...
+   base_maps[0] = {{0,-100}, {1,35}, {2, -100}, {3, 1}, {4, -100}, {5, 14}, {6, -100}, {7, 36}, {8, 18}, {9,25}};
+
+
+   base_maps[1] = {{0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
+      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13}};
+
+   base_maps[2] = {
+
+      {0, 4}, {1,6}, {2, 5}, {3, 29}, {4, 10},
+      {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3}
+
+   };
+
+   base_maps[3] = {
+
+     {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+      {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}
+   };
+
   }
 
   std::unordered_map<int, int>
@@ -178,10 +191,10 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers_per_packet = 10;
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
-  constexpr int nr_lambda_padded_receivers = 64;
+  constexpr int nr_lambda_padded_receivers = 32;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
-  constexpr int nr_lambda_receivers_per_block = 64;
+  constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
       256; // NUMBER_PACKETS_TO_CORRELATE;
   constexpr int nr_correlation_blocks_to_integrate = 56;
@@ -192,11 +205,27 @@ int main(int argc, char *argv[]) {
                    nr_lambda_polarizations, nr_lambda_receivers_per_packet,
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
-                   nr_correlation_blocks_to_integrate>;
+                   nr_correlation_blocks_to_integrate, true>;
+
+  using MapType = std::unordered_map<uint32_t, int>;
+  int fpga_id = -1;
+  if (ifname == "enp216s0np0") {
+	  fpga_id = 3;
+} else if (ifname == "enp175s0np0") {
+	fpga_id = 2;
+} else if (ifname == "enp134s0np0") {
+	fpga_id = 1;
+} else {
+	fpga_id = 0;
+}
+//std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
+
+std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id, 0}});
+std::vector<int> fpga_id_vec{fpga_id};
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      min_freq_channel);
+      min_freq_channel, &fpga_ids);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
@@ -204,7 +233,7 @@ int main(int argc, char *argv[]) {
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  // HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
+   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -222,20 +251,41 @@ int main(int argc, char *argv[]) {
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
-  static const std::unordered_map<int, int> antenna_mapping = {
-      {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-      {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
-  };
-  auto vis_writer =
-      std::make_unique<MSVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-          vis_filename, &antenna_mapping);
+  // use for Alveo 3
+  //static const std::unordered_map<int, int> antenna_mapping = {
+  //    {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+  //    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21},
+  //};
 
+  // use for Alveo 1
+//  static const std::unordered_map<int, int> antenna_mapping = {
+//      {0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
+//      {5, 32}, {6, 17}, {7, 33}, {8, 11},  {9, 13},
+//
+//      {10, 4}, {11,6}, {12, 5}, {13, 29}, {14, 10},
+//      {15, 20}, {16, 7}, {17, 9}, {18, 2},  {19, 3},
+//  };
+//  use for Alveo 2
+//  static const std::unordered_map<int, int> antenna_mapping = {
+//      {0, 4}, {1,6}, {2, 5}, {3, 29}, {4, 10},
+//      {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3},
+//  };
+AntennaMapRegistry registry;
+
+      std::unordered_map<int, int> antenna_mapping =  registry.get_combined_map(fpga_id_vec); 
+      std::cout << "Antenna mapping is:\n";
+     for (const auto &[key, val] : antenna_mapping) {
+	std::cout << "Key: " << key << ", Val: " << val <<std::endl;
+     }; 
+
+
+  auto vis_writer = std::make_unique<HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
+          vis_file, 55 /* nr baselines */, min_freq_channel, min_freq_channel + num_lambda_channels - 1,  &antenna_mapping);
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
 
-  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
+  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>(num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
@@ -259,8 +309,6 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
-  // int port = 36001;
-  //   std::string ifname = "enp216s0np0";
 
   std::unique_ptr<PacketInput> capture;
 
@@ -268,7 +316,7 @@ int main(int argc, char *argv[]) {
     capture = std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap);
   } else {
     capture =
-        std::make_unique<KernelSocketPacketCapture>(ifname, port, BUFFER_SIZE);
+        std::make_unique<KernelSocketPacketCapture>(ifname, port, BUFFER_SIZE, 256*1024*1024);
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
