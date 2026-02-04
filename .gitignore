@@ -80,3 +80,5 @@ scripts/.venv
 *.uvfits
 *.npy
 *.pcap
+//*.ms/*
+*.zip

@@ -78,6 +78,19 @@ std::string make_default_visibilities_filename(const int min_freq_channel,
   return oss.str();
 }
 
+std::vector<std::string> split_ifnames(const std::string &ifname) {
+  std::vector<std::string> result;
+  std::stringstream ss(ifname);
+  std::string token;
+
+  while (std::getline(ss, token, ',')) {
+    if (!token.empty()) {
+      result.push_back(token);
+    }
+  }
+  return result;
+}
+
 class AntennaMapRegistry {
 public:
   AntennaMapRegistry() {
@@ -229,24 +242,34 @@ int main(int argc, char *argv[]) {
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
                    nr_correlation_blocks_to_integrate, true>;
 
-  using MapType = std::unordered_map<uint32_t, int>;
-  int fpga_id = -1;
-  if (ifname == "enp216s0np0") {
-    fpga_id = 3;
-  } else if (ifname == "enp175s0np0") {
-    fpga_id = 2;
-  } else if (ifname == "enp134s0np0") {
-    fpga_id = 1;
-  } else {
-    fpga_id = 0;
-  }
-  // std::unique_ptr<MapType> fpga_ids =
-  // std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id,
-  // 0}});
+  const std::unordered_map<std::string, int> ifname_to_fpga{
+      {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
-  std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(
-      std::initializer_list<MapType::value_type>{{fpga_id, 0}});
-  std::vector<int> fpga_id_vec{fpga_id};
+  using MapType = std::unordered_map<uint32_t, int>;
+  auto fpga_ids = std::make_unique<MapType>();
+  std::vector<int> fpga_id_vec;
+
+  {
+    // use scope here to deallocate i at the end.
+    int i = 0;
+    for (const auto &name : split_ifnames(ifname)) {
+      int fpga_id = 0;
+
+      auto it = ifname_to_fpga.find(name);
+      if (it != ifname_to_fpga.end()) {
+        fpga_id = it->second;
+      }
+      (*fpga_ids)[fpga_id] = i;
+      fpga_id_vec.push_back(fpga_id);
+      i++;
+    }
+  }
+
+  if (fpga_id_vec.size() != nr_fpga_sources ||
+      fpga_ids.size() != nr_fpga_sources) {
+    throw std::runtime_error("The number of network interfaces does not match "
+                             "number of FPGA sources.");
+  }
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
