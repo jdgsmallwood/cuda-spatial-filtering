@@ -63,9 +63,10 @@ void writeVectorToCSV(const std::vector<float> &times,
   std::cout << "Data successfully written to " << filename << "\n";
 }
 
-std::string make_default_visibilities_filename(const int min_freq_channel,
-                                               const int num_channels,
-                                               const int fpga_id) {
+std::string
+make_default_visibilities_filename(const int min_freq_channel,
+                                   const int num_channels,
+                                   const std::vector<int> fpga_ids) {
   // timestamp
   auto now = std::chrono::system_clock::now();
   std::time_t t = std::chrono::system_clock::to_time_t(now);
@@ -73,8 +74,11 @@ std::string make_default_visibilities_filename(const int min_freq_channel,
 
   std::ostringstream oss;
   oss << std::put_time(&tm, "%Y%m%d-%H%M") << "_" << min_freq_channel << "_"
-      << min_freq_channel + num_channels - 1 << "_ALVEO" << fpga_id << ".hdf5";
-
+      << min_freq_channel + num_channels - 1;
+  for (auto id : fpga_ids) {
+    oss << "_ALVEO" << id;
+  }
+  oss << ".hdf5";
   return oss.str();
 }
 
@@ -266,7 +270,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (fpga_id_vec.size() != nr_fpga_sources ||
-      fpga_ids.size() != nr_fpga_sources) {
+      fpga_ids->size() != nr_fpga_sources) {
     throw std::runtime_error("The number of network interfaces does not match "
                              "number of FPGA sources.");
   }
@@ -284,7 +288,7 @@ int main(int argc, char *argv[]) {
 
   if (!program.is_used("-v")) {
     vis_filename = make_default_visibilities_filename(
-        min_freq_channel, num_lambda_channels, fpga_id);
+        min_freq_channel, num_lambda_channels, fpga_id_vec);
   }
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
