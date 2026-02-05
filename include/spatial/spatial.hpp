@@ -307,6 +307,10 @@ public:
       LOG_INFO("Initializing buffers for FPGA {} / {} as this is the first "
                "packet...",
                fpga_ids[parsed.fpga_id], parsed.fpga_id);
+      if (parsed.sample_count == 0) {
+        throw std::runtime_error("THIS IS UNLIKELY");
+      }
+
       initialize_buffers(parsed.sample_count, parsed.fpga_id);
     });
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
