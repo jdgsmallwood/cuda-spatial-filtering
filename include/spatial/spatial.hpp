@@ -81,6 +81,7 @@ public:
       buffers;
   uint64_t latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES] = {};
   mutable std::mutex buffer_index_mutex;
+  std::mutex receive_buffer_write_index_mutex;
   GPUPipeline *pipeline_;
   // Constructor / Destructor
   ProcessorState(
@@ -746,8 +747,12 @@ public:
     return (void *)&(d_packet_data[write_index]->data);
   }
   void *get_next_write_pointer() {
-    while (!get_next_write_index() && running) {
+    std::unique_lock<std::mutex> lock(receive_buffer_write_index_mutex);
+    while (!get_next_write_index() && running.load(std::memory_order_acquire)) {
+      lock.unlock();
+      std::this_thread::yield();
       LOG_DEBUG("Waiting for next pointer....");
+      lock.lock();
       // std::this_thread::sleep_for(std::chrono::nanoseconds(10));
     };
     return get_current_write_pointer();
@@ -894,7 +899,7 @@ public:
                sizeof(recv_buffer_size));
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     LOG_INFO("Receiver thread started");
-    void *next_write_pointer = state.get_current_write_pointer();
+    void *next_write_pointer = state.get_next_write_pointer();
     while (state.running) {
       int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
       if (ret_val < 0) {

@@ -252,11 +252,12 @@ int main(int argc, char *argv[]) {
   using MapType = std::unordered_map<uint32_t, int>;
   auto fpga_ids = std::make_unique<MapType>();
   std::vector<int> fpga_id_vec;
+  auto fpga_names = split_ifnames(ifname);
 
   {
     // use scope here to deallocate i at the end.
     int i = 0;
-    for (const auto &name : split_ifnames(ifname)) {
+    for (const auto &name : fpga_names) {
       int fpga_id = 0;
 
       auto it = ifname_to_fpga.find(name);
@@ -351,17 +352,24 @@ int main(int argc, char *argv[]) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
-  std::unique_ptr<PacketInput> capture;
+  std::vector<std::unique_ptr<PacketInput>> capture;
 
   if (!pcap_filename.empty()) {
-    capture = std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap);
+    capture.push_back(
+        std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap));
   } else {
-    capture = std::make_unique<KernelSocketPacketCapture>(
-        ifname, port, BUFFER_SIZE, 256 * 1024 * 1024);
+    for (auto if : fpga_names) {
+      capture.push_back(std::make_unique<KernelSocketPacketCapture>(
+          if, port, BUFFER_SIZE, 256 * 1024 * 1024));
+    }
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
-  std::thread receiver([&capture, &state]() { capture->get_packets(state); });
+  std::vector<std::thread> receiver_threads;
+  for (auto i = 0; i < capture.size(); ++i) {
+    receiver_threads.emplace_back(
+        [&capture, &state, i]() { capture[i]->get_packets(state); });
+  }
 
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
@@ -416,8 +424,12 @@ int main(int argc, char *argv[]) {
   state.running.store(0, std::memory_order_release);
   state.shutdown();
 
-  std::cout << "Waiting for receiver to finish...\n";
-  receiver.join();
+  std::cout << "Waiting for receivers to finish...\n";
+  for (auto &t : receiver_threads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
   std::cout << "Waiting for processor to finish...\n";
   processor.join();
   std::cout << "Waiting for pipeline feeder to finish...\n";
