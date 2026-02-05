@@ -358,9 +358,9 @@ int main(int argc, char *argv[]) {
     capture.push_back(
         std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap));
   } else {
-    for (auto if : fpga_names) {
+    for (auto nic : fpga_names) {
       capture.push_back(std::make_unique<KernelSocketPacketCapture>(
-          if, port, BUFFER_SIZE, 256 * 1024 * 1024));
+          nic, port, BUFFER_SIZE, 256 * 1024 * 1024));
     }
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
