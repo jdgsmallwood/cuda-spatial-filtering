@@ -866,6 +866,7 @@ public:
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
+    LOG_INFO("Starting packet capture on ifname {}.", ifname);
 
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
