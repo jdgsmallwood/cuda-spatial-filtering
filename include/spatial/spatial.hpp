@@ -302,14 +302,14 @@ public:
     // LOG_DEBUG("First data point...{} + {} i",
     //           parsed.payload->data[0][0][0].real(),
     //           parsed.payload->data[0][0][0].imag());
+    if (parsed.sample_count == 0) {
+      throw std::runtime_error("THIS IS UNLIKELY");
+    }
 
     std::call_once(buffer_init_flag[fpga_ids[parsed.fpga_id]], [&]() {
       LOG_INFO("Initializing buffers for FPGA {} / {} as this is the first "
                "packet...",
                fpga_ids[parsed.fpga_id], parsed.fpga_id);
-      if (parsed.sample_count == 0) {
-        throw std::runtime_error("THIS IS UNLIKELY");
-      }
 
       initialize_buffers(parsed.sample_count, parsed.fpga_id);
     });
