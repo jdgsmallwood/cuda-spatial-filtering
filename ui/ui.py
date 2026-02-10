@@ -14,6 +14,7 @@ from textual.validation import Integer
 from textual import work
 import asyncio
 import os
+from pathlib import Path
 
 
 class CMakeBuilder(App):
@@ -54,7 +55,7 @@ class CMakeBuilder(App):
             yield Log(id="build_log")
         yield Footer()
 
-    def round_up_to_32(n):
+    def round_up_to_32(self, n):
         # (n + mask) & ~mask
         return (n + 31) & ~31
 
@@ -70,16 +71,22 @@ class CMakeBuilder(App):
         log.clear()
         log.write("Starting conda build...\n")
 
+        build_dir = Path.cwd() / "build"
         env_name = "base"
 
         cmds = [
-            ["conda", "run", "-n", env_name, "cmake", "."] + flags,
+            ["conda", "run", "-n", env_name, "cmake", "..", "-DBUILD_TESTING=OFF"]
+            + flags,
             ["conda", "run", "-n", env_name, "cmake", "--build", "."],
         ]
 
         for cmd in cmds:
+            print(cmd)
             proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+                *cmd,
+                cwd=build_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
             )
             while True:
                 line = await proc.stdout.readline()
@@ -93,7 +100,7 @@ class CMakeBuilder(App):
                 return
 
         btn.disabled = False
-        log.write(f"\nSUCCESS! Binary located in build folder.\n")
+        log.write("\nSUCCESS! Binary located in build folder.\n")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "build_btn":
@@ -104,12 +111,10 @@ class CMakeBuilder(App):
             flags.append(
                 f"""-DNR_OBSERVING_PADDED_RECEIVERS={
                     self.round_up_to_32(
-                        int(
-                            self.query_one(f"#{nr_observing_fpga_sources}", Input).value
-                        )
+                        int(self.query_one("#nr_observing_fpga_sources", Input).value)
                         * int(
                             self.query_one(
-                                f"#{nr_observing_receivers_per_packet}", Input
+                                "#nr_observing_receivers_per_packet", Input
                             ).value
                         )
                     )

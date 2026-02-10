@@ -303,8 +303,9 @@ public:
     // LOG_DEBUG("First data point...{} + {} i",
     //           parsed.payload->data[0][0][0].real(),
     //           parsed.payload->data[0][0][0].imag());
-    if (parsed.sample_count == 0) {
-      throw std::runtime_error("THIS IS UNLIKELY");
+    if (parsed.sample_count == 0) [[unlikely]] {
+      throw std::runtime_error(
+          "parsed sample count was zero - something has gone wrong!");
     }
 
     std::call_once(buffer_init_flag[fpga_ids[parsed.fpga_id]], [&]() {
