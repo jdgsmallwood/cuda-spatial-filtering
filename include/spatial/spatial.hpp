@@ -57,6 +57,7 @@ public:
   unsigned long long packets_missing = 0;
   std::atomic<unsigned long long> packets_discarded = 0;
   unsigned long long pipeline_runs_queued = 0;
+  std::mutex producer_mutex;
   virtual void *get_next_write_pointer() = 0;
   virtual void *get_current_write_pointer() = 0;
   virtual void add_received_packet_metadata(const int length,
@@ -894,7 +895,6 @@ public:
                sizeof(recv_buffer_size));
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     LOG_INFO("Receiver thread started");
-    void *next_write_pointer = state.get_current_write_pointer();
     while (state.running) {
       int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
       if (ret_val < 0) {
@@ -903,14 +903,18 @@ public:
         // perror("recvfrom");
         break;
       }
+      {
+        std::lock_guard<std::mutex> lock(state.producer_mutex);
+        void *next_write_pointer = state.get_current_write_pointer();
 
-      for (int i = 0; i < ret_val; ++i) {
-        int len = msgs[i].msg_len;
-        std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
-        state.add_received_packet_metadata(len, client_addrs[i]);
-        state.packets_received += 1;
-        next_write_pointer = state.get_next_write_pointer();
-        msgs[i].msg_len = 0;
+        for (int i = 0; i < ret_val; ++i) {
+          int len = msgs[i].msg_len;
+          std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
+          state.add_received_packet_metadata(len, client_addrs[i]);
+          state.packets_received += 1;
+          next_write_pointer = state.get_next_write_pointer();
+          msgs[i].msg_len = 0;
+        }
       }
     }
     LOG_INFO("Receiver thread exiting");
