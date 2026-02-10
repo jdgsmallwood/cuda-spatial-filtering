@@ -63,9 +63,10 @@ void writeVectorToCSV(const std::vector<float> &times,
   std::cout << "Data successfully written to " << filename << "\n";
 }
 
-std::string make_default_visibilities_filename(const int min_freq_channel,
-                                               const int num_channels,
-                                               const int fpga_id) {
+std::string
+make_default_visibilities_filename(const int min_freq_channel,
+                                   const int num_channels,
+                                   const std::vector<int> fpga_ids) {
   // timestamp
   auto now = std::chrono::system_clock::now();
   std::time_t t = std::chrono::system_clock::to_time_t(now);
@@ -73,9 +74,25 @@ std::string make_default_visibilities_filename(const int min_freq_channel,
 
   std::ostringstream oss;
   oss << std::put_time(&tm, "%Y%m%d-%H%M") << "_" << min_freq_channel << "_"
-      << min_freq_channel + num_channels - 1 << "_ALVEO" << fpga_id << ".hdf5";
-
+      << min_freq_channel + num_channels - 1;
+  for (auto id : fpga_ids) {
+    oss << "_ALVEO" << id;
+  }
+  oss << ".hdf5";
   return oss.str();
+}
+
+std::vector<std::string> split_ifnames(const std::string &ifname) {
+  std::vector<std::string> result;
+  std::stringstream ss(ifname);
+  std::string token;
+
+  while (std::getline(ss, token, ',')) {
+    if (!token.empty()) {
+      result.push_back(token);
+    }
+  }
+  return result;
 }
 
 class AntennaMapRegistry {
@@ -204,21 +221,22 @@ int main(int argc, char *argv[]) {
 
   spatial::Logger::set(app_logger);
 
-  constexpr int num_buffers = 3;
-  constexpr int nr_fpga_sources = 1;
+  constexpr int num_buffers = NR_OBSERVING_BUFFERS;
+  constexpr int nr_fpga_sources = NR_OBSERVING_FPGA_SOURCES;
   constexpr size_t num_packet_buffers = 24;
-  constexpr int num_lambda_channels = 8;
+  constexpr int num_lambda_channels = NR_OBSERVING_CHANNELS;
   constexpr int nr_lambda_polarizations = 2;
-  constexpr int nr_lambda_receivers_per_packet = 10;
+  constexpr int nr_lambda_receivers_per_packet =
+      NR_OBSERVING_RECEIVERS_PER_PACKET;
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
-  constexpr int nr_lambda_padded_receivers = 32;
+  constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
-  constexpr int nr_lambda_receivers_per_block = 32;
   constexpr int nr_lambda_packets_for_correlation =
-      256; // NUMBER_PACKETS_TO_CORRELATE;
-  constexpr int nr_correlation_blocks_to_integrate = 56;
+      NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
+  constexpr int nr_correlation_blocks_to_integrate =
+      NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
@@ -228,24 +246,35 @@ int main(int argc, char *argv[]) {
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
                    nr_correlation_blocks_to_integrate, true>;
 
-  using MapType = std::unordered_map<uint32_t, int>;
-  int fpga_id = -1;
-  if (ifname == "enp216s0np0") {
-    fpga_id = 3;
-  } else if (ifname == "enp175s0np0") {
-    fpga_id = 2;
-  } else if (ifname == "enp134s0np0") {
-    fpga_id = 1;
-  } else {
-    fpga_id = 0;
-  }
-  // std::unique_ptr<MapType> fpga_ids =
-  // std::make_unique<MapType>(std::initializer_list<MapType::value_type>{{fpga_id,
-  // 0}});
+  const std::unordered_map<std::string, int> ifname_to_fpga{
+      {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
-  std::unique_ptr<MapType> fpga_ids = std::make_unique<MapType>(
-      std::initializer_list<MapType::value_type>{{fpga_id, 0}});
-  std::vector<int> fpga_id_vec{fpga_id};
+  using MapType = std::unordered_map<uint32_t, int>;
+  auto fpga_ids = std::make_unique<MapType>();
+  std::vector<int> fpga_id_vec;
+  auto fpga_names = split_ifnames(ifname);
+
+  {
+    // use scope here to deallocate i at the end.
+    int i = 0;
+    for (const auto &name : fpga_names) {
+      int fpga_id = 0;
+
+      auto it = ifname_to_fpga.find(name);
+      if (it != ifname_to_fpga.end()) {
+        fpga_id = it->second;
+      }
+      (*fpga_ids)[fpga_id] = i;
+      fpga_id_vec.push_back(fpga_id);
+      i++;
+    }
+  }
+
+  if (fpga_id_vec.size() != nr_fpga_sources ||
+      fpga_ids->size() != nr_fpga_sources) {
+    throw std::runtime_error("The number of network interfaces does not match "
+                             "number of FPGA sources.");
+  }
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
@@ -260,7 +289,7 @@ int main(int argc, char *argv[]) {
 
   if (!program.is_used("-v")) {
     vis_filename = make_default_visibilities_filename(
-        min_freq_channel, num_lambda_channels, fpga_id);
+        min_freq_channel, num_lambda_channels, fpga_id_vec);
   }
   HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
@@ -323,17 +352,24 @@ int main(int argc, char *argv[]) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
-  std::unique_ptr<PacketInput> capture;
+  std::vector<std::unique_ptr<PacketInput>> capture;
 
   if (!pcap_filename.empty()) {
-    capture = std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap);
+    capture.push_back(
+        std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap));
   } else {
-    capture = std::make_unique<KernelSocketPacketCapture>(
-        ifname, port, BUFFER_SIZE, 256 * 1024 * 1024);
+    for (auto nic : fpga_names) {
+      capture.push_back(std::make_unique<KernelSocketPacketCapture>(
+          nic, port, BUFFER_SIZE, 256 * 1024 * 1024));
+    }
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   LOG_INFO("Starting threads....");
-  std::thread receiver([&capture, &state]() { capture->get_packets(state); });
+  std::vector<std::thread> receiver_threads;
+  for (auto i = 0; i < capture.size(); ++i) {
+    receiver_threads.emplace_back(
+        [&capture, &state, i]() { capture[i]->get_packets(state); });
+  }
 
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
@@ -388,8 +424,12 @@ int main(int argc, char *argv[]) {
   state.running.store(0, std::memory_order_release);
   state.shutdown();
 
-  std::cout << "Waiting for receiver to finish...\n";
-  receiver.join();
+  std::cout << "Waiting for receivers to finish...\n";
+  for (auto &t : receiver_threads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
   std::cout << "Waiting for processor to finish...\n";
   processor.join();
   std::cout << "Waiting for pipeline feeder to finish...\n";

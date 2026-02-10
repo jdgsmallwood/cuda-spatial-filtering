@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ui"
+version = "0.1.0"
+dependencies = [
+    "textual",
+]
+
+[tool.hatch.envs.default]
+python = "3.11"  # Or your preferred version
+dev-mode = false
+
+[tool.hatch.envs.default.scripts]
+ui = "python ui.py"

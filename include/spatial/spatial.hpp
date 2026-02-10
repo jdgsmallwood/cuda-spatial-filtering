@@ -82,6 +82,7 @@ public:
       buffers;
   uint64_t latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES] = {};
   mutable std::mutex buffer_index_mutex;
+  std::mutex receive_buffer_write_index_mutex;
   GPUPipeline *pipeline_;
   // Constructor / Destructor
   ProcessorState(
@@ -302,9 +303,15 @@ public:
     // LOG_DEBUG("First data point...{} + {} i",
     //           parsed.payload->data[0][0][0].real(),
     //           parsed.payload->data[0][0][0].imag());
+    if (parsed.sample_count == 0) {
+      throw std::runtime_error("THIS IS UNLIKELY");
+    }
 
     std::call_once(buffer_init_flag[fpga_ids[parsed.fpga_id]], [&]() {
-      LOG_INFO("Initializing buffers as this is the first packet...");
+      LOG_INFO("Initializing buffers for FPGA {} / {} as this is the first "
+               "packet...",
+               fpga_ids[parsed.fpga_id], parsed.fpga_id);
+
       initialize_buffers(parsed.sample_count, parsed.fpga_id);
     });
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
@@ -747,8 +754,12 @@ public:
     return (void *)&(d_packet_data[write_index]->data);
   }
   void *get_next_write_pointer() {
-    while (!get_next_write_index() && running) {
+    std::unique_lock<std::mutex> lock(receive_buffer_write_index_mutex);
+    while (!get_next_write_index() && running.load(std::memory_order_acquire)) {
+      lock.unlock();
+      std::this_thread::yield();
       LOG_DEBUG("Waiting for next pointer....");
+      lock.lock();
       // std::this_thread::sleep_for(std::chrono::nanoseconds(10));
     };
     return get_current_write_pointer();
@@ -862,6 +873,7 @@ public:
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
+    LOG_INFO("Starting packet capture on ifname {}.", ifname);
 
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
