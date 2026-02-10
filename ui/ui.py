@@ -75,9 +75,31 @@ class CMakeBuilder(App):
         env_name = "base"
 
         cmds = [
-            ["conda", "run", "-n", env_name, "cmake", "..", "-DBUILD_TESTING=OFF"]
+            [
+                "conda",
+                "run",
+                "-n",
+                env_name,
+                "stdbuf",
+                "-oL",
+                "-eL",
+                "cmake",
+                "..",
+                "-DBUILD_TESTING=OFF",
+            ]
             + flags,
-            ["conda", "run", "-n", env_name, "cmake", "--build", "."],
+            [
+                "conda",
+                "run",
+                "-n",
+                env_name,
+                "stdbuf",
+                "-oL",
+                "-eL",
+                "cmake",
+                "--build",
+                ".",
+            ],
         ]
 
         for cmd in cmds:
