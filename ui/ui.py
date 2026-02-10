@@ -9,7 +9,7 @@ from textual.widgets import (
     Label,
     Collapsible,
 )
-from textual.containers import Vertical, Grid
+from textual.containers import Vertical, Grid, VerticalScroll
 from textual.validation import Integer
 from textual import work
 import asyncio
@@ -25,6 +25,9 @@ class CMakeBuilder(App):
     Input.-invalid { border: tall $error; }
     Log { background: $panel; border: solid $accent; height: 1fr; margin-top: 1;}
     #build_btn { width: 100%; margin: 1 0; }
+    Collapsible {
+    max-height: 33%;
+    }
     """
 
     CONFIG_SCHEMA = {
@@ -36,15 +39,21 @@ class CMakeBuilder(App):
         "nr_observing_correlation_blocks_to_integrate": ("56", Integer(minimum=10)),
     }
 
+    def log_message(self, msg: str) -> None:
+        self.query_one("#build_log", Log).write(msg)
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
             with Collapsible(title="Observing Parameters", collapsed=False):
-                with Grid():
-                    for key, (default, validator) in self.CONFIG_SCHEMA.items():
-                        with Vertical(classes="input-group"):
-                            yield Label(f"{key}:")
-                            yield Input(value=default, validators=[validator], id=key)
+                with VerticalScroll():
+                    with Grid():
+                        for key, (default, validator) in self.CONFIG_SCHEMA.items():
+                            with Vertical(classes="input-group"):
+                                yield Label(f"{key}:")
+                                yield Input(
+                                    value=default, validators=[validator], id=key
+                                )
 
             yield Select(
                 [("Debug", "Debug"), ("Release", "Release")],
@@ -59,9 +68,34 @@ class CMakeBuilder(App):
         # (n + mask) & ~mask
         return (n + 31) & ~31
 
-    def on_input_changed(self) -> None:
+    def on_input_changed(self, event: Input.Changed) -> None:
         all_valid = all(inp.is_valid for inp in self.query(Input))
         self.query_one("#build_btn", Button).disabled = not all_valid
+
+        if event.input.id not in {
+            "nr_observing_packets_for_correlation",
+            "nr_observing_correlation_blocks_to_integrate",
+        }:
+            return
+
+        try:
+            packets = int(
+                self.query_one("#nr_observing_packets_for_correlation", Input).value
+            )
+            blocks = int(
+                self.query_one(
+                    "#nr_observing_correlation_blocks_to_integrate", Input
+                ).value
+            )
+
+            value = (packets * blocks) / 14375
+            self.log_message(
+                f"Integrated visibilities every: ({packets} × {blocks}) / 14375 = {value:.4f} seconds\n"
+            )
+
+        except ValueError:
+            # One of them is mid-edit
+            pass
 
     @work(exclusive=True, thread=True)
     async def run_build(self, flags: list):
