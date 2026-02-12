@@ -946,6 +946,8 @@ public:
     // Reinterpret the template pointers to the underlying float/double types
     // Since TVal is a float array, reinterpret_cast is fine.
     const float *val_ptr = reinterpret_cast<const float *>(val_data);
+    const std::complex<float> *vec_ptr =
+        reinterpret_cast<const std::complex<float> *>(vec_data);
 
     std::string ts_str = std::to_string(ts);
 
@@ -964,6 +966,10 @@ public:
               ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N) +
               pol_r_idx * (NR_POLARIZATIONS * N) + pol_c_idx * N;
 
+          size_t vec_base_offset =
+              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
+              pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N);
+
           for (int k_idx = 0; k_idx < N; ++k_idx) {
             // --- 1. Data Access ---
             const float eigenvalue = val_ptr[val_base_offset + k_idx];
@@ -976,6 +982,22 @@ public:
             madd_args.push_back(key_prefix + ":val");
             madd_args.push_back(ts_str);
             madd_args.push_back(std::to_string(eigenvalue));
+
+            size_t vec_k_offset = vec_base_offset + k_idx * N;
+
+            for (int j_idx = 0; j_idx < N; ++j_idx) {
+              const std::complex<float> &coeff = vec_ptr[vec_k_offset + j_idx];
+              std::string j_id = std::to_string(j_idx);
+              std::string vec_key_prefix = key_prefix + ":vec:j:" + j_id;
+
+              madd_args.push_back(vec_key_prefix + ":re");
+              madd_args.push_back(ts_str);
+              madd_args.push_back(std::to_string(coeff.real()));
+
+              madd_args.push_back(vec_key_prefix + ":im");
+              madd_args.push_back(ts_str);
+              madd_args.push_back(std::to_string(coeff.imag()));
+            }
           } // End EIGENVALUE k_idx loop
         }
       }
@@ -994,16 +1016,18 @@ private:
     const int N = NR_RECEIVERS; // Matrix dimension
     // Track ALL N eigenvalues: "val"
     const std::vector<std::string> val_components = {"val"};
-
+    const std::vector<std::string> vec_components = {"re", "im"};
     std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
 
     // Calculate total keys to be created
     int total_pol_pairs = NR_POLARIZATIONS * NR_POLARIZATIONS;
     int total_eigenvalue_keys =
         NR_CHANNELS * total_pol_pairs * N * val_components.size();
+    int total_eigenvector_keys =
+        NR_CHANNELS * total_pol_pairs * N * vec_components.size() * N;
 
-    std::cout << "Total keys to create: " << (total_eigenvalue_keys)
-              << std::endl;
+    std::cout << "Total keys to create: "
+              << (total_eigenvalue_keys + total_eigenvector_keys) << std::endl;
 
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
@@ -1032,6 +1056,26 @@ private:
                 LOG_ERROR("Error creating key {}: {}", key, e.what());
               }
             }
+            for (int j_idx = 0; j_idx < N; ++j_idx) {
+              std::string j_id = std::to_string(j_idx);
+
+              for (const auto &component : vec_components) {
+                std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
+                                  ":k:" + k_id + ":vec:j:" + j_id + ":" +
+                                  component;
+                std::vector<std::string> args = {
+                    "TS.CREATE", key,         "LABELS",
+                    "channel",   channel_id,  "polarization",
+                    pol_pair,    "eigen_idx", k_id,
+                    "vec_idx",   j_id,        "component",
+                    component};
+                try {
+                  redis.command(args.begin(), args.end());
+                } catch (const std::exception &e) {
+                  LOG_ERROR("Error creating key {}: {}", key, e.what());
+                }
+              }
+            } // End Eigenvector j_idx loop
           } // End EIGENVALUE k_idx loop
         }
       }
