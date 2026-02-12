@@ -36,7 +36,7 @@ class CMakeBuilder(App):
         "nr_observing_channels": ("8", Integer(minimum=1)),
         "nr_observing_receivers_per_packet": ("10", Integer(minimum=1)),
         "nr_observing_packets_for_correlation": ("256", Integer(minimum=10)),
-        "nr_observing_correlation_blocks_to_integrate": ("56", Integer(minimum=10)),
+        "nr_observing_correlation_blocks_to_integrate": ("56", Integer(minimum=1)),
     }
 
     def log_message(self, msg: str) -> None:
