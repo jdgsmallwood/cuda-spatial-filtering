@@ -954,8 +954,8 @@ public:
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
 
-      for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
-        for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+      for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
+        for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
 
           std::string pol_pair =
               std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
