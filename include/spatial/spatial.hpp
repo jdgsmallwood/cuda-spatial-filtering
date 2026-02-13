@@ -734,7 +734,7 @@ public:
   };
 
   void pipeline_feeder() {
-    LOG_INFO("Pipeline feeder starting up...");
+    std::cout << "Pipeline feeder starting up...\n";
     while (running.load(std::memory_order_acquire) == 1) {
       std::unique_lock<std::mutex> lock(buffers_ready_for_pipeline_lock);
       buffer_ready_for_pipeline.wait(lock, [&] {
@@ -752,7 +752,7 @@ public:
       pipeline_->execute_pipeline(d_samples[buffer_index]);
       pipeline_runs_queued += 1;
     }
-    LOG_INFO("Pipeline feeder exiting!");
+    std::cout << "Pipeline feeder exiting!\n";
   }
 
   void *get_current_write_pointer() {
@@ -879,7 +879,7 @@ public:
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
-    LOG_INFO("Starting packet capture on ifname {}.", ifname);
+    std::cout << "Starting packet capture on ifname " << ifname << std::endl;
 
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
@@ -912,7 +912,7 @@ public:
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
                sizeof(recv_buffer_size));
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    LOG_INFO("Receiver thread started");
+    std::cout << "Receiver thread started for ifname " << ifname << std::endl;
     while (state.running) {
       int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
       if (ret_val < 0) {
@@ -935,7 +935,7 @@ public:
         }
       }
     }
-    LOG_INFO("Receiver thread exiting");
+    std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
   };
 
 private:

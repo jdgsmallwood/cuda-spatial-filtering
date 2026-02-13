@@ -951,7 +951,7 @@ public:
 
     std::string ts_str = std::to_string(ts);
 
-    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+    for (int ch_idx = 0; ch_idx < 1; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
 
       for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
