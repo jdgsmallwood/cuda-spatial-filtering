@@ -587,10 +587,12 @@ public:
         //               .count());
       }
     }
+    std::cout << "Main processor thread is shutting down.";
+    std::cout << " Waiting for sub-threads." << std::endl;
     // shut down pipeline thread
     buffer_ready_for_pipeline.notify_all();
     stop_processing_threads();
-    LOG_INFO("Processor thread exiting");
+    std::cout << "Processor thread exiting\n";
   };
 
   __attribute__((hot)) void worker_thread_fn(int worker_id) {
@@ -642,6 +644,8 @@ public:
       num_workers_with_tasks.fetch_sub(1);
       work_cv.notify_all();
     }
+
+    std::cout << "Worker " << worker_id << " exited\n";
   }
 
   __attribute__((hot)) void handle_buffer_completion(bool force_flush = false) {
@@ -854,6 +858,7 @@ private:
   };
   void stop_processing_threads() {
     work_cv.notify_all();
+    std::cout << "Trying to join worker threads...\n";
     for (auto &t : workers) {
       t.join();
     }
