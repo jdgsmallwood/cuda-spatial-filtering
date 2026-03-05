@@ -39,26 +39,6 @@ void signal_handler(int signal) {
   running = false;
 }
 
-void writeVectorToCSV(const std::vector<float> &times,
-                      const std::string &filename) {
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Error: Could not open file " << filename << "\n";
-    return;
-  }
-
-  // Write CSV header
-  file << "index,time\n";
-
-  // Write data
-  for (size_t i = 0; i < times.size(); ++i) {
-    file << i << "," << times[i] << "\n";
-  }
-
-  file.close();
-  std::cout << "Data successfully written to " << filename << "\n";
-}
-
 std::string make_default_filename(const int min_freq_channel,
                                   const int num_channels,
                                   const std::vector<int> fpga_ids) {
@@ -293,23 +273,24 @@ int main(int argc, char *argv[]) {
   for (const auto &[key, val] : antenna_mapping) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
+  std::string vis_file = "";
 
   // These still need to be initialized at this point - even if they're
   // not being used (except for the FFT one).
-  auto vis_writer = std::make_unique<
-      HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-      vis_file, 55 /* nr baselines */, min_freq_channel,
-      min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
-  auto eigen_writer =
-      std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
-                                            Config::EigenvectorOutputType>>();
+  // auto vis_writer = std::make_unique<
+  //     InMemoryVisibi<Config::VisibilitiesOutputType>>(
+  //     vis_file, 55 /* nr baselines */, min_freq_channel,
+  //     min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
+  // auto eigen_writer =
+  //     std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
+  //                                           Config::EigenvectorOutputType>>();
 
   auto fft_writer = std::make_unique<HDF5FFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
+      output_file, min_freq_channel,
+      min_freq_channel + NR_OBSERVING_CHANNELS - 1, &antenna_mapping);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
-      std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
-      std::move(fft_writer), 100, 100, 100, 100);
+      nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
 
   LambdaAntennaSpectraPipeline<Config> pipeline(num_buffers);
 
@@ -410,16 +391,6 @@ int main(int argc, char *argv[]) {
   output->running_ = false;
   std::cout << "Waiting for writer thread to finish...\n";
   writer_thread_.join();
-  std::vector<float> run_timings;
-  run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
-  for (auto i = 0; i < pipeline.NR_BENCHMARKING_RUNS; ++i) {
-    float ms;
-    cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.stop_run[i]);
-    if (ms != 0.0f) {
-      run_timings.push_back(ms);
-    };
-  }
-  writeVectorToCSV(run_timings, "output_timings.csv");
   FLUSH_LOG();
   spdlog::shutdown();
   std::cout << "Shutdown complete.\n";
