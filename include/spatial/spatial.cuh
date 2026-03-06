@@ -171,6 +171,22 @@ __global__ void get_data_for_fft(
 };
 
 template <typename InputT, typename OutputT>
+__global__ void
+get_data_for_multi_channel_fft(const InputT *__restrict__ input_data,
+                               OutputT *__restrict__ output_data, const int n) {
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+  const half2 *input_ptr = reinterpret_cast<const half2 *>(input_data);
+  float2 *output_ptr = reinterpret_cast<float2 *>(output_data);
+  while (tid < n) {
+    float2 output = __half22float2(input_ptr[tid]);
+    output_ptr[tid] = output;
+    tid += stride;
+  };
+};
+
+template <typename InputT, typename OutputT>
 void get_data_for_fft_launch(const InputT *input_data, OutputT *output_data,
                              const int NR_CHANNELS, const int NR_POLARIZATIONS,
                              const int NR_FREQS, const int NR_RECEIVERS,
@@ -183,6 +199,20 @@ void get_data_for_fft_launch(const InputT *input_data, OutputT *output_data,
   get_data_for_fft<InputT, OutputT><<<num_blocks, num_threads, 0, stream>>>(
       input_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
       NR_RECEIVERS, channel_to_fft, pol_to_fft);
+}
+
+template <typename InputT, typename OutputT>
+void get_data_for_multi_channel_fft_launch(
+    const InputT *input_data, OutputT *output_data, const int NR_CHANNELS,
+    const int NR_POLARIZATIONS, const int NR_FREQS, const int NR_RECEIVERS,
+    cudaStream_t stream) {
+
+  const int num_blocks = 16;
+  const int num_threads = 1024;
+  const int n = NR_CHANNELS * NR_POLARIZATIONS * NR_RECEIVERS * NR_FREQS;
+
+  get_data_for_multi_channel_fft<InputT, OutputT>
+      <<<num_blocks, num_threads, 0, stream>>>(input_data, output_data, n);
 }
 
 template <typename InputT, typename OutputT>
@@ -229,4 +259,54 @@ void detect_and_average_fft_launch(const InputT *cufft_data,
 
   detect_and_average_fft<InputT, OutputT><<<1, 1024, 0, stream>>>(
       cufft_data, output_data, NR_FREQS, NR_RECEIVERS, DOWNSAMPLE_FACTOR);
+}
+
+template <typename InputT, typename OutputT>
+__global__ void detect_and_downsample_multi_channel_fft(
+    const InputT *__restrict__ cufft_data, OutputT *__restrict__ output_data,
+    const int NR_CHANNELS, const int NR_POLARIZATIONS, const int NR_FREQS,
+    const int NR_RECEIVERS, const int DOWNSAMPLE_FACTOR) {
+  const int num_output_freqs = NR_FREQS / DOWNSAMPLE_FACTOR;
+
+  // Flattened 3D Grid: x = output frequencies, y = receivers, z = channels *
+  // pols
+  const int out_freq_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int rx_idx = blockIdx.y;
+  const int chan_pol_idx = blockIdx.z;
+  const int chan = chan_pol_idx / NR_POLARIZATIONS;
+  const int pol = chan_pol_idx % NR_POLARIZATIONS;
+
+  if (out_freq_idx >= num_output_freqs || rx_idx >= NR_RECEIVERS)
+    return;
+
+  float sum = 0.0f;
+  int count = 0;
+
+  int start_f = out_freq_idx * DOWNSAMPLE_FACTOR;
+  for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
+    float2 in = cufft_data[0][chan][pol][rx_idx][start_f + j];
+    float val = sqrtf(in.x * in.x + in.y * in.y);
+
+    if (!isnan(val)) {
+      sum += val;
+      count++;
+    }
+  }
+
+  float final_val = (count > 0) ? (sum / (float)count) : 0.0f;
+
+  output_data[0][chan][pol][rx_idx][out_freq_idx] = final_val;
+}
+
+template <typename InputT, typename OutputT>
+void detect_and_downsample_multi_channel_fft_launch(
+    const InputT *cufft_data, OutputT *output_data, const int NR_CHANNELS,
+    const int NR_POLARIZATIONS, const int NR_FREQS, const int NR_RECEIVERS,
+    const int DOWNSAMPLE_FACTOR, cudaStream_t stream) {
+  detect_and_downsample_multi_channel_fft<InputT, OutputT>
+      <<<dim3((NR_FREQS / DOWNSAMPLE_FACTOR + 255) / 256, NR_RECEIVERS,
+              NR_CHANNELS * NR_POLARIZATIONS),
+         256, 0, stream>>>(cufft_data, output_data, NR_CHANNELS,
+                           NR_POLARIZATIONS, NR_FREQS, NR_RECEIVERS,
+                           DOWNSAMPLE_FACTOR);
 }

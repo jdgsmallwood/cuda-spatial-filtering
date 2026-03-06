@@ -39,36 +39,16 @@ void signal_handler(int signal) {
   running = false;
 }
 
-void writeVectorToCSV(const std::vector<float> &times,
-                      const std::string &filename) {
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Error: Could not open file " << filename << "\n";
-    return;
-  }
-
-  // Write CSV header
-  file << "index,time\n";
-
-  // Write data
-  for (size_t i = 0; i < times.size(); ++i) {
-    file << i << "," << times[i] << "\n";
-  }
-
-  file.close();
-  std::cout << "Data successfully written to " << filename << "\n";
-}
-
-std::string
-make_default_visibilities_filename(const int min_freq_channel,
-                                   const int num_channels,
-                                   const std::vector<int> fpga_ids) {
+std::string make_default_filename(const int min_freq_channel,
+                                  const int num_channels,
+                                  const std::vector<int> fpga_ids) {
   // timestamp
   auto now = std::chrono::system_clock::now();
   std::time_t t = std::chrono::system_clock::to_time_t(now);
   std::tm tm = *std::localtime(&t);
 
   std::ostringstream oss;
+  oss << "antenna_spectra_";
   oss << std::put_time(&tm, "%Y%m%d-%H%M") << "_" << min_freq_channel << "_"
       << min_freq_channel + num_channels - 1;
   for (auto id : fpga_ids) {
@@ -144,7 +124,7 @@ int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
   std::string pcap_filename;
-  std::string vis_filename;
+  std::string output_filename;
   std::string ifname;
   bool loop_pcap, debug_logging;
   int min_freq_channel;
@@ -161,7 +141,7 @@ int main(int argc, char *argv[]) {
       .store_into(loop_pcap);
   program.add_argument("-v", "--vis_output_file")
       .help("specify a file name for the output visibilities")
-      .store_into(vis_filename);
+      .store_into(output_filename);
 
   program.add_argument("-f", "--min_freq_channel")
       .help("specify the lowest frequency channel.")
@@ -276,34 +256,14 @@ int main(int argc, char *argv[]) {
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel, &fpga_ids);
 
-  // const char *beam_filename = "hdf5_trial.hdf5";
-  // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
-  // std::string vis_filename = "hdf5_trial_vis.hdf5";
-  // hid_t beam_file =
-  //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-  //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-
   if (!program.is_used("-v")) {
-    vis_filename = make_default_visibilities_filename(
-        min_freq_channel, num_lambda_channels, fpga_id_vec);
+    output_filename = make_default_filename(min_freq_channel,
+                                            num_lambda_channels, fpga_id_vec);
   }
-  HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
+  HighFive::File output_file(output_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
-  //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
-  //    beam_file);
-  //  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
-  //    Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 100);
-  auto beam_writer = std::make_unique<
-      InMemoryBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
-      100);
-  // auto beam_writer = std::make_unique<
-  //     BinaryRawBeamWriter<Config::BeamOutputType,
-  //     Config::ArrivalsOutputType>>(
-  //    beam_filename);
-  //  auto vis_writer = std::make_unique<
-  //      UVFITSVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-  //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
-  //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
+  //     InMemoryBeamWriter<Config::BeamOutputType,
+  //     Config::ArrivalsOutputType>>( 100);
 
   AntennaMapRegistry registry;
 
@@ -313,36 +273,18 @@ int main(int argc, char *argv[]) {
   for (const auto &[key, val] : antenna_mapping) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
+  std::string vis_file = "";
 
-  auto vis_writer = std::make_unique<
-      HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-      vis_file, 55 /* nr baselines */, min_freq_channel,
-      min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
-  auto eigen_writer =
-      std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
-                                            Config::EigenvectorOutputType>>();
+  auto fft_writer =
+      std::make_unique<HDF5FFTWriter<Config::MultiChannelAntennaFFTOutputType>>(
+          output_file, min_freq_channel,
+          min_freq_channel + NR_OBSERVING_CHANNELS - 1, &antenna_mapping);
 
-  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
+  auto output = std::make_shared<
+      BufferedOutput<Config, Config::MultiChannelAntennaFFTOutputType>>(
+      nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
 
-  auto output = std::make_shared<BufferedOutput<Config>>(
-      std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
-      std::move(fft_writer), 100, 100, 100, 100);
-
-  BeamWeightsT<Config> h_weights;
-
-  for (auto i = 0; i < num_lambda_channels; ++i) {
-    for (auto j = 0; j < nr_lambda_receivers; ++j) {
-      for (auto k = 0; k < nr_lambda_beams; ++k) {
-        for (auto l = 0; l < nr_lambda_polarizations; ++l) {
-          h_weights.weights[i][l][k][j] =
-              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
-        }
-      }
-    }
-  }
-
-  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights);
+  LambdaAntennaSpectraPipeline<Config> pipeline(num_buffers);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
@@ -441,16 +383,6 @@ int main(int argc, char *argv[]) {
   output->running_ = false;
   std::cout << "Waiting for writer thread to finish...\n";
   writer_thread_.join();
-  std::vector<float> run_timings;
-  run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
-  for (auto i = 0; i < pipeline.NR_BENCHMARKING_RUNS; ++i) {
-    float ms;
-    cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.stop_run[i]);
-    if (ms != 0.0f) {
-      run_timings.push_back(ms);
-    };
-  }
-  writeVectorToCSV(run_timings, "output_timings.csv");
   FLUSH_LOG();
   spdlog::shutdown();
   std::cout << "Shutdown complete.\n";

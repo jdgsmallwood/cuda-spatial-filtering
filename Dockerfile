@@ -15,6 +15,8 @@ RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/nul
     echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ jammy main' | \
     tee /etc/apt/sources.list.d/kitware.list >/dev/null
 
+RUN echo 'deb [trusted=yes] https://apt.kitware.com/ubuntu/ jammy main' > /etc/apt/sources.list.d/kitware.list
+
 # Install GCC, CMake, and common build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -53,6 +55,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less \
     libcfitsio-dev \
     casacore-dev \
+    libnl-3-dev \
+    libnl-genl-3-dev \
+    libcurl4-gnutls-dev \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -77,7 +82,6 @@ RUN    apt-get install -y cmake
 # Set default compiler environment variables (optional)
 ENV CC=/usr/bin/gcc
 ENV CXX=/usr/bin/g++
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcutensor/12:$LD_LIBRARY_PATH
 ENV PATH=/usr/local/bin:$PATH
 ENV PATH=/usr/local/cuda-12/bin:$PATH
 ENV PATH=/usr/local/cuda-12/compute-sanitizer:$PATH
@@ -115,5 +119,44 @@ WORKDIR /tmp/linux-6.6.66/tools/perf
 RUN make && make install prefix=/usr/local
 RUN cp /usr/local/bin/perf /usr/bin/perf
 
+ENV CONDA_DIR /opt/conda
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -b -p /opt/conda && \
+    rm ~/miniconda.sh
 
+# 4. Put Conda on the PATH
+ENV PATH=$CONDA_DIR/bin:$PATH
+
+# 5. Handle the environment.yml
 WORKDIR /tmp
+COPY environment.yml .
+
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+# Create the environment and clean cache to save space
+RUN conda env update -n base -f environment.yml && \
+    conda clean -afy
+
+# 6. Setup shell to auto-activate on login/entry
+# This grabs the name from the first line of your environment.yml automatically
+RUN echo "source /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
+    echo "conda activate $(head -1 environment.yml | cut -d' ' -f2)" >> ~/.bashrc
+
+# Don't use conda linker
+RUN mv /opt/conda/bin/ld /opt/conda/bin/ld.bak
+
+
+# Create symlinks for math libraries
+RUN  ln -s /lib/x86_64-linux-gnu/libm.so.6 /lib64/libm.so.6 && \
+  ln -s /lib/x86_64-linux-gnu/libmvec.so.1 /lib64/libmvec.so.1 && \
+  ln -s /lib/x86_64-linux-gnu/libc.so.6 /lib64/libc.so.6 && \
+  ln -s /usr/lib/x86_64-linux-gnu/libc_nonshared.a /usr/lib64/libc_nonshared.a
+
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu
+# Ensure subsequent RUN commands use the conda environment
+SHELL ["/bin/bash", "--login", "-c"]
+
+CMD ["/bin/bash", "--login"]
+
+

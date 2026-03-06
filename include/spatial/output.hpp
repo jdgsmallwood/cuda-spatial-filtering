@@ -19,18 +19,18 @@ template <typename T> class FFTWriter;
 
 class Output {
 public:
-  virtual size_t register_beam_data_block(const int start_seq_num,
-                                          const int end_seq_num) = 0;
-  virtual size_t register_visibilities_block(const int start_seq_num,
-                                             const int end_seq_num,
+  virtual size_t register_beam_data_block(const size_t start_seq_num,
+                                          const size_t end_seq_num) = 0;
+  virtual size_t register_visibilities_block(const size_t start_seq_num,
+                                             const size_t end_seq_num,
                                              const int num_missing_packets,
                                              const int num_total_packets) = 0;
   virtual size_t
-  register_eigendecomposition_data_block(const int start_seq_num,
-                                         const int end_seq_num) = 0;
+  register_eigendecomposition_data_block(const size_t start_seq_num,
+                                         const size_t end_seq_num) = 0;
 
-  virtual size_t register_fft_block(const int start_seq_num,
-                                    const int end_seq_num,
+  virtual size_t register_fft_block(const size_t start_seq_num,
+                                    const size_t end_seq_num,
                                     const int channel_idx,
                                     const int pol_idx) = 0;
 
@@ -74,24 +74,25 @@ public:
   Eigenvectors *eigenvectors;
   FFTOutput *fft_output;
 
-  size_t register_beam_data_block(const int start_seq_num,
-                                  const int end_seq_num) override {
+  size_t register_beam_data_block(const size_t start_seq_num,
+                                  const size_t end_seq_num) override {
     return 1;
   };
-  size_t register_visibilities_block(const int start_seq_num,
-                                     const int end_seq_num,
+  size_t register_visibilities_block(const size_t start_seq_num,
+                                     const size_t end_seq_num,
                                      const int num_missing_packets,
                                      const int num_total_packets) override {
     return 1;
   };
 
   size_t
-  register_eigendecomposition_data_block(const int start_seq_num,
-                                         const int end_seq_num) override {
+  register_eigendecomposition_data_block(const size_t start_seq_num,
+                                         const size_t end_seq_num) override {
     return 1;
   };
-  size_t register_fft_block(const int start_seq_num, const int end_seq_num,
-                            const int channel_idx, const int pol_idx) override {
+  size_t register_fft_block(const size_t start_seq_num,
+                            const size_t end_seq_num, const int channel_idx,
+                            const int pol_idx) override {
     return 1;
   }
 
@@ -144,16 +145,16 @@ public:
   };
 };
 
-template <typename T> class BufferedOutput : public Output {
+template <typename T, typename FFTOutput = typename T::FFTOutputType>
+class BufferedOutput : public Output {
 public:
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
-  using FFTOutput = typename T::FFTOutputType;
   struct BeamBlock {
     typename T::BeamOutputType beam_data;
     typename T::ArrivalsOutputType arrival_data;
-    int start_seq_num;
-    int end_seq_num;
+    size_t start_seq_num;
+    size_t end_seq_num;
     bool beam_transfer_complete;
     bool arrival_transfer_complete;
 
@@ -164,8 +165,8 @@ public:
 
   struct VisBlock {
     typename T::VisibilitiesOutputType data;
-    int start_seq_num;
-    int end_seq_num;
+    size_t start_seq_num;
+    size_t end_seq_num;
     int num_missing_packets;
     int num_total_packets;
     bool transfer_complete;
@@ -178,8 +179,8 @@ public:
   struct EigenBlock {
     Eigenvalues eigenvalues;
     Eigenvectors eigenvectors;
-    int start_seq_num;
-    int end_seq_num;
+    size_t start_seq_num;
+    size_t end_seq_num;
     bool transfer_complete;
 
     EigenBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {}
@@ -187,8 +188,8 @@ public:
 
   struct FFTBlock {
     FFTOutput fft_output;
-    int start_seq_num;
-    int end_seq_num;
+    size_t start_seq_num;
+    size_t end_seq_num;
     int channel_idx;
     int pol_idx;
     bool transfer_complete;
@@ -205,9 +206,8 @@ public:
       std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
                                   typename T::EigenvectorOutputType>>
           eigen_writer,
-      std::unique_ptr<FFTWriter<typename T::FFTOutputType>> fft_writer,
-      size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size,
-      size_t fft_buffer_size)
+      std::unique_ptr<FFTWriter<FFTOutput>> fft_writer, size_t beam_buffer_size,
+      size_t vis_buffer_size, size_t eigen_buffer_size, size_t fft_buffer_size)
       : beam_writer_(std::move(beam_writer)),
         vis_writer_(std::move(vis_writer)),
         eigen_writer_(std::move(eigen_writer)),
@@ -225,14 +225,22 @@ public:
   ~BufferedOutput() {
     running_ = false;
 
-    beam_writer_->flush();
-    vis_writer_->flush();
-    eigen_writer_->flush();
-    fft_writer_->flush();
+    if (beam_writer_ != nullptr) {
+      beam_writer_->flush();
+    };
+    if (vis_writer_ != nullptr) {
+      vis_writer_->flush();
+    };
+    if (eigen_writer_ != nullptr) {
+      eigen_writer_->flush();
+    };
+    if (fft_writer_ != nullptr) {
+      fft_writer_->flush();
+    };
   }
 
-  size_t register_beam_data_block(const int start_seq_num,
-                                  const int end_seq_num) override {
+  size_t register_beam_data_block(const size_t start_seq_num,
+                                  const size_t end_seq_num) override {
     size_t block_num = beam_write_idx_;
 
     auto &block = beam_blocks_[block_num];
@@ -256,8 +264,8 @@ public:
     return block_num;
   }
 
-  size_t register_visibilities_block(const int start_seq_num,
-                                     const int end_seq_num,
+  size_t register_visibilities_block(const size_t start_seq_num,
+                                     const size_t end_seq_num,
                                      const int num_missing_packets,
                                      const int num_total_packets) override {
     size_t block_num = vis_write_idx_;
@@ -278,8 +286,8 @@ public:
   }
 
   size_t
-  register_eigendecomposition_data_block(const int start_seq_num,
-                                         const int end_seq_num) override {
+  register_eigendecomposition_data_block(const size_t start_seq_num,
+                                         const size_t end_seq_num) override {
     size_t block_num = eigen_write_idx_;
     eigen_write_idx_ = (block_num + 1) % eigen_blocks_.size();
 
@@ -294,10 +302,13 @@ public:
     return block_num;
   }
 
-  size_t register_fft_block(const int start_seq_num, const int end_seq_num,
-                            const int channel_idx, const int pol_idx) override {
+  size_t register_fft_block(const size_t start_seq_num,
+                            const size_t end_seq_num, const int channel_idx,
+                            const int pol_idx) override {
     size_t block_num = fft_write_idx_;
     fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
+    LOG_INFO("Registered FFT block with start seq {} and end seq {}",
+             start_seq_num, end_seq_num);
 
     if (fft_write_idx_ == fft_read_idx_) {
       LOG_ERROR("FFT ring buffer is full");
@@ -475,7 +486,7 @@ private:
   std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
                               typename T::EigenvectorOutputType>>
       eigen_writer_;
-  std::unique_ptr<FFTWriter<typename T::FFTOutputType>> fft_writer_;
+  std::unique_ptr<FFTWriter<FFTOutput>> fft_writer_;
 
   cuda_util::PinnedVector<BeamBlock> beam_blocks_;
   cuda_util::PinnedVector<VisBlock> vis_blocks_;

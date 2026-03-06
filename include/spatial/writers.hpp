@@ -479,6 +479,110 @@ private:
   HighFive::DataSet beam_seq_dataset_;
 };
 
+template <typename T> class HDF5FFTWriter : public FFTWriter<T> {
+public:
+  HDF5FFTWriter(HighFive::File &file, const int min_channel,
+                const int max_channel,
+                const std::unordered_map<int, int> *antenna_map = nullptr)
+      : file_(file),
+        element_count_(sizeof(T) /
+                       sizeof(typename std::remove_all_extents<T>::type)) {
+    using namespace HighFive;
+
+    double start_time = std::chrono::duration<double>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                                .count() /
+                            86400.0 +
+                        40587.0;
+    file_.createAttribute<double>("mjd_start", start_time);
+    file_.createAttribute<int>("min_channel", min_channel);
+    file_.createAttribute<int>("max_channel", max_channel);
+
+    fft_dims_ = get_array_dims<T>();
+    std::vector<size_t> fft_dataset_dims = {0};
+    std::vector<size_t> fft_dataset_max_dims = {DataSpace::UNLIMITED};
+
+    fft_dataset_dims.insert(fft_dataset_dims.end(), fft_dims_.begin(),
+                            fft_dims_.end());
+    fft_dataset_max_dims.insert(fft_dataset_max_dims.end(), fft_dims_.begin(),
+                                fft_dims_.end());
+    std::vector<hsize_t> fft_chunk = {1};
+    fft_chunk.insert(fft_chunk.end(), fft_dims_.begin(), fft_dims_.end());
+    DataSpace fft_space(fft_dataset_dims, fft_dataset_max_dims);
+    DataSetCreateProps props;
+    props.add(HighFive::Chunking(fft_chunk));
+    // I imagine createDataSet needs a primitive type
+    fft_dataset_ = file_.createDataSet<float>("ffts", fft_space, props);
+
+    DataSetCreateProps fft_seq_props;
+    fft_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    fft_seq_dataset_ = file_.createDataSet<int>(
+        "fft_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
+        fft_seq_props);
+
+    // DataSetCreateProps fft_missing_props;
+    // fft_missing_props.add(Chunking(std::vector<hsize_t>{1, 3}));
+    // fft_missing_dataset_ = file_.createDataSet<float>(
+    //     "fft_missing_nums",
+    //     DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
+    //     fft_missing_props);
+
+    if (antenna_map && !antenna_map->empty()) {
+      this->antenna_map_ = *antenna_map;
+    } else {
+      generate_identity_map();
+    }
+  }
+
+  void write_fft_block(const T *fft_data, const int start_seq,
+                       const int end_seq, const int channel_idx,
+                       const int pol_idx) override {
+    LOG_INFO("writing fft block {} to {}", start_seq, end_seq);
+    auto current_size = fft_dataset_.getDimensions()[0];
+    std::vector<size_t> new_dims = {current_size + 1};
+    new_dims.insert(new_dims.end(), fft_dims_.begin(), fft_dims_.end());
+    fft_dataset_.resize(new_dims);
+
+    std::vector<size_t> fft_offset = {current_size};
+    fft_offset.insert(fft_offset.end(), fft_dims_.size(), 0);
+    std::vector<size_t> fft_count = {1};
+    fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
+
+    fft_dataset_.select(fft_offset, fft_count).write(fft_data);
+
+    auto seq_size = fft_seq_dataset_.getDimensions()[0];
+    fft_seq_dataset_.resize({seq_size + 1, 2});
+    std::vector<int> seq_nums = {start_seq, end_seq};
+    fft_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+
+    // auto missing_size = fft_missing_dataset_.getDimensions()[0];
+    // fft_missing_dataset_.resize({missing_size + 1, 3});
+    // float num_missing_packets_fl = static_cast<float>(num_missing_packets);
+    // float num_total_packets_fl = static_cast<float>(num_total_packets);
+    // std::vector<float> missing_nums = {
+    //     num_missing_packets_fl, num_total_packets_fl,
+    //     100 * num_missing_packets_fl / num_total_packets_fl};
+    // fft_missing_dataset_.select({missing_size, 0}, {1, 3})
+    //     .write_raw(missing_nums.data());
+  }
+
+  void flush() override { file_.flush(); }
+
+private:
+  void generate_identity_map() {
+    for (int i = 0; i < 256; i++) {
+      antenna_map_[i] = i;
+    }
+  }
+
+  HighFive::File &file_;
+  size_t element_count_;
+  HighFive::DataSet fft_dataset_;
+  HighFive::DataSet fft_seq_dataset_;
+  std::vector<size_t> fft_dims_;
+  std::unordered_map<int, int> antenna_map_;
+};
+
 template <typename T>
 class HDF5VisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
@@ -946,14 +1050,16 @@ public:
     // Reinterpret the template pointers to the underlying float/double types
     // Since TVal is a float array, reinterpret_cast is fine.
     const float *val_ptr = reinterpret_cast<const float *>(val_data);
+    const std::complex<float> *vec_ptr =
+        reinterpret_cast<const std::complex<float> *>(vec_data);
 
     std::string ts_str = std::to_string(ts);
 
-    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+    for (int ch_idx = 0; ch_idx < 0; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
 
-      for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
-        for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
+      for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
+        for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
 
           std::string pol_pair =
               std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
@@ -963,6 +1069,10 @@ public:
           size_t val_base_offset =
               ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N) +
               pol_r_idx * (NR_POLARIZATIONS * N) + pol_c_idx * N;
+
+          size_t vec_base_offset =
+              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
+              pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N);
 
           for (int k_idx = 0; k_idx < N; ++k_idx) {
             // --- 1. Data Access ---
@@ -976,6 +1086,22 @@ public:
             madd_args.push_back(key_prefix + ":val");
             madd_args.push_back(ts_str);
             madd_args.push_back(std::to_string(eigenvalue));
+
+            size_t vec_k_offset = vec_base_offset + k_idx * N;
+
+            for (int j_idx = 0; j_idx < N; ++j_idx) {
+              const std::complex<float> &coeff = vec_ptr[vec_k_offset + j_idx];
+              std::string j_id = std::to_string(j_idx);
+              std::string vec_key_prefix = key_prefix + ":vec:j:" + j_id;
+
+              madd_args.push_back(vec_key_prefix + ":re");
+              madd_args.push_back(ts_str);
+              madd_args.push_back(std::to_string(coeff.real()));
+
+              madd_args.push_back(vec_key_prefix + ":im");
+              madd_args.push_back(ts_str);
+              madd_args.push_back(std::to_string(coeff.imag()));
+            }
           } // End EIGENVALUE k_idx loop
         }
       }
@@ -994,16 +1120,18 @@ private:
     const int N = NR_RECEIVERS; // Matrix dimension
     // Track ALL N eigenvalues: "val"
     const std::vector<std::string> val_components = {"val"};
-
+    const std::vector<std::string> vec_components = {"re", "im"};
     std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
 
     // Calculate total keys to be created
     int total_pol_pairs = NR_POLARIZATIONS * NR_POLARIZATIONS;
     int total_eigenvalue_keys =
         NR_CHANNELS * total_pol_pairs * N * val_components.size();
+    int total_eigenvector_keys =
+        NR_CHANNELS * total_pol_pairs * N * vec_components.size() * N;
 
-    std::cout << "Total keys to create: " << (total_eigenvalue_keys)
-              << std::endl;
+    std::cout << "Total keys to create: "
+              << (total_eigenvalue_keys + total_eigenvector_keys) << std::endl;
 
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
@@ -1032,6 +1160,26 @@ private:
                 LOG_ERROR("Error creating key {}: {}", key, e.what());
               }
             }
+            for (int j_idx = 0; j_idx < N; ++j_idx) {
+              std::string j_id = std::to_string(j_idx);
+
+              for (const auto &component : vec_components) {
+                std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
+                                  ":k:" + k_id + ":vec:j:" + j_id + ":" +
+                                  component;
+                std::vector<std::string> args = {
+                    "TS.CREATE", key,         "LABELS",
+                    "channel",   channel_id,  "polarization",
+                    pol_pair,    "eigen_idx", k_id,
+                    "vec_idx",   j_id,        "component",
+                    component};
+                try {
+                  redis.command(args.begin(), args.end());
+                } catch (const std::exception &e) {
+                  LOG_ERROR("Error creating key {}: {}", key, e.what());
+                }
+              }
+            } // End Eigenvector j_idx loop
           } // End EIGENVALUE k_idx loop
         }
       }
