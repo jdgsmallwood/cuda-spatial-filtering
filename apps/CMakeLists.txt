@@ -1,4 +1,3 @@
-set(NUMBER_PACKETS_TO_CORRELATE 16 CACHE STRING "Number of packets to correlate while benchmarking")
 set(NUMBER_BEAMS 10 CACHE STRING "Number of beams to correlate while benchmarking")
 add_executable(
   observe
