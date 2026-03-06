@@ -1211,6 +1211,8 @@ public:
 
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
+    LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
+             start_seq_num, end_seq_num);
     // visibilities_missing_packets += packet_data->get_num_missing_packets();
 
     // d_samples_entry memcpy
