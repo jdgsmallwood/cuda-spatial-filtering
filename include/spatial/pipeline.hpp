@@ -1371,6 +1371,9 @@ public:
     const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
     const size_t NUM_TOTAL_BATCHES =
         T::NR_RECEIVERS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
+    LOG_INFO("FFT initialized with {} total batches with a {} FFT each run "
+             "(RECEIVERS x CHANNELS x POL)",
+             NUM_TOTAL_BATCHES, CUFFT_FFT_SIZE);
     size_t work_size = 0;
     cudaDataType input_type = CUDA_C_32F;
     cudaDataType output_type = CUDA_C_32F;

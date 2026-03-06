@@ -372,6 +372,7 @@ public:
       std::memset(d_samples[buf_idx]->arrivals, 0,
                   T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
                       T::NR_FPGA_SOURCES * sizeof(bool));
+
       buffer.is_populated.reset();
       // LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index
       // {} "
