@@ -172,6 +172,9 @@ public:
 
     {
       std::lock_guard lock(latest_packet_mutex);
+      LOG_INFO("Latest packet received is {} and packet count is {}",
+               latest_packet_received[freq_channel][fpga_index],
+               pkt.sample_count);
       latest_packet_received[freq_channel][fpga_index] = std::max(
           latest_packet_received[freq_channel][fpga_index], pkt.sample_count);
     }

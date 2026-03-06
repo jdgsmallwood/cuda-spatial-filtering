@@ -191,7 +191,6 @@ struct LambdaPacketEntry
 
     const CustomHeader *__restrict__ custom =
         (const CustomHeader *)(base + offset);
-    LOG_INFO("Packet Seq is {}", custom->sample_count);
 
     uint32_t fpga_id;
     if (OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET) {
