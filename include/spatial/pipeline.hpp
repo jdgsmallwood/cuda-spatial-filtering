@@ -1195,8 +1195,6 @@ private:
       d_cufft_downsampled_output;
   std::vector<typename T::PacketScalesType *> d_scales;
 
-  int fft_start_seq_num;
-  int fft_end_seq_num;
   static constexpr int fft_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int fft_missing_packets;
@@ -1213,9 +1211,6 @@ public:
 
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
-    if (fft_start_seq_num == -1) {
-      fft_start_seq_num = packet_data->start_seq_id;
-    }
     // visibilities_missing_packets += packet_data->get_num_missing_packets();
 
     // d_samples_entry memcpy
@@ -1289,8 +1284,8 @@ public:
           (void *)output_->get_fft_landing_pointer(fft_block_num);
       cudaMemcpyAsync(fft_output_pointer,
                       d_cufft_downsampled_output[current_buffer],
-                      sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
-                      streams[current_buffer]);
+                      sizeof(typename T::MultiChannelAntennaFFTOutputType),
+                      cudaMemcpyDefault, streams[current_buffer]);
 
       auto *fft_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = fft_block_num};
@@ -1401,9 +1396,6 @@ public:
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
-    // these need to be set after the dummy run.
-    fft_start_seq_num = -1;
-    fft_end_seq_num = -1;
   };
   ~LambdaAntennaSpectraPipeline() {
     // If there are visibilities in the accumulator on the GPU - dump them

@@ -305,6 +305,8 @@ public:
                             const int channel_idx, const int pol_idx) override {
     size_t block_num = fft_write_idx_;
     fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
+    LOG_INFO("Registered FFT block with start seq {} and end seq {}",
+             start_seq_num, end_seq_num);
 
     if (fft_write_idx_ == fft_read_idx_) {
       LOG_ERROR("FFT ring buffer is full");
