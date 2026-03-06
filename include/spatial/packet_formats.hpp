@@ -47,8 +47,8 @@ struct CustomHeader {
 #pragma pack(pop)
 
 struct FinalPacketData {
-  size_t start_seq_id;
-  size_t end_seq_id;
+  uint64_t start_seq_id;
+  uint64_t end_seq_id;
   size_t buffer_index;
 
   virtual void *get_samples_ptr() = 0;
