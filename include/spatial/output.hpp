@@ -224,10 +224,18 @@ public:
   ~BufferedOutput() {
     running_ = false;
 
-    beam_writer_->flush();
-    vis_writer_->flush();
-    eigen_writer_->flush();
-    fft_writer_->flush();
+    if (beam_writer_ != nullptr) {
+      beam_writer_->flush();
+    };
+    if (vis_writer_ != nullptr) {
+      vis_writer_->flush();
+    };
+    if (eigen_writer_ != nullptr) {
+      eigen_writer_->flush();
+    };
+    if (fft_writer_ != nullptr) {
+      fft_writer_->flush();
+    };
   }
 
   size_t register_beam_data_block(const int start_seq_num,

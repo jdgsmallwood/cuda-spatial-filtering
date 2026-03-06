@@ -275,16 +275,6 @@ int main(int argc, char *argv[]) {
   };
   std::string vis_file = "";
 
-  // These still need to be initialized at this point - even if they're
-  // not being used (except for the FFT one).
-  // auto vis_writer = std::make_unique<
-  //     InMemoryVisibi<Config::VisibilitiesOutputType>>(
-  //     vis_file, 55 /* nr baselines */, min_freq_channel,
-  //     min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
-  // auto eigen_writer =
-  //     std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
-  //                                           Config::EigenvectorOutputType>>();
-
   auto fft_writer =
       std::make_unique<HDF5FFTWriter<Config::MultiChannelAntennaFFTOutputType>>(
           output_file, min_freq_channel,
