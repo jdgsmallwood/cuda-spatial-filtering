@@ -36,8 +36,8 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
                     const int tile_size_x, const int tile_size_y);
 template <size_t NR_CHANNELS, size_t NR_FPGA_SOURCES> struct BufferState {
   bool is_ready;
-  std::array<unsigned long long, NR_FPGA_SOURCES> start_seq;
-  std::array<unsigned long long, NR_FPGA_SOURCES> end_seq;
+  std::array<uint64_t, NR_FPGA_SOURCES> start_seq;
+  std::array<uint64_t, NR_FPGA_SOURCES> end_seq;
   std::bitset<NR_CHANNELS> is_populated;
 };
 
@@ -52,11 +52,11 @@ public:
   std::unordered_map<uint32_t, int> fpga_ids;
   bool synchronous_pipeline = false;
   std::atomic<int> running = 1;
-  unsigned long long packets_received = 0;
-  std::atomic<unsigned long long> packets_processed = 0;
-  unsigned long long packets_missing = 0;
-  std::atomic<unsigned long long> packets_discarded = 0;
-  unsigned long long pipeline_runs_queued = 0;
+  uint64_t packets_received = 0;
+  std::atomic<uint64_t> packets_processed = 0;
+  uint64_t packets_missing = 0;
+  std::atomic<uint64_t> packets_discarded = 0;
+  uint64_t pipeline_runs_queued = 0;
   std::mutex producer_mutex;
   virtual void *get_next_write_pointer() = 0;
   virtual void *get_current_write_pointer() = 0;
@@ -159,7 +159,7 @@ public:
       ProcessedPacket<typename T::PacketScaleStructure,
                       typename T::PacketDataStructure> &pkt,
       const int current_read_index,
-      const std::array<unsigned long long, T::NR_FPGA_SOURCES> &global_max) {
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
     size_t fpga_index;
     if (fpga_ids.count(pkt.fpga_id)) {
       fpga_index = fpga_ids[pkt.fpga_id];
@@ -190,8 +190,7 @@ public:
     // copy to correct place or leave it.
     for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
       const int buffer_index = (current_buf + buffer) % NR_INPUT_BUFFERS;
-      const unsigned long long buffer_start =
-          buffers[buffer_index].start_seq[fpga_index];
+      const uint64_t buffer_start = buffers[buffer_index].start_seq[fpga_index];
       const int packet_index =
           (sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
 
@@ -244,7 +243,7 @@ public:
   void process_all_available_packets() {
     // This exists mainly for testing purposes
     // to allow us to add some packets then process them all.
-    std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max{};
+    std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
     }
@@ -257,8 +256,7 @@ public:
     }
   }
 
-  void initialize_buffers(const unsigned long long first_count,
-                          const uint32_t fpga_id) {
+  void initialize_buffers(const uint64_t first_count, const uint32_t fpga_id) {
     LOG_INFO("[BufferInitialization] First count for FPGA ID {} was {}...",
              fpga_id, first_count);
     std::lock_guard lock(buffer_index_mutex);
@@ -287,7 +285,7 @@ public:
 
   __attribute__((hot)) void process_packet_data(
       typename T::PacketEntryType *pkt, const int current_read_index,
-      const std::array<unsigned long long, T::NR_FPGA_SOURCES> &global_max) {
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
@@ -326,8 +324,8 @@ public:
                                          MIN_FREQ_CHANNEL] = true;
   };
 
-  void get_global_max_packet_array(
-      std::array<unsigned long long, T::NR_FPGA_SOURCES> &arr) {
+  void
+  get_global_max_packet_array(std::array<uint64_t, T::NR_FPGA_SOURCES> &arr) {
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       arr[i] = global_max_end_seq[i].load(std::memory_order_acquire);
     }
@@ -347,15 +345,14 @@ public:
     {
       std::lock_guard<std::mutex> lock(buffer_index_mutex);
 
-      std::array<unsigned long long, T::NR_FPGA_SOURCES>
-          max_end_seq_in_buffers{};
+      std::array<uint64_t, T::NR_FPGA_SOURCES> max_end_seq_in_buffers{};
       get_global_max_packet_array(max_end_seq_in_buffers);
       const int buf_idx = buffer_index;
       auto &buffer = buffers[buf_idx];
       for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
-        const unsigned long long new_start =
+        const uint64_t new_start =
             max_end_seq_in_buffers[i] + 1 * NR_BETWEEN_SAMPLES;
-        const unsigned long long new_end =
+        const uint64_t new_end =
             new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
         // LOG_DEBUG("[ProcessorState - release_buffer] lock acquired for index
         // {}...",
@@ -442,8 +439,7 @@ public:
       if (!buffer.is_ready) {
         continue;
       }
-      const std::array<unsigned long long, T::NR_FPGA_SOURCES> end_seq =
-          buffer.end_seq;
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> end_seq = buffer.end_seq;
       for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
         if (buffer.is_populated[channel] ||
             !modified_since_last_completion_check[channel]) {
@@ -557,7 +553,7 @@ public:
       if (--packets_until_completion_check == 0) {
         // Before checking buffer completion drain any packets from the
         // queue that should be in this buffer
-        std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max{};
+        std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
         get_global_max_packet_array(global_max);
         {
           std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
@@ -615,7 +611,7 @@ public:
         break;
       }
 
-      std::array<unsigned long long, T::NR_FPGA_SOURCES> global_max{};
+      std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
       get_global_max_packet_array(global_max);
       auto [start, end] = worker_tasks[worker_id];
       lock.unlock();
@@ -798,7 +794,7 @@ private:
 
   struct BufferOrder {
     int index;
-    unsigned long long start_seq;
+    uint64_t start_seq;
 
     // Compare to make the priority queue a min-heap based on start_seq
     bool operator>(const BufferOrder &other) const {
@@ -808,7 +804,7 @@ private:
 
   struct PacketOrder {
     int index;
-    unsigned long long packet_num;
+    uint64_t packet_num;
 
     bool operator>(const PacketOrder &other) const {
       return packet_num > other.packet_num;
@@ -832,8 +828,7 @@ private:
                       std::greater<BufferOrder>>
       buffer_ordering_queue;
   std::condition_variable buffer_available_cv;
-  std::array<std::atomic<unsigned long long>, T::NR_FPGA_SOURCES>
-      global_max_end_seq{0};
+  std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
   std::array<std::once_flag, T::NR_FPGA_SOURCES> buffer_init_flag;
 
   std::mutex latest_packet_mutex;
@@ -966,8 +961,8 @@ public:
     int res;
 
     // Statistics
-    unsigned long long total_packets = 0;
-    unsigned long long total_bytes = 0;
+    uint64_t total_packets = 0;
+    uint64_t total_bytes = 0;
     auto start_time = std::chrono::steady_clock::now();
     auto last_stats_time = start_time;
 
@@ -1151,8 +1146,8 @@ public:
     int res;
 
     // Statistics
-    unsigned long long total_packets = 0;
-    unsigned long long total_bytes = 0;
+    uint64_t total_packets = 0;
+    uint64_t total_bytes = 0;
     auto start_time = std::chrono::steady_clock::now();
     auto last_stats_time = start_time;
 
