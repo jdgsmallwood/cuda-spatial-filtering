@@ -273,8 +273,8 @@ __global__ void detect_and_downsample_multi_channel_fft(
   const int out_freq_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int rx_idx = blockIdx.y;
   const int chan_pol_idx = blockIdx.z;
-  const int chan = chan_pol_idx % NR_POLARIZATIONS;
-  const int pol = chan_pol_idx / NR_POLARIZATIONS;
+  const int chan = chan_pol_idx / NR_POLARIZATIONS;
+  const int pol = chan_pol_idx % NR_POLARIZATIONS;
 
   if (out_freq_idx >= num_output_freqs || rx_idx >= NR_RECEIVERS)
     return;
