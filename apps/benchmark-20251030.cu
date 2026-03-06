@@ -224,7 +224,7 @@ int main(int argc, char *argv[]) {
   spatial::Logger::set(app_logger);
 
   constexpr int num_buffers = NR_OBSERVING_BUFFERS;
-  constexpr int nr_fpga_sources = 2;//NR_OBSERVING_FPGA_SOURCES;
+  constexpr int nr_fpga_sources = NR_OBSERVING_FPGA_SOURCES;
   constexpr size_t num_packet_buffers = 24;
   constexpr int num_lambda_channels = NR_OBSERVING_CHANNELS;
   constexpr int nr_lambda_polarizations = 2;
