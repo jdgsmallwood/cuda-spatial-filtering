@@ -225,7 +225,8 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_PACKETS_FOR_CORRELATION_T, size_t NR_BEAMS_T,
           size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T,
           size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T,
-          bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false>
+          bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false,
+          size_t FFT_DOWNSAMPLE_FACTOR_T = 64>
 struct LambdaConfig {
 
   static constexpr size_t NR_CHANNELS = NR_CHANNELS_T;
@@ -318,8 +319,22 @@ struct LambdaConfig {
                                                  NR_PACKETS_FOR_CORRELATION];
   using FFTCUFFTOutputType = float2[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
                                                   NR_PACKETS_FOR_CORRELATION];
-  constexpr static int FFT_DOWNSAMPLE_FACTOR = 64;
+
+  using MultiChannelFFTCUFFTInputType =
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
+  using MultiChannelFFTCUFFTOutputType =
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
+  constexpr static int FFT_DOWNSAMPLE_FACTOR = FFT_DOWNSAMPLE_FACTOR_T;
   using FFTOutputType =
       float[NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
+            FFT_DOWNSAMPLE_FACTOR];
+  using AntennaFFTOutputType =
+      float[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
+                          NR_PACKETS_FOR_CORRELATION / FFT_DOWNSAMPLE_FACTOR];
+  using MultiChannelAntennaFFTOutputType =
+      float[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+           [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
 };

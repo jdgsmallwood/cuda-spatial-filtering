@@ -285,11 +285,13 @@ int main(int argc, char *argv[]) {
   //     std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
   //                                           Config::EigenvectorOutputType>>();
 
-  auto fft_writer = std::make_unique<HDF5FFTWriter<Config::FFTOutputType>>(
-      output_file, min_freq_channel,
-      min_freq_channel + NR_OBSERVING_CHANNELS - 1, &antenna_mapping);
+  auto fft_writer =
+      std::make_unique<HDF5FFTWriter<Config::MultiChannelAntennaFFTOutputType>>(
+          output_file, min_freq_channel,
+          min_freq_channel + NR_OBSERVING_CHANNELS - 1, &antenna_mapping);
 
-  auto output = std::make_shared<BufferedOutput<Config>>(
+  auto output = std::make_shared<
+      BufferedOutput<Config, Config::MultiChannelAntennaFFTOutputType>>(
       nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
 
   LambdaAntennaSpectraPipeline<Config> pipeline(num_buffers);

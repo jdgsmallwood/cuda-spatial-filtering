@@ -144,11 +144,11 @@ public:
   };
 };
 
-template <typename T> class BufferedOutput : public Output {
+template <typename T, typename FFTOutput = typename T::FFTOutputType>
+class BufferedOutput : public Output {
 public:
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
-  using FFTOutput = typename T::FFTOutputType;
   struct BeamBlock {
     typename T::BeamOutputType beam_data;
     typename T::ArrivalsOutputType arrival_data;
@@ -205,9 +205,8 @@ public:
       std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
                                   typename T::EigenvectorOutputType>>
           eigen_writer,
-      std::unique_ptr<FFTWriter<typename T::FFTOutputType>> fft_writer,
-      size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size,
-      size_t fft_buffer_size)
+      std::unique_ptr<FFTWriter<FFTOutput>> fft_writer, size_t beam_buffer_size,
+      size_t vis_buffer_size, size_t eigen_buffer_size, size_t fft_buffer_size)
       : beam_writer_(std::move(beam_writer)),
         vis_writer_(std::move(vis_writer)),
         eigen_writer_(std::move(eigen_writer)),
@@ -475,7 +474,7 @@ private:
   std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
                               typename T::EigenvectorOutputType>>
       eigen_writer_;
-  std::unique_ptr<FFTWriter<typename T::FFTOutputType>> fft_writer_;
+  std::unique_ptr<FFTWriter<FFTOutput>> fft_writer_;
 
   cuda_util::PinnedVector<BeamBlock> beam_blocks_;
   cuda_util::PinnedVector<VisBlock> vis_blocks_;

@@ -1134,7 +1134,6 @@ private:
   static constexpr int COMPLEX = 2;
 
   inline static const __half alpha = __float2half(1.0f);
-  static constexpr float alpha_32 = 1.0f;
 
   // a = unpadded baselines
   // b = block
@@ -1157,27 +1156,8 @@ private:
                                                   'n', 'p', 'z'};
   // o and u need to end up together and will be interpreted as b x t in the
   // next transformation. Similarly f x n = r in next transformation.
-  inline static const std::vector<int> modePacketPadding{'f', 'n', 'c', 'o',
-                                                         'u', 'p', 'z'};
-  inline static const std::vector<int> modePacketPadded{'d', 'c', 'b',
-                                                        't', 'p', 'z'};
-  inline static const std::vector<int> modeCorrelatorInput{'c', 'b', 'd',
-                                                           'p', 't', 'z'};
-  inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'f',
-                                                  'n', 'o', 'u'};
   inline static const std::vector<int> modeCUFFTInput{'c', 'p', 'f', 'n',
                                                       'o', 'u', 'z'};
-  // We need the planar samples matrix to be in column-major memory layout
-  // which is equivalent to transposing time and receiver structure here.
-  // We also squash the b,t axes into s = block * time
-  // CCGLIB requires that we have BLOCK x COMPLEX x COL x ROW structure.
-  inline static const std::vector<int> modePlanarCons = {'c', 'p', 'z',
-                                                         'f', 'n', 's'};
-  inline static const std::vector<int> modePlanarColMajCons = {'c', 'p', 'z',
-                                                               's', 'f', 'n'};
-  // Convert back to interleaved instead of planar output.
-  // This is not strictly necessary to do in the pipeline.
-
   inline static const std::unordered_map<int, int64_t> extent = {
 
       {'b', NR_BLOCKS_FOR_CORRELATION},
@@ -1197,7 +1177,6 @@ private:
   };
 
   CutensorSetup tensor_16;
-  CutensorSetup tensor_32;
 
   int current_buffer;
   std::atomic<int> last_frame_processed;
@@ -1208,10 +1187,12 @@ private:
       d_samples_padding;
   std::vector<typename T::FFTCUFFTPreprocessingType *>
       d_samples_cufft_preprocessing;
-  std::vector<typename T::FFTCUFFTInputType *> d_samples_cufft_input;
-  std::vector<typename T::FFTCUFFTOutputType *> d_samples_cufft_output;
-  std::vector<typename T::FFTOutputType *> d_cufft_downsampled_output;
-  std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj;
+  std::vector<typename T::MultiChannelFFTCUFFTInputType *>
+      d_samples_cufft_input;
+  std::vector<typename T::MultiChannelFFTCUFFTOutputType *>
+      d_samples_cufft_output;
+  std::vector<typename T::MultiChannelAntennaFFTOutputType *>
+      d_cufft_downsampled_output;
   std::vector<typename T::PacketScalesType *> d_scales;
 
   int fft_start_seq_num;
@@ -1276,29 +1257,34 @@ public:
         (__half *)d_samples_cufft_preprocessing[current_buffer],
         streams[current_buffer]);
 
-    get_data_for_fft_launch<typename T::FFTCUFFTPreprocessingType,
-                            typename T::FFTCUFFTInputType>(
+    // convert to float
+    get_data_for_multi_channel_fft_launch<
+        typename T::FFTCUFFTPreprocessingType,
+        typename T::MultiChannelFFTCUFFTInputType>(
         (typename T::FFTCUFFTPreprocessingType *)
             d_samples_cufft_preprocessing[current_buffer],
         d_samples_cufft_input[current_buffer], T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, NR_TIME_STEPS_FOR_CORRELATION, T::NR_RECEIVERS, -1,
-        -1, streams[current_buffer]);
+        T::NR_POLARIZATIONS, NR_TIME_STEPS_FOR_CORRELATION, T::NR_RECEIVERS,
+        streams[current_buffer]);
 
     CUFFT_CHECK(cufftXtExec(
         fft_plan[current_buffer], (void *)d_samples_cufft_input[current_buffer],
         (void *)d_samples_cufft_output[current_buffer], CUFFT_FORWARD));
 
-    detect_and_average_fft_launch<typename T::FFTCUFFTOutputType,
-                                  typename T::FFTOutputType>(
+    detect_and_downsample_multi_channel_fft_launch<
+        typename T::MultiChannelFFTCUFFTOutputType,
+        typename T::MultiChannelAntennaFFTOutputType>(
         d_samples_cufft_output[current_buffer],
-        d_cufft_downsampled_output[current_buffer],
+        d_cufft_downsampled_output[current_buffer], T::NR_CHANNELS,
+        T::NR_POLARIZATIONS,
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
         T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer]);
     // Output handling
     if (output_ != nullptr && !dummy_run) {
+      // -1, -1 is required but not used. Interface allows for single channel /
+      // pol to be passed but this implementation does not use it.
       size_t fft_block_num =
           output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
-      // memcpy arrivals
       auto *fft_output_pointer =
           (void *)output_->get_fft_landing_pointer(fft_block_num);
       cudaMemcpyAsync(fft_output_pointer,
@@ -1320,17 +1306,16 @@ public:
   }
   LambdaAntennaSpectraPipeline(const int num_buffers)
 
-      : num_buffers(num_buffers), tensor_16(extent, CUTENSOR_R_16F, 128),
-        tensor_32(extent, CUTENSOR_R_32F, 128)
+      : num_buffers(num_buffers), tensor_16(extent, CUTENSOR_R_16F, 128)
 
   {
     std::cout << "Spectra Analyzer instantiated with NR_CHANNELS: "
-              << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_PADDED_RECEIVERS
+              << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS
               << ", NR_SAMPLES_PER_CHANNEL: "
               << NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK
               << ", NR_TIMES_PER_BLOCK: " << NR_TIMES_PER_BLOCK
-              << ", NR_BLOCKS_FOR_CORRELATION: " << NR_BLOCKS_FOR_CORRELATION
+              << ", NR_BLOCKS_FOR_FFT: " << NR_BLOCKS_FOR_CORRELATION
               << std::endl;
 
     streams.resize(2 * num_buffers);
@@ -1342,8 +1327,6 @@ public:
     d_samples_cufft_preprocessing.resize(num_buffers);
     d_cufft_downsampled_output.resize(num_buffers);
     d_samples_cufft_output.resize(num_buffers);
-    d_samples_consolidated.resize(num_buffers);
-    d_samples_consolidated_col_maj.resize(num_buffers);
 
     fft_plan.resize(num_buffers);
     d_cufft_work_area.resize(num_buffers);
@@ -1361,44 +1344,25 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_preprocessing[i],
                             sizeof(typename T::FFTCUFFTPreprocessingType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_input[i],
-                            sizeof(typename T::FFTCUFFTInputType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_output[i],
-                            sizeof(typename T::FFTCUFFTOutputType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_cufft_downsampled_output[i],
-                            sizeof(typename T::FFTOutputType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
+                            sizeof(typename T::MultiChannelFFTCUFFTInputType)));
+      CUDA_CHECK(
+          cudaMalloc((void **)&d_samples_cufft_output[i],
+                     sizeof(typename T::MultiChannelFFTCUFFTOutputType)));
+      CUDA_CHECK(
+          cudaMalloc((void **)&d_cufft_downsampled_output[i],
+                     sizeof(typename T::MultiChannelAntennaFFTOutputType)));
       CUDA_CHECK(cudaMalloc((void **)&d_scales[i],
                             sizeof(typename T::PacketScalesType)));
     }
 
     last_frame_processed = 0;
     current_buffer = 0;
-    CUdevice cu_device;
-    cuDeviceGet(&cu_device, 0);
-
     cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
-    tensor_16.addTensor(modePacketPadding, "packet_padding");
-    tensor_16.addTensor(modePacketPadded, "packet_padded");
-    tensor_16.addTensor(modeCorrelatorInput, "corr_input");
-    tensor_16.addTensor(modePlanar, "planar");
-    tensor_16.addTensor(modePlanarCons, "planarCons");
-    tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
     tensor_16.addTensor(modeCUFFTInput, "cufftInput");
 
-    tensor_16.addPermutation("packet", "packet_padding",
-                             CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
     tensor_16.addPermutation("packet", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToCUFFTInput");
-    tensor_16.addPermutation("packet_padded", "corr_input",
-                             CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
-    tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
-                             "packetToPlanar");
-    tensor_16.addPermutation("planarCons", "planarColMajCons",
-                             CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
 
     // set up CUFFT plan for fine-channelization
     const int CUFFT_RANK = 1;
@@ -1408,7 +1372,8 @@ public:
     const long long CUFFT_OSTRIDE = 1;
     const long long CUFFT_IDIST = CUFFT_FFT_SIZE;
     const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
-    const size_t NUM_TOTAL_BATCHES = T::NR_RECEIVERS;
+    const size_t NUM_TOTAL_BATCHES =
+        T::NR_RECEIVERS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
     size_t work_size = 0;
     cudaDataType input_type = CUDA_C_32F;
     cudaDataType output_type = CUDA_C_32F;
@@ -1439,7 +1404,6 @@ public:
     // these need to be set after the dummy run.
     fft_start_seq_num = -1;
     fft_end_seq_num = -1;
-    // visibilities_missing_packets = 0;
   };
   ~LambdaAntennaSpectraPipeline() {
     // If there are visibilities in the accumulator on the GPU - dump them
@@ -1458,10 +1422,6 @@ public:
       cudaFree(scale);
     }
 
-    for (auto samples_padding : d_samples_padding) {
-      cudaFree(samples_padding);
-    }
-
     for (auto samples_half : d_samples_half) {
       cudaFree(samples_half);
     }
@@ -1478,14 +1438,6 @@ public:
     }
     for (auto cufft : d_cufft_downsampled_output) {
       cudaFree(cufft);
-    }
-
-    for (auto samples_consolidated : d_samples_consolidated) {
-      cudaFree(samples_consolidated);
-    }
-
-    for (auto samples_consolidated_col_maj : d_samples_consolidated_col_maj) {
-      cudaFree(samples_consolidated_col_maj);
     }
   };
 
