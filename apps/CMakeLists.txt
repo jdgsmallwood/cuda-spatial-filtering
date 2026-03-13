@@ -31,3 +31,12 @@ target_link_libraries(fft_antenna_spectra PRIVATE spatial CUDA::cudart cuda cute
 target_compile_definitions(fft_antenna_spectra PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS})
 
 set_target_properties(fft_antenna_spectra PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(
+  beamformed_bandpass
+  ${PROJECT_SOURCE_DIR}/apps/beamformed-bandpass.cu
+)
+target_link_libraries(beamformed_bandpass PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
+target_compile_definitions(beamformed_bandpass PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS})
+
+set_target_properties(beamformed_bandpass PROPERTIES CUDA_ARCHITECTURES "native")

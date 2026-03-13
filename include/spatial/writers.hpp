@@ -2,6 +2,7 @@
 
 #include "spatial/logging.hpp"
 #include <array>
+#include <charconv>
 #include <condition_variable>
 #include <fitsio.h>
 #include <fstream>
@@ -1197,12 +1198,36 @@ private:
 
 template <typename T> class RedisFFTWriter : public FFTWriter<T> {
 public:
-  RedisFFTWriter(int num_channels, int num_receivers, int num_polarizations)
+  RedisFFTWriter(int num_channels, int num_receivers, int num_polarizations,
+                 std::string prefix = "")
       : element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
         redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
-        NR_RECEIVERS(num_receivers), NR_POLARIZATIONS(num_polarizations) {
+        NR_RECEIVERS(num_receivers), NR_POLARIZATIONS(num_polarizations),
+        prefix(prefix) {
     fft_dims_ = get_array_dims<T>();
+    precomputed_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS);
+    precomputed_max_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS);
+
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int f = 0; f < NR_FREQS; ++f) {
+          // Apply the frequency shift (F/2) during pre-caching
+          // so we don't calculate it during the hot loop.
+          int f_shifted = (f + NR_FREQS / 2) % NR_FREQS;
+
+          std::string key = prefix + "ts:fft:ch:" + std::to_string(ch) +
+                            ":p:" + std::to_string(pol) +
+                            ":f:" + std::to_string(f_shifted);
+
+          std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
+                                ":p:" + std::to_string(pol) +
+                                ":f:" + std::to_string(f);
+          precomputed_keys[get_key_index(ch, pol, f)] = key;
+          precomputed_max_keys[get_key_index(ch, pol, f)] = max_key;
+        }
+      }
+    }
 
     NR_FREQS = fft_dims_[0];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
@@ -1218,25 +1243,20 @@ public:
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
-
-    LOG_INFO("writing fft block {} to {}", start_seq, end_seq);
+    std::string ts_str = std::to_string(ts);
 
     std::vector<std::string> madd_args = {"TS.MADD"};
 
     int ch = channel_idx;
     int pol = pol_idx;
     const int F = NR_FREQS;
-    // There will be a little left over.
     for (int f = 0; f < F; ++f) {
       const auto &cval = fft_data[0][f];
 
       int f_shifted = (f + F / 2) % F;
-      std::string key = "ts:fft:ch:" + std::to_string(ch) +
-                        ":p:" + std::to_string(pol) +
-                        ":f:" + std::to_string(f_shifted);
 
-      madd_args.push_back(key);
-      madd_args.push_back(std::to_string(ts));
+      madd_args.push_back(precomputed_keys[get_key_index(ch, pol, f_shifted)]);
+      madd_args.push_back(ts_str);
       madd_args.push_back(std::to_string(cval));
     }
 
@@ -1248,19 +1268,18 @@ public:
   void flush() override {}
 
 private:
+  inline size_t get_key_index(int ch, int pol, int f) const {
+    return static_cast<size_t>(ch) * (NR_POLARIZATIONS * NR_FREQS) +
+           static_cast<size_t>(pol) * NR_FREQS + static_cast<size_t>(f);
+  }
+  std::string prefix;
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
-
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int f = 0; f < NR_FREQS; ++f) {
-
-          std::string key = "ts:fft:ch:" + std::to_string(ch) +
-                            ":p:" + std::to_string(pol) +
-                            ":f:" + std::to_string(f);
-          std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
-                                ":p:" + std::to_string(pol) +
-                                ":f:" + std::to_string(f);
+          auto key = precomputed_keys[get_key_index(ch, pol, f)];
+          auto max_key = precomputed_max_keys[get_key_index(ch, pol, f)];
 
           std::vector<std::string> args = {"TS.CREATE",
                                            key,
@@ -1316,28 +1335,172 @@ private:
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
   int NR_FREQS;
+  std::vector<std::string> precomputed_keys;
+  std::vector<std::string> precomputed_max_keys;
 };
 
-// Factory function for easy creation
-// template <typename T>
-// std::unique_ptr<BufferedOutput<T>>
-// create_hdf5_output(const std::string &filename, size_t beam_buffer_size,
-//                   size_t vis_buffer_size) {
-//  auto file =
-//      std::make_shared<HighFive::File>(filename, HighFive::File::Truncate);
-//
-//  auto beam_writer =
-//      std::make_unique<HDF5BeamWriter<typename T::BeamOutputType,
-//                                      typename T::ArrivalOutputType>>(*file);
-//  auto vis_writer = std::make_unique<
-//      HDF5VisibilitiesWriter<typename T::VisibilitiesOutputType>>(*file);
-//
-//  return std::make_unique<BufferedOutput<T>>(std::move(beam_writer),
-//                                             std::move(vis_writer),
-//                                             beam_buffer_size,
-//                                             vis_buffer_size);
-//}
-//
+template <typename T> class RedisBeamFFTWriter : public FFTWriter<T> {
+public:
+  RedisBeamFFTWriter(int num_channels, int num_beams, int num_polarizations,
+                     std::string prefix = "")
+      : element_count_(sizeof(T) /
+                       sizeof(typename std::remove_all_extents<T>::type)),
+        redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
+        NR_BEAMS(num_beams), NR_POLARIZATIONS(num_polarizations),
+        prefix(prefix) {
+    fft_dims_ = get_array_dims<T>();
+    precomputed_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS *
+                            NR_BEAMS);
+    precomputed_max_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS *
+                                NR_BEAMS);
+
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int beam = 0; beam < NR_BEAMS; beam++) {
+          for (int f = 0; f < NR_FREQS; ++f) {
+            // Apply the frequency shift (F/2) during pre-caching
+            // so we don't calculate it during the hot loop.
+            int f_shifted = (f + NR_FREQS / 2) % NR_FREQS;
+
+            std::string key = prefix + "ts:fft:ch:" + std::to_string(ch) +
+                              ":p:" + std::to_string(pol) +
+                              ":f:" + std::to_string(f_shifted);
+
+            std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
+                                  ":p:" + std::to_string(pol) +
+                                  ":f:" + std::to_string(f);
+            precomputed_keys[get_key_index(ch, pol, beam, f)] = key;
+            precomputed_max_keys[get_key_index(ch, pol, beam, f)] = max_key;
+          }
+        }
+      }
+    }
+
+    NR_FREQS = fft_dims_[0];
+    std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
+              << ", NR_BEAMS:" << NR_BEAMS << ", NR_FREQS: " << NR_FREQS
+              << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
+    create_all_timeseries_keys();
+  }
+
+  void write_fft_block(const T *fft_data, const int start_seq,
+                       const int end_seq, const int channel_idx,
+                       const int pol_idx) override {
+
+    long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+    std::string ts_str = std::to_string(ts);
+    char float_buf[32];
+    std::vector<std::string> madd_args;
+    madd_args.reserve(1 +
+                      NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
+
+    madd_args.push_back("TS.MADD");
+    int ch = channel_idx;
+    int pol = pol_idx;
+    const int F = NR_FREQS;
+    for (int f = 0; f < F; ++f) {
+      int f_shifted = (f + F / 2) % F;
+      for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+          for (int beam = 0; beam < NR_BEAMS; ++beam) {
+            const auto &cval = fft_data[0][ch][pol][beam][f];
+
+            madd_args.push_back(
+                precomputed_keys[get_key_index(ch, pol, beam, f_shifted)]);
+            madd_args.push_back(ts_str);
+            madd_args.push_back(std::to_string(cval));
+          }
+        }
+      }
+    }
+    if (madd_args.size() > 1) {
+      redis.command(madd_args.begin(), madd_args.end());
+    }
+  }
+
+  void flush() override {}
+
+private:
+  inline size_t get_key_index(int ch, int pol, int beam, int f) const {
+    return static_cast<size_t>(ch) * (NR_POLARIZATIONS * NR_FREQS * NR_BEAMS) +
+           static_cast<size_t>(pol) * (NR_FREQS * NR_BEAMS) +
+           static_cast<size_t>(beam) * NR_FREQS + static_cast<size_t>(f);
+  }
+  std::string prefix;
+  void create_all_timeseries_keys() {
+    std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int beam = 0; beam < NR_BEAMS; ++beam) {
+          for (int f = 0; f < NR_FREQS; ++f) {
+            auto key = precomputed_keys[get_key_index(ch, pol, beam, f)];
+            auto max_key =
+                precomputed_max_keys[get_key_index(ch, pol, beam, f)];
+
+            std::vector<std::string> args = {"TS.CREATE",
+                                             key,
+                                             "RETENTION",
+                                             "60000",
+                                             "LABELS",
+                                             "type",
+                                             "raw",
+                                             "channel",
+                                             std::to_string(ch),
+                                             "polarization",
+                                             std::to_string(pol),
+                                             "freq",
+                                             std::to_string(f),
+                                             "beam",
+                                             std::to_string(beam),
+                                             "component",
+                                             "bandpass"};
+
+            std::vector<std::string> max_args = {"TS.CREATE",
+                                                 max_key,
+                                                 "RETENTION",
+                                                 "0",
+                                                 "LABELS",
+                                                 "type",
+                                                 "aggregated",
+                                                 "channel",
+                                                 std::to_string(ch),
+                                                 "polarization",
+                                                 std::to_string(pol),
+                                                 "freq",
+                                                 std::to_string(f),
+                                                 "beam",
+                                                 std::to_string(beam),
+                                                 "component",
+                                                 "bandpass_max1s"};
+
+            std::vector<std::string> rule_args = {
+                "TS.CREATERULE", key, max_key, "AGGREGATION", "max", "1000"};
+            try {
+              redis.command(args.begin(), args.end());
+              redis.command(max_args.begin(), max_args.end());
+              redis.command(rule_args.begin(), rule_args.end());
+            } catch (const std::exception &e) {
+              LOG_ERROR("Error creating key {}: {}", key, e.what());
+            }
+          }
+        }
+      }
+    }
+
+    std::cout << "FFT TimeSeries key creation complete." << std::endl;
+  };
+  size_t element_count_;
+  std::vector<size_t> fft_dims_;
+  sw::redis::Redis redis;
+  int NR_CHANNELS;
+  int NR_POLARIZATIONS;
+  int NR_BEAMS;
+  int NR_FREQS;
+  std::vector<std::string> precomputed_keys;
+  std::vector<std::string> precomputed_max_keys;
+};
 
 template <typename T, size_t N> constexpr size_t array_dimension() { return N; }
 
@@ -1711,8 +1874,8 @@ public:
     if (count_ == capacity_) {
       // Overwrite oldest
       start_index_ = (start_index_ + 1) % capacity_;
-      LOG_INFO(
-          "[InMemoryRawBeamWriter] Buffer full, overwriting oldest block.");
+      LOG_INFO("[InMemoryRawBeamWriter] Buffer full, overwriting oldest "
+               "block.");
     } else {
       ++count_;
     }
@@ -1886,11 +2049,12 @@ private:
       int a1 = bl1_[b];
       int a2 = bl2_[b];
 
-      // NOTE: antpos_ must be defined/filled for this to compile/work correctly
-      // double uu = antpos_[3 * a2] - antpos_[3 * a1];
-      // double vv = antpos_[3 * a2 + 1] - antpos_[3 * a1 + 1];
-      // double ww = antpos_[3 * a2 + 2] - antpos_[3 * a1 + 2];
-      // Using dummy values for demonstration since antpos_ is commented out
+      // NOTE: antpos_ must be defined/filled for this to compile/work
+      // correctly double uu = antpos_[3 * a2] - antpos_[3 * a1]; double
+      // vv = antpos_[3 * a2 + 1] - antpos_[3 * a1 + 1]; double ww =
+      // antpos_[3 * a2
+      // + 2] - antpos_[3 * a1 + 2]; Using dummy values for demonstration
+      // since antpos_ is commented out
       double uu = 0.0, vv = 0.0, ww = 0.0;
 
       fits_write_col(fptr_, TDOUBLE, 1, row_counter_, 1, 1, &uu, &status);
@@ -1929,7 +2093,8 @@ private:
   }
 
   void error(int status, const char *msg) {
-    // fits_report_error(stderr, status); // Disabled for cleaner output here
+    // fits_report_error(stderr, status); // Disabled for cleaner output
+    // here
     throw std::runtime_error("CFITSIO: " + std::string(msg));
   }
 
@@ -1964,8 +2129,8 @@ public:
     // 1. Setup the MS Definition
     casacore::TableDesc td = casacore::MS::requiredTableDesc();
     casacore::MS::addColumnToDesc(
-        td, casacore::MS::DATA); // Add DATA column (Standard MS doesn't imply
-                                 // DATA/CORRECTED_DATA by default)
+        td, casacore::MS::DATA); // Add DATA column (Standard MS doesn't
+                                 // imply DATA/CORRECTED_DATA by default)
 
     casacore::SetupNewTable newTab(filename, td, casacore::Table::New);
 
@@ -1976,7 +2141,8 @@ public:
     setup_subtables();
 
     // 4. Initialize Columns accessors
-    // We use MSMainColumns for convenience, or individual column accessors
+    // We use MSMainColumns for convenience, or individual column
+    // accessors
     msc_ = std::make_unique<casacore::MSColumns>(*ms_);
 
     // Handle Antenna Map
@@ -2027,9 +2193,11 @@ public:
       msc_->antenna1().put(row_idx, pair.first);
       msc_->antenna2().put(row_idx, pair.second);
       msc_->time().put(row_idx, unix_timestamp + UNIX_TO_MJD_SECONDS);
-      msc_->interval().put(row_idx, 1.0); // 1 second integration placeholder
+      msc_->interval().put(row_idx,
+                           1.0); // 1 second integration placeholder
       msc_->scanNumber().put(row_idx, 1);
-      msc_->fieldId().put(row_idx, 0); // Pointing to index 0 in Field table
+      msc_->fieldId().put(row_idx,
+                          0); // Pointing to index 0 in Field table
       msc_->dataDescId().put(row_idx,
                              0); // Pointing to index 0 in DataDesc table
 
