@@ -128,7 +128,7 @@ int main() {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(5, &h_weights);
+  LambdaCorrBeamOnlyGPUPipeline<Config> pipeline(5, &h_weights);
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
