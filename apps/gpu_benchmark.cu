@@ -11,17 +11,22 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <thread>
 
-constexpr size_t NR_CHANNELS = 8;
-constexpr size_t NR_FPGA_SOURCES = 1;
-constexpr size_t NR_RECEIVERS = 40;
-constexpr size_t NR_RECEIVERS_PER_PACKET = NR_RECEIVERS;
+#ifndef NUMBER_BEAMS
+#define NUMBER_BEAMS 10
+#endif
+constexpr size_t NR_CHANNELS = NR_OBSERVING_CHANNELS;
+constexpr size_t NR_FPGA_SOURCES = NR_OBSERVING_FPGA_SOURCES;
+constexpr size_t NR_RECEIVERS_PER_PACKET = NR_OBSERVING_RECEIVERS_PER_PACKET;
+constexpr size_t NR_RECEIVERS = NR_RECEIVERS_PER_PACKET * NR_FPGA_SOURCES;
 constexpr size_t NR_TIME_STEPS_PER_PACKET = 64;
 constexpr size_t NR_POLARIZATIONS = 2;
-constexpr size_t NR_BEAMS = 1;
-constexpr size_t NR_PADDED_RECEIVERS = 64;
+constexpr size_t NR_BEAMS = NUMBER_BEAMS;
+constexpr size_t NR_PADDED_RECEIVERS = NR_OBSERVING_PADDED_RECEIVERS;
 constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = 32;
-constexpr size_t NR_PACKETS_FOR_CORRELATION = 128;
-constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 100000;
+constexpr size_t NR_PACKETS_FOR_CORRELATION =
+    NR_OBSERVING_PACKETS_FOR_CORRELATION;
+constexpr size_t NR_VISIBILITIES_BEFORE_DUMP =
+    NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE;
 using Config =
     LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
