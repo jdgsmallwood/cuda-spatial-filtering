@@ -310,3 +310,54 @@ void detect_and_downsample_multi_channel_fft_launch(
                            NR_POLARIZATIONS, NR_FREQS, NR_RECEIVERS,
                            DOWNSAMPLE_FACTOR);
 }
+
+__global__ void detect_and_downsample_fft(
+    const float2 *__restrict__ cufft_data, float *__restrict__ output_data,
+    const int NR_CHANNELS, const int NR_POLARIZATIONS, const int NR_FREQS,
+    const int NR_BEAMS, const int DOWNSAMPLE_FACTOR) {
+  const int num_output_freqs = NR_FREQS / DOWNSAMPLE_FACTOR;
+
+  // Flattened 3D Grid: x = output frequencies, y = receivers, z = channels *
+  // pols
+  const int out_freq_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int beam_idx = blockIdx.y;
+  const int chan_pol_idx = blockIdx.z;
+  const int chan = chan_pol_idx / NR_POLARIZATIONS;
+  const int pol = chan_pol_idx % NR_POLARIZATIONS;
+
+  if (out_freq_idx >= num_output_freqs || beam_idx >= NR_BEAMS)
+    return;
+
+  float sum = 0.0f;
+  int count = 0;
+
+  const int start_f = out_freq_idx * DOWNSAMPLE_FACTOR;
+  const int base_pointer = chan * NR_POLARIZATIONS * NR_BEAMS * NR_FREQS +
+                           pol * NR_BEAMS * NR_FREQS + beam_idx * NR_FREQS;
+  for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
+    float2 in = cufft_data[base_pointer + start_f + j];
+    float val = sqrtf(in.x * in.x + in.y * in.y);
+
+    if (!isnan(val)) {
+      sum += val;
+      count++;
+    }
+  }
+
+  float final_val = (count > 0) ? (sum / (float)count) : 0.0f;
+
+  output_data[base_pointer + out_freq_idx] = final_val;
+}
+
+void detect_and_downsample_fft_launch(const float2 *cufft_data,
+                                      float *output_data, const int NR_CHANNELS,
+                                      const int NR_POLARIZATIONS,
+                                      const int NR_FREQS, const int NR_BEAMS,
+                                      const int DOWNSAMPLE_FACTOR,
+                                      cudaStream_t stream) {
+  detect_and_downsample_fft<<<dim3((NR_FREQS / DOWNSAMPLE_FACTOR + 255) / 256,
+                                   NR_BEAMS, NR_CHANNELS * NR_POLARIZATIONS),
+                              256, 0, stream>>>(
+      cufft_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
+      NR_BEAMS, DOWNSAMPLE_FACTOR);
+}
