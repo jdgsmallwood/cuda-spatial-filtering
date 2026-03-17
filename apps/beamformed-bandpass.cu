@@ -39,25 +39,6 @@ void signal_handler(int signal) {
   running = false;
 }
 
-std::string make_default_filename(const int min_freq_channel,
-                                  const int num_channels,
-                                  const std::vector<int> fpga_ids) {
-  // timestamp
-  auto now = std::chrono::system_clock::now();
-  std::time_t t = std::chrono::system_clock::to_time_t(now);
-  std::tm tm = *std::localtime(&t);
-
-  std::ostringstream oss;
-  oss << "antenna_spectra_";
-  oss << std::put_time(&tm, "%Y%m%d-%H%M") << "_" << min_freq_channel << "_"
-      << min_freq_channel + num_channels - 1;
-  for (auto id : fpga_ids) {
-    oss << "_ALVEO" << id;
-  }
-  oss << ".hdf5";
-  return oss.str();
-}
-
 std::vector<std::string> split_ifnames(const std::string &ifname) {
   std::vector<std::string> result;
   std::stringstream ss(ifname);
@@ -272,15 +253,18 @@ int main(int argc, char *argv[]) {
   for (const auto &[key, val] : antenna_mapping) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
-  std::string vis_file = "";
 
+  std::cout << "Creating FFT Writer" << std::endl;
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
       Config::NR_CHANNELS, nr_lambda_beams, Config::NR_POLARIZATIONS,
       "beam-fft:");
 
+  std::cout << "Creating Output Handler\n";
+
   auto output = std::make_shared<BufferedOutput<Config, FFTOutputType>>(
       nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
 
+  std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
 
   for (auto i = 0; i < num_lambda_channels; ++i) {
@@ -294,12 +278,13 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  std::cout << "Initializing pipeline...\n";
   LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &h_weights);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
-
+  std::cout << "Initializing packet capture...\n";
   std::vector<std::unique_ptr<PacketInput>> capture;
 
   if (!pcap_filename.empty()) {
@@ -312,7 +297,7 @@ int main(int argc, char *argv[]) {
     }
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
-  LOG_INFO("Starting threads....");
+  std::cout << "Starting threads...\n";
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < capture.size(); ++i) {
     receiver_threads.emplace_back(
