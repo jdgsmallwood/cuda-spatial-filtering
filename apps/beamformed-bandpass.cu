@@ -241,10 +241,6 @@ int main(int argc, char *argv[]) {
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel, &fpga_ids);
 
-  if (!program.is_used("-v")) {
-    output_filename = make_default_filename(min_freq_channel,
-                                            num_lambda_channels, fpga_id_vec);
-  }
   AntennaMapRegistry registry;
 
   std::unordered_map<int, int> antenna_mapping =
