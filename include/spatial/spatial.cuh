@@ -346,7 +346,10 @@ __global__ void detect_and_downsample_fft(
 
   float final_val = (count > 0) ? (sum / (float)count) : 0.0f;
 
-  output_data[base_pointer + out_freq_idx] = final_val;
+  const int output_base_pointer =
+      chan * NR_POLARIZATIONS * NR_BEAMS * num_output_freqs +
+      pol * NR_BEAMS * num_output_freqs + beam_idx * num_output_freqs;
+  output_data[output_base_pointer + out_freq_idx] = final_val;
 }
 
 void detect_and_downsample_fft_launch(const float2 *cufft_data,
