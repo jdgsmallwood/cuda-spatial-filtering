@@ -1826,7 +1826,7 @@ public:
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
     tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
-    tensor_16.addTensor(modeCUFFTInput, "cufftInput");
+    tensor_32.addTensor(modeCUFFTInput, "cufftInput");
 
     tensor_16.addTensor(modeWeightsInput, "weightsInput");
     tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
