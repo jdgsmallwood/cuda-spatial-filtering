@@ -1349,7 +1349,7 @@ public:
         NR_BEAMS(num_beams), NR_POLARIZATIONS(num_polarizations),
         prefix(prefix) {
     fft_dims_ = get_array_dims<T>();
-    NR_FREQS = fft_dims_[0];
+    NR_FREQS = fft_dims_[fft_dims_.size() - 1];
 
     std::cout << "FFT Dims are ";
     for (auto dim : fft_dims_) {
