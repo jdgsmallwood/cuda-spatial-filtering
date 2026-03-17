@@ -1349,6 +1349,14 @@ public:
         NR_BEAMS(num_beams), NR_POLARIZATIONS(num_polarizations),
         prefix(prefix) {
     fft_dims_ = get_array_dims<T>();
+    NR_FREQS = fft_dims_[0];
+
+    std::cout << "FFT Dims are ";
+    for (auto dim : fft_dims_) {
+      std::cout << dim << ", ";
+    }
+    std::cout << std::endl;
+
     precomputed_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS *
                             NR_BEAMS);
     precomputed_max_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS *
@@ -1376,7 +1384,6 @@ public:
       }
     }
 
-    NR_FREQS = fft_dims_[0];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_BEAMS:" << NR_BEAMS << ", NR_FREQS: " << NR_FREQS
               << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
