@@ -1372,10 +1372,12 @@ public:
 
             std::string key = prefix + "ts:fft:ch:" + std::to_string(ch) +
                               ":p:" + std::to_string(pol) +
+                              ":b:" + std::to_string(beam) +
                               ":f:" + std::to_string(f_shifted);
 
             std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
                                   ":p:" + std::to_string(pol) +
+                                  ":b:" + std::to_string(beam) +
                                   ":f:" + std::to_string(f);
             precomputed_keys[get_key_index(ch, pol, beam, f)] = key;
             precomputed_max_keys[get_key_index(ch, pol, beam, f)] = max_key;
@@ -1398,14 +1400,11 @@ public:
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
     std::string ts_str = std::to_string(ts);
-    char float_buf[32];
     std::vector<std::string> madd_args;
     madd_args.reserve(1 +
                       NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
 
     madd_args.push_back("TS.MADD");
-    int ch = channel_idx;
-    int pol = pol_idx;
     const int F = NR_FREQS;
     for (int f = 0; f < F; ++f) {
       int f_shifted = (f + F / 2) % F;
@@ -1462,7 +1461,7 @@ private:
                                              "beam",
                                              std::to_string(beam),
                                              "component",
-                                             "bandpass"};
+                                             "beam-bandpass"};
 
             std::vector<std::string> max_args = {"TS.CREATE",
                                                  max_key,
@@ -1480,7 +1479,7 @@ private:
                                                  "beam",
                                                  std::to_string(beam),
                                                  "component",
-                                                 "bandpass_max1s"};
+                                                 "beam-bandpass_max1s"};
 
             std::vector<std::string> rule_args = {
                 "TS.CREATERULE", key, max_key, "AGGREGATION", "max", "1000"};

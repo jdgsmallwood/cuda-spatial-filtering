@@ -1789,17 +1789,18 @@ public:
     const size_t NUM_TOTAL_BATCHES =
         T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
 
-    size_t work_size = 0;
-    {
-      // Temporary plan to calculate work_size
-      cufftHandle temp_plan;
-      CUFFT_CHECK(cufftCreate(&temp_plan));
-      CUFFT_CHECK(cufftXtMakePlanMany(temp_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
-                                      CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
-                                      CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
-                                      CUDA_C_32F));
-      cufftDestroy(temp_plan);
-    }
+    // size_t work_size = 0;
+    // {
+    //   // Temporary plan to calculate work_size
+    //   cufftHandle temp_plan;
+    //   CUFFT_CHECK(cufftCreate(&temp_plan));
+    //   CUFFT_CHECK(cufftXtMakePlanMany(temp_plan, 1, N, NULL, 1,
+    //   CUFFT_FFT_SIZE,
+    //                                   CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
+    //                                   CUDA_C_32F, NUM_TOTAL_BATCHES,
+    //                                   &work_size, CUDA_C_32F));
+    //   cufftDestroy(temp_plan);
+    // }
 
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
@@ -1826,11 +1827,11 @@ public:
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
     tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
-    tensor_32.addTensor(modeCUFFTInput, "cufftInput");
 
     tensor_16.addTensor(modeWeightsInput, "weightsInput");
     tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
 
+    tensor_32.addTensor(modeCUFFTInput, "cufftInput");
     tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
     tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToPlanar");
