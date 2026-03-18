@@ -454,12 +454,12 @@ int main(int argc, char *argv[]) {
   ProjectionWeightApplicator<Config> beam_weight_updater(
       "output_eigenvectors_2.hdf5");
 
-  BeamWeightsT<Config> projected = applicator.apply_latest(
+  BeamWeightsT<Config> projected = beam_weight_updater.apply_latest(
       /*beam_idx=*/1,
       /*nr_eigenvectors=*/3, h_weights);
 
   std::cout << "Initializing pipeline...\n";
-  LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &h_weights);
+  LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &projected);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
