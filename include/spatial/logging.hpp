@@ -24,11 +24,11 @@
     if (err_ != CUSOLVER_STATUS_SUCCESS) {                                     \
       printf("cusolver error %d at %s:%d\n", err_, __FILE__, __LINE__);        \
     }                                                                          \
-  } while (0)
+  } while (0);
 
 #ifndef CUFFT_CHECK
 #define CUFFT_CHECK(call)                                                      \
-  {                                                                            \
+  do {                                                                         \
     auto status = static_cast<cufftResult>(call);                              \
     if (status != CUFFT_SUCCESS)                                               \
       fprintf(stderr,                                                          \
@@ -36,7 +36,19 @@
               "with "                                                          \
               "code (%d).\n",                                                  \
               #call, __LINE__, __FILE__, status);                              \
-  }
+  } while (0);
+#endif
+
+#ifndef CUBLAS_CHECK
+#define CUBLAS_CHECK(call)                                                     \
+  do {                                                                         \
+    cublasStatus_t err = (call);                                               \
+    if (err != CUBLAS_STATUS_SUCCESS) {                                        \
+      fprintf(stderr, "cuBLAS error in %s at %s:%d (code %d)\n", #call,        \
+              __FILE__, __LINE__, err);                                        \
+      std::exit(EXIT_FAILURE);                                                 \
+    }                                                                          \
+  } while (0);
 #endif
 
 namespace spatial {

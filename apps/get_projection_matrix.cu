@@ -28,10 +28,6 @@
 #include <unistd.h>
 #include <unordered_map>
 
-#ifndef NUMBER_BEAMS
-#define NUMBER_BEAMS 1
-#endif
-
 std::atomic<bool> running{true};
 
 void signal_handler(int signal) {
@@ -99,158 +95,6 @@ public:
 
 private:
   std::unordered_map<int, std::unordered_map<int, int>> base_maps;
-};
-
-template <typename T> class ProjectionWeightApplicator {
-public:
-  static constexpr int N = T::NR_RECEIVERS;
-  static constexpr int CH = T::NR_CHANNELS;
-  static constexpr int POL = T::NR_POLARIZATIONS;
-
-  // Total number of complex<float> elements per stored eigenvector block.
-  static constexpr size_t ELEMS_PER_BLOCK =
-      static_cast<size_t>(CH) * POL * POL * N * N;
-
-  // -------------------------------------------------------------------------
-  explicit ProjectionWeightApplicator(const std::string &filename)
-      : file_(filename, HighFive::File::ReadOnly) {
-    vec_dataset_ = file_.getDataSet("projection_eigenvectors");
-    seq_dataset_ = file_.getDataSet("projection_seq_nums");
-    num_blocks_ = vec_dataset_.getDimensions()[0];
-    LOG_INFO("ProjectionWeightApplicator: opened '{}' — {} block(s) available",
-             filename, num_blocks_);
-  }
-
-  // -------------------------------------------------------------------------
-  // apply_latest
-  //
-  // Convenience wrapper: projects w using the most recently written block.
-  // -------------------------------------------------------------------------
-  BeamWeightsT<T> apply_latest(const BeamWeightsT<T> &w) const {
-    if (num_blocks_ == 0)
-      throw std::runtime_error(
-          "ProjectionWeightApplicator: no eigenvector blocks in file");
-    return apply(num_blocks_ - 1, w);
-  }
-
-  // -------------------------------------------------------------------------
-  // apply
-  //
-  // Projects w using eigenvector block at index block_idx.
-  // Returns a new BeamWeightsT<T> with the projected weights.
-  // -------------------------------------------------------------------------
-  BeamWeightsT<T> apply(const size_t block_idx,
-                        const BeamWeightsT<T> &w) const {
-    if (block_idx >= num_blocks_)
-      throw std::out_of_range(
-          "ProjectionWeightApplicator: block_idx out of range");
-
-    // Load the flat float buffer from HDF5.
-    // Stored shape: [block, CH, POL, POL, N, N] of float32.
-    // ELEMS_PER_BLOCK complex elements → 2 * ELEMS_PER_BLOCK floats.
-    std::vector<float> raw(ELEMS_PER_BLOCK * 2);
-    {
-      const std::vector<size_t> offset = {block_idx, 0, 0, 0, 0, 0};
-      const std::vector<size_t> count = {1,
-                                         static_cast<size_t>(CH),
-                                         static_cast<size_t>(POL),
-                                         static_cast<size_t>(POL),
-                                         static_cast<size_t>(N),
-                                         static_cast<size_t>(N)};
-      vec_dataset_.select(offset, count).read_raw(raw.data());
-    }
-
-    // Reinterpret as complex<float>[CH][POL][POL][N][N].
-    // cuSOLVER writes in column-major (Fortran) order, so element (row r,
-    // col k) of a matrix starting at V_batch is V_batch[k * N + r].
-    const auto *V_all =
-        reinterpret_cast<const std::complex<float> *>(raw.data());
-
-    BeamWeightsT<T> out = w;
-
-    for (int ch = 0; ch < CH; ++ch) {
-      for (int pol = 0; pol < POL; ++pol) {
-        // Diagonal pol-pol batch element: pol_r == pol_c == pol.
-        const int batch = ch * (POL * POL) + pol * POL + pol;
-        // Pointer to the N×N eigenvector matrix for this batch (col-major).
-        const std::complex<float> *V =
-            V_all + static_cast<size_t>(batch) * N * N;
-
-        for (int beam = 0; beam < T::NR_BEAMS; ++beam) {
-          // ------------------------------------------------------------------
-          // Unpack input weight vector w[ch][pol][beam][0..N-1] from
-          // complex<__half> to complex<float> for arithmetic.
-          // ------------------------------------------------------------------
-          std::vector<std::complex<float>> wvec(N);
-          for (int r = 0; r < N; ++r) {
-            const std::complex<__half> &h = w.weights[ch][pol][beam][r];
-            wvec[r] = std::complex<float>(__half2float(h.real()),
-                                          __half2float(h.imag()));
-          }
-
-          // ------------------------------------------------------------------
-          // Step 1: coeff[k] = (V^H · wvec)[k] = sum_r conj(V[r,k]) * wvec[r]
-          //
-          // V is column-major: V element (row r, col k) = V[k * N + r].
-          // V^H element (k, r)                          = conj(V[k * N + r]).
-          // ------------------------------------------------------------------
-          std::vector<std::complex<float>> coeff(N, {0.f, 0.f});
-          for (int k = 0; k < N; ++k) {
-            for (int r = 0; r < N; ++r) {
-              coeff[k] += std::conj(V[k * N + r]) * wvec[r];
-            }
-          }
-
-          // ------------------------------------------------------------------
-          // Step 2: wpvec[r] = ((I - P) * wvec)[r]
-          //                  = wvec[r] - (V * coeff)[r]
-          //                  = wvec[r] - sum_k V[r,k] * coeff[k]
-          //
-          // (I - P) projects w onto the noise subspace -- the complement of
-          // the signal subspace spanned by V.
-          //
-          // V element (row r, col k) = V[k * N + r]  (column-major).
-          // ------------------------------------------------------------------
-          std::vector<std::complex<float>> wpvec(N);
-          for (int r = 0; r < N; ++r) {
-            std::complex<float> Vcoeff = {0.f, 0.f};
-            for (int k = 0; k < N; ++k) {
-              Vcoeff += V[k * N + r] * coeff[k];
-            }
-            wpvec[r] = wvec[r] - Vcoeff;
-          }
-
-          // ------------------------------------------------------------------
-          // Pack projected weights back to complex<__half>.
-          // std::complex<__half> stores real and imaginary as consecutive
-          // __half values in memory — matching the layout of BeamWeightsT.
-          // ------------------------------------------------------------------
-          for (int r = 0; r < N; ++r) {
-            out.weights[ch][pol][beam][r] = std::complex<__half>(
-                __float2half(wpvec[r].real()), __float2half(wpvec[r].imag()));
-          }
-        }
-      }
-    }
-
-    return out;
-  }
-
-  // Number of eigenvector blocks available in the file.
-  size_t num_blocks() const { return num_blocks_; }
-
-  // Sequence numbers for a given block index.  Returns {start_seq, end_seq}.
-  std::pair<int, int> seq_nums(const size_t block_idx) const {
-    std::vector<int> seq(2);
-    seq_dataset_.select({block_idx, 0}, {1, 2}).read_raw(seq.data());
-    return {seq[0], seq[1]};
-  }
-
-private:
-  HighFive::File file_;
-  HighFive::DataSet vec_dataset_;
-  HighFive::DataSet seq_dataset_;
-  size_t num_blocks_ = 0;
 };
 
 int main(int argc, char *argv[]) {
@@ -340,25 +184,21 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
   constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
-  constexpr int nr_lambda_beams = NUMBER_BEAMS;
+  constexpr int nr_lambda_beams = 1;
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_packets_for_correlation =
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
-  constexpr int fft_downsample_factor = 64;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
-  using Config = LambdaConfig<
-      num_lambda_channels, nr_fpga_sources, nr_lambda_time_steps_per_packet,
-      nr_lambda_receivers, nr_lambda_polarizations,
-      nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
-      nr_lambda_beams, nr_lambda_padded_receivers, nr_lambda_padded_receivers,
-      nr_correlation_blocks_to_integrate, true, fft_downsample_factor>;
+  using Config =
+      LambdaConfig<num_lambda_channels, nr_fpga_sources,
+                   nr_lambda_time_steps_per_packet, nr_lambda_receivers,
+                   nr_lambda_polarizations, nr_lambda_receivers_per_packet,
+                   nr_lambda_packets_for_correlation, nr_lambda_beams,
+                   nr_lambda_padded_receivers, nr_lambda_padded_receivers,
+                   nr_correlation_blocks_to_integrate, true>;
 
-  using FFTOutputType =
-      float[NR_OBSERVING_CHANNELS][nr_lambda_polarizations][nr_lambda_beams]
-           [nr_lambda_time_steps_per_packet *
-            NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -402,32 +242,19 @@ int main(int argc, char *argv[]) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
 
-  std::cout << "Creating FFT Writer" << std::endl;
-  auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
-      Config::NR_CHANNELS, nr_lambda_beams, Config::NR_POLARIZATIONS,
-      "beam-fft:");
+  HighFive::File output_file_(output_filename, HighFive::File::Truncate);
+  std::cout << "Creating Projection Writer" << std::endl;
+  auto projection_writer = std::make_unique<HDF5ProjectionEigenWriter<
+      Config::EigenvalueOutputType, Config::EigenvectorOutputType>>(
+      output_file_);
 
   std::cout << "Creating Output Handler\n";
-
-  auto output = std::make_shared<BufferedOutput<Config, FFTOutputType>>(
-      nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
-
-  std::cout << "Loading weights...\n";
-  BeamWeightsT<Config> h_weights;
-
-  for (auto i = 0; i < num_lambda_channels; ++i) {
-    for (auto j = 0; j < nr_lambda_receivers; ++j) {
-      for (auto k = 0; k < nr_lambda_beams; ++k) {
-        for (auto l = 0; l < nr_lambda_polarizations; ++l) {
-          h_weights.weights[i][l][k][j] =
-              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
-        }
-      }
-    }
-  }
+  auto output = std::make_shared<BufferedOutput<Config>>(
+      nullptr, nullptr, std::move(projection_writer), nullptr, 100, 100, 100,
+      100);
 
   std::cout << "Initializing pipeline...\n";
-  LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &h_weights);
+  LambdaProjectionPipeline<Config, 3, 4> pipeline(num_buffers);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

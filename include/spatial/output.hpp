@@ -145,11 +145,11 @@ public:
   };
 };
 
-template <typename T, typename FFTOutput = typename T::FFTOutputType>
+template <typename T, typename FFTOutput = typename T::FFTOutputType,
+          typename Eigenvalues = typename T::EigenvalueOutputType,
+          typename Eigenvectors = typename T::EigenvectorOutputType>
 class BufferedOutput : public Output {
 public:
-  using Eigenvalues = typename T::EigenvalueOutputType;
-  using Eigenvectors = typename T::EigenvectorOutputType;
   struct BeamBlock {
     typename T::BeamOutputType beam_data;
     typename T::ArrivalsOutputType arrival_data;

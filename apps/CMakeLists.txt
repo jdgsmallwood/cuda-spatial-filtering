@@ -41,3 +41,10 @@ target_link_libraries(beamformed_bandpass PRIVATE spatial CUDA::cudart cuda cute
 target_compile_definitions(beamformed_bandpass PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS})
 
 set_target_properties(beamformed_bandpass PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(
+  get_projection_matrix
+  ${PROJECT_SOURCE_DIR}/apps/get_projection_matrix.cu
+)
+target_link_libraries(get_projection_matrix PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
+set_target_properties(get_projection_matrix PROPERTIES CUDA_ARCHITECTURES "native")
