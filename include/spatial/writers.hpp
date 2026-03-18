@@ -2375,6 +2375,8 @@ public:
     using namespace HighFive;
 
     vec_dims_ = get_array_dims<TVec>();
+    vec_dims_.push_back(2); // add the complex as we will be saving out as float
+                            // but input is likely std::complex<float>
 
     // Outer (block) dimension is unlimited; inner shape comes from TVec.
     std::vector<size_t> dataset_dims = {0};
