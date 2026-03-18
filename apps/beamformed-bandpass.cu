@@ -157,13 +157,14 @@ public:
     // ELEMS_PER_BLOCK complex elements -> 2 * ELEMS_PER_BLOCK floats.
     std::vector<float> raw(ELEMS_PER_BLOCK * 2);
     {
-      const std::vector<size_t> offset = {block_idx, 0, 0, 0, 0, 0};
+      const std::vector<size_t> offset = {block_idx, 0, 0, 0, 0, 0, 0};
       const std::vector<size_t> count = {1,
                                          static_cast<size_t>(CH),
                                          static_cast<size_t>(POL),
                                          static_cast<size_t>(POL),
                                          static_cast<size_t>(N),
-                                         static_cast<size_t>(N)};
+                                         static_cast<size_t>(N),
+                                         2};
       vec_dataset_.select(offset, count).read_raw(raw.data());
     }
 
