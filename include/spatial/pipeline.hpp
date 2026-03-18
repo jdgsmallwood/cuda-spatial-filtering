@@ -3389,11 +3389,18 @@ private:
           start_seq_num, end_seq_num);
 
       // d_projection_averaged now holds the eigenvectors (cuSOLVER in-place).
+      //
+      void *eigval_ptr =
+          output_->get_eigenvalues_data_landing_pointer(block_num);
       void *eigvec_ptr =
           output_->get_eigenvectors_data_landing_pointer(block_num);
       CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, d_projection_averaged,
                                  sizeof(DecompositionVisibilities),
                                  cudaMemcpyDefault, b0.stream));
+
+      CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, d_projection_eigenvalues_scratch,
+                                 sizeof(Eigenvalues), cudaMemcpyDefault,
+                                 b0.stream));
 
       auto *ctx = new OutputTransferCompleteContext{.output = this->output_,
                                                     .block_index = block_num};
