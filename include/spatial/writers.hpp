@@ -2367,3 +2367,130 @@ private:
     }
   }
 };
+
+template <typename TVal, typename TVec>
+class HDF5ProjectionEigenWriter : public EigenWriter<TVal, TVec> {
+public:
+  explicit HDF5ProjectionEigenWriter(HighFive::File &file) : file_(file) {
+    using namespace HighFive;
+
+    vec_dims_ = get_array_dims<TVec>();
+
+    // Outer (block) dimension is unlimited; inner shape comes from TVec.
+    std::vector<size_t> dataset_dims = {0};
+    std::vector<size_t> dataset_max_dims = {DataSpace::UNLIMITED};
+    dataset_dims.insert(dataset_dims.end(), vec_dims_.begin(), vec_dims_.end());
+    dataset_max_dims.insert(dataset_max_dims.end(), vec_dims_.begin(),
+                            vec_dims_.end());
+
+    // Chunk: one block at a time — matches the write pattern.
+    std::vector<hsize_t> chunk = {1};
+    chunk.insert(chunk.end(), vec_dims_.begin(), vec_dims_.end());
+
+    DataSetCreateProps vec_props;
+    vec_props.add(Chunking(chunk));
+    vec_props.add(Deflate(4));
+
+    // Store as float32 (complex<float> is two consecutive floats in memory).
+    vec_dataset_ = file_.createDataSet<float>(
+        "projection_eigenvectors", DataSpace(dataset_dims, dataset_max_dims),
+        vec_props);
+
+    using namespace HighFive;
+
+    val_dims_ = get_array_dims<TVal>();
+
+    // Outer (block) dimension is unlimited; inner shape comes from TVec.
+    std::vector<size_t> dataset_dims_vals = {0};
+    std::vector<size_t> dataset_max_dims_vals = {DataSpace::UNLIMITED};
+    dataset_dims_vals.insert(dataset_dims_vals.end(), val_dims_.begin(),
+                             val_dims_.end());
+    dataset_max_dims_vals.insert(dataset_max_dims_vals.end(), val_dims_.begin(),
+                                 val_dims_.end());
+
+    // Chunk: one block at a time — matches the write pattern.
+    std::vector<hsize_t> chunk_vals = {1};
+    chunk_vals.insert(chunk_vals.end(), val_dims_.begin(), val_dims_.end());
+
+    DataSetCreateProps val_props;
+    val_props.add(Chunking(chunk_vals));
+    val_props.add(Deflate(4));
+
+    // Store as float32 (complex<float> is two consecutive floats in memory).
+    val_dataset_ = file_.createDataSet<float>(
+        "projection_eigenvalues",
+        DataSpace(dataset_dims_vals, dataset_max_dims_vals), val_props);
+
+    // Sequence number dataset: [N_blocks, 2].
+    DataSetCreateProps seq_props;
+    seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    seq_dataset_ = file_.createDataSet<int>(
+        "projection_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
+        seq_props);
+  }
+
+  // -------------------------------------------------------------------------
+  // write_eigendata_block
+  //
+  // val_data — always nullptr for this pipeline, ignored.
+  // vec_data — pointer to one TVec worth of eigenvector data.
+  // -------------------------------------------------------------------------
+  void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
+                             const int start_seq, const int end_seq) override {
+    LOG_INFO("HDF5ProjectionEigenWriter: writing block {} -> {}", start_seq,
+             end_seq);
+
+    // ---- eigenvalues -------------------------------------------------------
+    {
+      const auto current_size = val_dataset_.getDimensions()[0];
+
+      std::vector<size_t> new_dims = {current_size + 1};
+      new_dims.insert(new_dims.end(), val_dims_.begin(), val_dims_.end());
+      val_dataset_.resize(new_dims);
+
+      std::vector<size_t> offset = {current_size};
+      offset.insert(offset.end(), val_dims_.size(), 0);
+      std::vector<size_t> count = {1};
+      count.insert(count.end(), val_dims_.begin(), val_dims_.end());
+
+      // write_raw interprets the memory as a flat array of the dataset's
+      // element type (float), which is exactly what interleaved complex<float>
+      // gives us.
+      val_dataset_.select(offset, count)
+          .write_raw(reinterpret_cast<const float *>(val_data));
+    }
+    // ---- eigenvectors -------------------------------------------------------
+    const auto current_size = vec_dataset_.getDimensions()[0];
+
+    std::vector<size_t> new_dims = {current_size + 1};
+    new_dims.insert(new_dims.end(), vec_dims_.begin(), vec_dims_.end());
+    vec_dataset_.resize(new_dims);
+
+    std::vector<size_t> offset = {current_size};
+    offset.insert(offset.end(), vec_dims_.size(), 0);
+    std::vector<size_t> count = {1};
+    count.insert(count.end(), vec_dims_.begin(), vec_dims_.end());
+
+    // write_raw interprets the memory as a flat array of the dataset's
+    // element type (float), which is exactly what interleaved complex<float>
+    // gives us.
+    vec_dataset_.select(offset, count)
+        .write_raw(reinterpret_cast<const float *>(vec_data));
+
+    // ---- sequence numbers ---------------------------------------------------
+    const auto seq_size = seq_dataset_.getDimensions()[0];
+    seq_dataset_.resize({seq_size + 1, 2});
+    const std::vector<int> seq_nums = {start_seq, end_seq};
+    seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+  }
+
+  void flush() override { file_.flush(); }
+
+private:
+  HighFive::File &file_;
+  HighFive::DataSet vec_dataset_;
+  HighFive::DataSet val_dataset_;
+  HighFive::DataSet seq_dataset_;
+  std::vector<size_t> vec_dims_; // inner shape of TVec, e.g. {CH,POL,POL,N,N}
+  std::vector<size_t> val_dims_;
+};

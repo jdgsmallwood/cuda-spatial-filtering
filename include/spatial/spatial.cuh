@@ -364,3 +364,20 @@ void detect_and_downsample_fft_launch(const float2 *cufft_data,
       cufft_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
       NR_BEAMS, DOWNSAMPLE_FACTOR);
 }
+
+__global__ void scale_visibilities_kernel(float *__restrict__ data,
+                                          const size_t count,
+                                          const float scale) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < count) {
+    data[idx] *= scale;
+  }
+}
+
+inline void scale_visibilities(float *data, const size_t count,
+                               const float scale, cudaStream_t stream) {
+  constexpr int BLOCK_SIZE = 256;
+  const int grid_size = static_cast<int>((count + BLOCK_SIZE - 1) / BLOCK_SIZE);
+  scale_visibilities_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(data, count,
+                                                                  scale);
+}
