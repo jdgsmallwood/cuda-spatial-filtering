@@ -122,32 +122,39 @@ public:
   }
 
   // -------------------------------------------------------------------------
-  // apply_latest
-  //
-  // Convenience wrapper: projects w using the most recently written block.
-  // -------------------------------------------------------------------------
-  BeamWeightsT<T> apply_latest(const BeamWeightsT<T> &w) const {
-    if (num_blocks_ == 0)
-      throw std::runtime_error(
-          "ProjectionWeightApplicator: no eigenvector blocks in file");
-    return apply(num_blocks_ - 1, w);
-  }
-
-  // -------------------------------------------------------------------------
   // apply
   //
-  // Projects w using eigenvector block at index block_idx.
-  // Returns a new BeamWeightsT<T> with the projected weights.
+  // Applies (I - U U^H) to beam beam_idx using eigenvector block block_idx.
+  //
+  // Arguments:
+  //   block_idx        -- which stored block to load (0-based)
+  //   beam_idx         -- which beam to project (0-based, must be < NR_BEAMS)
+  //   nr_eigenvectors  -- number of signal-subspace eigenvectors to use (K).
+  //                       Must satisfy 1 <= K <= N.  The K eigenvectors
+  //                       with the LARGEST eigenvalues are selected — these
+  //                       are the last K columns of the cuSOLVER output
+  //                       (ascending order).
+  //   w                -- input weights; all beams copied to output, then
+  //                       beam_idx is overwritten with the projected vector.
+  //
+  // Returns a new BeamWeightsT<T> identical to w except at beam_idx.
   // -------------------------------------------------------------------------
-  BeamWeightsT<T> apply(const size_t block_idx,
+  BeamWeightsT<T> apply(const size_t block_idx, const int beam_idx,
+                        const int nr_eigenvectors,
                         const BeamWeightsT<T> &w) const {
     if (block_idx >= num_blocks_)
       throw std::out_of_range(
           "ProjectionWeightApplicator: block_idx out of range");
+    if (beam_idx < 0 || beam_idx >= T::NR_BEAMS)
+      throw std::out_of_range(
+          "ProjectionWeightApplicator: beam_idx out of range");
+    if (nr_eigenvectors < 1 || nr_eigenvectors > N)
+      throw std::invalid_argument("ProjectionWeightApplicator: nr_eigenvectors "
+                                  "must be in [1, NR_RECEIVERS]");
 
     // Load the flat float buffer from HDF5.
     // Stored shape: [block, CH, POL, POL, N, N] of float32.
-    // ELEMS_PER_BLOCK complex elements → 2 * ELEMS_PER_BLOCK floats.
+    // ELEMS_PER_BLOCK complex elements -> 2 * ELEMS_PER_BLOCK floats.
     std::vector<float> raw(ELEMS_PER_BLOCK * 2);
     {
       const std::vector<size_t> offset = {block_idx, 0, 0, 0, 0, 0};
@@ -161,10 +168,14 @@ public:
     }
 
     // Reinterpret as complex<float>[CH][POL][POL][N][N].
-    // cuSOLVER writes in column-major (Fortran) order, so element (row r,
-    // col k) of a matrix starting at V_batch is V_batch[k * N + r].
+    // cuSOLVER writes column-major: element (row r, col k) = V[k*N + r].
     const auto *V_all =
         reinterpret_cast<const std::complex<float> *>(raw.data());
+
+    // K = number of signal-subspace eigenvectors to use.
+    // First column index of U in V: col_offset = N - K.
+    const int K = nr_eigenvectors;
+    const int col_offset = N - K; // last K columns = largest K eigenvalues
 
     BeamWeightsT<T> out = w;
 
@@ -172,68 +183,82 @@ public:
       for (int pol = 0; pol < POL; ++pol) {
         // Diagonal pol-pol batch element: pol_r == pol_c == pol.
         const int batch = ch * (POL * POL) + pol * POL + pol;
-        // Pointer to the N×N eigenvector matrix for this batch (col-major).
+
+        // Pointer to the full N×N eigenvector matrix for this batch
+        // (col-major).
         const std::complex<float> *V =
             V_all + static_cast<size_t>(batch) * N * N;
 
-        for (int beam = 0; beam < T::NR_BEAMS; ++beam) {
-          // ------------------------------------------------------------------
-          // Unpack input weight vector w[ch][pol][beam][0..N-1] from
-          // complex<__half> to complex<float> for arithmetic.
-          // ------------------------------------------------------------------
-          std::vector<std::complex<float>> wvec(N);
-          for (int r = 0; r < N; ++r) {
-            const std::complex<__half> &h = w.weights[ch][pol][beam][r];
-            wvec[r] = std::complex<float>(__half2float(h.real()),
-                                          __half2float(h.imag()));
-          }
+        // U = last K columns of V.
+        // Column j of U (0-based) = column (col_offset + j) of V.
+        // U element (row r, col j) = V[(col_offset + j) * N + r]  (col-major).
+        const std::complex<float> *U = V + col_offset * N;
 
-          // ------------------------------------------------------------------
-          // Step 1: coeff[k] = (V^H · wvec)[k] = sum_r conj(V[r,k]) * wvec[r]
-          //
-          // V is column-major: V element (row r, col k) = V[k * N + r].
-          // V^H element (k, r)                          = conj(V[k * N + r]).
-          // ------------------------------------------------------------------
-          std::vector<std::complex<float>> coeff(N, {0.f, 0.f});
-          for (int k = 0; k < N; ++k) {
-            for (int r = 0; r < N; ++r) {
-              coeff[k] += std::conj(V[k * N + r]) * wvec[r];
-            }
-          }
+        // ------------------------------------------------------------------
+        // Unpack w[ch][pol][beam_idx][0..N-1] from complex<__half> to float.
+        // ------------------------------------------------------------------
+        std::vector<std::complex<float>> wvec(N);
+        for (int r = 0; r < N; ++r) {
+          const std::complex<__half> &h = w.weights[ch][pol][beam_idx][r];
+          wvec[r] = std::complex<float>(__half2float(h.real()),
+                                        __half2float(h.imag()));
+        }
 
-          // ------------------------------------------------------------------
-          // Step 2: wpvec[r] = ((I - P) * wvec)[r]
-          //                  = wvec[r] - (V * coeff)[r]
-          //                  = wvec[r] - sum_k V[r,k] * coeff[k]
-          //
-          // (I - P) projects w onto the noise subspace -- the complement of
-          // the signal subspace spanned by V.
-          //
-          // V element (row r, col k) = V[k * N + r]  (column-major).
-          // ------------------------------------------------------------------
-          std::vector<std::complex<float>> wpvec(N);
+        // ------------------------------------------------------------------
+        // Step 1: coeff[j] = (U^H * wvec)[j]  for j in [0, K)
+        //
+        // U is the sub-matrix of V starting at col_offset (col-major).
+        // U element (row r, col j) = U[j * N + r].
+        // U^H element (j, r)       = conj(U[j * N + r]).
+        // ------------------------------------------------------------------
+        std::vector<std::complex<float>> coeff(K, {0.f, 0.f});
+        for (int j = 0; j < K; ++j) {
           for (int r = 0; r < N; ++r) {
-            std::complex<float> Vcoeff = {0.f, 0.f};
-            for (int k = 0; k < N; ++k) {
-              Vcoeff += V[k * N + r] * coeff[k];
-            }
-            wpvec[r] = wvec[r] - Vcoeff;
+            coeff[j] += std::conj(U[j * N + r]) * wvec[r];
           }
+        }
 
-          // ------------------------------------------------------------------
-          // Pack projected weights back to complex<__half>.
-          // std::complex<__half> stores real and imaginary as consecutive
-          // __half values in memory — matching the layout of BeamWeightsT.
-          // ------------------------------------------------------------------
-          for (int r = 0; r < N; ++r) {
-            out.weights[ch][pol][beam][r] = std::complex<__half>(
-                __float2half(wpvec[r].real()), __float2half(wpvec[r].imag()));
+        // ------------------------------------------------------------------
+        // Step 2: wpvec[r] = wvec[r] - (U * coeff)[r]
+        //
+        // (I - U U^H) * wvec projects out the signal subspace, leaving
+        // only the noise-subspace component.
+        //
+        // U element (row r, col j) = U[j * N + r]  (col-major).
+        // ------------------------------------------------------------------
+        std::vector<std::complex<float>> wpvec(N);
+        for (int r = 0; r < N; ++r) {
+          std::complex<float> Ucoeff = {0.f, 0.f};
+          for (int j = 0; j < K; ++j) {
+            Ucoeff += U[j * N + r] * coeff[j];
           }
+          wpvec[r] = wvec[r] - Ucoeff;
+        }
+
+        // ------------------------------------------------------------------
+        // Pack result back to complex<__half> and write into beam_idx only.
+        // ------------------------------------------------------------------
+        for (int r = 0; r < N; ++r) {
+          out.weights[ch][pol][beam_idx][r] = std::complex<__half>(
+              __float2half(wpvec[r].real()), __float2half(wpvec[r].imag()));
         }
       }
     }
 
     return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // apply_latest
+  //
+  // Convenience wrapper: uses the most recently written block.
+  // -------------------------------------------------------------------------
+  BeamWeightsT<T> apply_latest(const int beam_idx, const int nr_eigenvectors,
+                               const BeamWeightsT<T> &w) const {
+    if (num_blocks_ == 0)
+      throw std::runtime_error(
+          "ProjectionWeightApplicator: no eigenvector blocks in file");
+    return apply(num_blocks_ - 1, beam_idx, nr_eigenvectors, w);
   }
 
   // Number of eigenvector blocks available in the file.
@@ -425,6 +450,13 @@ int main(int argc, char *argv[]) {
       }
     }
   }
+
+  ProjectionWeightApplicator<Config> beam_weight_updater(
+      "output_eigenvectors_2.hdf5");
+
+  BeamWeightsT<Config> projected = applicator.apply_latest(
+      /*beam_idx=*/1,
+      /*nr_eigenvectors=*/3, h_weights);
 
   std::cout << "Initializing pipeline...\n";
   LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &h_weights);
