@@ -452,11 +452,21 @@ int main(int argc, char *argv[]) {
   }
 
   ProjectionWeightApplicator<Config> beam_weight_updater(
-      "output_eigenvectors_2.hdf5");
+      "output_eigenvectors_4.hdf5");
 
   BeamWeightsT<Config> projected = beam_weight_updater.apply_latest(
       /*beam_idx=*/1,
       /*nr_eigenvectors=*/3, h_weights);
+
+  std::cout << "Weights check:\n";
+  for (auto i = 0; i < num_lambda_channels; ++i) {
+    for (auto j = 0; j < nr_lambda_receivers; ++j) {
+      for (auto k = 0; k < nr_lambda_beams; ++k) {
+        for (auto l = 0; l < nr_lambda_polarizations; ++l) {
+		std::cout << "Ch: " << i << ", Rx: " << j << ", Beam: " << k << 
+			", Pol: " << l << ", Re: " << __half2float(projected.weights[i][l][k][j].real()) << ", Im: " << __half2float(projected.weights[i][l][k][j].imag()) << std::endl;
+	}}}}
+
 
   std::cout << "Initializing pipeline...\n";
   LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &projected);
