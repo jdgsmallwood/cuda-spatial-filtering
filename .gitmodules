@@ -7,6 +7,7 @@
 [submodule "extern/ccglib"]
 	path = extern/ccglib
 	url = https://github.com/nlesc-recruit/ccglib.git
+	branch = main
 [submodule "extern/cudawrappers"]
 	path = extern/cudawrappers
 	url = https://github.com/nlesc-recruit/cudawrappers.git

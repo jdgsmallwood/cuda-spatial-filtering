@@ -17,6 +17,7 @@
 #include <atomic>
 #include <ccglib/ccglib.hpp>
 #include <ccglib/common/complex_order.h>
+#include <ccglib/pipeline/pipeline.h>
 #include <ccglib/transpose/transpose.h>
 #include <complex>
 #include <cuComplex.h>
@@ -267,7 +268,7 @@ private:
   std::atomic<int> num_integrated_units_processed;
   std::atomic<int> num_correlation_units_integrated;
 
-  std::vector<std::unique_ptr<ccglib::mma::GEMM>> gemm_handles;
+  std::vector<std::unique_ptr<ccglib::pipeline::Pipeline>> gemm_handles;
 
   tcc::Correlator correlator;
 
@@ -742,8 +743,7 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
 
-        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
-                   T::NR_CHANNELS,
+        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
@@ -877,13 +877,18 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
 
+    const std::complex<float> alpha_ccglib = {1, 0};
+    const std::complex<float> beta_ccglib = {0, 0};
     //    tcc::Format inputFormat = tcc::Format::fp16;
     for (auto i = 0; i < num_buffers; ++i) {
-      gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
+      gemm_handles.emplace_back(std::make_unique<ccglib::pipeline::Pipeline>(
           T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
           NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, T::NR_RECEIVERS,
-          cu_device, streams[i], ccglib::ValueType::float16,
-          ccglib::mma::basic));
+          cu_device, streams[i], ccglib::complex_planar, ccglib::complex_planar,
+          ccglib::mma::row_major, ccglib::mma::col_major,
+          ccglib::mma::row_major, ccglib::ValueType::float16,
+          ccglib::ValueType::float32, ccglib::mma::opt, alpha_ccglib,
+          beta_ccglib));
     }
 
     LOG_DEBUG("Copying weights...");
@@ -2000,7 +2005,7 @@ private:
   std::atomic<int> num_integrated_units_processed;
   std::atomic<int> num_correlation_units_integrated;
 
-  std::vector<std::unique_ptr<ccglib::mma::GEMM>> gemm_handles;
+  std::vector<std::unique_ptr<ccglib::pipeline::Pipeline>> gemm_handles;
 
   tcc::Correlator correlator;
 
@@ -2342,8 +2347,9 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
 
-        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
-                   T::NR_CHANNELS,
+        correlator(cu::Device(0),
+                   16, // tcc::Format::fp16,
+                   T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
@@ -2440,13 +2446,18 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
 
+    const std::complex<float> alpha_ccglib = {1, 0};
+    const std::complex<float> beta_ccglib = {0, 0};
     //    tcc::Format inputFormat = tcc::Format::fp16;
     for (auto i = 0; i < num_buffers; ++i) {
-      gemm_handles.emplace_back(std::make_unique<ccglib::mma::GEMM>(
+      gemm_handles.emplace_back(std::make_unique<ccglib::pipeline::Pipeline>(
           T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
           NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, T::NR_RECEIVERS,
-          cu_device, streams[i], ccglib::ValueType::float16,
-          ccglib::mma::basic));
+          cu_device, streams[i], ccglib::complex_planar, ccglib::complex_planar,
+          ccglib::mma::row_major, ccglib::mma::col_major,
+          ccglib::mma::row_major, ccglib::ValueType::float16,
+          ccglib::ValueType::float32, ccglib::mma::opt, alpha_ccglib,
+          beta_ccglib));
     }
 
     LOG_DEBUG("Copying weights...");
@@ -3233,8 +3244,7 @@ public:
   LambdaProjectionPipeline(const int num_buffers_in)
       : num_buffers(num_buffers_in),
 
-        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
-                   T::NR_CHANNELS,
+        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
