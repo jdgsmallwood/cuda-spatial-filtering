@@ -1223,9 +1223,9 @@ public:
 
           std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
                                 ":p:" + std::to_string(pol) +
-                                ":f:" + std::to_string(f);
-          precomputed_keys[get_key_index(ch, pol, f)] = key;
-          precomputed_max_keys[get_key_index(ch, pol, f)] = max_key;
+                                ":f:" + std::to_string(f_shifted);
+          precomputed_keys[get_key_index(ch, pol, f_shifted)] = key;
+          precomputed_max_keys[get_key_index(ch, pol, f_shifted)] = max_key;
         }
       }
     }
@@ -1378,9 +1378,10 @@ public:
             std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
                                   ":p:" + std::to_string(pol) +
                                   ":b:" + std::to_string(beam) +
-                                  ":f:" + std::to_string(f);
-            precomputed_keys[get_key_index(ch, pol, beam, f)] = key;
-            precomputed_max_keys[get_key_index(ch, pol, beam, f)] = max_key;
+                                  ":f:" + std::to_string(f_shifted);
+            precomputed_keys[get_key_index(ch, pol, beam, f_shifted)] = key;
+            precomputed_max_keys[get_key_index(ch, pol, beam, f_shifted)] =
+                max_key;
           }
         }
       }
