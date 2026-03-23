@@ -46,9 +46,7 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
       NR_TIME_STEPS_PER_PACKET % TIME_STEPS_PER_THREAD == 0,
       "TIME_STEPS_PER_THREAD must evenly divide NR_TIME_STEPS_PER_PACKET");
 
-  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
-  constexpr size_t ELEMS_PER_TIME =
-      NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS * 2;
+  constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * 2;
 
   int channel_idx = blockIdx.x % NR_CHANNELS;
   int packet_idx = blockIdx.x / NR_CHANNELS;
@@ -56,8 +54,7 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
 
   int complex_idx = threadIdx.x % 2;
   int pol_idx = (threadIdx.x / 2) % NR_POLARIZATIONS;
-  int recv_in_pkt =
-      (threadIdx.x / (2 * NR_POLARIZATIONS)) % NR_RECEIVERS_PER_PACKET;
+  int recv_in_pkt = blockIdx.z;
   int time_base = (threadIdx.x / ELEMS_PER_TIME) * TIME_STEPS_PER_THREAD;
 
   int receiver_idx = fpga_idx * NR_RECEIVERS_PER_PACKET + recv_in_pkt;
@@ -74,28 +71,6 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
             [pol_idx][complex_idx] = __int2half_rn(static_cast<int>(sample) *
                                                    static_cast<int>(scale_val));
   }
-
-  //
-  //
-  // int channel_idx = blockIdx.x % NR_CHANNELS;
-  // int packet_idx = blockIdx.x / NR_CHANNELS;
-  // int receiver_idx = blockIdx.y / NR_POLARIZATIONS;
-  // int fpga_idx = receiver_idx / NR_RECEIVERS_PER_PACKET;
-  // int receiver_idx_in_pkt = receiver_idx % NR_RECEIVERS_PER_PACKET;
-  // int polarization_idx = blockIdx.y % NR_POLARIZATIONS;
-  // int time_idx = threadIdx.x / 2;
-  // int complex_idx = threadIdx.x % 2;
-  // // Can I cast directly from int8_t to __half and then I don't need to
-  // // convert from int to __half as well.
-  // int val = static_cast<int>(
-  //     d_input[0][channel_idx][packet_idx][fpga_idx][time_idx]
-  //            [receiver_idx_in_pkt][polarization_idx][complex_idx]);
-  // int scale_factor = static_cast<int>(
-  //     d_scale[0][channel_idx][packet_idx][receiver_idx][polarization_idx]);
-  //
-  // int result = val * scale_factor;
-  // d_output[0][channel_idx][packet_idx][fpga_idx][time_idx][receiver_idx_in_pkt]
-  //         [polarization_idx][complex_idx] = __int2half_rn(result);
 };
 
 template <int N> constexpr bool dependent_false = false;
@@ -103,13 +78,12 @@ template <int N> constexpr bool dependent_false = false;
 template <typename inputT, typename scaleT, typename outputT,
           size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
-          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD = 4>
+          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD = 1>
 void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
                                outputT *d_output, cudaStream_t stream) {
 
   constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
-  constexpr size_t ELEMS_PER_TIME =
-      NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS * 2;
+  constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * 2;
   constexpr size_t THREADS =
       (NR_TIME_STEPS_PER_PACKET / TIME_STEPS_PER_THREAD) * ELEMS_PER_TIME;
 
@@ -124,7 +98,8 @@ void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
       inputT, scaleT, outputT, NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
       NR_RECEIVERS_PER_PACKET, NR_TIME_STEPS_PER_PACKET, NR_PACKETS,
       TIME_STEPS_PER_THREAD>
-      <<<dim3(NR_CHANNELS * NR_PACKETS, NR_FPGA_SOURCES, 1),
+      <<<dim3(NR_CHANNELS * NR_PACKETS, NR_FPGA_SOURCES,
+              NR_RECEIVERS_PER_PACKET),
          dim3(THREADS, 1, 1), 0, stream>>>(d_input, d_scale, d_output);
 }
 
