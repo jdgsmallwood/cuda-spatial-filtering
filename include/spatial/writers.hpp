@@ -1206,6 +1206,7 @@ public:
         NR_RECEIVERS(num_receivers), NR_POLARIZATIONS(num_polarizations),
         prefix(prefix) {
     fft_dims_ = get_array_dims<T>();
+    NR_FREQS = fft_dims_[fft_dims_.size() - 1];
     precomputed_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS);
     precomputed_max_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS);
 
@@ -1229,7 +1230,6 @@ public:
       }
     }
 
-    NR_FREQS = fft_dims_[0];
     std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_RECEIVERS:" << NR_RECEIVERS << ", NR_FREQS: " << NR_FREQS
               << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
