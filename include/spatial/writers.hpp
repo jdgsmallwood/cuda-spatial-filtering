@@ -1224,8 +1224,8 @@ public:
           std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
                                 ":p:" + std::to_string(pol) +
                                 ":f:" + std::to_string(f_shifted);
-          precomputed_keys[get_key_index(ch, pol, f_shifted)] = key;
-          precomputed_max_keys[get_key_index(ch, pol, f_shifted)] = max_key;
+          precomputed_keys[get_key_index(ch, pol, f)] = key;
+          precomputed_max_keys[get_key_index(ch, pol, f)] = max_key;
         }
       }
     }
@@ -1253,9 +1253,7 @@ public:
     for (int f = 0; f < F; ++f) {
       const auto &cval = fft_data[0][f];
 
-      int f_shifted = (f + F / 2) % F;
-
-      madd_args.push_back(precomputed_keys[get_key_index(ch, pol, f_shifted)]);
+      madd_args.push_back(precomputed_keys[get_key_index(ch, pol, f)]);
       madd_args.push_back(ts_str);
       madd_args.push_back(std::to_string(cval));
     }
@@ -1281,6 +1279,7 @@ private:
           auto key = precomputed_keys[get_key_index(ch, pol, f)];
           auto max_key = precomputed_max_keys[get_key_index(ch, pol, f)];
 
+          int f_shifted = (f + NR_FREQS / 2) % NR_FREQS;
           std::vector<std::string> args = {"TS.CREATE",
                                            key,
                                            "RETENTION",
@@ -1293,7 +1292,7 @@ private:
                                            "polarization",
                                            std::to_string(pol),
                                            "freq",
-                                           std::to_string(f),
+                                           std::to_string(f_shifted),
                                            "component",
                                            "bandpass"};
 
@@ -1309,7 +1308,7 @@ private:
                                                "polarization",
                                                std::to_string(pol),
                                                "freq",
-                                               std::to_string(f),
+                                               std::to_string(f_shifted),
                                                "component",
                                                "bandpass_max1s"};
 
@@ -1379,9 +1378,8 @@ public:
                                   ":p:" + std::to_string(pol) +
                                   ":b:" + std::to_string(beam) +
                                   ":f:" + std::to_string(f_shifted);
-            precomputed_keys[get_key_index(ch, pol, beam, f_shifted)] = key;
-            precomputed_max_keys[get_key_index(ch, pol, beam, f_shifted)] =
-                max_key;
+            precomputed_keys[get_key_index(ch, pol, beam, f)] = key;
+            precomputed_max_keys[get_key_index(ch, pol, beam, f)] = max_key;
           }
         }
       }
@@ -1408,14 +1406,13 @@ public:
     madd_args.push_back("TS.MADD");
     const int F = NR_FREQS;
     for (int f = 0; f < F; ++f) {
-      int f_shifted = (f + F / 2) % F;
       for (int ch = 0; ch < NR_CHANNELS; ++ch) {
         for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
           for (int beam = 0; beam < NR_BEAMS; ++beam) {
             const auto &cval = fft_data[0][ch][pol][beam][f];
 
             madd_args.push_back(
-                precomputed_keys[get_key_index(ch, pol, beam, f_shifted)]);
+                precomputed_keys[get_key_index(ch, pol, beam, f)]);
             madd_args.push_back(ts_str);
             madd_args.push_back(std::to_string(cval));
           }
@@ -1442,6 +1439,7 @@ private:
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int beam = 0; beam < NR_BEAMS; ++beam) {
           for (int f = 0; f < NR_FREQS; ++f) {
+            int f_shifted = (f + NR_FREQS / 2) % NR_FREQS;
             auto key = precomputed_keys[get_key_index(ch, pol, beam, f)];
             auto max_key =
                 precomputed_max_keys[get_key_index(ch, pol, beam, f)];
@@ -1458,7 +1456,7 @@ private:
                                              "polarization",
                                              std::to_string(pol),
                                              "freq",
-                                             std::to_string(f),
+                                             std::to_string(f_shifted),
                                              "beam",
                                              std::to_string(beam),
                                              "component",
@@ -1476,7 +1474,7 @@ private:
                                                  "polarization",
                                                  std::to_string(pol),
                                                  "freq",
-                                                 std::to_string(f),
+                                                 std::to_string(f_shifted),
                                                  "beam",
                                                  std::to_string(beam),
                                                  "component",
