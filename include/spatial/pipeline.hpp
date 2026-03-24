@@ -1928,10 +1928,12 @@ private:
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
-  using ProjectionMatrix = __half[T::NR_CHANNELS][T::NR_POLARIZATIONS]
-                                 [T::NR_RECEIVERS][T::NR_RECEIVERS];
-  using FloatProjectionMatrix = float[T::NR_CHANNELS][T::NR_POLARIZATIONS]
-                                     [T::NR_RECEIVERS][T::NR_RECEIVERS];
+  using ProjectionMatrix =
+      std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
+                          [T::NR_RECEIVERS];
+  using FloatProjectionMatrix =
+      std::complex<float>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
+                         [T::NR_RECEIVERS];
   using BeamWeights = BeamWeightsT<T>;
   struct RFIMitigatedT {
     static constexpr size_t NR_CHANNELS = T::NR_CHANNELS;
