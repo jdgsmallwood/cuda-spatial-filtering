@@ -1916,17 +1916,17 @@ private:
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS];
 
   using FFTCUFFTInputType =
-      float2[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
+      float2[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
             [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION];
   using FFTCUFFTOutputType =
-      float2[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
+      float2[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
             [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION];
   using FFTOutputType =
-      float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
+      float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION /
             T::FFT_DOWNSAMPLE_FACTOR];
   using BeamformerOutput =
-      float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
+      float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
   using ProjectionMatrix = __half[T::NR_CHANNELS][T::NR_POLARIZATIONS]
                                  [T::NR_RECEIVERS][T::NR_RECEIVERS];
@@ -1956,8 +1956,8 @@ private:
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
     DevicePtr<BeamWeights> weights;
-    DevicePtr<BeamWeights> weights_permuted, weights_updated,
-        weights_rfi_mitigated;
+    DevicePtr<BeamWeights> weights_permuted, weights_updated;
+    DevicePtr<RFIMitigatedBeamWeights> weights_rfi_mitigated;
     DevicePtr<RFIMitigatedBeamWeights> weights_beamformer;
     DevicePtr<BeamformerOutput> beamformer_output;
     DevicePtr<void> cufft_work_area;
@@ -2005,7 +2005,7 @@ private:
           weights(make_device_ptr<BeamWeights>()),
           weights_permuted(make_device_ptr<BeamWeights>()),
           weights_updated(make_device_ptr<BeamWeights>()),
-          weights_rfi_mitigated(make_device_ptr<BeamWeights>()),
+          weights_rfi_mitigated(make_device_ptr<RFIMitigatedBeamWeights>()),
           weights_beamformer(make_device_ptr<RFIMitigatedBeamWeights>()),
           beamformer_output(make_device_ptr<BeamformerOutput>()),
           samples_padding(make_device_ptr<typename T::HalfPacketSamplesType>()),
@@ -2198,7 +2198,7 @@ private:
   inline static const std::vector<int> modePlanarColMajCons = {'c', 'p', 'z',
                                                                's', 'f', 'n'};
 
-  inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'm', 's'};
+  inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'e', 's'};
   inline static const std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r',
                                                         'z'};
   inline static const std::vector<int> modeWeightsBeamMajor{'m', 'c', 'p', 'r',
@@ -2220,11 +2220,9 @@ private:
                                                            'z'};
   inline static const std::vector<int> modeVisCorrBaselineTrimmed{'p', 'a', 'c',
                                                                   'z'};
-  inline static const std::vector<int> modeVisCorrTrimmed{'c', 'a', 'p', 'z'};
   inline static const std::vector<int> modeVisDecomp{'c', 'p', 'a', 'z'};
 
   inline static const std::unordered_map<int, int64_t> extent = {
-
       {'a', NR_UNPADDED_BASELINES},
       {'b', NR_BLOCKS_FOR_CORRELATION},
       {'c', T::NR_CHANNELS},
@@ -2242,7 +2240,6 @@ private:
       {'t', NR_TIMES_PER_BLOCK},
       {'u', T::NR_TIME_STEPS_PER_PACKET},
       {'z', 2}, // real, imaginary
-
   };
 
   CutensorSetup tensor_16;
@@ -2362,13 +2359,8 @@ public:
                                sizeof(TrimmedVisibilities) / 2,
                                cudaMemcpyDefault, b.stream));
     tensor_32.runPermutation(
-        "visBaselineTrimmedToTrimmed", alpha_32,
+        "visBaselineTrimmedToDecomp", alpha_32,
         reinterpret_cast<float *>(b.visibilities_trimmed_baseline.get()),
-        reinterpret_cast<float *>(b.visibilities_trimmed.get()), b.stream);
-
-    tensor_32.runPermutation(
-        "visCorrToDecomp", alpha_32,
-        reinterpret_cast<float *>(b.visibilities_trimmed.get()),
         reinterpret_cast<float *>(b.decomp_visibilities.get()), b.stream);
 
     unpack_triangular_baseline_batch_launch<cuComplex>(
@@ -2467,7 +2459,7 @@ public:
     cudaMemcpyAsync(dest_ptr, b.weights_permuted.get(), sizeof(BeamWeights),
                     cudaMemcpyDefault, b.stream);
 
-    tensor_16.runPermutation("BeamMajorToCCGLIBWeights", alpha,
+    tensor_16.runPermutation("weights2xBeamMajorToCCGLIB", alpha,
                              (__half *)b.weights_rfi_mitigated.get(),
                              (__half *)b.weights_beamformer.get(), b.stream);
 
@@ -2528,12 +2520,12 @@ public:
               << NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK
               << ", NR_TIMES_PER_BLOCK: " << NR_TIMES_PER_BLOCK
               << ", NR_BLOCKS_FOR_FFT: " << NR_BLOCKS_FOR_CORRELATION
-              << ", NR_BEAMS: " << T::NR_BEAMS << std::endl;
+              << ", NR_BEAMS: " << 2 * T::NR_BEAMS << std::endl;
 
     const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
     long long N[] = {CUFFT_FFT_SIZE};
     const size_t NUM_TOTAL_BATCHES =
-        T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
+        2 * T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
 
     size_t work_size = 0;
     {
@@ -2548,6 +2540,8 @@ public:
     }
 
     tensor_16.addTensor(modePacket, "packet");
+    tensor_16.addTensor(modePacketPadding, "packet_padding");
+    tensor_16.addTensor(modePacketPadded, "packet_padded");
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
     tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
@@ -2560,10 +2554,10 @@ public:
     tensor_32.addTensor(modeCUFFTInput, "cufftInput");
     tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
 
+    tensor_16.addTensor(modeCorrelatorInput, "corr_input");
     tensor_32.addTensor(modeVisCorr, "visCorr");
     tensor_32.addTensor(modeVisCorrBaseline, "visBaseline");
     tensor_32.addTensor(modeVisCorrBaselineTrimmed, "visBaselineTrimmed");
-    tensor_32.addTensor(modeVisCorrTrimmed, "visCorrTrimmed");
     tensor_32.addTensor(modeVisDecomp, "visDecomp");
 
     // Permutation descriptors
@@ -2574,11 +2568,9 @@ public:
 
     tensor_32.addPermutation("visCorr", "visBaseline",
                              CUTENSOR_COMPUTE_DESC_32F, "visCorrToBaseline");
-    tensor_32.addPermutation("visBaselineTrimmed", "visCorrTrimmed",
+    tensor_32.addPermutation("visBaselineTrimmed", "visDecomp",
                              CUTENSOR_COMPUTE_DESC_32F,
-                             "visBaselineTrimmedToTrimmed");
-    tensor_32.addPermutation("visCorrTrimmed", "visDecomp",
-                             CUTENSOR_COMPUTE_DESC_32F, "visCorrToDecomp");
+                             "visBaselineTrimmedToDecomp");
 
     tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToPlanar");
