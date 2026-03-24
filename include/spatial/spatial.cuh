@@ -35,7 +35,7 @@ void convert_float_to_half(const float *d_input, __half *d_output, const int n,
 template <typename inputT, typename scaleT, typename outputT,
           size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
-          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD = 2>
+          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD = 1>
 __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
                                                  const scaleT *d_scale,
                                                  outputT *d_output) {
@@ -403,4 +403,37 @@ inline void scale_visibilities(float *data, const size_t count,
   const int grid_size = static_cast<int>((count + BLOCK_SIZE - 1) / BLOCK_SIZE);
   scale_visibilities_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(data, count,
                                                                   scale);
+}
+
+__global__ void identityMinusMatrixKernel(const __restrict__ float2 *d_A,
+                                          __half2 *d_output, const int N,
+                                          const int batches) {
+  // Calculate the global 1D thread index
+  int batch = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_elements = N * N;
+
+  if (idx < total_elements) {
+    int lookup_idx = total_elements * batch + idx;
+    float2 val = d_A[lookup_idx];
+    // If the index falls on the diagonal
+    if (idx % (N + 1) == 0) {
+      d_output[lookup_idx] =
+          __float22half2_rn(make_float2(1.0f - val.x, -val.y));
+    } else {
+      // If it's an off-diagonal element
+      d_output[lookup_idx] = __float22half2_rn(make_float2(-val.x, -val.y));
+    }
+  }
+}
+
+void computeIdentityMinusA(const float2 *d_A, __half2 *d_output, const int N,
+                           const int batches, cudaStream_t stream) {
+  int total_elements = N * N;
+
+  int threadsPerBlock = 256;
+  int blocksPerGrid = (total_elements + threadsPerBlock - 1) / threadsPerBlock;
+
+  identityMinusMatrixKernel<<<dim3(blocksPerGrid, batches, 1), threadsPerBlock,
+                              0, stream>>>(d_A, d_output, N, batches);
 }

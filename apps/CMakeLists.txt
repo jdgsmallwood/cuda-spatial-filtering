@@ -1,4 +1,4 @@
-set(NUMBER_BEAMS 10 CACHE STRING "Number of beams to correlate while benchmarking")
+set(NUMBER_BEAMS 1 CACHE STRING "Number of beams to correlate while benchmarking")
 add_executable(
   observe
   ${PROJECT_SOURCE_DIR}/apps/benchmark-20251030.cu
@@ -48,3 +48,12 @@ add_executable(
 )
 target_link_libraries(get_projection_matrix PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
 set_target_properties(get_projection_matrix PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(
+  adaptive_beamformed_bandpass
+  ${PROJECT_SOURCE_DIR}/apps/adaptive-beamformed-bandpass.cu
+)
+target_link_libraries(adaptive_beamformed_bandpass PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
+target_compile_definitions(adaptive_beamformed_bandpass PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS})
+
+set_target_properties(adaptive_beamformed_bandpass PROPERTIES CUDA_ARCHITECTURES "native")

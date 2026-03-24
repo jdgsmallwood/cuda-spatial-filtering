@@ -12,7 +12,7 @@
 #include <thread>
 
 #ifndef NUMBER_BEAMS
-#define NUMBER_BEAMS 10
+#define NUMBER_BEAMS 1
 #endif
 constexpr size_t NR_CHANNELS = NR_OBSERVING_CHANNELS;
 constexpr size_t NR_FPGA_SOURCES = NR_OBSERVING_FPGA_SOURCES;
@@ -25,8 +25,7 @@ constexpr size_t NR_PADDED_RECEIVERS = NR_OBSERVING_PADDED_RECEIVERS;
 constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = 32;
 constexpr size_t NR_PACKETS_FOR_CORRELATION =
     NR_OBSERVING_PACKETS_FOR_CORRELATION;
-constexpr size_t NR_VISIBILITIES_BEFORE_DUMP =
-    NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE;
+constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 10000000;
 using Config =
     LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
@@ -103,6 +102,8 @@ int main() {
 
   spatial::Logger::set(app_logger);
 
+  std::cout << "NUMBER_BEAMS is " << NUMBER_BEAMS << std::endl;
+
   FakeProcessorState state;
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
@@ -167,8 +168,15 @@ int main() {
             << std::endl;
   std::cout << "Size of Config: " << size_config_MB << " MB" << std::endl;
 
+  double input_GB_sec =
+      (size_packet_data_MB / 1024) * pipeline_runs / elapsed_seconds;
+  double output_GB_sec =
+      (size_config_MB / 1024) * pipeline_runs / elapsed_seconds;
   double GB_sec = ((size_packet_data_MB + size_config_MB) / 1024) *
                   pipeline_runs / elapsed_seconds;
+  std::cout << "Input GB/sec: " << input_GB_sec << std::endl;
+  std::cout << "Output GB/sec: " << output_GB_sec << std::endl;
+
   std::cout << "GB/sec: " << GB_sec << std::endl;
 
   std::cout << "Finished running for 60 seconds." << std::endl;
