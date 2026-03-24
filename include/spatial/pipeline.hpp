@@ -2415,10 +2415,14 @@ public:
         // Pointer to signal-subspace U = last K columns of V_batch.
         for (int batch = 0; batch < CUBLAS_BATCH_SIZE_PER_CHANNEL; batch++) {
           // Pointer to the start of eigenvector matrix for this batch element.
-          cuComplex *V_batch = V_base + batch * N * N;
+          cuComplex *V_batch =
+              V_base +
+              (channel * CUBLAS_BATCH_SIZE_PER_CHANNEL + batch) * N * N;
           cuComplex *U = V_batch + col_offset * N;
           // Pointer to output P for this batch element.
-          cuComplex *P_batch = P_base + batch * N * N;
+          cuComplex *P_batch =
+              P_base +
+              (channel * CUBLAS_BATCH_SIZE_PER_CHANNEL + batch) * N * N;
 
           CUBLAS_CHECK(cublasGemmEx(b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_C,
                                     N, N, K, &herk_alpha, U, CUDA_C_32F, N, U,
