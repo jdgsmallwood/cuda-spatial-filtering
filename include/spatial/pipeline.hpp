@@ -2486,7 +2486,7 @@ public:
         (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
         T::NR_POLARIZATIONS,
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
-        T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+        2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
