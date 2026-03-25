@@ -2440,8 +2440,9 @@ public:
                           T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
 
     {
-      const __half2 herk_alpha{1.0f, 0.0f};
-      const __half2 herk_beta{0.0f, 0.0f}; // overwrite projection_block
+      const __half2 herk_alpha{__float2half(1.0f), __float2half(0.0f)};
+      const __half2 herk_beta{__float2half(0.0f),
+                              __float2half(0.0f)}; // overwrite projection_block
       const int N = T::NR_RECEIVERS;
       size_t CUBLAS_NUM_BATCHES =
           CUSOLVER_BATCH_SIZE; // T::NR_POLARIZATIONS * T::NR_CHANNELS
@@ -2458,7 +2459,7 @@ public:
           CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
 
-    weightsDebugLaunch((__half2 *)b.weights.get(),
+    weightsDebugLaunch((__half2 *)b.weights_updated.get(),
                        T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_RECEIVERS *
                            T::NR_BEAMS,
                        b.stream);
