@@ -1508,7 +1508,7 @@ private:
                 "beam",
                 std::to_string(beam),
                 "component",
-                "beam-bandpass_max1s"};
+                "beam-bandpass_max100ms"};
             std::vector<std::string> rule_args = {
                 "TS.CREATERULE", key, max_key, "AGGREGATION", "max", "1000"};
             std::vector<std::string> rule_100ms_args = {
