@@ -2456,6 +2456,11 @@ public:
           CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
 
+    weightsDebugLaunch((__half2 *)b.weights_updated.get(),
+                       T::NR_RECEIVERS * T::NR_BEAMS * T::NR_CHANNELS *
+                           T::NR_POLARIZATIONS,
+                       b.stream);
+
     tensor_16.runPermutation("weightsToBeamMajor", alpha,
                              (__half *)b.weights_updated.get(),
                              (__half *)b.weights_permuted.get(), b.stream);

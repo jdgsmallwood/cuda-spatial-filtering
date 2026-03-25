@@ -416,7 +416,6 @@ __global__ void identityMinusMatrixKernel(const __restrict__ float2 *d_A,
   if (idx < total_elements) {
     int lookup_idx = total_elements * batch + idx;
     float2 val = d_A[lookup_idx];
-    printf("Batch %i, Idx %i: %f + %f i\n", batch, idx, val.x, val.y);
     // If the index falls on the diagonal
     if (idx % (N + 1) == 0) {
       d_output[lookup_idx] =
@@ -437,4 +436,22 @@ void computeIdentityMinusA(const float2 *d_A, __half2 *d_output, const int N,
 
   identityMinusMatrixKernel<<<dim3(blocksPerGrid, batches, 1), threadsPerBlock,
                               0, stream>>>(d_A, d_output, N, batches);
+}
+
+__global__ void weightsDebugKernel(const __half2 *d_in, int N) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < N) {
+    __half2 val = d_in[idx];
+    printf("Idx %i: %f + %f i", idx, val.x, val.y);
+  }
+}
+
+void weightsDebugLaunch(const __half2 *d_in, int N, cudaStream_t stream) {
+
+  int threadsPerBlock = 256;
+
+  int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+
+  weightsDebugKernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_in, N);
 }
