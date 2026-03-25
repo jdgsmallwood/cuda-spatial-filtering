@@ -2177,7 +2177,7 @@ private:
   inline static const __half alpha = __float2half(1.0f);
 
   inline static const std::vector<size_t> NR_SIGNAL_EIGENVECTORS{1, 1, 1, 1,
-                                                                 5, 1, 5, 5};
+                                                                 6, 1, 5, 5};
 
   static constexpr float alpha_32 = 1.0f;
   // a = unpadded baselines
