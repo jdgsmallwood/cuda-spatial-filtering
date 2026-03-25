@@ -2363,10 +2363,10 @@ public:
     tensor_32.runPermutation(
         "visBaselineTrimmedToDecomp", alpha_32,
         reinterpret_cast<float *>(b.visibilities_trimmed_baseline.get()),
-        reinterpret_cast<float *>(b.decomp_visibilities.get()), b.stream);
+        reinterpret_cast<float *>(b.visibilities_trimmed.get()), b.stream);
 
     unpack_triangular_baseline_batch_launch<cuComplex>(
-        reinterpret_cast<cuComplex *>(b.decomp_visibilities.get()),
+        reinterpret_cast<cuComplex *>(b.visibilities_trimmed.get()),
         reinterpret_cast<cuComplex *>(b.decomp_visibilities.get()),
         T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, T::NR_CHANNELS, b.stream);
 
