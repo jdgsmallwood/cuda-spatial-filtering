@@ -2443,16 +2443,17 @@ public:
       const cuComplex herk_alpha{1.0f, 0.0f};
       const cuComplex herk_beta{0.0f, 0.0f}; // overwrite projection_block
       const int N = T::NR_RECEIVERS;
-      size_t CUBLAS_NUM_BATCHES = CUSOLVER_BATCH_SIZE;
+      size_t CUBLAS_NUM_BATCHES =
+          CUSOLVER_BATCH_SIZE; // T::NR_POLARIZATIONS * T::NR_CHANNELS
       size_t CUBLAS_STRIDE_A = T::NR_RECEIVERS * T::NR_RECEIVERS;
       size_t CUBLAS_STRIDE_B = T::NR_RECEIVERS * T::NR_BEAMS;
       size_t CUBLAS_STRIDE_C = T::NR_RECEIVERS * T::NR_BEAMS;
 
       cublasGemmStridedBatchedEx(
-          b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &herk_alpha,
-          b.projection_matrix.get(), CUDA_C_16F, N, CUBLAS_STRIDE_A,
-          b.weights.get(), CUDA_C_16F, N, CUBLAS_STRIDE_B, &herk_beta,
-          b.weights_updated.get(), CUDA_C_16F, N, CUBLAS_STRIDE_C,
+          b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, N, T::NR_BEAMS, N,
+          &herk_alpha, b.projection_matrix.get(), CUDA_C_16F, N,
+          CUBLAS_STRIDE_A, b.weights.get(), CUDA_C_16F, N, CUBLAS_STRIDE_B,
+          &herk_beta, b.weights_updated.get(), CUDA_C_16F, N, CUBLAS_STRIDE_C,
           CUBLAS_NUM_BATCHES, CUBLAS_COMPUTE_32F,
           CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
