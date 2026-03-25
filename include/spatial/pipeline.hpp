@@ -2458,7 +2458,7 @@ public:
           CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
 
-    weightsDebugLaunch((__half2 *)b.weights_updated.get(),
+    weightsDebugLaunch((__half2 *)b.weights.get(),
                        T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_RECEIVERS *
                            T::NR_BEAMS,
                        b.stream);
