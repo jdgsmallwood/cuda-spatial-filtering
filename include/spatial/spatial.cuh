@@ -416,7 +416,7 @@ __global__ void identityMinusMatrixKernel(const __restrict__ float2 *d_A,
   if (idx < total_elements) {
     int lookup_idx = total_elements * batch + idx;
     float2 val = d_A[lookup_idx];
-    printf("Batch %i, Idx %i: %f + %f i", batch, idx, val.x, val.y);
+    printf("Batch %i, Idx %i: %f + %f i\n", batch, idx, val.x, val.y);
     // If the index falls on the diagonal
     if (idx % (N + 1) == 0) {
       d_output[lookup_idx] =
