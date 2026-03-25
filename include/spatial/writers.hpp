@@ -1360,6 +1360,8 @@ public:
                             NR_BEAMS);
     precomputed_max_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS *
                                 NR_BEAMS);
+    precomputed_max_100ms_keys.resize(NR_CHANNELS * NR_POLARIZATIONS *
+                                      NR_FREQS * NR_BEAMS);
 
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
@@ -1378,8 +1380,15 @@ public:
                                   ":p:" + std::to_string(pol) +
                                   ":b:" + std::to_string(beam) +
                                   ":f:" + std::to_string(f_shifted);
+
+            std::string max_100ms_key =
+                "ts:fft_max100ms:ch:" + std::to_string(ch) +
+                ":p:" + std::to_string(pol) + ":b:" + std::to_string(beam) +
+                ":f:" + std::to_string(f_shifted);
             precomputed_keys[get_key_index(ch, pol, beam, f)] = key;
             precomputed_max_keys[get_key_index(ch, pol, beam, f)] = max_key;
+            precomputed_max_100ms_keys[get_key_index(ch, pol, beam, f)] =
+                max_100ms_key;
           }
         }
       }
@@ -1443,6 +1452,8 @@ private:
             auto key = precomputed_keys[get_key_index(ch, pol, beam, f)];
             auto max_key =
                 precomputed_max_keys[get_key_index(ch, pol, beam, f)];
+            auto max_key =
+                precomputed_max_100ms_keys[get_key_index(ch, pol, beam, f)];
 
             std::vector<std::string> args = {"TS.CREATE",
                                              key,
@@ -1480,12 +1491,35 @@ private:
                                                  "component",
                                                  "beam-bandpass_max1s"};
 
+            std::vector<std::string> max_100ms_args = {
+                "TS.CREATE",
+                max_100ms_key,
+                "RETENTION",
+                "0",
+                "LABELS",
+                "type",
+                "aggregated",
+                "channel",
+                std::to_string(ch),
+                "polarization",
+                std::to_string(pol),
+                "freq",
+                std::to_string(f_shifted),
+                "beam",
+                std::to_string(beam),
+                "component",
+                "beam-bandpass_max1s"};
             std::vector<std::string> rule_args = {
                 "TS.CREATERULE", key, max_key, "AGGREGATION", "max", "1000"};
+            std::vector<std::string> rule_100ms_args = {
+                "TS.CREATERULE", key,   max_100ms_key,
+                "AGGREGATION",   "max", "100"};
             try {
               redis.command(args.begin(), args.end());
               redis.command(max_args.begin(), max_args.end());
+              redis.command(max_100ms_args.begin(), max_100ms_args.end());
               redis.command(rule_args.begin(), rule_args.end());
+              redis.command(rule_100ms_args.begin(), rule_100ms_args.end());
             } catch (const std::exception &e) {
               LOG_ERROR("Error creating key {}: {}", key, e.what());
             }
@@ -1505,6 +1539,7 @@ private:
   int NR_FREQS;
   std::vector<std::string> precomputed_keys;
   std::vector<std::string> precomputed_max_keys;
+  std::vector<std::string> precomputed_max_100ms_keys;
 };
 
 template <typename T, size_t N> constexpr size_t array_dimension() { return N; }
