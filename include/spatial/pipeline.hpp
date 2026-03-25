@@ -2064,7 +2064,7 @@ private:
               T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
               T::NR_RECEIVERS, T::NR_RECEIVERS, cu_device, stream,
               ccglib::complex_interleaved, ccglib::complex_interleaved,
-              ccglib::mma::row_major, ccglib::mma::col_major,
+              ccglib::mma::row_major, ccglib::mma::row_major,
               ccglib::mma::row_major, ccglib::ValueType::float16,
               ccglib::ValueType::float16, ccglib::mma::opt, alpha_ccglib,
               beta_ccglib);
