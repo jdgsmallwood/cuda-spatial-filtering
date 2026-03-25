@@ -2470,7 +2470,7 @@ public:
       //
       //
       b.gemm_weight_projection_handle->Run(
-          (CUdeviceptr)b.projection_matrix.get(), (CUdeviceptr)b.weights.get(),
+          (CUdeviceptr)b.weights.get(), (CUdeviceptr)b.projection_matrix.get(),
           (CUdeviceptr)b.weights_updated.get());
     }
 
