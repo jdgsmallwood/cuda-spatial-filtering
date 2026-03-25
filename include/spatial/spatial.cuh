@@ -443,7 +443,7 @@ __global__ void weightsDebugKernel(const __half2 *d_in, int N) {
 
   if (idx < N) {
     __half2 val = d_in[idx];
-    printf("Idx %i: %f + %f i", idx, val.x, val.y);
+    printf("Idx %i: %f + %f i", idx, __half2float(val.x), __half2float(val.y));
   }
 }
 
