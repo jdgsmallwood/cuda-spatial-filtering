@@ -2474,10 +2474,11 @@ public:
           (CUdeviceptr)b.weights_updated.get());
     }
 
-    weightsDebugLaunch((__half2 *)b.weights_updated.get(),
-                       T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_RECEIVERS *
-                           T::NR_BEAMS,
-                       b.stream);
+    // weightsDebugLaunch((__half2 *)b.weights_updated.get(),
+    //                    T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_RECEIVERS
+    //                    *
+    //                        T::NR_BEAMS,
+    //                    b.stream);
 
     tensor_16.runPermutation("weightsToBeamMajor", alpha,
                              (__half *)b.weights_updated.get(),
