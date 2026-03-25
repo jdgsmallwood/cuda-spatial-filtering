@@ -2452,8 +2452,8 @@ public:
       cublasGemmStridedBatchedEx(
           b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T, T::NR_BEAMS, N, N,
           &herk_alpha, b.weights.get(), CUDA_C_16F, T::NR_BEAMS,
-          CUBLAS_STRIDE_A, b.projection_matrix.get(), CUDA_C_16F, N,
-          CUBLAS_STRIDE_B, &herk_beta, b.weights_updated.get(), CUDA_C_16F,
+          CUBLAS_STRIDE_B, b.projection_matrix.get(), CUDA_C_16F, N,
+          CUBLAS_STRIDE_A, &herk_beta, b.weights_updated.get(), CUDA_C_16F,
           T::NR_BEAMS, CUBLAS_STRIDE_C, CUBLAS_NUM_BATCHES, CUBLAS_COMPUTE_32F,
           CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
