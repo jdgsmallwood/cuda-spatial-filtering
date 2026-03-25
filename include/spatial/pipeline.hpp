@@ -2450,10 +2450,10 @@ public:
                           (__half2 *)b.projection_matrix.get(), T::NR_RECEIVERS,
                           T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
 
-    conjugateMatrix((__half2 *)b.projection_matrix.get(),
-                    T::NR_RECEIVERS * T::NR_RECEIVERS * T::NR_CHANNELS *
-                        T::NR_POLARIZATIONS,
-                    b.stream);
+    // conjugateMatrix((__half2 *)b.projection_matrix.get(),
+    //                 T::NR_RECEIVERS * T::NR_RECEIVERS * T::NR_CHANNELS *
+    //                     T::NR_POLARIZATIONS,
+    //                 b.stream);
 
     {
       const cuComplex herk_alpha{1.0f, 0.0f};
