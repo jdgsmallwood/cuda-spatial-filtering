@@ -1452,7 +1452,7 @@ private:
             auto key = precomputed_keys[get_key_index(ch, pol, beam, f)];
             auto max_key =
                 precomputed_max_keys[get_key_index(ch, pol, beam, f)];
-            auto max_key =
+            auto max_100ms_key =
                 precomputed_max_100ms_keys[get_key_index(ch, pol, beam, f)];
 
             std::vector<std::string> args = {"TS.CREATE",
