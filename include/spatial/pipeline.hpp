@@ -1991,6 +1991,8 @@ private:
     size_t cusolver_work_device_size = 0;
     size_t cusolver_work_host_size = 0;
     std::unique_ptr<ccglib::pipeline::Pipeline> gemm_handle;
+    std::unique_ptr<ccglib::pipeline::Pipeline> gemm_weight_projection_handle;
+
     cublasHandle_t cublas_handle = nullptr;
 
     PipelineResources(CUdevice cu_device, size_t work_size)
@@ -2057,6 +2059,15 @@ private:
           ccglib::ValueType::float32, ccglib::mma::opt, alpha_ccglib,
           beta_ccglib);
 
+      gemm_weight_projection_handle =
+          std::make_unique<ccglib::pipeline::Pipeline>(
+              T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
+              T::NR_RECEIVERS, T::NR_RECEIVERS, cu_device, stream,
+              ccglib::complex_interleaved, ccglib::complex_interleaved,
+              ccglib::mma::row_major, ccglib::mma::col_major,
+              ccglib::mma::row_major, ccglib::ValueType::float16,
+              ccglib::ValueType::float16, ccglib::mma::opt, alpha_ccglib,
+              beta_ccglib);
       CUBLAS_CHECK(cublasCreate(&cublas_handle));
       CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
     }
@@ -2440,9 +2451,8 @@ public:
                           T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
 
     {
-      const __half2 herk_alpha{__float2half(1.0f), __float2half(0.0f)};
-      const __half2 herk_beta{__float2half(0.0f),
-                              __float2half(0.0f)}; // overwrite projection_block
+      const cuComplex herk_alpha{1.0f, 0.0f};
+      const cuComplex herk_beta{0.0f, 0.0f}; // overwrite projection_block
       const int N = T::NR_RECEIVERS;
       size_t CUBLAS_NUM_BATCHES =
           CUSOLVER_BATCH_SIZE; // T::NR_POLARIZATIONS * T::NR_CHANNELS
@@ -2450,13 +2460,18 @@ public:
       size_t CUBLAS_STRIDE_B = T::NR_RECEIVERS * T::NR_BEAMS;
       size_t CUBLAS_STRIDE_C = T::NR_RECEIVERS * T::NR_BEAMS;
 
-      cublasGemmStridedBatchedEx(
-          b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T, T::NR_BEAMS, N, N,
-          &herk_alpha, b.weights.get(), CUDA_C_16F, T::NR_BEAMS,
-          CUBLAS_STRIDE_B, b.projection_matrix.get(), CUDA_C_16F, N,
-          CUBLAS_STRIDE_A, &herk_beta, b.weights_updated.get(), CUDA_C_16F,
-          T::NR_BEAMS, CUBLAS_STRIDE_C, CUBLAS_NUM_BATCHES, CUBLAS_COMPUTE_32F,
-          CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+      // cublasGemmStridedBatchedEx(
+      //     b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T, T::NR_BEAMS, N, N,
+      //     &herk_alpha, b.weights.get(), CUDA_C_16F, T::NR_BEAMS,
+      //     CUBLAS_STRIDE_B, b.projection_matrix.get(), CUDA_C_16F, N,
+      //     CUBLAS_STRIDE_A, &herk_beta, b.weights_updated.get(), CUDA_C_16F,
+      //     T::NR_BEAMS, CUBLAS_STRIDE_C, CUBLAS_NUM_BATCHES,
+      //     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+      //
+      //
+      b.gemm_weight_projection_handle->Run(
+          (CUdeviceptr)b.projection_matrix.get(), (CUdeviceptr)b.weights.get(),
+          (CUdeviceptr)b.weights_updated.get());
     }
 
     weightsDebugLaunch((__half2 *)b.weights_updated.get(),
