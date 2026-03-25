@@ -2438,6 +2438,11 @@ public:
     computeIdentityMinusA((float2 *)b.float_projection_matrix.get(),
                           (__half2 *)b.projection_matrix.get(), T::NR_RECEIVERS,
                           T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
+
+    weightsDebugLaunch((__half2 *)b.projection_matrix.get(),
+                       T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_RECEIVERS *
+                           T::NR_RECEIVERS,
+                       b.stream);
     {
       const cuComplex herk_alpha{1.0f, 0.0f};
       const cuComplex herk_beta{0.0f, 0.0f}; // overwrite projection_block
@@ -2455,12 +2460,6 @@ public:
           CUBLAS_NUM_BATCHES, CUBLAS_COMPUTE_32F,
           CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     }
-
-    weightsDebugLaunch((__half2 *)b.weights_updated.get(),
-                       T::NR_RECEIVERS * T::NR_BEAMS * T::NR_CHANNELS *
-                           T::NR_POLARIZATIONS,
-                       b.stream);
-
     tensor_16.runPermutation("weightsToBeamMajor", alpha,
                              (__half *)b.weights_updated.get(),
                              (__half *)b.weights_permuted.get(), b.stream);
