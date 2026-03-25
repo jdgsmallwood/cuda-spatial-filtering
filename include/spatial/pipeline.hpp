@@ -2064,7 +2064,7 @@ private:
               T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
               T::NR_RECEIVERS, T::NR_RECEIVERS, cu_device, stream,
               ccglib::complex_interleaved, ccglib::complex_interleaved,
-              ccglib::mma::row_major, ccglib::mma::row_major,
+              ccglib::mma::row_major, ccglib::mma::col_major,
               ccglib::mma::row_major, ccglib::ValueType::float16,
               ccglib::ValueType::float16, ccglib::mma::opt, alpha_ccglib,
               beta_ccglib);
@@ -2449,6 +2449,11 @@ public:
     computeIdentityMinusA((float2 *)b.float_projection_matrix.get(),
                           (__half2 *)b.projection_matrix.get(), T::NR_RECEIVERS,
                           T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
+
+    conjugateMatrix((__half2 *)b.projection_matrix.get(),
+                    T::NR_RECEIVERS * T::NR_RECEIVERS * T::NR_CHANNELS *
+                        T::NR_POLARIZATIONS,
+                    b.stream);
 
     {
       const cuComplex herk_alpha{1.0f, 0.0f};

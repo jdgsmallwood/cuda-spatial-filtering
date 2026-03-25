@@ -456,3 +456,22 @@ void weightsDebugLaunch(const __half2 *d_in, int N, cudaStream_t stream) {
 
   weightsDebugKernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_in, N);
 }
+
+__global__ void conjugateMatrixKernel(__half2 *d_in, const int N) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < N) {
+    __half2 val = d_in[idx];
+    val.y = -val.y;
+    d_in[idx] = val;
+  }
+}
+
+void conjugateMatrix(__half2 *d_in, const int N, cudaStream_t stream) {
+
+  int threadsPerBlock = 256;
+
+  int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
+
+  conjugateMatrixKernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_in, N);
+}
