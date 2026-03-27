@@ -314,10 +314,51 @@ int main(int argc, char *argv[]) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
 
-  auto vis_writer = std::make_unique<
-      HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-      vis_file, 55 /* nr baselines */, min_freq_channel,
-      min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
+  // Array origin — geodetic: [longitude_deg, latitude_deg, height_m]
+  std::array<double, 3> array_origin_geodetic = {116.6708, -26.7041, 330.0};
+
+  // Array origin — geocentric ECEF [X, Y, Z] metres (origin for antenna
+  // offsets)
+  std::array<double, 3> array_origin_geocentric = {-2559454.0, 5095372.0,
+                                                   -2849057.0};
+
+  // Per-antenna ENU offsets from array origin [East, North, Up] in metres
+  // 10 antennas, all placed at the origin as placeholders
+  std::vector<std::array<double, 3>> antenna_enu = {
+      {0.0, 0.0, 0.0},  // ant 0
+      {10.0, 0.0, 0.0}, // ant 1
+      {20.0, 0.0, 0.0}, // ant 2
+      {30.0, 0.0, 0.0}, // ant 3
+      {40.0, 0.0, 0.0}, // ant 4
+      {0.0, 10.0, 0.0}, // ant 5
+      {0.0, 20.0, 0.0}, // ant 6
+      {0.0, 30.0, 0.0}, // ant 7
+      {0.0, 40.0, 0.0}, // ant 8
+      {0.0, 50.0, 0.0}, // ant 9
+  };
+  std::vector<std::string> antenna_ids = {
+      "SKA-MID-000", "SKA-MID-001", "SKA-MID-002", "SKA-MID-003", "SKA-MID-004",
+      "SKA-MID-005", "SKA-MID-006", "SKA-MID-007", "SKA-MID-008", "SKA-MID-009",
+  };
+  // Per-antenna ECEF positions — array origin already subtracted.
+  // Computed from ENU via the standard rotation for this lat/lon,
+  // but zeroed here as placeholders.
+  std::vector<std::array<double, 3>> antenna_ecef(antenna_enu.size(),
+                                                  {0.0, 0.0, 0.0});
+
+  constexpr double CHANNEL_WIDTH_HZ = 781.25e3;
+  std::vector<double> channel_freqs_hz(num_lambda_channels);
+  for (int i = 0; i < num_lambda_channels; ++i)
+    channel_freqs_hz[i] = (min_freq_channel + i) * CHANNEL_WIDTH_HZ;
+
+  auto vis_writer =
+      std::make_unique<HDF5UVXWriter<Config::VisibilitiesOutputType>>(
+          vis_file, channel_freqs_hz, antenna_enu, antenna_ecef,
+          array_origin_geocentric, array_origin_geodetic, antenna_ids,
+          /* ra_j2000  = */ std::numeric_limits<double>::quiet_NaN(),
+          /* dec_j2000 = */ std::numeric_limits<double>::quiet_NaN(),
+          &antenna_mapping);
+
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();

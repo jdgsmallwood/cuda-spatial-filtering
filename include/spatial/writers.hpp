@@ -2530,3 +2530,513 @@ private:
   std::vector<size_t> vec_dims_; // inner shape of TVec, e.g. {CH,POL,POL,N,N}
   std::vector<size_t> val_dims_;
 };
+
+// ---------------------------------------------------------------------------
+// HDF5UVXWriter
+//
+// Implements VisibilitiesWriter<T> and writes cross-correlation data to the
+// UVX (AA_UV) HDF5 format.
+//
+// Template parameter T is the same flat C array type used by
+// HDF5VisibilitiesWriter, e.g.:
+//   float[NUM_CHANNELS][NUM_BASELINES][NUM_POL][NUM_POL][2]   (complex as pair)
+//
+// Dimension extraction (compile-time):
+//   extent<T,0> → channels (frequency)
+//   extent<T,1> → baselines
+//   extent<T,2> → NUM_POL  (polarisation products = NUM_POL * NUM_POL)
+//   extent<T,3> → NUM_POL
+//   extent<T,4> → 2 (real/imag)
+//
+// Data written to uvx/visibilities/data as [time, frequency, baseline, pol]
+// complex floats interleaved (real, imag).
+//
+// Timestamps are derived from the system clock at the moment
+// write_visibilities_block() is called — no caller-supplied time needed.
+// LST is stored as NaN because it cannot be computed without sidereal
+// reduction; fill it in post-hoc if required.
+//
+// Sequence and packet-loss metadata from the VisibilitiesWriter interface
+// are stored under uvx/visibilities/attrs as chunked datasets.
+//
+// Usage:
+//   HDF5UVXWriter<DataType> writer(
+//       file,
+//       {freq_hz_ch0, freq_hz_ch1, ...},   // per-channel centre frequencies
+//       antenna_enu,                        // [N_ANT][3] ENU metres
+//       antenna_ecef,                       // [N_ANT][3] ECEF metres (origin
+//       subtracted) array_origin_geocentric,            // [3] ECEF of array
+//       centre array_origin_geodetic,              // [3] lon(deg), lat(deg),
+//       height(m) antenna_ids,                        // string name per
+//       antenna ra_j2000,  dec_j2000,              // phase centre (degrees)
+//       antenna_map                         // optional physical→logical index
+//       map
+//   );
+//   writer.write_visibilities_block(data_ptr, start_seq, end_seq,
+//                                   num_missing_packets, num_total_packets);
+// ---------------------------------------------------------------------------
+
+template <typename T> class HDF5UVXWriter : public VisibilitiesWriter<T> {
+public:
+  // ------------------------------------------------------------------
+  // Types
+  // ------------------------------------------------------------------
+  using ElementType = typename std::remove_all_extents<T>::type;
+
+  static constexpr size_t NUM_CHANNELS = std::extent<T, 0>::value;
+  static constexpr size_t NUM_BASELINES = std::extent<T, 1>::value;
+  static constexpr size_t NUM_POL = std::extent<T, 2>::value; // e.g. 2
+  static constexpr size_t NUM_POL_PRODS = NUM_POL * NUM_POL;  // e.g. 4
+  static constexpr size_t CPLX = std::extent<T, 4>::value;    // must be 2
+
+  static_assert(CPLX == 2, "T must have innermost extent == 2 (real/imag)");
+
+  // ------------------------------------------------------------------
+  // Constructor
+  // ------------------------------------------------------------------
+  HDF5UVXWriter(HighFive::File &file,
+                // Frequency axis
+                const std::vector<double> &channel_frequencies_hz,
+                // Antenna geometry  (size: n_antennas × 3)
+                const std::vector<std::array<double, 3>> &antenna_enu,
+                const std::vector<std::array<double, 3>> &antenna_ecef,
+                // Array origin
+                const std::array<double, 3> &array_origin_geocentric,
+                const std::array<double, 3> &array_origin_geodetic,
+                // Antenna names
+                const std::vector<std::string> &antenna_identifiers,
+                // Phase centre (J2000, degrees). Pass NaN for either to
+                // auto-compute the zenith pointing (RA = LST, Dec = latitude)
+                // at the first integration.
+                double ra_j2000 = std::numeric_limits<double>::quiet_NaN(),
+                double dec_j2000 = std::numeric_limits<double>::quiet_NaN(),
+                // Optional physical→logical antenna index remap
+                const std::unordered_map<int, int> *antenna_map = nullptr)
+      : file_(file), longitude_deg_(array_origin_geodetic[0]),
+        latitude_deg_(array_origin_geodetic[1]), ra_j2000_(ra_j2000),
+        dec_j2000_(dec_j2000) {
+    using namespace HighFive;
+
+    // --- Validate inputs ------------------------------------------------
+    const size_t n_ant = antenna_enu.size();
+    if (antenna_ecef.size() != n_ant || antenna_identifiers.size() != n_ant)
+      throw std::invalid_argument(
+          "Antenna arrays must all have the same length");
+
+    if (channel_frequencies_hz.size() != NUM_CHANNELS)
+      throw std::invalid_argument(
+          "channel_frequencies_hz length must equal T's channel extent");
+
+    // --- Build antenna map ----------------------------------------------
+    if (antenna_map && !antenna_map->empty())
+      antenna_map_ = *antenna_map;
+    else
+      for (int i = 0; i < 256; ++i)
+        antenna_map_[i] = i;
+
+    // --- Root group / class attributes ----------------------------------
+    auto uvx = file_.createGroup("uvx");
+    uvx.createAttribute<std::string>("CLASS", std::string("AA_UV"));
+    uvx.createAttribute<std::string>("VERSION", std::string("1.0.0"));
+
+    // --- uvx/context (placeholder) --------------------------------------
+    uvx.createGroup("context");
+
+    // ====================================================================
+    // uvx/antennas
+    // ====================================================================
+    auto grp_ant = uvx.createGroup("antennas");
+    auto grp_ant_attrs = grp_ant.createGroup("attrs");
+    auto grp_ant_coord = grp_ant.createGroup("coords");
+
+    // -- coords/antenna (0-based index) --
+    {
+      std::vector<int> ant_idx(n_ant);
+      std::iota(ant_idx.begin(), ant_idx.end(), 0);
+      grp_ant_coord.createDataSet<int>("antenna", DataSpace::From(ant_idx))
+          .write(ant_idx);
+    }
+
+    // -- coords/spatial --
+    {
+      const std::vector<std::string> spatial_labels = {"X", "Y", "Z"};
+      grp_ant_coord
+          .createDataSet<std::string>("spatial",
+                                      DataSpace::From(spatial_labels))
+          .write(spatial_labels);
+    }
+
+    // -- attrs/array_origin_geocentric --
+    {
+      std::vector<double> origin(array_origin_geocentric.begin(),
+                                 array_origin_geocentric.end());
+      grp_ant_attrs
+          .createDataSet<double>("array_origin_geocentric",
+                                 DataSpace::From(origin))
+          .write(origin);
+    }
+
+    // -- attrs/array_origin_geodetic --
+    {
+      std::vector<double> geodetic(array_origin_geodetic.begin(),
+                                   array_origin_geodetic.end());
+      grp_ant_attrs
+          .createDataSet<double>("array_origin_geodetic",
+                                 DataSpace::From(geodetic))
+          .write(geodetic);
+    }
+
+    // -- attrs/identifier --
+    {
+      grp_ant_attrs
+          .createDataSet<std::string>("identifier",
+                                      DataSpace::From(antenna_identifiers))
+          .write(antenna_identifiers);
+    }
+
+    // -- attrs/flags (all zero = no known issues) --
+    {
+      std::vector<int> flags(n_ant, 0);
+      grp_ant_attrs.createDataSet<int>("flags", DataSpace::From(flags))
+          .write(flags);
+    }
+
+    // -- ecef [antenna, spatial] --
+    {
+      std::vector<std::vector<double>> ecef_2d(n_ant, std::vector<double>(3));
+      for (size_t i = 0; i < n_ant; ++i)
+        for (int j = 0; j < 3; ++j)
+          ecef_2d[i][j] = antenna_ecef[i][j];
+
+      auto ds = grp_ant.createDataSet<double>("ecef", DataSpace({n_ant, 3}));
+      ds.write(ecef_2d);
+      ds.createAttribute<std::string>("units", std::string("m"));
+    }
+
+    // -- enu [antenna, spatial] --
+    {
+      std::vector<std::vector<double>> enu_2d(n_ant, std::vector<double>(3));
+      for (size_t i = 0; i < n_ant; ++i)
+        for (int j = 0; j < 3; ++j)
+          enu_2d[i][j] = antenna_enu[i][j];
+
+      auto ds = grp_ant.createDataSet<double>("enu", DataSpace({n_ant, 3}));
+      ds.write(enu_2d);
+      ds.createAttribute<std::string>("units", std::string("m"));
+    }
+
+    // ====================================================================
+    // uvx/visibilities
+    // ====================================================================
+    auto grp_vis = uvx.createGroup("visibilities");
+    auto grp_vis_attrs = grp_vis.createGroup("attrs");
+    auto grp_vis_coord = grp_vis.createGroup("coords");
+
+    // -- coords/frequency [frequency] --
+    {
+      auto ds = grp_vis_coord.createDataSet<double>(
+          "frequency", DataSpace::From(channel_frequencies_hz));
+      ds.write(channel_frequencies_hz);
+      ds.createAttribute<std::string>("units", std::string("Hz"));
+    }
+
+    // -- coords/polarization [polarization] --
+    {
+      // Build polarisation labels: XX, XY, YX, YY (for 2-pol systems)
+      // Generalises to any NUM_POL value.
+      const std::vector<char> pol_chars = {'X', 'Y', 'R', 'L'};
+      std::vector<std::string> pol_labels;
+      pol_labels.reserve(NUM_POL_PRODS);
+      for (size_t i = 0; i < NUM_POL; ++i)
+        for (size_t j = 0; j < NUM_POL; ++j) {
+          std::string lbl;
+          lbl += (i < pol_chars.size()) ? pol_chars[i] : ('A' + i);
+          lbl += (j < pol_chars.size()) ? pol_chars[j] : ('A' + j);
+          pol_labels.push_back(lbl);
+        }
+      grp_vis_coord
+          .createDataSet<std::string>("polarization",
+                                      DataSpace::From(pol_labels))
+          .write(pol_labels);
+    }
+
+    // -- coords/baseline/ant1 and ant2 --
+    write_baseline_coords(grp_vis_coord, n_ant);
+
+    // -- coords/time (chunked, unlimited on time axis) --
+    {
+      auto grp_time = grp_vis_coord.createGroup("time");
+
+      DataSetCreateProps props_1d;
+      props_1d.add(HighFive::Chunking(std::vector<hsize_t>{1}));
+
+      ds_time_mjd_ = grp_time.createDataSet<double>(
+          "mjd", DataSpace({0}, {DataSpace::UNLIMITED}), props_1d);
+      ds_time_mjd_.createAttribute<std::string>("format", std::string("mjd"));
+
+      ds_time_unix_ = grp_time.createDataSet<double>(
+          "unix", DataSpace({0}, {DataSpace::UNLIMITED}), props_1d);
+      ds_time_unix_.createAttribute<std::string>("format", std::string("unix"));
+      ds_time_unix_.createAttribute<std::string>(
+          "description",
+          std::string(
+              "Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)"));
+
+      ds_time_lst_ = grp_time.createDataSet<double>(
+          "lst", DataSpace({0}, {DataSpace::UNLIMITED}), props_1d);
+      ds_time_lst_.createAttribute<std::string>("units", std::string("hr"));
+    }
+
+    // -- visibilities/data [time, frequency, baseline, polarization] --
+    // Stored as pairs of float (real, imag) → innermost dim size = 2
+    {
+      std::vector<hsize_t> chunk = {1, NUM_CHANNELS, NUM_BASELINES,
+                                    NUM_POL_PRODS, 2};
+      DataSetCreateProps vis_props;
+      vis_props.add(HighFive::Chunking(chunk));
+
+      ds_vis_ = grp_vis.createDataSet<float>(
+          "data",
+          DataSpace({0, NUM_CHANNELS, NUM_BASELINES, NUM_POL_PRODS, 2},
+                    {DataSpace::UNLIMITED, NUM_CHANNELS, NUM_BASELINES,
+                     NUM_POL_PRODS, 2}),
+          vis_props);
+      // Dimension labels as attribute (optional but useful)
+      ds_vis_.createAttribute<std::string>(
+          "DIMENSION_LABELS",
+          std::string("time,frequency,baseline,polarization,complex"));
+    }
+
+    // ====================================================================
+    // uvx/phase_center — written now if explicit values were supplied,
+    // otherwise deferred to the first write_visibilities_block() call
+    // (where the actual LST and zenith pointing are known).
+    // ====================================================================
+    grp_pc_ = uvx.createGroup("phase_center");
+    grp_pc_.createAttribute<std::string>("frame", std::string("J2000"));
+    grp_pc_.createAttribute<std::string>("units", std::string("degrees"));
+    if (!std::isnan(ra_j2000_) && !std::isnan(dec_j2000_)) {
+      write_phase_center(ra_j2000_, dec_j2000_);
+      phase_center_written_ = true;
+    }
+
+    // -- visibilities/attrs: per-integration sequence and packet metadata --
+    // Mirrors the old vis_seq_nums / vis_missing_nums datasets but stored
+    // under the correct UVX group.
+    {
+      DataSetCreateProps props_seq;
+      props_seq.add(HighFive::Chunking(std::vector<hsize_t>{1, 2}));
+      ds_seq_ = grp_vis_attrs.createDataSet<int>(
+          "sequence_numbers", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
+          props_seq);
+      ds_seq_.createAttribute<std::string>(
+          "description", std::string("start_seq and end_seq per integration"));
+
+      DataSetCreateProps props_miss;
+      props_miss.add(HighFive::Chunking(std::vector<hsize_t>{1, 3}));
+      ds_missing_ = grp_vis_attrs.createDataSet<float>(
+          "missing_packets", DataSpace({0, 3}, {DataSpace::UNLIMITED, 3}),
+          props_miss);
+      ds_missing_.createAttribute<std::string>(
+          "description",
+          std::string(
+              "num_missing, num_total, percent_missing per integration"));
+    }
+
+    // ====================================================================
+    // uvx/provenance
+    // ====================================================================
+    {
+      auto grp_prov = uvx.createGroup("provenance");
+      grp_prov.createGroup("ska_ost_low_uv_config");
+      grp_prov.createGroup("input_files");
+      grp_prov.createGroup("input_metadata");
+      grp_prov.createGroup("station_config");
+
+      // Record creation timestamp as a Unix epoch double
+      double creation_time = static_cast<double>(
+          std::chrono::duration_cast<std::chrono::seconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      grp_prov.createAttribute<double>("creation_unix_time", creation_time);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // write_visibilities_block  (implements VisibilitiesWriter<T>)
+  //
+  // Appends one integration to the file. Timestamps are taken from the
+  // system clock at the time of the call. LST is stored as NaN because
+  // it requires sidereal reduction beyond the scope of this writer.
+  // ------------------------------------------------------------------
+  void write_visibilities_block(const T *data, const int start_seq,
+                                const int end_seq,
+                                const int num_missing_packets,
+                                const int num_total_packets) override {
+    const size_t t = current_time_index_;
+
+    // ---- Capture timestamps now ----------------------------------------
+    const double unix_now =
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count()) /
+        1000.0;
+
+    // MJD = Unix seconds / 86400 + 40587 (offset from 1858-11-17 to 1970-01-01)
+    const double mjd_now = unix_now / 86400.0 + 40587.0;
+
+    // LST from system clock + array longitude
+    const double lst_now = compute_lst_hours(unix_now);
+
+    // ---- Deferred phase center (zenith pointing) -----------------------
+    // Written once at the first integration when no explicit RA/Dec was given.
+    if (!phase_center_written_) {
+      const double ra = lst_now * 15.0; // LST hours → degrees
+      const double dec = latitude_deg_;
+      write_phase_center(ra, dec);
+      phase_center_written_ = true;
+    }
+
+    // ---- Time coordinates ----------------------------------------------
+    append_scalar(ds_time_mjd_, t, mjd_now);
+    append_scalar(ds_time_unix_, t, unix_now);
+    append_scalar(ds_time_lst_, t, lst_now);
+
+    // ---- Visibility data -----------------------------------------------
+    ds_vis_.resize({t + 1, NUM_CHANNELS, NUM_BASELINES, NUM_POL_PRODS, 2});
+    ds_vis_
+        .select({t, 0, 0, 0, 0},
+                {1, NUM_CHANNELS, NUM_BASELINES, NUM_POL_PRODS, 2})
+        .write_raw(reinterpret_cast<const float *>(data));
+
+    // ---- Sequence numbers ----------------------------------------------
+    {
+      const auto sz = ds_seq_.getDimensions()[0];
+      ds_seq_.resize({sz + 1, 2});
+      std::array<int, 2> seq = {start_seq, end_seq};
+      ds_seq_.select({sz, 0}, {1, 2}).write_raw(seq.data());
+    }
+
+    // ---- Packet-loss metadata ------------------------------------------
+    {
+      const auto sz = ds_missing_.getDimensions()[0];
+      ds_missing_.resize({sz + 1, 3});
+      const float miss = static_cast<float>(num_missing_packets);
+      const float total = static_cast<float>(num_total_packets);
+      std::array<float, 3> miss_row = {
+          miss, total, (total > 0.f ? 100.f * miss / total : 0.f)};
+      ds_missing_.select({sz, 0}, {1, 3}).write_raw(miss_row.data());
+    }
+
+    ++current_time_index_;
+  }
+
+  void flush() override { file_.flush(); }
+
+  size_t num_time_steps() const { return current_time_index_; }
+
+private:
+  // ------------------------------------------------------------------
+  // compute_lst_hours
+  //
+  // Local Apparent Sidereal Time in hours [0, 24) from a Unix timestamp
+  // and the stored array longitude.
+  //
+  // Uses the IAU 1982 GMST formula (good to ~0.1s over several decades):
+  //   JD    = unix / 86400 + 2440587.5
+  //   D     = JD - 2451545.0           (days from J2000.0)
+  //   GMST  = 280.46061837
+  //           + 360.98564736629 * D    (Earth's rotation)
+  //           + 0.000387933 * T²       (T = D/36525, secular drift)
+  //           - T³/38710000            (higher-order)
+  //   LST   = (GMST + longitude_deg) mod 360, then / 15 → hours
+  // ------------------------------------------------------------------
+  double compute_lst_hours(double unix_time) const {
+    const double jd = unix_time / 86400.0 + 2440587.5;
+    const double D = jd - 2451545.0;
+    const double Time = D / 36525.0;
+
+    double gmst_deg = 280.46061837 + 360.98564736629 * D +
+                      0.000387933 * Time * Time -
+                      (Time * Time * Time) / 38710000.0;
+
+    // Normalise to [0, 360)
+    double lst_deg = std::fmod(gmst_deg + longitude_deg_, 360.0);
+    if (lst_deg < 0.0)
+      lst_deg += 360.0;
+
+    return lst_deg / 15.0; // degrees → hours
+  }
+
+  // ------------------------------------------------------------------
+  // write_phase_center — creates ra/dec scalar datasets in grp_pc_
+  // ------------------------------------------------------------------
+  void write_phase_center(double ra_deg, double dec_deg) {
+    grp_pc_.createDataSet<double>("ra", HighFive::DataSpace::From(ra_deg))
+        .write(ra_deg);
+    grp_pc_.createDataSet<double>("dec", HighFive::DataSpace::From(dec_deg))
+        .write(dec_deg);
+  }
+
+  // ------------------------------------------------------------------
+  // write_baseline_coords — populate ant1/ant2 index arrays
+  // ------------------------------------------------------------------
+  void write_baseline_coords(HighFive::Group &grp_coord, size_t n_ant) {
+    // Derive number of antennas from NUM_BASELINES (triangular number)
+    // B = A*(A+1)/2  →  A = (-1 + sqrt(1 + 8B)) / 2
+    const size_t n_ant_from_bl =
+        static_cast<size_t>((std::sqrt(1.0 + 8.0 * NUM_BASELINES) - 1.0) / 2.0);
+
+    if (n_ant_from_bl != n_ant) {
+      // If there's a mismatch, fall back to using the triangular derivation.
+      // Log a warning here if your logging facility is available.
+    }
+
+    std::vector<int> ant1_ids, ant2_ids;
+    ant1_ids.reserve(NUM_BASELINES);
+    ant2_ids.reserve(NUM_BASELINES);
+
+    // Lower-triangular order: (0,0),(0,1),(1,1),(0,2),(1,2),(2,2),...
+    for (size_t a2 = 0; a2 < n_ant_from_bl; ++a2) {
+      for (size_t a1 = 0; a1 <= a2; ++a1) {
+        ant1_ids.push_back(static_cast<int>(antenna_map_[a1]));
+        ant2_ids.push_back(static_cast<int>(antenna_map_[a2]));
+      }
+    }
+
+    auto grp_bl = grp_coord.createGroup("baseline");
+
+    grp_bl.createDataSet<int>("ant1", HighFive::DataSpace::From(ant1_ids))
+        .write(ant1_ids);
+    grp_bl.createDataSet<int>("ant2", HighFive::DataSpace::From(ant2_ids))
+        .write(ant2_ids);
+  }
+
+  // ------------------------------------------------------------------
+  // append_scalar — grows a 1-D unlimited dataset by one element
+  // ------------------------------------------------------------------
+  static void append_scalar(HighFive::DataSet &ds, size_t idx, double value) {
+    ds.resize({idx + 1});
+    ds.select({idx}, {1}).write_raw(&value);
+  }
+
+  // ------------------------------------------------------------------
+  // Members
+  // ------------------------------------------------------------------
+  HighFive::File &file_;
+  HighFive::Group grp_pc_;
+  HighFive::DataSet ds_vis_;
+  HighFive::DataSet ds_time_mjd_;
+  HighFive::DataSet ds_time_unix_;
+  HighFive::DataSet ds_time_lst_;
+  HighFive::DataSet ds_seq_;
+  HighFive::DataSet ds_missing_;
+  std::unordered_map<int, int> antenna_map_;
+  double longitude_deg_ = 0.0;
+  double latitude_deg_ = 0.0;
+  double ra_j2000_ = std::numeric_limits<double>::quiet_NaN();
+  double dec_j2000_ = std::numeric_limits<double>::quiet_NaN();
+  bool phase_center_written_ = false;
+  size_t current_time_index_ = 0;
+};
