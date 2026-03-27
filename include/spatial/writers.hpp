@@ -2635,17 +2635,17 @@ public:
         antenna_map_[i] = i;
 
     // --- Root group / class attributes ----------------------------------
-    auto uvx = file_.createGroup("uvx");
-    uvx.createAttribute<std::string>("CLASS", std::string("AA_UV"));
-    uvx.createAttribute<std::string>("VERSION", std::string("1.0.0"));
+    // auto uvx = file_.createGroup("uvx");
+    // uvx.createAttribute<std::string>("CLASS", std::string("AA_UV"));
+    // uvx.createAttribute<std::string>("VERSION", std::string("1.0.0"));
 
     // --- uvx/context (placeholder) --------------------------------------
-    uvx.createGroup("context");
+    file_.createGroup("context");
 
     // ====================================================================
     // uvx/antennas
     // ====================================================================
-    auto grp_ant = uvx.createGroup("antennas");
+    auto grp_ant = file_.createGroup("antennas");
     auto grp_ant_attrs = grp_ant.createGroup("attrs");
     auto grp_ant_coord = grp_ant.createGroup("coords");
 
@@ -2728,7 +2728,7 @@ public:
     // ====================================================================
     // uvx/visibilities
     // ====================================================================
-    auto grp_vis = uvx.createGroup("visibilities");
+    auto grp_vis = file_.createGroup("visibilities");
     auto grp_vis_attrs = grp_vis.createGroup("attrs");
     auto grp_vis_coord = grp_vis.createGroup("coords");
 
@@ -2812,7 +2812,7 @@ public:
     // otherwise deferred to the first write_visibilities_block() call
     // (where the actual LST and zenith pointing are known).
     // ====================================================================
-    grp_pc_ = uvx.createGroup("phase_center");
+    grp_pc_ = file_.createGroup("phase_center");
     grp_pc_.createAttribute<std::string>("frame", std::string("J2000"));
     grp_pc_.createAttribute<std::string>("units", std::string("degrees"));
     if (!std::isnan(ra_j2000_) && !std::isnan(dec_j2000_)) {
@@ -2847,7 +2847,7 @@ public:
     // uvx/provenance
     // ====================================================================
     {
-      auto grp_prov = uvx.createGroup("provenance");
+      auto grp_prov = file_.createGroup("provenance");
       grp_prov.createGroup("ska_ost_low_uv_config");
       grp_prov.createGroup("input_files");
       grp_prov.createGroup("input_metadata");
