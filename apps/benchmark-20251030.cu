@@ -319,7 +319,7 @@ int main(int argc, char *argv[]) {
       HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
       vis_file, 55 /* nr baselines */, min_freq_channel,
       min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
-  auto eigen_writer =
+auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
 
@@ -327,7 +327,8 @@ int main(int argc, char *argv[]) {
       num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
-      std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
+      std::move(beam_writer), std::move(vis_writer), 
+      std::move(eigen_writer),
       std::move(fft_writer), 100, 100, 100, 100);
 
   BeamWeightsT<Config> h_weights;
