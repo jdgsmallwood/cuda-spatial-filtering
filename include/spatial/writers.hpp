@@ -2711,9 +2711,7 @@ public:
       auto ds = grp_ant.createDataSet<double>("ecef", DataSpace({n_ant, 3}));
       ds.write(ecef_2d);
       ds.createAttribute<std::string>("units", std::string("m"));
-      std::vector<std::string> dims = {"antenna", "spatial"};
-      ds.createAttribute<std::string>("dims", HighFive::DataSpace::From(dims))
-          .write(dims);
+      ds.createAttribute<std::string>("dims", std::string("antenna, spatial"));
     }
 
     // -- enu [antenna, spatial] --
@@ -2726,9 +2724,7 @@ public:
       auto ds = grp_ant.createDataSet<double>("enu", DataSpace({n_ant, 3}));
       ds.write(enu_2d);
       ds.createAttribute<std::string>("units", std::string("m"));
-      std::vector<std::string> dims = {"antenna", "spatial"};
-      ds.createAttribute<std::string>("dims", HighFive::DataSpace::From(dims))
-          .write(dims);
+      ds.createAttribute<std::string>("dims", std::string("antenna, spatial"));
     }
 
     // ====================================================================
