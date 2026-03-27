@@ -2680,10 +2680,11 @@ public:
     {
       std::vector<double> geodetic(array_origin_geodetic.begin(),
                                    array_origin_geodetic.end());
-      grp_ant_attrs
-          .createDataSet<double>("array_origin_geodetic",
-                                 DataSpace::From(geodetic))
-          .write(geodetic);
+      auto ds = grp_ant_attrs.createDataSet<double>("array_origin_geodetic",
+                                                    DataSpace::From(geodetic));
+
+      ds.createAttribute<std::string>("units", std::string("lat,long,height"));
+      ds.write(geodetic);
     }
 
     // -- attrs/identifier --
