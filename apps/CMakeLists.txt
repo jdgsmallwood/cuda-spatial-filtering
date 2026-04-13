@@ -57,3 +57,12 @@ target_link_libraries(adaptive_beamformed_bandpass PRIVATE spatial CUDA::cudart 
 target_compile_definitions(adaptive_beamformed_bandpass PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS})
 
 set_target_properties(adaptive_beamformed_bandpass PROPERTIES CUDA_ARCHITECTURES "native")
+
+
+add_executable(
+  pulsar_fold
+  ${PROJECT_SOURCE_DIR}/apps/pulsar_fold.cu
+)
+target_link_libraries(pulsar_fold PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver)
+
+set_target_properties(pulsar_fold PROPERTIES CUDA_ARCHITECTURES "native")

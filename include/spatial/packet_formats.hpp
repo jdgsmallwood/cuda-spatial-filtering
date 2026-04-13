@@ -337,4 +337,5 @@ struct LambdaConfig {
       float[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
+  using PulsarFoldOutputType = float[NR_CHANNELS][16][NR_POLARIZATIONS][256];
 };

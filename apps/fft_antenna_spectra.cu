@@ -282,7 +282,8 @@ int main(int argc, char *argv[]) {
 
   auto output = std::make_shared<
       BufferedOutput<Config, Config::MultiChannelAntennaFFTOutputType>>(
-      nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
+      nullptr, nullptr, nullptr, std::move(fft_writer), nullptr, 100, 100, 100,
+      100, 100);
 
   LambdaAntennaSpectraPipeline<Config> pipeline(num_buffers);
 

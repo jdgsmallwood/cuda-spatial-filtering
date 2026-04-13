@@ -368,7 +368,7 @@ int main(int argc, char *argv[]) {
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
-      std::move(fft_writer), 100, 100, 100, 100);
+      std::move(fft_writer), nullptr, 100, 100, 100, 100, 100);
 
   BeamWeightsT<Config> h_weights;
 

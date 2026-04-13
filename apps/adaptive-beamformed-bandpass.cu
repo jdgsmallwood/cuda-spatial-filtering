@@ -259,7 +259,8 @@ int main(int argc, char *argv[]) {
   std::cout << "Creating Output Handler\n";
 
   auto output = std::make_shared<BufferedOutput<Config, FFTOutputType>>(
-      nullptr, nullptr, nullptr, std::move(fft_writer), 100, 100, 100, 100);
+      nullptr, nullptr, nullptr, std::move(fft_writer), nullptr, 100, 100, 100,
+      100, 100);
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;

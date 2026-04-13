@@ -99,7 +99,7 @@ private:
 
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
-  argparse::ArgumentParser program("pipeline");
+  argparse::ArgumentParser program("pulsar_fold");
   std::string pcap_filename;
   std::string output_filename;
   std::string ifname;
@@ -184,21 +184,22 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
   constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
-  constexpr int nr_lambda_beams = 1;
+  constexpr int nr_lambda_beams = 1; // NUMBER_BEAMS placeholder;
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_packets_for_correlation =
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
+  constexpr int fft_downsample_factor = 1;
   constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
-  using Config =
-      LambdaConfig<num_lambda_channels, nr_fpga_sources,
-                   nr_lambda_time_steps_per_packet, nr_lambda_receivers,
-                   nr_lambda_polarizations, nr_lambda_receivers_per_packet,
-                   nr_lambda_packets_for_correlation, nr_lambda_beams,
-                   nr_lambda_padded_receivers, nr_lambda_padded_receivers,
-                   nr_correlation_blocks_to_integrate, true>;
+  using Config = LambdaConfig<
+      num_lambda_channels, nr_fpga_sources, nr_lambda_time_steps_per_packet,
+      nr_lambda_receivers, nr_lambda_polarizations,
+      nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
+      nr_lambda_beams, nr_lambda_padded_receivers, nr_lambda_padded_receivers,
+      nr_correlation_blocks_to_integrate, true, fft_downsample_factor>;
 
+  // 2x as there will be original & RFI mitigated beams.
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -242,19 +243,40 @@ int main(int argc, char *argv[]) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
 
-  HighFive::File output_file_(output_filename, HighFive::File::Truncate);
-  std::cout << "Creating Projection Writer" << std::endl;
-  auto projection_writer = std::make_unique<HDF5ProjectionEigenWriter<
-      Config::EigenvalueOutputType, Config::EigenvectorOutputType>>(
-      output_file_);
-
   std::cout << "Creating Output Handler\n";
+  using PulsarType =
+      float[num_lambda_channels][16][nr_lambda_polarizations][256];
+  auto pulsar_writer = std::make_unique<RedisPulsarFoldWriter<PulsarType>>(
+      num_lambda_channels, 16, nr_lambda_polarizations, 256);
+
   auto output = std::make_shared<BufferedOutput<Config>>(
-      nullptr, nullptr, std::move(projection_writer), nullptr, nullptr, 100,
-      100, 100, 100, 100);
+      nullptr, nullptr, nullptr, nullptr, std::move(pulsar_writer), 100, 100,
+      100, 100, 100);
+
+  std::cout << "Loading weights...\n";
+  // BeamWeightsT<Config> h_weights;
+  //
+  // for (auto i = 0; i < num_lambda_channels; ++i) {
+  //   for (auto j = 0; j < nr_lambda_receivers; ++j) {
+  //     for (auto k = 0; k < nr_lambda_beams; ++k) {
+  //       for (auto l = 0; l < nr_lambda_polarizations; ++l) {
+  //         h_weights.weights[i][l][k][j] =
+  //             std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+  //       }
+  //     }
+  //   }
+  // }
 
   std::cout << "Initializing pipeline...\n";
-  LambdaProjectionPipeline<Config, 3, 4> pipeline(num_buffers);
+  PulsarFoldParameters pulsar;
+  pulsar.period_samples = -1;
+  pulsar.n_bins = 256;
+  pulsar.dm = 2.0;
+  pulsar.ref_freq_mhz = -1;
+  pulsar.chan_bw_mhz = -1;
+  pulsar.lowest_chan_freq_mhz = -1;
+
+  LambdaPulsarFoldPipeline<Config> pipeline(num_buffers, pulsar, 100);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
