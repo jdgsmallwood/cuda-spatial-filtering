@@ -475,3 +475,178 @@ void conjugateMatrix(__half2 *d_in, const int N, cudaStream_t stream) {
 
   conjugateMatrixKernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_in, N);
 }
+
+__global__ void incoherent_sum(const __restrict__ float2 *d_input,
+                               float *d_output, const size_t nr_channels,
+                               const size_t nr_polarizations,
+                               const size_t nr_receivers,
+                               const size_t nr_fine_channels,
+                               const size_t time_bins_per_block) {
+
+  __shared__ float detected_data[1024];
+  // This kernel needs to detect and sum over antennas for each channel / pol.
+
+  // For each
+  int time_idx = blockIdx.x * blockDim.x + threadIdx.y;
+  int time_in_block_idx = threadIdx.y;
+  int antenna_id = threadIdx.x;
+  int pol = blockIdx.y;
+  int coarse_channel = blockIdx.z / nr_fine_channels;
+  int fine_channel = blockIdx.z % nr_fine_channels;
+  int linearized_thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
+  int linearized_time_idx = blockIdx.x * blockDim.x + linearized_thread_idx;
+  if (time_idx < time_bins_per_block) {
+    const size_t base_pointer =
+        coarse_channel * nr_polarizations * nr_fine_channels *
+            time_bins_per_block * nr_receivers +
+        fine_channel * nr_polarizations * time_bins_per_block * nr_receivers +
+        pol * time_bins_per_block * nr_receivers + time_idx * nr_receivers +
+        antenna_id;
+
+    float2 val = d_input[base_pointer];
+    int shared_pointer = time_in_block_idx * nr_receivers + antenna_id;
+    detected_data[shared_pointer] = val.x * val.x + val.y * val.y;
+
+    __syncthreads();
+
+    // now add the shared data
+    int n = nr_receivers;
+
+    while (n > 1) {
+      // Stride is ceiling(n / 2). This handles odd lengths properly.
+      int stride = (n + 1) / 2;
+
+      // Only the first floor(n / 2) threads do work in this iteration
+      if (antenna_id < (n / 2)) {
+        detected_data[shared_pointer] += detected_data[shared_pointer + stride];
+      }
+
+      // Synchronize to ensure all additions are visible before the next pass
+      __syncthreads();
+
+      // The new array size is the stride we just used
+      n = stride;
+    }
+  }
+
+  if (linearized_thread_idx < blockDim.y &&
+      linearized_time_idx < time_bins_per_block) {
+    d_output[coarse_channel * nr_fine_channels * nr_polarizations *
+                 time_bins_per_block +
+             fine_channel * nr_polarizations * time_bins_per_block +
+             pol * time_bins_per_block + blockIdx.x * blockDim.x +
+             linearized_thread_idx] =
+        detected_data[linearized_thread_idx * nr_receivers];
+  }
+}
+
+void incoherent_sum_launch(const float2 *d_input, float *d_output,
+                           const size_t nr_channels,
+                           const size_t nr_polarizations,
+                           const size_t nr_receivers,
+                           const size_t nr_fine_channels,
+                           const size_t time_bins_per_block,
+                           cudaStream_t stream) {
+
+  int nr_time_steps_per_block = 1024 / nr_receivers;
+  int nr_time_blocks =
+      (time_bins_per_block + nr_time_steps_per_block) / nr_time_steps_per_block;
+
+  incoherent_sum<<<dim3(nr_receivers, nr_time_steps_per_block, 1),
+                   dim3(nr_time_blocks, nr_polarizations,
+                        nr_channels * nr_fine_channels),
+                   0, stream>>>(d_input, d_output, nr_channels,
+                                nr_polarizations, nr_receivers,
+                                nr_fine_channels, time_bins_per_block);
+}
+
+// fold_and_accumulate_kernel
+//
+// Input  (incoherent_sum): [nr_channels][nr_fine_channels][nr_polarizations]
+//                          [nr_time_bins]   (row-major, power floats)
+// Output (fold_accumulator): [nr_channels][nr_fine_channels][nr_polarizations]
+//                            [n_bins]      (row-major, atomically accumulated)
+// dm_delays: [nr_channels * nr_fine_channels]  (int32 sample offsets,
+//            positive = channel arrives late relative to reference frequency)
+//
+// Each thread handles one (channel, fine_channel, polarization, time_bin) cell.
+// The absolute sample index for that time bin is:
+//   abs_sample = total_samples_elapsed + local_time_bin
+// After subtracting the DM delay, phase is mapped to a bin with fmod and
+// an atomicAdd accumulates the power.  Negative phase (delayed channel at
+// the start of an observation) wraps via the +1 trick rather than a branch.
+__global__ void
+fold_and_accumulate_kernel(const float *__restrict__ incoherent_sum,
+                           float *__restrict__ fold_accumulator,
+                           const int32_t *__restrict__ dm_delays,
+                           int64_t total_samples_elapsed, double period_samples,
+                           int n_bins, int nr_channels, int nr_fine_channels,
+                           int nr_polarizations, int nr_time_bins) {
+  // Grid: (nr_channels * nr_fine_channels, nr_polarizations, nr_time_bins)
+  const int cf_idx =
+      blockIdx.x * blockDim.x + threadIdx.x; // flat channel×fine index
+  const int pol_idx = blockIdx.y;
+  const int t_idx = blockIdx.z * blockDim.z + threadIdx.z;
+
+  if (cf_idx >= nr_channels * nr_fine_channels || t_idx >= nr_time_bins)
+    return;
+
+  const int c_idx = cf_idx / nr_fine_channels;
+  const int f_idx = cf_idx % nr_fine_channels;
+
+  const int32_t delay = dm_delays[cf_idx];
+
+  // Corrected absolute sample index for this time bin.
+  const int64_t abs_sample =
+      total_samples_elapsed + static_cast<int64_t>(t_idx) - delay;
+
+  // fmod with period_samples, then map to [0, 1).  Using double throughout
+  // to preserve phase accuracy over long observations.
+  double phase = fmod(static_cast<double>(abs_sample) / period_samples, 1.0);
+  if (phase < 0.0)
+    phase += 1.0;
+
+  const int bin = static_cast<int>(phase * n_bins);
+
+  // Input index: [c][f][pol][t]
+  const int in_idx =
+      ((c_idx * nr_fine_channels + f_idx) * nr_polarizations + pol_idx) *
+          nr_time_bins +
+      t_idx;
+
+  // Output index: [c][f][pol][bin]
+  const int out_idx =
+      ((c_idx * nr_fine_channels + f_idx) * nr_polarizations + pol_idx) *
+          n_bins +
+      bin;
+
+  atomicAdd(&fold_accumulator[out_idx], incoherent_sum[in_idx]);
+}
+
+// Launch wrapper matching the call site in LambdaPulsarFoldPipeline.
+//
+// Thread layout:
+//   blockDim: (32, 1, 8)   — 32 cf cells × 8 time bins per block = 256 threads
+//   gridDim:  ceil over (nr_channels * nr_fine_channels), nr_polarizations,
+//             ceil over nr_time_bins
+//
+// nr_polarizations is always small (≤ 4) so it maps directly to gridDim.y
+// without needing a thread dimension.
+inline void fold_and_accumulate_launch(
+    const float *incoherent_sum, float *fold_accumulator,
+    const int32_t *dm_delays, int64_t total_samples_elapsed,
+    double period_samples, int n_bins, int nr_channels, int nr_fine_channels,
+    int nr_polarizations, int nr_time_bins, cudaStream_t stream) {
+  constexpr int CF_THREADS = 32;
+  constexpr int T_THREADS = 8;
+
+  const dim3 block(CF_THREADS, 1, T_THREADS);
+  const dim3 grid((nr_channels * nr_fine_channels + CF_THREADS - 1) /
+                      CF_THREADS,
+                  nr_polarizations, (nr_time_bins + T_THREADS - 1) / T_THREADS);
+
+  fold_and_accumulate_kernel<<<grid, block, 0, stream>>>(
+      incoherent_sum, fold_accumulator, dm_delays, total_samples_elapsed,
+      period_samples, n_bins, nr_channels, nr_fine_channels, nr_polarizations,
+      nr_time_bins);
+}

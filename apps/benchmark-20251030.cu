@@ -364,9 +364,8 @@ auto vis_writer = std::make_unique<
       num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
-      std::move(beam_writer), std::move(vis_writer), 
-      std::move(eigen_writer),
-      std::move(fft_writer), 100, 100, 100, 100);
+      std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
+      std::move(fft_writer), nullptr, 100, 100, 100, 100, 100);
 
   BeamWeightsT<Config> h_weights;
 

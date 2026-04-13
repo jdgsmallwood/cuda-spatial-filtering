@@ -250,8 +250,8 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Creating Output Handler\n";
   auto output = std::make_shared<BufferedOutput<Config>>(
-      nullptr, nullptr, std::move(projection_writer), nullptr, 100, 100, 100,
-      100);
+      nullptr, nullptr, std::move(projection_writer), nullptr, nullptr, 100,
+      100, 100, 100, 100);
 
   std::cout << "Initializing pipeline...\n";
   LambdaProjectionPipeline<Config, 3, 4> pipeline(num_buffers);
