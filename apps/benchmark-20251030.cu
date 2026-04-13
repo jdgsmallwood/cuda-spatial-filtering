@@ -315,10 +315,6 @@ int main(int argc, char *argv[]) {
     std::cout << "Key: " << key << ", Val: " << val << std::endl;
   };
 
-  auto vis_writer = std::make_unique<
-      HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-      vis_file, 55 /* nr baselines */, min_freq_channel,
-      min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
   // Array origin — geodetic: [longitude_deg, latitude_deg, height_m]
   std::array<double, 3> array_origin_geodetic = {116.6708, -26.7041, 330.0};
 
@@ -356,14 +352,10 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < num_lambda_channels; ++i)
     channel_freqs_hz[i] = (min_freq_channel + i) * CHANNEL_WIDTH_HZ;
 
-  auto vis_writer =
-      std::make_unique<HDF5UVXWriter<Config::VisibilitiesOutputType>>(
-          vis_file, channel_freqs_hz, antenna_enu, antenna_ecef,
-          array_origin_geocentric, array_origin_geodetic, antenna_ids,
-          /* ra_j2000  = */ std::numeric_limits<double>::quiet_NaN(),
-          /* dec_j2000 = */ std::numeric_limits<double>::quiet_NaN(),
-          &antenna_mapping);
-
+auto vis_writer = std::make_unique<
+      HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
+      vis_file, 55 /* nr baselines */, min_freq_channel,
+      min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
