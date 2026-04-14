@@ -4436,7 +4436,7 @@ private:
                                        0.5 * pulsar_params_.chan_bw_mhz +
                                        c * pulsar_params_.chan_bw_mhz * 27 / 32;
 
-      std::cout << "Coarse Channel " << c << " has center " << coarse_center_mhz
+      std::cout << "Coarse Channel " << c << " has center " << coarse_centre_mhz
                 << " MHz.\n";
 
       for (int f = 0; f < n_fine; ++f) {
