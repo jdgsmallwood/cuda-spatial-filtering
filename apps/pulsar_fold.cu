@@ -244,10 +244,11 @@ int main(int argc, char *argv[]) {
   };
 
   std::cout << "Creating Output Handler\n";
+  constexpr int n_bins = 512;
   using PulsarType =
-      float[num_lambda_channels][16][nr_lambda_polarizations][256];
+      float[num_lambda_channels][16][nr_lambda_polarizations][n_bins];
   auto pulsar_writer = std::make_unique<RedisPulsarFoldWriter<PulsarType>>(
-      num_lambda_channels, 16, nr_lambda_polarizations, 256);
+      num_lambda_channels, 16, nr_lambda_polarizations, n_bins);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       nullptr, nullptr, nullptr, nullptr, std::move(pulsar_writer), 100, 100,
@@ -270,7 +271,7 @@ int main(int argc, char *argv[]) {
   std::cout << "Initializing pipeline...\n";
   PulsarFoldParameters pulsar;
   pulsar.period_samples = 5175.4575;
-  pulsar.n_bins = 512;
+  pulsar.n_bins = n_bins;
   pulsar.dm = 67.771;
   pulsar.ref_freq_mhz = 149.5 * 781.25 / 1000;
   pulsar.chan_bw_mhz = 781.25 * 32 / 27 / 1000;
