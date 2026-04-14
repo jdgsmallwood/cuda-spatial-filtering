@@ -250,7 +250,10 @@ int main(int argc, char *argv[]) {
   auto pulsar_writer = std::make_unique<RedisPulsarFoldWriter<PulsarType>>(
       num_lambda_channels, 16, nr_lambda_polarizations, n_bins);
 
-  auto output = std::make_shared<BufferedOutput<Config>>(
+  auto output = std::make_shared<
+      BufferedOutput<Config, typename Config::FFTOutputType,
+                     typename Config::EigenvalueOutputType,
+                     typename Config::EigenvectorOutputType, PulsarType>>(
       nullptr, nullptr, nullptr, nullptr, std::move(pulsar_writer), 100, 100,
       100, 100, 100);
 
