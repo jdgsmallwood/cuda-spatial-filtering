@@ -204,7 +204,6 @@ get_data_for_multi_channel_fft(const InputT *__restrict__ input_data,
   float2 *output_ptr = reinterpret_cast<float2 *>(output_data);
   while (tid < n) {
     float2 output = __half22float2(input_ptr[tid]);
-    printf("tid %i x: %f y: %f", tid, output.x, output.y);
     output_ptr[tid] = output;
     tid += stride;
   };
@@ -505,6 +504,7 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
         antenna_id;
 
     float2 val = d_input[base_pointer];
+    printf("time_idx %i x: %f y:%f\n", time_idx, val.x, val.y);
     int shared_pointer = time_in_block_idx * nr_receivers + antenna_id;
     detected_data[shared_pointer] = val.x * val.x + val.y * val.y;
 
