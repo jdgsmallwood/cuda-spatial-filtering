@@ -30,12 +30,13 @@
 #define CUFFT_CHECK(call)                                                      \
   do {                                                                         \
     auto status = static_cast<cufftResult>(call);                              \
-    if (status != CUFFT_SUCCESS)                                               \
-      fprintf(stderr,                                                          \
-              "ERROR: CUFFT call \"%s\" in line %d of file %s failed "         \
-              "with "                                                          \
-              "code (%d).\n",                                                  \
-              #call, __LINE__, __FILE__, status);                              \
+    if (status != CUFFT_SUCCESS) {                                             \
+      printf("ERROR: CUFFT call \"%s\" in line %d of file %s failed "          \
+             "with "                                                           \
+             "code (%d).\n",                                                   \
+             #call, __LINE__, __FILE__, status);                               \
+      std::exit(EXIT_FAILURE);                                                 \
+    }                                                                          \
   } while (0);
 #endif
 
