@@ -204,6 +204,7 @@ get_data_for_multi_channel_fft(const InputT *__restrict__ input_data,
   float2 *output_ptr = reinterpret_cast<float2 *>(output_data);
   while (tid < n) {
     float2 output = __half22float2(input_ptr[tid]);
+    printf("tid %i x: %f y: %f", tid, output.x, output.y);
     output_ptr[tid] = output;
     tid += stride;
   };
