@@ -564,12 +564,11 @@ void incoherent_sum_launch(const float2 *d_input, float *d_output,
   std::cout << "total number of blocks for time: " << nr_time_blocks
             << std::endl;
 
-  incoherent_sum<<<dim3(nr_receivers, nr_time_steps_per_block, 1),
-                   dim3(nr_time_blocks, nr_polarizations,
+  incoherent_sum<<<dim3(nr_time_blocks, nr_polarizations,
                         nr_channels * nr_fine_channels),
-                   0, stream>>>(d_input, d_output, nr_channels,
-                                nr_polarizations, nr_receivers,
-                                nr_fine_channels, time_bins_per_block);
+                   dim3(nr_receivers, nr_time_steps_per_block, 1), 0, stream>>>(
+      d_input, d_output, nr_channels, nr_polarizations, nr_receivers,
+      nr_fine_channels, time_bins_per_block);
 }
 
 // fold_and_accumulate_kernel
