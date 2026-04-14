@@ -4433,7 +4433,11 @@ private:
 
     for (int c = 0; c < n_coarse; ++c) {
       const double coarse_centre_mhz = pulsar_params_.lowest_chan_freq_mhz +
-                                       (c + 0.5) * pulsar_params_.chan_bw_mhz;
+                                       0.5 * pulsar_params_.chan_bw_mhz +
+                                       c * pulsar_params_.chan_bw_mhz * 27 / 32;
+
+      std::cout << "Coarse Channel " << c << " has center " << coarse_center_mhz
+                << " MHz.\n";
 
       for (int f = 0; f < n_fine; ++f) {
         // FFT bin ordering: 0 = DC, 1..N/2-1 = positive, N/2..N-1 = negative.
@@ -4446,6 +4450,8 @@ private:
 
         dm_delays_[c * n_fine + f] =
             static_cast<int32_t>(std::round(delay_s * sample_rate_hz));
+        std::cout << "Delay samples for channel " << c << " / " << f << " is "
+                  << dm_delays_[c * n_fine + f] << std::endl;
       }
     }
 
