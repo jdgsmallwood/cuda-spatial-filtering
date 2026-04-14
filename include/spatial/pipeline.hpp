@@ -4668,9 +4668,9 @@ private:
     }
 
     // Async memset runs after the copy above on the same stream.
-    // CUDA_CHECK(cudaMemsetAsync(d_fold_accumulator_, 0,
-    //                            fold_accumulator_elements_ * sizeof(float),
-    //                            stream));
+    CUDA_CHECK(cudaMemsetAsync(d_fold_accumulator_, 0,
+                               fold_accumulator_elements_ * sizeof(float),
+                               stream));
     blocks_accumulated_.store(0);
     fold_start_set_ = false;
     // total_samples_elapsed_ is not reset — phase is continuous across dumps.
