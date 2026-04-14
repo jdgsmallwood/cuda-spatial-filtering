@@ -4442,7 +4442,7 @@ private:
       for (int f = 0; f < n_fine; ++f) {
         // FFT bin ordering: 0 = DC, 1..N/2-1 = positive, N/2..N-1 = negative.
         const double fine_offset_mhz =
-            (f <= n_fine / 2) ? f * fine_bw_mhz : (f - n_fine) * fine_bw_mhz;
+            (f < n_fine / 2) ? f * fine_bw_mhz : (f - n_fine) * fine_bw_mhz;
 
         const double chan_freq_mhz = coarse_centre_mhz + fine_offset_mhz;
         const double delay_s = dm_delay_seconds(
