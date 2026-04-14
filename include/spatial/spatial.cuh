@@ -549,20 +549,9 @@ void incoherent_sum_launch(const float2 *d_input, float *d_output,
                            const size_t time_bins_per_block,
                            cudaStream_t stream) {
 
-  std::cout << "Incoherent sum launching with NR_CHANNELS: " << nr_channels
-            << ", POL: " << nr_polarizations
-            << ", nr_receivers: " << nr_receivers
-            << ", nr_fine_channels: " << nr_fine_channels
-            << ", spectra_time: " << time_bins_per_block << ".\n";
-
   int nr_time_steps_per_block = 1024 / nr_receivers;
   int nr_time_blocks =
       (time_bins_per_block + nr_time_steps_per_block) / nr_time_steps_per_block;
-
-  std::cout << "time steps per grid block " << nr_time_steps_per_block
-            << std::endl;
-  std::cout << "total number of blocks for time: " << nr_time_blocks
-            << std::endl;
 
   incoherent_sum<<<dim3(nr_time_blocks, nr_polarizations,
                         nr_channels * nr_fine_channels),

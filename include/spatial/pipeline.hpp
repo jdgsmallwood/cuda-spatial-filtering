@@ -4604,7 +4604,7 @@ public:
     // Downsampled sample rate: raw bandwidth × 1e6 / downsample factor.
     // period_samples must be expressed at this same rate.
     const double downsampled_rate_hz =
-        (pulsar_params_.chan_bw_mhz * 1e6) / T::FFT_DOWNSAMPLE_FACTOR;
+        (pulsar_params_.chan_bw_mhz * 1e6) / NR_FINE_CHANNELS;
     precompute_dm_delays(downsampled_rate_hz);
 
     cudaDeviceSynchronize();
