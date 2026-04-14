@@ -4576,9 +4576,9 @@ public:
     {
       cufftHandle temp_plan;
       CUFFT_CHECK(cufftCreate(&temp_plan));
-      CUFFT_CHECK(cufftXtMakePlanMany(
-          temp_plan, 1, N, nullptr, 1, FFT_SIZE, CUDA_C_32F, nullptr, 1,
-          FFT_SIZE, CUDA_C_32F, NUM_BATCHES, &work_size, CUDA_C_32F));
+      CUFFT_CHECK(cufftXtMakePlanMany(temp_plan, 1, N, NULL, 1, FFT_SIZE,
+                                      CUDA_C_32F, NULL, 1, FFT_SIZE, CUDA_C_32F,
+                                      NUM_BATCHES, &work_size, CUDA_C_32F));
       cufftDestroy(temp_plan);
     }
 
@@ -4586,9 +4586,9 @@ public:
     for (int i = 0; i < num_buffers; ++i) {
       buffers.emplace_back(work_size);
       auto &b = buffers.back();
-      CUFFT_CHECK(cufftXtMakePlanMany(
-          b.fft_plan, 1, N, nullptr, 1, FFT_SIZE, CUDA_C_32F, nullptr, 1,
-          FFT_SIZE, CUDA_C_32F, NUM_BATCHES, &work_size, CUDA_C_32F));
+      CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, FFT_SIZE,
+                                      CUDA_C_32F, NULL, 1, FFT_SIZE, CUDA_C_32F,
+                                      NUM_BATCHES, &work_size, CUDA_C_32F));
       CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
       CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
     }

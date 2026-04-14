@@ -504,7 +504,7 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
         antenna_id;
 
     float2 val = d_input[base_pointer];
-    printf("time_idx %i x: %f y:%f\n", time_idx, val.x, val.y);
+    // printf("time_idx %i x: %f y:%f\n", time_idx, val.x, val.y);
     int shared_pointer = time_in_block_idx * nr_receivers + antenna_id;
     detected_data[shared_pointer] = val.x * val.x + val.y * val.y;
 
