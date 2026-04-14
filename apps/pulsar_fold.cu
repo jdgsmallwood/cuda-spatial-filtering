@@ -269,7 +269,7 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Initializing pipeline...\n";
   PulsarFoldParameters pulsar;
-  pulsar.period_samples = 5169.48;
+  pulsar.period_samples = 5170.5;
   pulsar.n_bins = 256;
   pulsar.dm = 67.99;
   pulsar.ref_freq_mhz = 149.5 * 781.25 / 1000;
