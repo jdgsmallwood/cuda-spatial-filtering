@@ -667,6 +667,7 @@ __global__ void normalise_fold_kernel(
     return;
 
   const uint32_t hits = hit_counts[idx];
+  printf("Hit count is %i.\n", hits);
   if (hits > 0) {
     fold_output[idx] = fold_accumulator[idx] / static_cast<float>(hits);
   } else {
@@ -680,12 +681,6 @@ inline void normalise_fold_launch(const float *fold_accumulator,
                                   int total_elements, cudaStream_t stream) {
   constexpr int THREADS = 256;
   const int blocks = (total_elements + THREADS - 1) / THREADS;
-
-  std::cout << "Hit Counts are...";
-  for (int i = 0; i < total_elements; ++i) {
-    std::cout << hit_counts[i] << ", ";
-  }
-  std::cout << ".\n";
 
   normalise_fold_kernel<<<blocks, THREADS, 0, stream>>>(
       fold_accumulator, fold_output, hit_counts, total_elements);
