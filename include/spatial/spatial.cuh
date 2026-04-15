@@ -667,7 +667,6 @@ __global__ void normalise_fold_kernel(
     return;
 
   const uint32_t hits = hit_counts[idx];
-  printf("Hit count is %i.\n", hits);
   if (hits > 0) {
     fold_output[idx] = fold_accumulator[idx] / static_cast<float>(hits);
   } else {
