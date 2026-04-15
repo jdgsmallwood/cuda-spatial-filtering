@@ -4399,6 +4399,7 @@ private:
       nullptr; // device copy [NR_CHANNELS * NR_FINE_CHANNELS]
 
   float *d_fold_accumulator_ = nullptr;
+  float *d_fold_output_ = nullptr;
   uint32_t *d_hit_counts_ = nullptr;
   size_t fold_accumulator_elements_ = 0;
 
@@ -4606,9 +4607,13 @@ public:
                                  params.n_bins;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_fold_accumulator_),
                           fold_accumulator_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_fold_output_),
+                          fold_accumulator_elements_ * sizeof(float)));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_hit_counts_),
                           fold_accumulator_elements_ * sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(d_fold_accumulator_, 0,
+                          fold_accumulator_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_fold_output_, 0,
                           fold_accumulator_elements_ * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_hit_counts_, 0,
                           fold_accumulator_elements_ * sizeof(uint32_t)));
@@ -4641,6 +4646,8 @@ public:
 
     CUDA_CHECK(cudaMemset(d_fold_accumulator_, 0,
                           fold_accumulator_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_fold_output_, 0,
+                          fold_accumulator_elements_ * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_hit_counts_, 0,
                           fold_accumulator_elements_ * sizeof(uint32_t)));
     total_samples_elapsed_.store(0);
@@ -4651,6 +4658,8 @@ public:
   ~LambdaPulsarFoldPipeline() {
     if (d_fold_accumulator_)
       cudaFree(d_fold_accumulator_);
+    if (d_fold_output_)
+      cudaFree(d_fold_output_);
     if (d_dm_delays_)
       cudaFree(d_dm_delays_);
     if (d_hit_counts_)
@@ -4664,14 +4673,14 @@ private:
              "(blocks_accumulated={})",
              blocks_accumulated_.load());
 
-    normalise_fold_launch(d_fold_accumulator_, d_hit_counts_,
+    normalise_fold_launch(d_fold_accumulator_, d_fold_output_, d_hit_counts_,
                           static_cast<int>(fold_accumulator_elements_), stream);
 
     if (output_ != nullptr) {
       size_t block_num =
           output_->register_pulsar_fold_block(start_seq_num, end_seq_num);
       void *landing = output_->get_pulsar_fold_landing_pointer(block_num);
-      CUDA_CHECK(cudaMemcpyAsync(landing, d_fold_accumulator_,
+      CUDA_CHECK(cudaMemcpyAsync(landing, d_fold_output_,
                                  fold_accumulator_elements_ * sizeof(float),
                                  cudaMemcpyDefault, stream));
       auto *ctx = new OutputTransferCompleteContext{.output = this->output_,
