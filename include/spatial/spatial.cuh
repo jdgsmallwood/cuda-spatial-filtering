@@ -656,23 +656,24 @@ inline void fold_and_accumulate_launch(
 // Divides each element of fold_accumulator by its hit count in-place.
 // Bins with zero hits (possible at the very start of an observation when DM
 // delays push some channels before sample 0) are left as zero.
-__global__ void normalise_fold_kernel(float *__restrict__ fold_accumulator,
-                                      const uint32_t *__restrict__ hit_counts,
-                                      int total_elements) {
+__global__ void normalise_fold_kernel(
+    const float *__restrict__ fold_accumulator, float *__restrict__ fold_output,
+    const uint32_t *__restrict__ hit_counts, int total_elements) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= total_elements)
     return;
 
   const uint32_t hits = hit_counts[idx];
   if (hits > 0)
-    fold_accumulator[idx] /= static_cast<float>(hits);
+    fold_output[idx] = fold_accumulator[idx] / static_cast<float>(hits);
 }
 
-inline void normalise_fold_launch(float *fold_accumulator,
+inline void normalise_fold_launch(const float *fold_accumulator,
+                                  float *fold_output,
                                   const uint32_t *hit_counts,
                                   int total_elements, cudaStream_t stream) {
   constexpr int THREADS = 256;
   const int blocks = (total_elements + THREADS - 1) / THREADS;
   normalise_fold_kernel<<<blocks, THREADS, 0, stream>>>(
-      fold_accumulator, hit_counts, total_elements);
+      fold_accumulator, fold_output, hit_counts, total_elements);
 }
