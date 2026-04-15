@@ -4272,7 +4272,8 @@ struct PulsarFoldParameters {
 //
 // Exported fold profile layout:
 //   float[NR_CHANNELS][NR_FINE_CHANNELS][NR_POLARIZATIONS][n_bins]
-template <typename T> class LambdaPulsarFoldPipeline : public GPUPipeline {
+template <typename T, size_t NR_FINE_CHANNELS = 16>
+class LambdaPulsarFoldPipeline : public GPUPipeline {
 
 private:
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16;
@@ -4281,8 +4282,7 @@ private:
       T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET;
 
   static constexpr int COMPLEX = 2;
-  static constexpr int FFT_SIZE = 16;
-  static constexpr int NR_FINE_CHANNELS = FFT_SIZE;
+  static constexpr int FFT_SIZE = NR_FINE_CHANNELS;
 
   static constexpr int NR_SPECTRA_PER_BLOCK = NR_TIME_STEPS_FOR_CORR / FFT_SIZE;
 
