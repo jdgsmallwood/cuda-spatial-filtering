@@ -495,6 +495,8 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
   int fine_channel = blockIdx.z % nr_fine_channels;
   int linearized_thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
   int linearized_time_idx = blockIdx.x * blockDim.y + linearized_thread_idx;
+
+  float squared_mag = 0.0f;
   if (time_idx < time_bins_per_block) {
     const size_t base_pointer =
         coarse_channel * nr_polarizations * nr_fine_channels *
@@ -505,29 +507,30 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
 
     float2 val = d_input[base_pointer];
     // printf("time_idx %i x: %f y:%f\n", time_idx, val.x, val.y);
-    int shared_pointer = time_in_block_idx * nr_receivers + antenna_id;
-    detected_data[shared_pointer] = val.x * val.x + val.y * val.y;
+    squared_mag = val.x * val.x + val.y * val.y;
+  }
 
+  int shared_pointer = time_in_block_idx * nr_receivers + antenna_id;
+  detected_data[shared_pointer] = squared_mag;
+  __syncthreads();
+
+  // now add the shared data
+  int n = nr_receivers;
+
+  while (n > 1) {
+    // Stride is ceiling(n / 2). This handles odd lengths properly.
+    int stride = (n + 1) / 2;
+
+    // Only the first floor(n / 2) threads do work in this iteration
+    if (antenna_id < (n / 2)) {
+      detected_data[shared_pointer] += detected_data[shared_pointer + stride];
+    }
+
+    // Synchronize to ensure all additions are visible before the next pass
     __syncthreads();
 
-    // now add the shared data
-    int n = nr_receivers;
-
-    while (n > 1) {
-      // Stride is ceiling(n / 2). This handles odd lengths properly.
-      int stride = (n + 1) / 2;
-
-      // Only the first floor(n / 2) threads do work in this iteration
-      if (antenna_id < (n / 2)) {
-        detected_data[shared_pointer] += detected_data[shared_pointer + stride];
-      }
-
-      // Synchronize to ensure all additions are visible before the next pass
-      __syncthreads();
-
-      // The new array size is the stride we just used
-      n = stride;
-    }
+    // The new array size is the stride we just used
+    n = stride;
   }
 
   if (linearized_thread_idx < blockDim.y &&
@@ -550,8 +553,8 @@ void incoherent_sum_launch(const float2 *d_input, float *d_output,
                            cudaStream_t stream) {
 
   int nr_time_steps_per_block = 1024 / nr_receivers;
-  int nr_time_blocks =
-      (time_bins_per_block + nr_time_steps_per_block) / nr_time_steps_per_block;
+  int nr_time_blocks = (time_bins_per_block + nr_time_steps_per_block - 1) /
+                       nr_time_steps_per_block;
 
   incoherent_sum<<<dim3(nr_time_blocks, nr_polarizations,
                         nr_channels * nr_fine_channels),
@@ -664,8 +667,11 @@ __global__ void normalise_fold_kernel(
     return;
 
   const uint32_t hits = hit_counts[idx];
-  if (hits > 0)
+  if (hits > 0) {
     fold_output[idx] = fold_accumulator[idx] / static_cast<float>(hits);
+  } else {
+    fold_output[idx] = 0;
+  }
 }
 
 inline void normalise_fold_launch(const float *fold_accumulator,
@@ -674,6 +680,13 @@ inline void normalise_fold_launch(const float *fold_accumulator,
                                   int total_elements, cudaStream_t stream) {
   constexpr int THREADS = 256;
   const int blocks = (total_elements + THREADS - 1) / THREADS;
+
+  std::cout << "Hit Counts are...";
+  for (int i = 0; i < total_elements; ++i) {
+    std::cout << hit_counts[i] << ", ";
+  }
+  std::cout << ".\n";
+
   normalise_fold_kernel<<<blocks, THREADS, 0, stream>>>(
       fold_accumulator, fold_output, hit_counts, total_elements);
 }
