@@ -252,10 +252,11 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Creating Output Handler\n";
   constexpr int n_bins = 512;
-  using PulsarType =
-      float[num_lambda_channels][16][nr_lambda_polarizations][n_bins];
+  constexpr int n_fine_channels = 32;
+  using PulsarType = float[num_lambda_channels][n_fine_channels]
+                          [nr_lambda_polarizations][n_bins];
   auto pulsar_writer = std::make_unique<RedisPulsarFoldWriter<PulsarType>>(
-      num_lambda_channels, 16, nr_lambda_polarizations, n_bins);
+      num_lambda_channels, n_fine_channels, nr_lambda_polarizations, n_bins);
 
   auto output = std::make_shared<
       BufferedOutput<Config, typename Config::FFTOutputType,
@@ -287,7 +288,8 @@ int main(int argc, char *argv[]) {
   pulsar.chan_bw_mhz = 781.25 * 32 / 27 / 1000;
   pulsar.lowest_chan_freq_mhz = (146 * 781.25 - 0.5 * 781.25 * 32 / 27) / 1000;
 
-  LambdaPulsarFoldPipeline<Config> pipeline(num_buffers, pulsar, 100);
+  LambdaPulsarFoldPipeline<Config, n_fine_channels> pipeline(num_buffers,
+                                                             pulsar, 100);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
