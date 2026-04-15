@@ -107,6 +107,7 @@ int main(int argc, char *argv[]) {
   int min_freq_channel;
   int port;
   int packets_to_receive;
+  double pulsar_period_samples;
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
       .store_into(pcap_filename);
@@ -144,6 +145,12 @@ int main(int argc, char *argv[]) {
       .help("How many packets to receive before exiting.")
       .default_value(0)
       .store_into(packets_to_receive);
+
+  program.add_argument("-q", "--pulsar-period-samples")
+      .help("Number of samples for pulsar period")
+      .default_value(1000.0)
+      .scan<'g', double>()
+      .store_into(pulsar_period_samples);
 
   try {
     program.parse_args(argc, argv);
@@ -273,7 +280,7 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Initializing pipeline...\n";
   PulsarFoldParameters pulsar;
-  pulsar.period_samples = 1000;
+  pulsar.period_samples = pulsar_period_samples;
   pulsar.n_bins = n_bins;
   pulsar.dm = 67.771;
   pulsar.ref_freq_mhz = 149.5 * 781.25 / 1000;

@@ -487,14 +487,14 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
   // This kernel needs to detect and sum over antennas for each channel / pol.
 
   // For each
-  int time_idx = blockIdx.x * blockDim.x + threadIdx.y;
+  int time_idx = blockIdx.x * blockDim.y + threadIdx.y;
   int time_in_block_idx = threadIdx.y;
   int antenna_id = threadIdx.x;
   int pol = blockIdx.y;
   int coarse_channel = blockIdx.z / nr_fine_channels;
   int fine_channel = blockIdx.z % nr_fine_channels;
   int linearized_thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
-  int linearized_time_idx = blockIdx.x * blockDim.x + linearized_thread_idx;
+  int linearized_time_idx = blockIdx.x * blockDim.y + linearized_thread_idx;
   if (time_idx < time_bins_per_block) {
     const size_t base_pointer =
         coarse_channel * nr_polarizations * nr_fine_channels *
@@ -535,7 +535,7 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
     d_output[coarse_channel * nr_fine_channels * nr_polarizations *
                  time_bins_per_block +
              fine_channel * nr_polarizations * time_bins_per_block +
-             pol * time_bins_per_block + blockIdx.x * blockDim.x +
+             pol * time_bins_per_block + blockIdx.x * blockDim.y +
              linearized_thread_idx] =
         detected_data[linearized_thread_idx * nr_receivers];
   }
