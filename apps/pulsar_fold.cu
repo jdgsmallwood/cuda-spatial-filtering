@@ -147,10 +147,10 @@ int main(int argc, char *argv[]) {
       .store_into(packets_to_receive);
 
   program.add_argument("-q", "--pulsar-period-samples")
-	  .help("Number of samples for pulsar period")
-	  .default_value(1000.0)
-	  .scan<'g', double>()
-	  .store_into(pulsar_period_samples);
+      .help("Number of samples for pulsar period")
+      .default_value(1000.0)
+      .scan<'g', double>()
+      .store_into(pulsar_period_samples);
 
   try {
     program.parse_args(argc, argv);
