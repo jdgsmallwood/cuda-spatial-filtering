@@ -4399,6 +4399,7 @@ private:
       nullptr; // device copy [NR_CHANNELS * NR_FINE_CHANNELS]
 
   float *d_fold_accumulator_ = nullptr;
+  uint32_t *d_hit_counts_ = nullptr;
   size_t fold_accumulator_elements_ = 0;
 
   int nr_blocks_per_dump_;
@@ -4535,9 +4536,10 @@ public:
     // bin.
     fold_and_accumulate_launch(
         reinterpret_cast<const float *>(b.incoherent_sum.get()),
-        d_fold_accumulator_, d_dm_delays_, total_samples_elapsed_.load(),
-        pulsar_params_.period_samples, pulsar_params_.n_bins, T::NR_CHANNELS,
-        NR_FINE_CHANNELS, T::NR_POLARIZATIONS, NR_SPECTRA_PER_BLOCK, b.stream);
+        d_fold_accumulator_, d_hit_counts_, d_dm_delays_,
+        total_samples_elapsed_.load(), pulsar_params_.period_samples,
+        pulsar_params_.n_bins, T::NR_CHANNELS, NR_FINE_CHANNELS,
+        T::NR_POLARIZATIONS, NR_SPECTRA_PER_BLOCK, b.stream);
 
     if (!dummy_run) {
       if (!fold_start_set_) {
@@ -4604,8 +4606,12 @@ public:
                                  params.n_bins;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_fold_accumulator_),
                           fold_accumulator_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_hit_counts_),
+                          fold_accumulator_elements_ * sizeof(uint32_t)));
     CUDA_CHECK(cudaMemset(d_fold_accumulator_, 0,
                           fold_accumulator_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_hit_counts_, 0,
+                          fold_accumulator_elements_ * sizeof(uint32_t)));
 
     // Downsampled sample rate: raw bandwidth × 1e6 / downsample factor.
     // period_samples must be expressed at this same rate.
@@ -4635,6 +4641,8 @@ public:
 
     CUDA_CHECK(cudaMemset(d_fold_accumulator_, 0,
                           fold_accumulator_elements_ * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_hit_counts_, 0,
+                          fold_accumulator_elements_ * sizeof(uint32_t)));
     total_samples_elapsed_.store(0);
     blocks_accumulated_.store(0);
     fold_start_set_ = false;
@@ -4645,6 +4653,8 @@ public:
       cudaFree(d_fold_accumulator_);
     if (d_dm_delays_)
       cudaFree(d_dm_delays_);
+    if (d_hit_counts_)
+      cudaFree(d_hit_counts_);
   }
 
 private:
@@ -4653,6 +4663,9 @@ private:
     LOG_INFO("LambdaPulsarFoldPipeline: dumping fold profile "
              "(blocks_accumulated={})",
              blocks_accumulated_.load());
+
+    normalise_fold_launch(d_fold_accumulator_, d_hit_counts_,
+                          static_cast<int>(fold_accumulator_elements_), stream);
 
     if (output_ != nullptr) {
       size_t block_num =
