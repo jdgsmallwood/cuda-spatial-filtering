@@ -575,13 +575,12 @@ void incoherent_sum_launch(const float2 *d_input, float *d_output,
 // After subtracting the DM delay, phase is mapped to a bin with fmod and
 // an atomicAdd accumulates the power.  Negative phase (delayed channel at
 // the start of an observation) wraps via the +1 trick rather than a branch.
-__global__ void
-fold_and_accumulate_kernel(const float *__restrict__ incoherent_sum,
-                           float *__restrict__ fold_accumulator,
-                           const int32_t *__restrict__ dm_delays,
-                           int64_t total_samples_elapsed, double period_samples,
-                           int n_bins, int nr_channels, int nr_fine_channels,
-                           int nr_polarizations, int nr_time_bins) {
+__global__ void fold_and_accumulate_kernel(
+    const float *__restrict__ incoherent_sum,
+    float *__restrict__ fold_accumulator, uint32_t *__restrict__ hit_counts,
+    const int32_t *__restrict__ dm_delays, int64_t total_samples_elapsed,
+    double period_samples, int n_bins, int nr_channels, int nr_fine_channels,
+    int nr_polarizations, int nr_time_bins) {
   // Grid: (nr_channels * nr_fine_channels, nr_polarizations, nr_time_bins)
   const int cf_idx =
       blockIdx.x * blockDim.x + threadIdx.x; // flat channel×fine index
@@ -621,6 +620,7 @@ fold_and_accumulate_kernel(const float *__restrict__ incoherent_sum,
       bin;
 
   atomicAdd(&fold_accumulator[out_idx], incoherent_sum[in_idx]);
+  atomicAdd(&hit_counts[out_idx], 1u);
 }
 
 // Launch wrapper matching the call site in LambdaPulsarFoldPipeline.
@@ -633,7 +633,7 @@ fold_and_accumulate_kernel(const float *__restrict__ incoherent_sum,
 // nr_polarizations is always small (≤ 4) so it maps directly to gridDim.y
 // without needing a thread dimension.
 inline void fold_and_accumulate_launch(
-    const float *incoherent_sum, float *fold_accumulator,
+    const float *incoherent_sum, float *fold_accumulator, uint32_t *hit_counts,
     const int32_t *dm_delays, int64_t total_samples_elapsed,
     double period_samples, int n_bins, int nr_channels, int nr_fine_channels,
     int nr_polarizations, int nr_time_bins, cudaStream_t stream) {
@@ -646,7 +646,33 @@ inline void fold_and_accumulate_launch(
                   nr_polarizations, (nr_time_bins + T_THREADS - 1) / T_THREADS);
 
   fold_and_accumulate_kernel<<<grid, block, 0, stream>>>(
-      incoherent_sum, fold_accumulator, dm_delays, total_samples_elapsed,
-      period_samples, n_bins, nr_channels, nr_fine_channels, nr_polarizations,
-      nr_time_bins);
+      incoherent_sum, fold_accumulator, hit_counts, dm_delays,
+      total_samples_elapsed, period_samples, n_bins, nr_channels,
+      nr_fine_channels, nr_polarizations, nr_time_bins);
+}
+
+// normalise_fold_kernel
+//
+// Divides each element of fold_accumulator by its hit count in-place.
+// Bins with zero hits (possible at the very start of an observation when DM
+// delays push some channels before sample 0) are left as zero.
+__global__ void normalise_fold_kernel(float *__restrict__ fold_accumulator,
+                                      const uint32_t *__restrict__ hit_counts,
+                                      int total_elements) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total_elements)
+    return;
+
+  const uint32_t hits = hit_counts[idx];
+  if (hits > 0)
+    fold_accumulator[idx] /= static_cast<float>(hits);
+}
+
+inline void normalise_fold_launch(float *fold_accumulator,
+                                  const uint32_t *hit_counts,
+                                  int total_elements, cudaStream_t stream) {
+  constexpr int THREADS = 256;
+  const int blocks = (total_elements + THREADS - 1) / THREADS;
+  normalise_fold_kernel<<<blocks, THREADS, 0, stream>>>(
+      fold_accumulator, hit_counts, total_elements);
 }
