@@ -169,4 +169,7 @@ TEST_F(FoldKernelTest, Minimal) { run_test(1, 1, 1, 1, 8, 10.0, 0); }
 
 TEST_F(FoldKernelTest, NoDelays) { run_test(2, 2, 1, 64, 16, 32.0, 0); }
 
-TEST_F(FoldKernelTest, WithDelays) { run_test(2, 4, 2, 128, 32, 50.0, 1000); }
+TEST_F(FoldKernelTest, WithDelays) {
+  run_test(2, 4, 2, 128, 32, 50.0, 1000);
+  EXPECT_TRUE(false);
+}
