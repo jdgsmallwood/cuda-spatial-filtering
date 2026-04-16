@@ -617,10 +617,7 @@ __global__ void fold_and_accumulate_kernel(
       t_idx;
 
   // Output index: [c][f][pol][bin]
-  const int out_idx =
-      ((c_idx * nr_fine_channels + f_idx) * nr_polarizations + pol_idx) *
-          n_bins +
-      bin;
+  const int out_idx = bin;
 
   atomicAdd(&fold_accumulator[out_idx], incoherent_sum[in_idx]);
   atomicAdd(&hit_counts[out_idx], 1u);
