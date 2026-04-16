@@ -3058,36 +3058,16 @@ private:
 
 template <typename T> class RedisPulsarFoldWriter : public PulsarFoldWriter<T> {
 public:
-  RedisPulsarFoldWriter(int num_channels, int num_fine_channels,
-                        int num_polarizations, int num_bins,
-                        std::string prefix = "")
-      : redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
-        NR_FINE_CHANNELS(num_fine_channels),
-        NR_POLARIZATIONS(num_polarizations), NR_BINS(num_bins), prefix(prefix) {
+  RedisPulsarFoldWriter(int num_bins, std::string prefix = "")
+      : redis("tcp://127.0.0.1:6379"), NR_BINS(num_bins), prefix(prefix) {
 
-    precomputed_keys.resize(NR_CHANNELS * NR_FINE_CHANNELS * NR_POLARIZATIONS *
-                            NR_BINS);
+    precomputed_keys.resize(NR_BINS);
 
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-      for (int f = 0; f < NR_FINE_CHANNELS; ++f) {
-        // FFT bin ordering: shift so 0 = DC centre rather than
-        // left edge, matching the convention in RedisBeamFFTWriter.
-        int f_shifted = (f + NR_FINE_CHANNELS / 2) % NR_FINE_CHANNELS;
-        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-          for (int bin = 0; bin < NR_BINS; ++bin) {
-            precomputed_keys[key_index(ch, f, pol, bin)] =
-                prefix + "ts:fold:ch:" + std::to_string(ch) +
-                ":f:" + std::to_string(f_shifted) +
-                ":p:" + std::to_string(pol) + ":bin:" + std::to_string(bin);
-          }
-        }
-      }
+    for (int bin = 0; bin < NR_BINS; ++bin) {
+      precomputed_keys[bin] = prefix + "ts:fold:bin:" + std::to_string(bin);
     }
 
     std::cout << "RedisPulsarFoldWriter instantiated:"
-              << " NR_CHANNELS=" << NR_CHANNELS
-              << " NR_FINE_CHANNELS=" << NR_FINE_CHANNELS
-              << " NR_POLARIZATIONS=" << NR_POLARIZATIONS
               << " NR_BINS=" << NR_BINS
               << " total_keys=" << precomputed_keys.size() << std::endl;
 
@@ -3102,27 +3082,18 @@ public:
     std::string ts_str = std::to_string(ts);
 
     std::vector<std::string> madd_args;
-    madd_args.reserve(1 + NR_CHANNELS * NR_FINE_CHANNELS * NR_POLARIZATIONS *
-                              NR_BINS * 3);
+    madd_args.reserve(1 + NR_BINS * 3);
     madd_args.push_back("TS.MADD");
 
     // Input layout: [NR_CHANNELS][NR_FINE_CHANNELS][NR_POLARIZATIONS][NR_BINS]
     // flat index: ((ch * NR_FINE_CHANNELS + f) * NR_POLARIZATIONS + pol) *
     // NR_BINS + bin
     const float *data = reinterpret_cast<const float *>(pulsar_fold_data);
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-      for (int f = 0; f < NR_FINE_CHANNELS; ++f) {
-        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-          for (int bin = 0; bin < NR_BINS; ++bin) {
-            int flat = ((ch * NR_FINE_CHANNELS + f) * NR_POLARIZATIONS + pol) *
-                           NR_BINS +
-                       bin;
-            madd_args.push_back(precomputed_keys[key_index(ch, f, pol, bin)]);
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(data[flat]));
-          }
-        }
-      }
+    for (int bin = 0; bin < NR_BINS; ++bin) {
+      int flat = bin;
+      madd_args.push_back(precomputed_keys[bin]);
+      madd_args.push_back(ts_str);
+      madd_args.push_back(std::to_string(data[flat]));
     }
 
     if (madd_args.size() > 1)
@@ -3132,42 +3103,18 @@ public:
   void flush() override {}
 
 private:
-  inline size_t key_index(int ch, int f, int pol, int bin) const {
-    return static_cast<size_t>(ch) *
-               (NR_FINE_CHANNELS * NR_POLARIZATIONS * NR_BINS) +
-           static_cast<size_t>(f) * (NR_POLARIZATIONS * NR_BINS) +
-           static_cast<size_t>(pol) * NR_BINS + static_cast<size_t>(bin);
-  }
-
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating pulsar fold TimeSeries keys..." << std::endl;
 
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-      for (int f = 0; f < NR_FINE_CHANNELS; ++f) {
-        int f_shifted = (f + NR_FINE_CHANNELS / 2) % NR_FINE_CHANNELS;
-        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-          for (int bin = 0; bin < NR_BINS; ++bin) {
-            const auto &key = precomputed_keys[key_index(ch, f, pol, bin)];
-            std::vector<std::string> args = {"TS.CREATE",
-                                             key,
-                                             "LABELS",
-                                             "channel",
-                                             std::to_string(ch),
-                                             "fine_channel",
-                                             std::to_string(f_shifted),
-                                             "polarization",
-                                             std::to_string(pol),
-                                             "phase_bin",
-                                             std::to_string(bin),
-                                             "component",
-                                             "fold_power"};
-            try {
-              redis.command(args.begin(), args.end());
-            } catch (const std::exception &e) {
-              LOG_ERROR("Error creating key {}: {}", key, e.what());
-            }
-          }
-        }
+    for (int bin = 0; bin < NR_BINS; ++bin) {
+      const auto &key = precomputed_keys[bin];
+      std::vector<std::string> args = {
+          "TS.CREATE",         key,         "LABELS",    "phase_bin",
+          std::to_string(bin), "component", "fold_power"};
+      try {
+        redis.command(args.begin(), args.end());
+      } catch (const std::exception &e) {
+        LOG_ERROR("Error creating key {}: {}", key, e.what());
       }
     }
 
@@ -3175,9 +3122,6 @@ private:
   }
 
   sw::redis::Redis redis;
-  int NR_CHANNELS;
-  int NR_FINE_CHANNELS;
-  int NR_POLARIZATIONS;
   int NR_BINS;
   std::string prefix;
   std::vector<std::string> precomputed_keys;
