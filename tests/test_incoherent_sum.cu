@@ -1,3 +1,4 @@
+#include "spatial/spatial.cuh"
 #include <cmath>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
