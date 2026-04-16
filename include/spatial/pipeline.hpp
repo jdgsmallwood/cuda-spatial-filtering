@@ -4417,7 +4417,7 @@ private:
   static double dm_delay_seconds(double dm, double f_mhz, double f_ref_mhz) {
     if (dm == 0.0)
       return 0.0;
-    constexpr double K_DM_S = 4.148808; // s MHz² pc^{-1} cm³
+    constexpr double K_DM_S = 4.148808;
     return K_DM_S * dm *
            (1.0 / (f_mhz * f_mhz) - 1.0 / (f_ref_mhz * f_ref_mhz));
   }
@@ -4602,9 +4602,7 @@ public:
       CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
     }
 
-    fold_accumulator_elements_ = static_cast<size_t>(T::NR_CHANNELS) *
-                                 NR_FINE_CHANNELS * T::NR_POLARIZATIONS *
-                                 params.n_bins;
+    fold_accumulator_elements_ = params.n_bins;
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_fold_accumulator_),
                           fold_accumulator_elements_ * sizeof(float)));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&d_fold_output_),
