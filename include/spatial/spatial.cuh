@@ -2,6 +2,8 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <stdint.h>
+#include <stdio.h>
 __global__ void convert_int8_to_half_kernel(const int8_t *d_input,
                                             __half *d_output, const int n);
 __global__ void
@@ -486,7 +488,6 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
   __shared__ float detected_data[1024];
   // This kernel needs to detect and sum over antennas for each channel / pol.
 
-  // For each
   int time_idx = blockIdx.x * blockDim.y + threadIdx.y;
   int time_in_block_idx = threadIdx.y;
   int antenna_id = threadIdx.x;
@@ -506,7 +507,6 @@ __global__ void incoherent_sum(const __restrict__ float2 *d_input,
         antenna_id;
 
     float2 val = d_input[base_pointer];
-    // printf("time_idx %i x: %f y:%f\n", time_idx, val.x, val.y);
     squared_mag = val.x * val.x + val.y * val.y;
   }
 
