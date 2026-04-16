@@ -2,7 +2,8 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
-#include <iostream>
+#include <stdint.h>
+#include <stdio.h>
 #include <vector>
 
 #define CUDA_CHECK(err)                                                        \
