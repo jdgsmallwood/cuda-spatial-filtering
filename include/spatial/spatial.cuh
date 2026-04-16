@@ -619,8 +619,12 @@ __global__ void fold_and_accumulate_kernel(
   // Output index: [c][f][pol][bin]
   const int out_idx = bin;
 
-  atomicAdd(&fold_accumulator[out_idx], incoherent_sum[in_idx]);
-  atomicAdd(&hit_counts[out_idx], 1u);
+  float sum = incoherent_sum[in_idx];
+  if (sum > 0) {
+
+    atomicAdd(&fold_accumulator[out_idx], incoherent_sum[in_idx]);
+    atomicAdd(&hit_counts[out_idx], 1u);
+  }
 }
 
 // Launch wrapper matching the call site in LambdaPulsarFoldPipeline.
