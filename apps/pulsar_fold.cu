@@ -253,10 +253,9 @@ int main(int argc, char *argv[]) {
   std::cout << "Creating Output Handler\n";
   constexpr int n_bins = 512;
   constexpr int n_fine_channels = 32;
-  using PulsarType = float[num_lambda_channels][n_fine_channels]
-                          [nr_lambda_polarizations][n_bins];
-  auto pulsar_writer = std::make_unique<RedisPulsarFoldWriter<PulsarType>>(
-      num_lambda_channels, n_fine_channels, nr_lambda_polarizations, n_bins);
+  using PulsarType = float[n_bins];
+  auto pulsar_writer =
+      std::make_unique<RedisPulsarFoldWriter<PulsarType>>(n_bins);
 
   auto output = std::make_shared<
       BufferedOutput<Config, typename Config::FFTOutputType,
