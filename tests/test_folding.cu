@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <vector>
 
 #define CUDA_CHECK(err)                                                        \
@@ -15,6 +16,7 @@ static void assert_allclose(const std::vector<float> &a,
   ASSERT_EQ(a.size(), b.size());
   for (size_t i = 0; i < a.size(); ++i) {
     ASSERT_NEAR(a[i], b[i], tol) << "Mismatch at index " << i;
+    std::cout << "a was " << a[i] << " and b was " << b[i] << std::endl;
   }
 }
 
