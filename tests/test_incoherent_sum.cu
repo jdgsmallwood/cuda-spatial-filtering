@@ -86,3 +86,7 @@ protected:
 TEST_F(IncoherentSumTest, Minimal) { run_test(1, 1, 1, 1, 1); }
 
 TEST_F(IncoherentSumTest, MultiReceiver) { run_test(1, 1, 8, 1, 16); }
+
+TEST_F(IncoherentSumTest, OddReceivers) { run_test(1, 1, 7, 1, 16); }
+
+TEST_F(IncoherentSumTest, MultiDimensional) { run_test(3, 2, 8, 4, 32); }
