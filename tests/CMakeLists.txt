@@ -52,6 +52,12 @@ add_executable(
 target_link_libraries(IncoherentSumTests PRIVATE GTest::gtest_main spatial CUDA::cudart)
 
 
+
+add_executable(
+  FoldingTests test_folding.cu
+)
+target_link_libraries(FoldingTests PRIVATE GTest::gtest_main spatial CUDA::cudart)
+
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
@@ -59,3 +65,4 @@ gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
 gtest_discover_tests(IncoherentSumTests)
+gtest_discover_tests(FoldingTests)
