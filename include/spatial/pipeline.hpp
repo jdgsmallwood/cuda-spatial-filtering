@@ -2537,6 +2537,26 @@ public:
           .output = this->output_, .block_index = fft_block_num};
       cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
                          fft_output_ctx);
+
+      size_t eig_block_num = output_->register_eigendecomposition_data_block(
+          start_seq_num, end_seq_num);
+
+      void *eigval_ptr =
+          output_->get_eigenvalues_data_landing_pointer(eig_block_num);
+      void *eigvec_ptr =
+          output_->get_eigenvectors_data_landing_pointer(eig_block_num);
+      CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, b.decomp_visibilities.get(),
+                                 sizeof(DecompositionVisibilities),
+                                 cudaMemcpyDefault, b.stream));
+
+      CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, b.eigenvalues.get(),
+                                 sizeof(Eigenvalues), cudaMemcpyDefault,
+                                 b.stream));
+
+      auto *ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = eig_block_num};
+      CUDA_CHECK(cudaLaunchHostFunc(
+          b.stream, eigen_output_transfer_complete_host_func, ctx));
     }
 
     // Rotate buffer indices

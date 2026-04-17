@@ -39,17 +39,17 @@ void signal_handler(int signal) {
   running = false;
 }
 
-std::string
-make_default_visibilities_filename(const int min_freq_channel,
-                                   const int num_channels,
-                                   const std::vector<int> fpga_ids) {
+std::string make_default_filename(const std::string prefix,
+                                  const int min_freq_channel,
+                                  const int num_channels,
+                                  const std::vector<int> fpga_ids) {
   // timestamp
   auto now = std::chrono::system_clock::now();
   std::time_t t = std::chrono::system_clock::to_time_t(now);
   std::tm tm = *std::localtime(&t);
 
   std::ostringstream oss;
-  oss << "beam_fft_" << std::put_time(&tm, "%Y%m%d-%H%M") << "_"
+  oss << prefix << "_" << std::put_time(&tm, "%Y%m%d-%H%M") << "_"
       << min_freq_channel << "_" << min_freq_channel + num_channels - 1;
   for (auto id : fpga_ids) {
     oss << "_ALVEO" << id;
@@ -271,8 +271,8 @@ int main(int argc, char *argv[]) {
   };
 
   std::cout << "Creating FFT Writer" << std::endl;
-  std::string filename = make_default_visibilities_filename(
-      min_freq_channel, num_lambda_channels, fpga_id_vec);
+  std::string filename = make_default_filename(
+      "beam_fft", min_freq_channel, num_lambda_channels, fpga_id_vec);
 
   HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
   // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
@@ -281,6 +281,19 @@ int main(int argc, char *argv[]) {
   auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
       fft_beam_file, min_freq_channel,
       min_freq_channel + num_lambda_channels - 1);
+
+  std::cout << "Creating Eigen Writer\n";
+  std::string eigen_filename = make_default_filename(
+      "eigendata", min_freq_channel, num_lambda_channels, fpga_id_vec);
+
+  HighFive::File eigendata_file(eigen_filename, HighFive::File::Truncate);
+  // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
+  //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
+  //     "beam-fft:");
+  auto eigen_writer =
+      std::make_unique<HDF5EigenWriter<Config::EigenvalueOutputTyp,
+                                       Config::EigenvectorOutputType>>(
+          eigendata_file);
 
   std::cout << "Creating Output Handler\n";
 
