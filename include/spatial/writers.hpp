@@ -3236,3 +3236,183 @@ private:
   std::vector<size_t> fft_dims_;
   std::unordered_map<int, int> antenna_map_;
 };
+
+// ---------------------------------------------------------------------------
+// HDF5EigenWriter
+//
+// Writes eigenvalue and eigenvector data to HDF5, following the same
+// template conventions as HDF5ProjectionEigenWriter but for the full
+// general case (all channels, polarisations, and eigenvector components).
+//
+// Template parameters:
+//   TVal — C array type for eigenvalues,  e.g. float[CH][POL][POL][N]
+//   TVec — C array type for eigenvectors, e.g.
+//   std::complex<float>[CH][POL][POL][N][N]
+//
+// Datasets created:
+//   eigenvalues        [time, CH, POL_R, POL_C, N]       float32
+//   eigenvectors       [time, CH, POL_R, POL_C, N, N, 2] float32  (re/im)
+//   eigendata_seq_nums [time, 2]                          int32    (start,end)
+// ---------------------------------------------------------------------------
+
+template <typename TVal, typename TVec>
+class HDF5EigenWriter : public EigenWriter<TVal, TVec> {
+public:
+  explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 4)
+      : file_(file) {
+    using namespace HighFive;
+
+    // ---- Derive inner dimensions from TVal ---------------------------
+    // Expected layout: float[CH][POL_R][POL_C][N]
+    val_dims_ = get_array_dims<TVal>();
+
+    // ---- Derive inner dimensions from TVec ---------------------------
+    // Expected layout: complex<float>[CH][POL_R][POL_C][N][N]
+    // We append a trailing '2' so HDF5 stores interleaved float pairs.
+    vec_dims_ = get_array_dims<TVec>();
+    vec_dims_.push_back(2); // real / imag
+
+    // ---- Sanity-check dimensionality ---------------------------------
+    if (val_dims_.size() < 4)
+      throw std::invalid_argument("HDF5EigenWriter: TVal must be at least 4-D "
+                                  "(channels, pol_r, pol_c, N)");
+    if (vec_dims_.size() < 6) // 5 from TVec + 1 appended
+      throw std::invalid_argument("HDF5EigenWriter: TVec must be at least 5-D "
+                                  "(channels, pol_r, pol_c, N, N)");
+
+    // ---- Eigenvalue dataset ------------------------------------------
+    // Shape: [0, *val_dims_], unlimited on axis-0 (time)
+    {
+      std::vector<size_t> dims = {0};
+      std::vector<size_t> max_dims = {DataSpace::UNLIMITED};
+      dims.insert(dims.end(), val_dims_.begin(), val_dims_.end());
+      max_dims.insert(max_dims.end(), val_dims_.begin(), val_dims_.end());
+
+      std::vector<hsize_t> chunk = {1};
+      chunk.insert(chunk.end(), val_dims_.begin(), val_dims_.end());
+
+      DataSetCreateProps props;
+      props.add(Chunking(chunk));
+      props.add(Deflate(deflate_level));
+
+      val_dataset_ = file_.createDataSet<float>(
+          "eigenvalues", DataSpace(dims, max_dims), props);
+
+      val_dataset_.createAttribute<std::string>(
+          "DIMENSION_LABELS",
+          std::string(
+              "time,channel,polarization_r,polarization_c,eigenvalue_index"));
+    }
+
+    // ---- Eigenvector dataset -----------------------------------------
+    // Shape: [0, *vec_dims_], unlimited on axis-0 (time)
+    {
+      std::vector<size_t> dims = {0};
+      std::vector<size_t> max_dims = {DataSpace::UNLIMITED};
+      dims.insert(dims.end(), vec_dims_.begin(), vec_dims_.end());
+      max_dims.insert(max_dims.end(), vec_dims_.begin(), vec_dims_.end());
+
+      std::vector<hsize_t> chunk = {1};
+      chunk.insert(chunk.end(), vec_dims_.begin(), vec_dims_.end());
+
+      DataSetCreateProps props;
+      props.add(Chunking(chunk));
+      props.add(Deflate(deflate_level));
+
+      vec_dataset_ = file_.createDataSet<float>(
+          "eigenvectors", DataSpace(dims, max_dims), props);
+
+      vec_dataset_.createAttribute<std::string>(
+          "DIMENSION_LABELS",
+          std::string("time,channel,polarization_r,polarization_c,"
+                      "eigenvalue_index,component_index,complex"));
+    }
+
+    // ---- Sequence number dataset -------------------------------------
+    // Shape: [0, 2], unlimited on axis-0 (time)
+    {
+      DataSetCreateProps props;
+      props.add(Chunking(std::vector<hsize_t>{1, 2}));
+
+      seq_dataset_ = file_.createDataSet<int>(
+          "eigendata_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
+          props);
+
+      seq_dataset_.createAttribute<std::string>(
+          "description", std::string("start_seq, end_seq per block"));
+    }
+
+    // ---- Store shape metadata as attributes for easy introspection ---
+    file_.createAttribute<int>("eigenvalue_channels",
+                               static_cast<int>(val_dims_[0]));
+    file_.createAttribute<int>("eigenvalue_N",
+                               static_cast<int>(val_dims_.back()));
+  }
+
+  // -----------------------------------------------------------------------
+  // write_eigendata_block
+  //
+  // val_data — pointer to one TVal block of eigenvalues.
+  // vec_data — pointer to one TVec block of eigenvectors (complex<float>).
+  //            Pass nullptr to skip writing eigenvectors for that block.
+  // -----------------------------------------------------------------------
+  void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
+                             const int start_seq, const int end_seq) override {
+    LOG_INFO("HDF5EigenWriter: writing block {} -> {}", start_seq, end_seq);
+
+    // ---- Eigenvalues -------------------------------------------------
+    if (val_data != nullptr) {
+      const auto t = val_dataset_.getDimensions()[0];
+
+      std::vector<size_t> new_dims = {t + 1};
+      new_dims.insert(new_dims.end(), val_dims_.begin(), val_dims_.end());
+      val_dataset_.resize(new_dims);
+
+      std::vector<size_t> offset = {t};
+      offset.insert(offset.end(), val_dims_.size(), 0);
+      std::vector<size_t> count = {1};
+      count.insert(count.end(), val_dims_.begin(), val_dims_.end());
+
+      val_dataset_.select(offset, count)
+          .write_raw(reinterpret_cast<const float *>(val_data));
+    }
+
+    // ---- Eigenvectors ------------------------------------------------
+    if (vec_data != nullptr) {
+      const auto t = vec_dataset_.getDimensions()[0];
+
+      std::vector<size_t> new_dims = {t + 1};
+      new_dims.insert(new_dims.end(), vec_dims_.begin(), vec_dims_.end());
+      vec_dataset_.resize(new_dims);
+
+      std::vector<size_t> offset = {t};
+      offset.insert(offset.end(), vec_dims_.size(), 0);
+      std::vector<size_t> count = {1};
+      count.insert(count.end(), vec_dims_.begin(), vec_dims_.end());
+
+      // complex<float> is two consecutive floats in memory, so
+      // write_raw into a float dataset is correct here.
+      vec_dataset_.select(offset, count)
+          .write_raw(reinterpret_cast<const float *>(vec_data));
+    }
+
+    // ---- Sequence numbers --------------------------------------------
+    {
+      const auto sz = seq_dataset_.getDimensions()[0];
+      seq_dataset_.resize({sz + 1, 2});
+      const std::array<int, 2> seq = {start_seq, end_seq};
+      seq_dataset_.select({sz, 0}, {1, 2}).write_raw(seq.data());
+    }
+  }
+
+  void flush() override { file_.flush(); }
+
+private:
+  HighFive::File &file_;
+  HighFive::DataSet val_dataset_;
+  HighFive::DataSet vec_dataset_;
+  HighFive::DataSet seq_dataset_;
+  std::vector<size_t> val_dims_; // inner shape of TVal, e.g. {CH, POL, POL, N}
+  std::vector<size_t>
+      vec_dims_; // inner shape of TVec + [2], e.g. {CH, POL, POL, N, N, 2}
+};
