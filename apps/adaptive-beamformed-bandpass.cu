@@ -290,14 +290,20 @@ int main(int argc, char *argv[]) {
   // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
   //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
   //     "beam-fft:");
+  //
+  using Eigenvalues =
+      float[Config::NR_CHANNELS][Config::NR_POLARIZATIONS][nr_lambda_receivers];
+  using Eigenvectors =
+      std::complex<float>[Config::NR_CHANNELS][Config::NR_POLARIZATIONS]
+                         [nr_lambda_receivers][nr_lambda_receivers];
   auto eigen_writer =
-      std::make_unique<HDF5EigenWriter<Config::EigenvalueOutputType,
-                                       Config::EigenvectorOutputType>>(
+      std::make_unique<HDF5EigenWriter<Eigenvalues, Eigenvectors>>(
           eigendata_file);
 
   std::cout << "Creating Output Handler\n";
 
-  auto output = std::make_shared<BufferedOutput<Config, FFTOutputType>>(
+  auto output = std::make_shared<
+      BufferedOutput<Config, FFTOutputType, Eigenvalues, Eigenvectors>>(
       nullptr, nullptr, std::move(eigen_writer), std::move(fft_writer), nullptr,
       100, 100, 100, 100, 100);
 
