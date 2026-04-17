@@ -3272,14 +3272,6 @@ public:
     vec_dims_ = get_array_dims<TVec>();
     vec_dims_.push_back(2); // real / imag
 
-    // ---- Sanity-check dimensionality ---------------------------------
-    if (val_dims_.size() < 4)
-      throw std::invalid_argument("HDF5EigenWriter: TVal must be at least 4-D "
-                                  "(channels, pol_r, pol_c, N)");
-    if (vec_dims_.size() < 6) // 5 from TVec + 1 appended
-      throw std::invalid_argument("HDF5EigenWriter: TVec must be at least 5-D "
-                                  "(channels, pol_r, pol_c, N, N)");
-
     // ---- Eigenvalue dataset ------------------------------------------
     // Shape: [0, *val_dims_], unlimited on axis-0 (time)
     {
@@ -3324,7 +3316,7 @@ public:
 
       vec_dataset_.createAttribute<std::string>(
           "DIMENSION_LABELS",
-          std::string("time,channel,polarization_r,polarization_c,"
+          std::string("time,channel,polarization"
                       "eigenvalue_index,component_index,complex"));
     }
 
