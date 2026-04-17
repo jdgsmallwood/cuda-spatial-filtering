@@ -39,6 +39,25 @@ void signal_handler(int signal) {
   running = false;
 }
 
+std::string
+make_default_visibilities_filename(const int min_freq_channel,
+                                   const int num_channels,
+                                   const std::vector<int> fpga_ids) {
+  // timestamp
+  auto now = std::chrono::system_clock::now();
+  std::time_t t = std::chrono::system_clock::to_time_t(now);
+  std::tm tm = *std::localtime(&t);
+
+  std::ostringstream oss;
+  oss << "beam_fft_" << std::put_time(&tm, "%Y%m%d-%H%M") << "_"
+      << min_freq_channel << "_" << min_freq_channel + num_channels - 1;
+  for (auto id : fpga_ids) {
+    oss << "_ALVEO" << id;
+  }
+  oss << ".hdf5";
+  return oss.str();
+}
+
 std::vector<std::string> split_ifnames(const std::string &ifname) {
   std::vector<std::string> result;
   std::stringstream ss(ifname);
@@ -252,9 +271,16 @@ int main(int argc, char *argv[]) {
   };
 
   std::cout << "Creating FFT Writer" << std::endl;
-  auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
-      Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
-      "beam-fft:");
+  std::string filename = make_default_visibilities_filename(
+      min_freq_channel, num_lambda_channels, fpga_id_vec);
+
+  HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
+  // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
+  //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
+  //     "beam-fft:");
+  auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
+      fft_beam_file, min_freq_channel,
+      min_freq_channel + num_lambda_channels - 1);
 
   std::cout << "Creating Output Handler\n";
 
