@@ -568,9 +568,7 @@ private:
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;
-  std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
-                              typename T::EigenvectorOutputType>>
-      eigen_writer_;
+  std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer_;
   std::unique_ptr<FFTWriter<FFTOutput>> fft_writer_;
   std::unique_ptr<PulsarFoldWriter<PulsarFold>> pulsar_fold_writer_;
 
