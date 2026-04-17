@@ -291,7 +291,7 @@ int main(int argc, char *argv[]) {
   //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
   //     "beam-fft:");
   auto eigen_writer =
-      std::make_unique<HDF5EigenWriter<Config::EigenvalueOutputTyp,
+      std::make_unique<HDF5EigenWriter<Config::EigenvalueOutputType,
                                        Config::EigenvectorOutputType>>(
           eigendata_file);
 
