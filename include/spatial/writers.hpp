@@ -3126,3 +3126,113 @@ private:
   std::string prefix;
   std::vector<std::string> precomputed_keys;
 };
+
+template <typename T> class HDF5BeamFFTWriter : public FFTWriter<T> {
+public:
+  HDF5BeamFFTWriter(HighFive::File &file, const int min_channel,
+                    const int max_channel,
+                    const std::unordered_map<int, int> *antenna_map = nullptr)
+      : file_(file),
+        element_count_(sizeof(T) /
+                       sizeof(typename std::remove_all_extents<T>::type)) {
+    using namespace HighFive;
+
+    double start_time = std::chrono::duration<double>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                                .count() /
+                            86400.0 +
+                        40587.0;
+    file_.createAttribute<double>("mjd_start", start_time);
+    file_.createAttribute<int>("min_channel", min_channel);
+    file_.createAttribute<int>("max_channel", max_channel);
+
+    fft_dims_ = get_array_dims<T>();
+
+    // Dataset dims: [0, ...fft_dims_], unlimited on first axis
+    std::vector<size_t> fft_dataset_dims = {0};
+    std::vector<size_t> fft_dataset_max_dims = {DataSpace::UNLIMITED};
+    fft_dataset_dims.insert(fft_dataset_dims.end(), fft_dims_.begin(),
+                            fft_dims_.end());
+    fft_dataset_max_dims.insert(fft_dataset_max_dims.end(), fft_dims_.begin(),
+                                fft_dims_.end());
+
+    // Chunk: 1 block at a time
+    std::vector<hsize_t> fft_chunk = {1};
+    fft_chunk.insert(fft_chunk.end(), fft_dims_.begin(), fft_dims_.end());
+
+    DataSpace fft_space(fft_dataset_dims, fft_dataset_max_dims);
+    DataSetCreateProps props;
+    props.add(Chunking(fft_chunk));
+    fft_dataset_ = file_.createDataSet<float>("beam_ffts", fft_space, props);
+
+    // Sequence number dataset: [N, 2] (start_seq, end_seq)
+    DataSetCreateProps fft_seq_props;
+    fft_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    fft_seq_dataset_ = file_.createDataSet<int>(
+        "beam_fft_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
+        fft_seq_props);
+
+    // Channel/polarisation index dataset: [N, 2] (channel_idx, pol_idx)
+    DataSetCreateProps fft_idx_props;
+    fft_idx_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    fft_idx_dataset_ = file_.createDataSet<int>(
+        "beam_fft_idx", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
+        fft_idx_props);
+
+    if (antenna_map && !antenna_map->empty()) {
+      antenna_map_ = *antenna_map;
+    } else {
+      generate_identity_map();
+    }
+  }
+
+  void write_fft_block(const T *fft_data, const int start_seq,
+                       const int end_seq, const int channel_idx,
+                       const int pol_idx) override {
+    LOG_INFO("writing beam fft block {} to {} (ch={}, pol={})", start_seq,
+             end_seq, channel_idx, pol_idx);
+
+    // --- FFT data ---
+    auto current_size = fft_dataset_.getDimensions()[0];
+
+    std::vector<size_t> new_dims = {current_size + 1};
+    new_dims.insert(new_dims.end(), fft_dims_.begin(), fft_dims_.end());
+    fft_dataset_.resize(new_dims);
+
+    std::vector<size_t> fft_offset = {current_size};
+    fft_offset.insert(fft_offset.end(), fft_dims_.size(), 0);
+    std::vector<size_t> fft_count = {1};
+    fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
+
+    fft_dataset_.select(fft_offset, fft_count).write_raw(fft_data);
+
+    // --- Sequence numbers ---
+    auto seq_size = fft_seq_dataset_.getDimensions()[0];
+    fft_seq_dataset_.resize({seq_size + 1, 2});
+    std::vector<int> seq_nums = {start_seq, end_seq};
+    fft_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+
+    // --- Channel / polarisation indices ---
+    auto idx_size = fft_idx_dataset_.getDimensions()[0];
+    fft_idx_dataset_.resize({idx_size + 1, 2});
+    std::vector<int> idx_nums = {channel_idx, pol_idx};
+    fft_idx_dataset_.select({idx_size, 0}, {1, 2}).write_raw(idx_nums.data());
+  }
+
+  void flush() override { file_.flush(); }
+
+private:
+  void generate_identity_map() {
+    for (int i = 0; i < 256; i++) {
+      antenna_map_[i] = i;
+    }
+  }
+
+  HighFive::File &file_;
+  size_t element_count_;
+  HighFive::DataSet fft_dataset_;
+  HighFive::DataSet fft_seq_dataset_;
+  HighFive::DataSet fft_idx_dataset_;
+  std::vector<size_t> fft_dims_;
+  std::unordered_map<int, int> antenna_map_;
+};
