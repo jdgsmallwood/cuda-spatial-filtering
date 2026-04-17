@@ -236,9 +236,7 @@ public:
           beam_writer,
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
-      std::unique_ptr<EigenWriter<typename T::EigenvalueOutputType,
-                                  typename T::EigenvectorOutputType>>
-          eigen_writer,
+      std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer,
       std::unique_ptr<FFTWriter<FFTOutput>> fft_writer,
       std::unique_ptr<PulsarFoldWriter<PulsarFold>> pulsar_fold_writer,
       size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size,
