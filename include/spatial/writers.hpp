@@ -3292,8 +3292,7 @@ public:
 
       val_dataset_.createAttribute<std::string>(
           "DIMENSION_LABELS",
-          std::string(
-              "time,channel,polarization_r,polarization_c,eigenvalue_index"));
+          std::string("time,channel,polarization,eigenvalue_index"));
     }
 
     // ---- Eigenvector dataset -----------------------------------------
