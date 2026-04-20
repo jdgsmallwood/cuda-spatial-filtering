@@ -2526,6 +2526,27 @@ public:
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
+
+      size_t beam_block_num =
+          output_->register_beam_data_block(start_seq_num, end_seq_num);
+      auto *beam_output_pointer =
+          (void *)output_->get_beam_data_landing_pointer(beam_block_num);
+
+      cudaMemcpyAsync(beam_output_pointer, b.samples_cufft_input.get(),
+                      sizeof(FFTCUFFTInputType), cudaMemcpyDefault, b.stream);
+
+      auto *beam_output_ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = beam_block_num};
+
+      cudaLaunchHostFunc(streams[current_buffer],
+                         output_transfer_complete_host_func, beam_output_ctx);
+
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
+      std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
+                  packet_data->get_arrivals_size());
+      output_->register_arrivals_transfer_complete(beam_block_num);
+
       size_t fft_block_num =
           output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
       auto *fft_output_pointer =
