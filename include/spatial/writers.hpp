@@ -358,66 +358,24 @@ public:
 
   void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
                         const int start_seq, const int end_seq) override {
-    using clock = std::chrono::high_resolution_clock;
-    auto cpu_start = clock::now();
-    auto cpu_end = clock::now();
-
-    // Write beam data
-    cpu_start = clock::now();
     auto current_size = beam_dataset_.getDimensions()[0];
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam_dataset_.getDimensions(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     std::vector<size_t> new_dims = {current_size + 1};
     new_dims.insert(new_dims.end(), beam_dims_.begin(), beam_dims_.end());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam new_dims construction: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     beam_dataset_.resize(new_dims);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam_dataset_.resize(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     std::vector<size_t> beam_offset = {current_size};
     beam_offset.insert(beam_offset.end(), beam_dims_.size(), 0);
     std::vector<size_t> beam_count = {1};
     beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam offset/count construction: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     using beam_type = typename std::remove_all_extents<BeamT>::type;
     beam_dataset_.select(beam_offset, beam_count).write_raw(beam_data);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam_dataset_.select().write(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     // Write arrivals data
-    cpu_start = clock::now();
     auto arrivals_size = arrivals_dataset_.getDimensions()[0];
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals_dataset_.getDimensions(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     std::vector<size_t> arrivals_new_dims = {arrivals_size + 1};
     arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
                              arrivals_dims_.end());
@@ -426,54 +384,19 @@ public:
     std::vector<size_t> arrivals_count = {1};
     arrivals_count.insert(arrivals_count.end(), arrivals_dims_.begin(),
                           arrivals_dims_.end());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals dims/offset/count construction: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     arrivals_dataset_.resize(arrivals_new_dims);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals_dataset_.resize(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     arrivals_dataset_.select(arrivals_offset, arrivals_count)
         .write_raw(arrivals_data);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals_dataset_.select().write_raw(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     // Write sequence numbers
-    cpu_start = clock::now();
     auto seq_size = beam_seq_dataset_.getDimensions()[0];
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam_seq_dataset_.getDimensions(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     beam_seq_dataset_.resize({seq_size + 1, 2});
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam_seq_dataset_.resize(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     std::vector<int> seq_nums = {start_seq, end_seq};
     beam_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam_seq_dataset_.select().write_raw(): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
   }
 
   void flush() override { file_.flush(); }

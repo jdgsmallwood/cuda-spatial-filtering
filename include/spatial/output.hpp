@@ -170,11 +170,12 @@ public:
 template <typename T, typename FFTOutput = typename T::FFTOutputType,
           typename Eigenvalues = typename T::EigenvalueOutputType,
           typename Eigenvectors = typename T::EigenvectorOutputType,
-          typename PulsarFold = typename T::PulsarFoldOutputType>
+          typename PulsarFold = typename T::PulsarFoldOutputType,
+          typename BeamOutputType = typename T::BeamOutputType>
 class BufferedOutput : public Output {
 public:
   struct BeamBlock {
-    typename T::BeamOutputType beam_data;
+    BeamOutputType beam_data;
     typename T::ArrivalsOutputType arrival_data;
     size_t start_seq_num;
     size_t end_seq_num;
@@ -231,8 +232,8 @@ public:
   };
 
   BufferedOutput(
-      std::unique_ptr<BeamWriter<typename T::BeamOutputType,
-                                 typename T::ArrivalsOutputType>>
+      std::unique_ptr<
+          BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
           beam_writer,
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
@@ -563,8 +564,7 @@ private:
     }
   };
 
-  std::unique_ptr<
-      BeamWriter<typename T::BeamOutputType, typename T::ArrivalsOutputType>>
+  std::unique_ptr<BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;
