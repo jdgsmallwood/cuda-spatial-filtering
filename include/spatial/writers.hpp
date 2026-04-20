@@ -536,12 +536,6 @@ public:
     //     "fft_missing_nums",
     //     DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
     //     fft_missing_props);
-
-    if (antenna_map && !antenna_map->empty()) {
-      this->antenna_map_ = *antenna_map;
-    } else {
-      generate_identity_map();
-    }
   }
 
   void write_fft_block(const T *fft_data, const int start_seq,
@@ -579,18 +573,11 @@ public:
   void flush() override { file_.flush(); }
 
 private:
-  void generate_identity_map() {
-    for (int i = 0; i < 256; i++) {
-      antenna_map_[i] = i;
-    }
-  }
-
   HighFive::File &file_;
   size_t element_count_;
   HighFive::DataSet fft_dataset_;
   HighFive::DataSet fft_seq_dataset_;
   std::vector<size_t> fft_dims_;
-  std::unordered_map<int, int> antenna_map_;
 };
 
 template <typename T>
@@ -3147,6 +3134,11 @@ public:
     file_.createAttribute<int>("max_channel", max_channel);
 
     fft_dims_ = get_array_dims<T>();
+    std::cout << "HDF5BeamFFTWriter initializing with dimensions (";
+    for (auto _i : fft_dims_) {
+      std::cout << _i;
+    }
+    std::cout << ").\n";
 
     // Dataset dims: [0, ...fft_dims_], unlimited on first axis
     std::vector<size_t> fft_dataset_dims = {0};
@@ -3178,12 +3170,6 @@ public:
     fft_idx_dataset_ = file_.createDataSet<int>(
         "beam_fft_idx", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
         fft_idx_props);
-
-    if (antenna_map && !antenna_map->empty()) {
-      antenna_map_ = *antenna_map;
-    } else {
-      generate_identity_map();
-    }
   }
 
   void write_fft_block(const T *fft_data, const int start_seq,
@@ -3222,19 +3208,12 @@ public:
   void flush() override { file_.flush(); }
 
 private:
-  void generate_identity_map() {
-    for (int i = 0; i < 256; i++) {
-      antenna_map_[i] = i;
-    }
-  }
-
   HighFive::File &file_;
   size_t element_count_;
   HighFive::DataSet fft_dataset_;
   HighFive::DataSet fft_seq_dataset_;
   HighFive::DataSet fft_idx_dataset_;
   std::vector<size_t> fft_dims_;
-  std::unordered_map<int, int> antenna_map_;
 };
 
 // ---------------------------------------------------------------------------
