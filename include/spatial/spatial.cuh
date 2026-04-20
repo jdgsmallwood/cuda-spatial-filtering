@@ -383,13 +383,6 @@ void detect_and_downsample_fft_launch(const float2 *cufft_data,
                                       const int NR_FREQS, const int NR_BEAMS,
                                       const int DOWNSAMPLE_FACTOR,
                                       cudaStream_t stream) {
-  std::cout << "detect_and_downsample_fft launching with NR_CHANNELS: "
-            << NR_CHANNELS << ", NR_POL: " << NR_POLARIZATIONS
-            << ", NR_FREQS: " << NR_FREQS << ", NR_BEAMS: " << NR_BEAMS;
-  std::cout << ", DOWNSAMPLE_FACTOR: " << DOWNSAMPLE_FACTOR << std::endl;
-
-  std::cout << "Grid: " << (NR_FREQS / DOWNSAMPLE_FACTOR + 255) / 256 << ", "
-            << NR_BEAMS << ", " << NR_POLARIZATIONS * NR_CHANNELS << std::endl;
 
   detect_and_downsample_fft<<<dim3((NR_FREQS / DOWNSAMPLE_FACTOR + 255) / 256,
                                    NR_BEAMS, NR_CHANNELS * NR_POLARIZATIONS),
