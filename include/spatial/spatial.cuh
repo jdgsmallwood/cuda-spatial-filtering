@@ -310,7 +310,7 @@ __global__ void detect_and_downsample_multi_channel_fft(
   int start_f = out_freq_idx * DOWNSAMPLE_FACTOR;
   for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
     float2 in = cufft_data[0][chan][pol][rx_idx][start_f + j];
-    float val = sqrtf(in.x * in.x + in.y * in.y);
+    float val = in.x * in.x + in.y * in.y;
 
     if (!isnan(val)) {
       sum += val;
@@ -361,7 +361,7 @@ __global__ void detect_and_downsample_fft(
                            pol * NR_BEAMS * NR_FREQS + beam_idx * NR_FREQS;
   for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
     float2 in = cufft_data[base_pointer + start_f + j];
-    float val = sqrtf(in.x * in.x + in.y * in.y);
+    float val = in.x * in.x + in.y * in.y;
 
     if (!isnan(val)) {
       sum += val;
@@ -389,7 +389,7 @@ void detect_and_downsample_fft_launch(const float2 *cufft_data,
   std::cout << ", DOWNSAMPLE_FACTOR: " << DOWNSAMPLE_FACTOR << std::endl;
 
   std::cout << "Grid: " << (NR_FREQS / DOWNSAMPLE_FACTOR + 255) / 256 << ", "
-            << NR_BEAMS << ", " << NR_POLARIZATIONS << std::endl;
+            << NR_BEAMS << ", " << NR_POLARIZATIONS * NR_CHANNELS << std::endl;
 
   detect_and_downsample_fft<<<dim3((NR_FREQS / DOWNSAMPLE_FACTOR + 255) / 256,
                                    NR_BEAMS, NR_CHANNELS * NR_POLARIZATIONS),

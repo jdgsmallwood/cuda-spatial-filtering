@@ -308,11 +308,6 @@ public:
                                      const int num_missing_packets,
                                      const int num_total_packets) override {
     size_t block_num = vis_write_idx_;
-    vis_write_idx_ = (block_num + 1) % vis_blocks_.size();
-
-    if (vis_write_idx_ == vis_read_idx_) {
-      throw std::runtime_error("Visibilities ring buffer is full");
-    }
 
     auto &block = vis_blocks_[block_num];
     block.start_seq_num = start_seq_num;
@@ -321,6 +316,11 @@ public:
     block.num_total_packets = num_total_packets;
     block.transfer_complete = false;
 
+    vis_write_idx_ = (block_num + 1) % vis_blocks_.size();
+
+    if (vis_write_idx_ == vis_read_idx_) {
+      throw std::runtime_error("Visibilities ring buffer is full");
+    }
     return block_num;
   }
 
@@ -328,16 +328,16 @@ public:
   register_eigendecomposition_data_block(const size_t start_seq_num,
                                          const size_t end_seq_num) override {
     size_t block_num = eigen_write_idx_;
-    eigen_write_idx_ = (block_num + 1) % eigen_blocks_.size();
-
-    if (eigen_write_idx_ == eigen_read_idx_) {
-      LOG_ERROR("Eigendata ring buffer is full");
-    }
     auto &block = eigen_blocks_[block_num];
     block.start_seq_num = start_seq_num;
     block.end_seq_num = end_seq_num;
     block.transfer_complete = false;
 
+    eigen_write_idx_ = (block_num + 1) % eigen_blocks_.size();
+
+    if (eigen_write_idx_ == eigen_read_idx_) {
+      LOG_ERROR("Eigendata ring buffer is full");
+    }
     return block_num;
   }
 
@@ -345,13 +345,6 @@ public:
                             const size_t end_seq_num, const int channel_idx,
                             const int pol_idx) override {
     size_t block_num = fft_write_idx_;
-    fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
-    LOG_INFO("Registered FFT block with start seq {} and end seq {}",
-             start_seq_num, end_seq_num);
-
-    if (fft_write_idx_ == fft_read_idx_) {
-      LOG_ERROR("FFT ring buffer is full");
-    }
     auto &block = fft_blocks_[block_num];
     block.start_seq_num = start_seq_num;
     block.end_seq_num = end_seq_num;
@@ -359,12 +352,24 @@ public:
     block.pol_idx = pol_idx;
     block.transfer_complete = false;
 
+    fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
+    LOG_INFO("Registered FFT block with start seq {} and end seq {}",
+             start_seq_num, end_seq_num);
+
+    if (fft_write_idx_ == fft_read_idx_) {
+      LOG_ERROR("FFT ring buffer is full");
+    }
     return block_num;
   }
 
   size_t register_pulsar_fold_block(const size_t start_seq_num,
                                     const size_t end_seq_num) override {
     size_t block_num = pulsar_fold_write_idx_;
+    auto &block = pulsar_fold_blocks_[block_num];
+    block.start_seq_num = start_seq_num;
+    block.end_seq_num = end_seq_num;
+    block.transfer_complete = false;
+
     pulsar_fold_write_idx_ = (block_num + 1) % pulsar_fold_blocks_.size();
     LOG_INFO("Registered Pulsar Fold block with start seq {} and end seq {}",
              start_seq_num, end_seq_num);
@@ -372,11 +377,6 @@ public:
     if (pulsar_fold_write_idx_ == pulsar_fold_read_idx_) {
       LOG_ERROR("Pulsar Fold ring buffer is full");
     }
-    auto &block = pulsar_fold_blocks_[block_num];
-    block.start_seq_num = start_seq_num;
-    block.end_seq_num = end_seq_num;
-    block.transfer_complete = false;
-
     return block_num;
   }
 
