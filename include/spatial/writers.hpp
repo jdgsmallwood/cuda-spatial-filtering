@@ -3136,7 +3136,7 @@ public:
     fft_dims_ = get_array_dims<T>();
     std::cout << "HDF5BeamFFTWriter initializing with dimensions (";
     for (auto _i : fft_dims_) {
-      std::cout << _i;
+      std::cout << _i << ", ";
     }
     std::cout << ").\n";
 
