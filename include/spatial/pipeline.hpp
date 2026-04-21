@@ -1938,6 +1938,9 @@ private:
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+  using BeamOutput =
+      std::complex<__half>[2 * T::NR_BEAMS][NR_TIME_STEPS_FOR_CORRELATION]
+                          [T::NR_CHANNELS][T::NR_POLARIZATIONS];
   using ProjectionMatrix =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                           [T::NR_RECEIVERS];
@@ -1964,7 +1967,8 @@ private:
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
-    DevicePtr<FFTCUFFTInputType> samples_cufft_input, beam_output;
+    DevicePtr<FFTCUFFTInputType> samples_cufft_input, beam_shape;
+    DevicePtr<BeamOutput> beam_output;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
     DevicePtr<BeamWeights> weights;
@@ -2014,7 +2018,8 @@ private:
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
-          beam_output(make_device_ptr<FFTCUFFTInputType>()),
+          beam_shape(make_device_ptr<FFTCUFFTInputType>()),
+          beam_output(make_device_ptr<BeamOutput>()),
           samples_cufft_output(make_device_ptr<FFTCUFFTOutputType>()),
           cufft_downsampled_output(make_device_ptr<FFTOutputType>()),
           weights(make_device_ptr<BeamWeights>()),
@@ -2105,6 +2110,7 @@ private:
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
           beam_output(std::move(other.beam_output)),
+          beam_shape(std::move(other.beam_shape)),
           samples_cufft_input(std::move(other.samples_cufft_input)),
           samples_cufft_output(std::move(other.samples_cufft_output)),
           cufft_downsampled_output(std::move(other.cufft_downsampled_output)),
@@ -2158,6 +2164,7 @@ private:
         samples_consolidated_col_maj =
             std::move(other.samples_consolidated_col_maj);
         beam_output = std::move(other.beam_output);
+        beam_shape = std::move(other.beam_shape);
         samples_cufft_input = std::move(other.samples_cufft_input);
         samples_cufft_output = std::move(other.samples_cufft_output);
         cufft_downsampled_output = std::move(other.cufft_downsampled_output);
@@ -2522,7 +2529,10 @@ public:
 
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
                              (float *)b.beamformer_output.get(),
-                             (float *)b.beam_output.get(), b.stream);
+                             (float *)b.beam_shape.get(), b.stream);
+    convert_float_to_half((float *)b.beam_shape.get(),
+                          (__half *)b.beam_output.get(),
+                          sizeof(BeamOutput) / sizeof(__half));
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
                             CUFFT_FORWARD));
@@ -2544,7 +2554,7 @@ public:
           (void *)output_->get_beam_data_landing_pointer(beam_block_num);
 
       cudaMemcpyAsync(beam_output_pointer, b.beam_output.get(),
-                      sizeof(FFTCUFFTInputType), cudaMemcpyDefault, b.stream);
+                      sizeof(BeamOutput), cudaMemcpyDefault, b.stream);
 
       auto *beam_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = beam_block_num};
