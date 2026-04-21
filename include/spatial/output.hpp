@@ -473,8 +473,8 @@ private:
   }
 
   void write_beam_data() {
-    LOG_INFO("Beam info....beam_read_idx %i, beam_write_idx %i "
-             "transfer_complete: %i arrival transfercomplete %i",
+    LOG_INFO("Beam info....beam_read_idx {}, beam_write_idx {} "
+             "transfer_complete: {} arrival transfercomplete {}",
              beam_read_idx_, beam_write_idx_,
              beam_blocks_[beam_read_idx_].beam_transfer_complete,
              beam_blocks_[beam_read_idx_].arrival_transfer_complete);
