@@ -421,6 +421,8 @@ public:
   void register_arrivals_transfer_complete(const size_t block_num) override {
     LOG_INFO("Marking arrivals transfer complete for block {}", block_num);
     beam_blocks_[block_num].arrival_transfer_complete = true;
+    LOG_INFO("arrivals transfer complete for block {} is now {}", block_num,
+             beam_blocks_[block_num]);
   }
 
   void register_eigendecomposition_data_transfer_complete(
