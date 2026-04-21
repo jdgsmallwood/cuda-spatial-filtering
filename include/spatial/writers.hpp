@@ -358,6 +358,7 @@ public:
 
   void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
                         const int start_seq, const int end_seq) override {
+    LOG_INFO("Writing beam block...");
     auto current_size = beam_dataset_.getDimensions()[0];
 
     std::vector<size_t> new_dims = {current_size + 1};

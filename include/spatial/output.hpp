@@ -436,30 +436,13 @@ public:
 
   void writer_loop() {
 
-    using clock = std::chrono::high_resolution_clock;
-    auto cpu_start = clock::now();
-    auto cpu_end = clock::now();
     LOG_INFO("Writer loop is running!");
     while (running_) {
 
       if (has_data_to_write()) {
         LOG_INFO("There is data to write! Writing data...");
-        cpu_start = clock::now();
         write_beam_data();
-        cpu_end = clock::now();
-
-        LOG_DEBUG("CPU time for writing beam data...: {} us",
-                  std::chrono::duration_cast<std::chrono::microseconds>(
-                      cpu_end - cpu_start)
-                      .count());
-        cpu_start = clock::now();
         write_visibilities();
-        cpu_end = clock::now();
-        LOG_DEBUG("CPU time for writing visibilities...: {} us",
-                  std::chrono::duration_cast<std::chrono::microseconds>(
-                      cpu_end - cpu_start)
-                      .count());
-
         write_eigendata();
         write_fft_data();
         write_pulsar_fold_data();
