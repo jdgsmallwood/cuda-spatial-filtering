@@ -1928,6 +1928,9 @@ private:
   using FFTCUFFTOutputType =
       float2[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
             [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION];
+  using BeamTransferSingleChannelPol =
+      float2[2 * T::NR_BEAMS]
+            [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION];
   using FFTOutputType =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION /
@@ -2533,7 +2536,8 @@ public:
           (void *)output_->get_beam_data_landing_pointer(beam_block_num);
 
       cudaMemcpyAsync(beam_output_pointer, b.samples_cufft_input.get(),
-                      sizeof(FFTCUFFTInputType), cudaMemcpyDefault, b.stream);
+                      sizeof(BeamTransferSingleChannelPol), cudaMemcpyDefault,
+                      b.stream);
 
       auto *beam_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = beam_block_num};

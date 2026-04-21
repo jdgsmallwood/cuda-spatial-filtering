@@ -229,8 +229,7 @@ int main(int argc, char *argv[]) {
             NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
 
   using BeamOutputType =
-      std::complex<float>[NR_OBSERVING_CHANNELS][nr_lambda_polarizations]
-                         [2 * nr_lambda_beams]
+      std::complex<float>[2 * nr_lambda_beams]
                          [nr_lambda_time_steps_per_packet *
                           NR_OBSERVING_PACKETS_FOR_CORRELATION];
   const std::unordered_map<std::string, int> ifname_to_fpga{
