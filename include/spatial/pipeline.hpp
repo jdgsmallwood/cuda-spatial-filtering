@@ -1964,7 +1964,7 @@ private:
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
-    DevicePtr<FFTCUFFTInputType> samples_cufft_input;
+    DevicePtr<FFTCUFFTInputType> samples_cufft_input, beam_output;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
     DevicePtr<BeamWeights> weights;
@@ -2014,6 +2014,7 @@ private:
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
+          beam_output(make_device_ptr<FFTCUFFTInputType>()),
           samples_cufft_output(make_device_ptr<FFTCUFFTOutputType>()),
           cufft_downsampled_output(make_device_ptr<FFTOutputType>()),
           weights(make_device_ptr<BeamWeights>()),
@@ -2103,6 +2104,7 @@ private:
           samples_consolidated(std::move(other.samples_consolidated)),
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
+          beam_output(std::move(other.beam_output)),
           samples_cufft_input(std::move(other.samples_cufft_input)),
           samples_cufft_output(std::move(other.samples_cufft_output)),
           cufft_downsampled_output(std::move(other.cufft_downsampled_output)),
@@ -2155,6 +2157,7 @@ private:
         samples_consolidated = std::move(other.samples_consolidated);
         samples_consolidated_col_maj =
             std::move(other.samples_consolidated_col_maj);
+        beam_output = std::move(other.beam_output);
         samples_cufft_input = std::move(other.samples_cufft_input);
         samples_cufft_output = std::move(other.samples_cufft_output);
         cufft_downsampled_output = std::move(other.cufft_downsampled_output);
@@ -2222,6 +2225,7 @@ private:
                                                                's', 'f', 'n'};
 
   inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'e', 's'};
+  inline static const std::vector<int> modeBeamOutput{'e', 's' 'c', 'p', 'z'};
   inline static const std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r',
                                                         'z'};
   inline static const std::vector<int> modeWeightsBeamMajor{'m', 'c', 'p', 'r',
@@ -2516,6 +2520,9 @@ public:
                              (float *)b.beamformer_output.get(),
                              (float *)b.samples_cufft_input.get(), b.stream);
 
+    tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
+                             (float *)b.beamformer_output.get(),
+                             (float *)b.beam_output.get(), b.stream);
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
                             CUFFT_FORWARD));
@@ -2526,6 +2533,7 @@ public:
         T::NR_POLARIZATIONS,
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
         2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
@@ -2535,9 +2543,8 @@ public:
       auto *beam_output_pointer =
           (void *)output_->get_beam_data_landing_pointer(beam_block_num);
 
-      cudaMemcpyAsync(beam_output_pointer, b.samples_cufft_input.get(),
-                      sizeof(BeamTransferSingleChannelPol), cudaMemcpyDefault,
-                      b.stream);
+      cudaMemcpyAsync(beam_output_pointer, b.beam_output.get(),
+                      sizeof(FFTCUFFTInputType), cudaMemcpyDefault, b.stream);
 
       auto *beam_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = beam_block_num};
@@ -2640,6 +2647,7 @@ public:
 
     tensor_32.addTensor(modeCUFFTInput, "cufftInput");
     tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
+    tensor_32.addTensor(modeBeamOutput, "beamOutput");
 
     tensor_16.addTensor(modeCorrelatorInput, "corr_input");
     tensor_32.addTensor(modeVisCorr, "visCorr");
@@ -2670,6 +2678,8 @@ public:
                              "weights2xBeamMajorToCCGLIB");
     tensor_32.addPermutation("beamCCGLIB", "cufftInput",
                              CUTENSOR_COMPUTE_DESC_32F, "beamToCUFFTInput");
+    tensor_32.addPermutation("beamCCGLIB", "beamOutput",
+                             CUTENSOR_COMPUTE_DESC_32F, "beamCCGLIBToOutput");
 
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);

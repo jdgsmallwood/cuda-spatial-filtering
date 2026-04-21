@@ -1728,9 +1728,11 @@ private:
 template <typename BeamT, typename ArrivalsT>
 class BinaryRawBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 public:
-  BinaryRawBeamWriter(const std::string &filename)
+  BinaryRawBeamWriter(const std::string &filename,
+                      const bool write_arrivals = false)
       : filename_(filename),
-        file_stream_(filename, std::ios::binary | std::ios::out) {
+        file_stream_(filename, std::ios::binary | std::ios::out),
+        write_arrivals(write_arrivals) {
     if (!file_stream_) {
       throw std::runtime_error("Failed to open binary file: " + filename);
     }
@@ -1754,31 +1756,19 @@ public:
 
   void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
                         const int start_seq, const int end_seq) {
-    using clock = std::chrono::high_resolution_clock;
-
-    auto cpu_start = clock::now();
-
-    // Write header: start_seq, end_seq, element counts
-    file_stream_.write(reinterpret_cast<const char *>(&start_seq), sizeof(int));
-    file_stream_.write(reinterpret_cast<const char *>(&end_seq), sizeof(int));
+    // file_stream_.write(reinterpret_cast<const char *>(&start_seq),
+    // sizeof(int)); file_stream_.write(reinterpret_cast<const char
+    // *>(&end_seq), sizeof(int));
 
     // Write beam data
     file_stream_.write(reinterpret_cast<const char *>(beam_data),
                        sizeof(BeamT));
 
     // Write arrivals data
-    file_stream_.write(reinterpret_cast<const char *>(arrivals_data),
-                       sizeof(ArrivalsT));
-
-    auto cpu_end = clock::now();
-
-    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                          cpu_end - cpu_start)
-                          .count();
-
-    std::cout << "[BinaryRawBeamWriter] Wrote beam block ("
-              << sizeof(BeamT) + sizeof(ArrivalsT) << " bytes) "
-              << "in " << elapsed_us << " us.\n";
+    if (write_arrivals) {
+      file_stream_.write(reinterpret_cast<const char *>(arrivals_data),
+                         sizeof(ArrivalsT));
+    }
   }
 
   void flush() {
@@ -1790,6 +1780,7 @@ private:
   std::string filename_;
   std::ofstream file_stream_;
 
+  bool write_arrivals;
   size_t beam_element_count_;
   size_t arrivals_element_count_;
 };
