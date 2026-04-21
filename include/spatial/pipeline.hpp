@@ -2532,7 +2532,7 @@ public:
                              (float *)b.beam_shape.get(), b.stream);
     convert_float_to_half((float *)b.beam_shape.get(),
                           (__half *)b.beam_output.get(),
-                          sizeof(BeamOutput) / sizeof(__half));
+                          sizeof(BeamOutput) / sizeof(__half), b.stream);
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
                             CUFFT_FORWARD));
