@@ -2225,7 +2225,7 @@ private:
                                                                's', 'f', 'n'};
 
   inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'e', 's'};
-  inline static const std::vector<int> modeBeamOutput{'e', 's' 'c', 'p', 'z'};
+  inline static const std::vector<int> modeBeamOutput{'e', 's', 'c', 'p', 'z'};
   inline static const std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r',
                                                         'z'};
   inline static const std::vector<int> modeWeightsBeamMajor{'m', 'c', 'p', 'r',
