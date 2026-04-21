@@ -2538,8 +2538,8 @@ public:
       auto *beam_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = beam_block_num};
 
-      cudaLaunchHostFunc(streams[current_buffer],
-                         output_transfer_complete_host_func, beam_output_ctx);
+      cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
+                         beam_output_ctx);
 
       bool *arrivals_output_pointer =
           (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
