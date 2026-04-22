@@ -686,3 +686,26 @@ inline void normalise_fold_launch(const float *fold_accumulator,
   normalise_fold_kernel<<<blocks, THREADS, 0, stream>>>(
       fold_accumulator, fold_output, hit_counts, total_elements);
 }
+
+__global__ void detect_and_convert_to_half(const float2 *__restrict__ d_input,
+                                           __half *__restrict__ d_output,
+                                           const int n) {
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+
+  while (tid < n) {
+    float2 output = d_input[tid];
+    float out = sqrtf(output.x * output.x + output.y * output.y);
+    d_output[tid] = __float2half(out);
+
+    tid += stride;
+  };
+};
+
+inline void detect_and_convert_to_half_launch(const float2 *d_input,
+                                              __half *d_output, const int n,
+                                              cudaStream_t stream) {
+  detect_and_convert_to_half<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input,
+                                                                  d_output, n);
+}
