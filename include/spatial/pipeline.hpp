@@ -2543,9 +2543,9 @@ public:
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
         2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
 
-    detect_and_convert_to_half((float2 *)b.beam_shape.get(),
-                               (__half *)b.beam_output.get(),
-                               sizeof(BeamOutput) / sizeof(__half), b.stream);
+    detect_and_convert_to_half_launch(
+        (float2 *)b.beam_shape.get(), (__half *)b.beam_output.get(),
+        sizeof(BeamOutput) / sizeof(__half), b.stream);
 
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
