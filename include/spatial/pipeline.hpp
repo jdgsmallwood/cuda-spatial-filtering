@@ -1938,9 +1938,8 @@ private:
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
-  using BeamOutput =
-      std::complex<__half>[2 * T::NR_BEAMS][NR_TIME_STEPS_FOR_CORRELATION]
-                          [T::NR_CHANNELS][T::NR_POLARIZATIONS];
+  using BeamOutput = __half[2 * T::NR_BEAMS][NR_TIME_STEPS_FOR_CORRELATION]
+                           [T::NR_CHANNELS][T::NR_POLARIZATIONS];
   using ProjectionMatrix =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                           [T::NR_RECEIVERS];
@@ -2530,9 +2529,9 @@ public:
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
                              (float *)b.beamformer_output.get(),
                              (float *)b.beam_shape.get(), b.stream);
-    convert_float_to_half((float *)b.beam_shape.get(),
-                          (__half *)b.beam_output.get(),
-                          sizeof(BeamOutput) / sizeof(__half), b.stream);
+    // convert_float_to_half((float *)b.beam_shape.get(),
+    //                       (__half *)b.beam_output.get(),
+    //                       sizeof(BeamOutput) / sizeof(__half), b.stream);
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
                             CUFFT_FORWARD));
@@ -2543,6 +2542,10 @@ public:
         T::NR_POLARIZATIONS,
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
         2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+
+    detect_and_convert_to_half((float2 *)b.beam_shape.get(),
+                               (__half *)b.beam_output.get(),
+                               sizeof(BeamOutput) / sizeof(__half), b.stream);
 
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
