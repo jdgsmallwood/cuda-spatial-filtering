@@ -1982,11 +1982,11 @@ private:
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
-    DevicePtr<FFTCUFFTInputType> samples_cufft_input, beam_shape;
+    DevicePtr<FFTCUFFTInputType> samples_cufft_input;
     DevicePtr<BeamOutput> beam_output;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output,
         samples_cufft_output_fine_channel;
-    DevicePtr<FineChannelRemovedType> samples_fine_channel_removed;
+    DevicePtr<FineChannelRemovedType> samples_fine_channel_removed, beam_shape;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
     DevicePtr<BeamWeights> weights;
     DevicePtr<BeamWeights> weights_permuted, weights_updated;
