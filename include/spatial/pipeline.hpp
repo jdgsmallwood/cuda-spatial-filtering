@@ -2569,8 +2569,8 @@ public:
     void *src_ptr = (char *)b.samples_cufft_output_fine_channel.get();
     size_t src_size = sizeof(FineChannelCopyType);
 
-    void *dest_ptr = (char *)b.samples_fine_channel_removed.get() +
-                     sizeof(FineChannelCopyType);
+    dest_ptr = (char *)b.samples_fine_channel_removed.get() +
+               sizeof(FineChannelCopyType);
 
     cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
 
