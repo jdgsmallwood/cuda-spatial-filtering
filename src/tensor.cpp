@@ -12,7 +12,7 @@
 #include <string_view>
 #include <utility>
 
-void checkCutensorStatus(cutensorStatus_t status, const char *msg) {
+void checkCutensorStatus(cutensorStatus_t status, const std::string &*msg) {
   if (status != CUTENSOR_STATUS_SUCCESS) {
     std::cerr << "cuTENSOR error at " << msg << ": "
               << cutensorGetErrorString(status) << std::endl;
