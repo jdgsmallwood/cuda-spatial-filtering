@@ -200,7 +200,7 @@ void CutensorSetup::runPermutation(const std::string &name, const float &alpha,
   // std::cout << "Running permutation: " << name << std::endl;
   checkCutensorStatus(
       cutensorPermute(handle, perm->plan, &alpha, d_in, d_out, stream),
-      "permutation float");
+      "permutation float " + name);
 }
 
 void CutensorSetup::runPermutation(const std::string &name, const float &alpha,
