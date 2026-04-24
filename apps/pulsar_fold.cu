@@ -283,9 +283,9 @@ int main(int argc, char *argv[]) {
   pulsar.period_samples = pulsar_period_samples;
   pulsar.n_bins = n_bins;
   pulsar.dm = 67.771;
-  pulsar.ref_freq_mhz = 149.5 * 781.25 / 1000;
+  pulsar.ref_freq_mhz = (min_freq_channel+ 7.5) * 781.25 / 1000;
   pulsar.chan_bw_mhz = 781.25 * 32 / 27 / 1000;
-  pulsar.lowest_chan_freq_mhz = (146 * 781.25 - 0.5 * 781.25 * 32 / 27) / 1000;
+  pulsar.lowest_chan_freq_mhz = (min_freq_channel * 781.25 - 0.5 * 781.25 * 32 / 27) / 1000;
   LambdaPulsarFoldPipeline<Config, n_fine_channels> pipeline(num_buffers, pulsar, 512);
 
   state.set_pipeline(&pipeline);
