@@ -265,6 +265,7 @@ struct LambdaConfig {
 
   using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                                   [NR_RECEIVERS][NR_POLARIZATIONS];
+
   using Sample = std::complex<int8_t>;
   using InputPacketSamplesType =
       std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]

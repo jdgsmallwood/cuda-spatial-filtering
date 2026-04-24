@@ -687,7 +687,7 @@ inline void normalise_fold_launch(const float *fold_accumulator,
       fold_accumulator, fold_output, hit_counts, total_elements);
 }
 
-__global__ void detect_and_convert_to_half(const float2 *__restrict__ d_input,
+__global__ void detect_and_convert_to_half(const float4 *__restrict__ d_input,
                                            __half *__restrict__ d_output,
                                            const int n) {
 
@@ -695,8 +695,9 @@ __global__ void detect_and_convert_to_half(const float2 *__restrict__ d_input,
   const int stride = blockDim.x * gridDim.x;
 
   while (tid < n) {
-    float2 output = d_input[tid];
-    float out = sqrtf(output.x * output.x + output.y * output.y);
+    float4 output = d_input[tid];
+    float out = sqrtf(output.x * output.x + output.y * output.y +
+                      output.w * output.w + output.z * output.z);
     d_output[tid] = __float2half(out);
 
     tid += stride;

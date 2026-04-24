@@ -229,9 +229,8 @@ int main(int argc, char *argv[]) {
             NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
 
   using BeamOutputType =
-      __half[2 * nr_lambda_beams][nr_lambda_time_steps_per_packet *
-                                  NR_OBSERVING_PACKETS_FOR_CORRELATION]
-            [NR_OBSERVING_CHANNELS][nr_lambda_polarizations];
+      __half[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
+            [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -281,14 +280,14 @@ int main(int argc, char *argv[]) {
   std::string beam_filename = make_default_filename(
       "beam", min_freq_channel, num_lambda_channels, fpga_id_vec);
 
-  HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
-  //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
-  //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
-  //     "beam-fft:");
-  auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
-      fft_beam_file, min_freq_channel,
-      min_freq_channel + num_lambda_channels - 1);
+  // HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
+  // //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
+  // // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
+  // //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
+  // //     "beam-fft:");
+  // auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
+  //     fft_beam_file, min_freq_channel,
+  //     min_freq_channel + num_lambda_channels - 1);
 
   auto beam_writer = std::make_unique<
       BinaryRawBeamWriter<BeamOutputType, Config::ArrivalsOutputType>>(
@@ -318,7 +317,7 @@ int main(int argc, char *argv[]) {
       BufferedOutput<Config, FFTOutputType, Eigenvalues, Eigenvectors,
                      Config::PulsarFoldOutputType, BeamOutputType>>(
       std::move(beam_writer), nullptr, std::move(eigen_writer),
-      std::move(fft_writer), nullptr, 100, 100, 100, 200, 100);
+      nullptr /*std::move(fft_writer) */, nullptr, 100, 100, 100, 200, 100);
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
