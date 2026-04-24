@@ -704,7 +704,7 @@ __global__ void detect_and_convert_to_half(const float4 *__restrict__ d_input,
   };
 };
 
-inline void detect_and_convert_to_half_launch(const float2 *d_input,
+inline void detect_and_convert_to_half_launch(const float4 *d_input,
                                               __half *d_output, const int n,
                                               cudaStream_t stream) {
   detect_and_convert_to_half<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input,
