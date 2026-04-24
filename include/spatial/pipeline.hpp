@@ -2580,7 +2580,7 @@ public:
     cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
 
     tensor_32.runPermutation("fineChannelRemovedToBeamOutput", alpha_32,
-                             (float *)b.fine_channel_removed.get(),
+                             (float *)b.samples_fine_channel_removed.get(),
                              (float *)b.beam_shape.get(), b.stream);
 
     // detect_and_downsample_fft_launch(
