@@ -2035,9 +2035,13 @@ private:
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
-          beam_shape(make_device_ptr<FFTCUFFTInputType>()),
+          beam_shape(make_device_ptr<FineChannelRemovedType>()),
           beam_output(make_device_ptr<BeamOutput>()),
           samples_cufft_output(make_device_ptr<FFTCUFFTOutputType>()),
+          samples_cufft_output_fine_channel(
+              make_device_ptr<FFTCUFFTOutputType>()),
+          samples_fine_channel_removed(
+              make_device_ptr<FineChannelRemovedType>()),
           cufft_downsampled_output(make_device_ptr<FFTOutputType>()),
           weights(make_device_ptr<BeamWeights>()),
           weights_permuted(make_device_ptr<BeamWeights>()),
@@ -2734,7 +2738,7 @@ public:
     tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToPlanar");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
-                             CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
+                             CUTENSOR_COMPUTE_DESC_17F, "consToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsBeamMajor",
                              CUTENSOR_COMPUTE_DESC_16F, "weightsToBeamMajor");
     tensor_16.addPermutation("weights2xBeamMajor", "weightsCCGLIB",
