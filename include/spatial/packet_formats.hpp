@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <iostream>
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -83,7 +84,7 @@ struct LambdaFinalPacketData : public FinalPacketData {
   size_t get_arrivals_size() override { return sizeof(ArrivalsType); };
 
   void zero_samples() override {
-    std::memset(get_samples_ptr(), get_samples_elements_size());
+    std::memset(get_samples_ptr(), 0, get_samples_elements_size());
   };
 
   void zero_arrivals() override {
@@ -212,13 +213,15 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
   };
 
   void unpack_packet_data(
-      PacketPayload<PacketScaleStructure, InputPacketDataStructure> *payload) {
+      const PacketPayload<PacketScaleStructure, InputPacketDataStructure>
+          *payload) {
     for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
       for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
         int scale_factor = static_cast<int>(payload->scales[i][j]);
+        // LOG_INFO("Scale factor i {} j {} is {}", i, j, scale_factor);
 
         for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
-          std::complex<int8_t> data = payload->samples[k][i][j];
+          std::complex<int8_t> data = payload->data[k][i][j];
           std::complex<int> data_int = convert_and_scale(data, scale_factor);
           this->output_data[k][i][j] = convert_float_to_half(data_int);
         }
@@ -276,10 +279,10 @@ struct LambdaConfig {
 
   using Sample = std::complex<int8_t>;
   using InputPacketSamplesType =
-      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+      std::complex<__half>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
-  using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<int8_t>;
+  using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<__half>;
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
   using HalfInputPacketSamplesPlanarType =
@@ -301,14 +304,14 @@ struct LambdaConfig {
                           [NR_POLARIZATIONS];
   using PacketPayloadType =
       PacketPayload<PacketScaleStructure, PacketDataStructure>;
-  using ProcessedPacketType = ProcessedPacket<PacketDataStructure>;
+  using ProcessedPacketType = ProcessedPacket<OutputPacketDataStructure>;
   using PacketEntryType =
       LambdaPacketEntry<PacketScaleStructure, PacketDataStructure,
                         OutputPacketDataStructure, NR_RECEIVERS_PER_PACKET,
                         NR_POLARIZATIONS, NR_TIME_STEPS_PER_PACKET,
                         OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>;
   using PacketFinalDataType =
-      LambdaFinalPacketData<OutputPacketSamplesType, NR_CHANNELS,
+      LambdaFinalPacketData<InputPacketSamplesType, NR_CHANNELS,
                             NR_PACKETS_FOR_CORRELATION, NR_RECEIVERS_PER_PACKET,
                             NR_POLARIZATIONS, NR_FPGA_SOURCES,
                             NR_TIME_STEPS_PER_PACKET>;

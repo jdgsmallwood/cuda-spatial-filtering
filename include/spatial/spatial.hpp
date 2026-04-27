@@ -158,8 +158,7 @@ public:
   };
 
   __attribute__((hot)) void copy_data_to_input_buffer_if_able(
-      ProcessedPacket<typename T::PacketScaleStructure,
-                      typename T::PacketDataStructure> &pkt,
+      ProcessedPacket<typename T::OutputPacketDataStructure> &pkt,
       const int current_read_index,
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
     size_t fpga_index;
@@ -222,8 +221,9 @@ public:
         // start token. Maybe an out-of-order packet that's coming in?
         // Regardless we can't do anything with this.
         LOG_INFO("Discarding packet as it is before current buffer with "
-                 "begin_seq {} actually has packet_index {}",
-                 buffer_start, pkt.sample_count);
+                 "begin_seq {} actually has start_packet_index {} and "
+                 "end_packet_index {}",
+                 buffer_start, pkt.sample_count, end_sample_count);
         packets_discarded.fetch_add(1);
         *pkt.original_packet_processed = true;
         return;
@@ -241,17 +241,20 @@ public:
 
         // this will be some number from the beginning that should
         // be copied to the end of this packet.
-        const int num_to_copy = 64 - packet_index_start_remainder;
+        const int num_to_copy =
+            T::NR_TIME_STEPS_PER_PACKET - packet_index_start_remainder;
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
-        //           "receiver_index {} of buffer {}",
-        //           packet_index, freq_channel, receiver_index, buffer_index);
+        LOG_INFO(
+            "Copying data to end of packet_index {} and channel index {} and "
+            "receiver_index {} of buffer {}. Num to copy is {}",
+            packet_index_start, freq_channel, receiver_index, buffer_index,
+            num_to_copy);
 
         auto &buffer = d_samples[buffer_index];
         auto &samples =
             (*buffer->samples)[freq_channel][packet_index_start][fpga_index];
         auto &arrival =
-            buffer->arrivals[0][freq_channel][packet_index][fpga_index];
+            buffer->arrivals[0][freq_channel][packet_index_start][fpga_index];
 
         // we want to only copy the first part of this.
         std::memcpy((char *)&samples +
@@ -282,17 +285,19 @@ public:
 
         // this will be some number from the beginning that should
         // be copied to the end of this packet.
-        const int num_to_copy = packet_index_start_remainder;
+        const int num_to_copy = packet_index_end_remainder + 1;
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
-        //           "receiver_index {} of buffer {}",
-        //           packet_index, freq_channel, receiver_index, buffer_index);
+        LOG_DEBUG(
+            "Copying data to start of packet_index {} and channel index {} and "
+            "receiver_index {} of buffer {}. Number to copy is {}",
+            packet_index_end, freq_channel, receiver_index, buffer_index,
+            num_to_copy);
 
         auto &buffer = d_samples[buffer_index];
         auto &samples =
-            (*buffer->samples)[freq_channel][packet_index_start][fpga_index];
+            (*buffer->samples)[freq_channel][packet_index_end][fpga_index];
         auto &arrival =
-            buffer->arrivals[0][freq_channel][packet_index][fpga_index];
+            buffer->arrivals[0][freq_channel][packet_index_end][fpga_index];
 
         // we want to only copy the last part of this. We need to seek forward
         // from the beginning by the number that would have been copied
@@ -301,7 +306,7 @@ public:
         std::memcpy(&samples,
                     (char *)pkt.payload +
                         sizeof(typename T::OutputPacketDataStructure) *
-                            (64 - num_to_copy),
+                            (T::NR_TIME_STEPS_PER_PACKET - num_to_copy),
                     sizeof(typename T::OutputPacketDataStructure) *
                         num_to_copy / T::NR_TIME_STEPS_PER_PACKET);
         arrival += num_to_copy;
@@ -781,7 +786,6 @@ public:
       buffer.is_ready = false;
       cpu_start = clock::now();
       // LOG_INFO("Zeroing missing packets...");
-      d_samples[current_buf]->zero_missing_packets();
       packets_missing += d_samples[current_buf]->get_num_missing_packets();
       cpu_end = clock::now();
       // LOG_DEBUG("CPU time for zeroing packets: {} us",
@@ -976,10 +980,10 @@ public:
   void get_packets(ProcessorStateBase &state) override {
     std::cout << "Starting packet capture on ifname " << ifname << std::endl;
 
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    // adds a timeout here - otherwise the socket will block indefinitely
-    // and get in the way of shutdown.
+    // struct sockaddr_in client_addr;
+    //  socklen_t client_len = sizeof(client_addr);
+    //   adds a timeout here - otherwise the socket will block indefinitely
+    //   and get in the way of shutdown.
     struct timeval tv;
     tv.tv_sec = 1; // 1 second timeout
     tv.tv_usec = 0;
