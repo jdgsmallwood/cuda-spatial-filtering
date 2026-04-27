@@ -95,10 +95,12 @@ public:
   SimpleMockPipeline *mock_pipeline;
 
   void SetUp() override {
+    std::array<size_t, 1> delays = {0};
     processor_state = new ProcessorState<TestConfig, NR_BUFFERS>(
         10,                                   // nr_packets_for_correlation
         TestConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
-        0                                     // min_freq_channel
+        0,                                    // min_freq_channel
+        delays                                // fpga_delays
     );
 
     mock_pipeline = new SimpleMockPipeline();
@@ -212,11 +214,13 @@ public:
 class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
 
   void SetUp() override {
+    std::array<size_t, TestMultipleFPGAConfig::NR_FPGA_SOURCES> delays = {0,
+                                                                          13};
     processor_state = new ProcessorState<TestMultipleFPGAConfig, NR_BUFFERS>(
         10, // nr_packets_for_correlation
         TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
-        0                                                 // min_freq_channel
-    );
+        0,                                                // min_freq_channel
+        delays // fpga_delays);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -316,12 +320,15 @@ class ProcessorStateMultipleFPGAWithOctetTest
     std::unique_ptr<MapType> fpga_ids =
         std::make_unique<MapType>(std::initializer_list<MapType::value_type>{
             {10, 0}, {11, 1}, {12, 2}, {13, 3}});
+
+    std::array<size_t, TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES>
+        delays = {0, 13, 26, 4};
     processor_state = new ProcessorState<TestMultipleFPGAWithOctetConfig,
                                          NR_BUFFERS>(
         10, // nr_packets_for_correlation
         TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
         0,                                                // min_freq_channel
-        &fpga_ids);
+        delays, &fpga_ids);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);

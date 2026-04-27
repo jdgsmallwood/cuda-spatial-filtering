@@ -4,6 +4,7 @@
 #include "spatial/pipeline_base.hpp"
 #include <complex>
 #include <cuda.h>
+#include <cuda_fp16.h>
 #include <iostream>
 #include <libtcc/Correlator.h>
 #include <netinet/in.h>
@@ -88,10 +89,11 @@ public:
   ProcessorState(
       size_t nr_packets_for_correlation, size_t nr_between_samples,
       size_t min_freq_channel,
+      std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays,
       std::unique_ptr<std::unordered_map<uint32_t, int>> *fpga_ids_ = nullptr)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
-        MIN_FREQ_CHANNEL(min_freq_channel) {
+        MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
 
     if (fpga_ids_ && !(*fpga_ids_)->empty()) {
       fpga_ids = **fpga_ids_;
@@ -177,21 +179,45 @@ public:
     }
     const int current_buf = current_buffer;
     const uint64_t sample_count = pkt.sample_count;
+    const uint64_t end_sample_count =
+        pkt.sample_count + T::NR_TIME_STEPS_PER_PACKET - 1;
     // on the first run global_max will not be set initially so will be 0.
     // We don't want it to seize up on this.
+    //
+    bool start_packet_done = false;
+    bool end_packet_done = false;
+    bool allow_overwrite = true;
     if (sample_count > global_max[fpga_index] && global_max[fpga_index] > 0) {
       std::lock_guard lock(future_packet_queue_mutex);
       future_packet_queue[fpga_index].push({current_read_index, sample_count});
       return;
     }
+
+    if (sample_count <= global_max[fpga_index] &&
+        end_sample_count > global_max[fpga_index] &&
+        global_max[fpga_index] > 0) {
+      std::lock_guard lock(future_packet_queue_mutex);
+      future_packet_queue[fpga_index].push({current_read_index, sample_count});
+      allow_overwrite = false;
+      end_packet_done = true;
+    }
+
     // copy to correct place or leave it.
     for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
       const int buffer_index = (current_buf + buffer) % NR_INPUT_BUFFERS;
       const uint64_t buffer_start = buffers[buffer_index].start_seq[fpga_index];
-      const int packet_index =
+      const uint64_t buffer_end =
+          buffer_start + T::NR_TIME_STEPS_PER_PACKET - 1;
+      const int packet_index_start =
           (sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
+      const int packet_index_start_remainder =
+          (sample_count - buffer_start) % NR_BETWEEN_SAMPLES;
+      const int packet_index_end =
+          (end_sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
+      const int packet_index_end_remainder =
+          (end_sample_count - buffer_start) % NR_BETWEEN_SAMPLES;
 
-      if (buffer == 0 && packet_index < 0) [[unlikely]] {
+      if (buffer == 0 && packet_index_end < 0) [[unlikely]] {
         // This means that this packet is less than the lowest possible
         // start token. Maybe an out-of-order packet that's coming in?
         // Regardless we can't do anything with this.
@@ -203,7 +229,19 @@ public:
         return;
       }
 
-      if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
+      if (buffer == 0 && packet_index_start < 0) [[unlikely]] {
+        // This means that we were right up against the end of the last block
+        // and the first half of this packet was already used, so we only need
+        // to worry about the second half.
+        start_packet_done = true;
+      }
+
+      if (!start_packet_done && packet_index_start >= 0 &&
+          packet_index_start < NR_PACKETS_FOR_CORRELATION) {
+
+        // this will be some number from the beginning that should
+        // be copied to the end of this packet.
+        const int num_to_copy = 64 - packet_index_start_remainder;
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
         // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
         //           "receiver_index {} of buffer {}",
@@ -211,24 +249,76 @@ public:
 
         auto &buffer = d_samples[buffer_index];
         auto &samples =
-            (*buffer->samples)[freq_channel][packet_index][fpga_index];
-        auto &scales =
-            (*buffer->scales)[freq_channel][packet_index][receiver_index];
+            (*buffer->samples)[freq_channel][packet_index_start][fpga_index];
         auto &arrival =
             buffer->arrivals[0][freq_channel][packet_index][fpga_index];
-        std::memcpy(&samples, pkt.payload->data,
-                    sizeof(typename T::PacketDataStructure));
-        std::memcpy(&scales, pkt.payload->scales,
-                    sizeof(typename T::PacketScaleStructure));
-        arrival = true;
+
+        // we want to only copy the first part of this.
+        std::memcpy((char *)&samples +
+                        sizeof(typename T::OutputPacketDataStructure) *
+                            packet_index_start_remainder /
+                            T::NR_TIME_STEPS_PER_PACKET,
+                    pkt.payload,
+                    sizeof(typename T::OutputPacketDataStructure) *
+                        num_to_copy / T::NR_TIME_STEPS_PER_PACKET);
+        arrival += num_to_copy;
         // LOG_DEBUG("Setting original_packet_processed as true...");
         // LOG_DEBUG("original_packet_processed_before={}",
         //           *pkt.original_packet_processed);
-        *(pkt.original_packet_processed) = true;
         // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
         //           *pkt.original_packet_processed);
 
-        return;
+        start_packet_done = true;
+        if (start_packet_done && end_packet_done) {
+          if (allow_overwrite) {
+            *(pkt.original_packet_processed) = true;
+          }
+          return;
+        }
+      }
+
+      if (!end_packet_done && packet_index_end >= 0 &&
+          packet_index_end < NR_PACKETS_FOR_CORRELATION) {
+
+        // this will be some number from the beginning that should
+        // be copied to the end of this packet.
+        const int num_to_copy = packet_index_start_remainder;
+        const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
+        // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
+        //           "receiver_index {} of buffer {}",
+        //           packet_index, freq_channel, receiver_index, buffer_index);
+
+        auto &buffer = d_samples[buffer_index];
+        auto &samples =
+            (*buffer->samples)[freq_channel][packet_index_start][fpga_index];
+        auto &arrival =
+            buffer->arrivals[0][freq_channel][packet_index][fpga_index];
+
+        // we want to only copy the last part of this. We need to seek forward
+        // from the beginning by the number that would have been copied
+        // from the previous if statement, then only copy the remaining
+        // number.
+        std::memcpy(&samples,
+                    (char *)pkt.payload +
+                        sizeof(typename T::OutputPacketDataStructure) *
+                            (64 - num_to_copy),
+                    sizeof(typename T::OutputPacketDataStructure) *
+                        num_to_copy / T::NR_TIME_STEPS_PER_PACKET);
+        arrival += num_to_copy;
+        // LOG_DEBUG("Setting original_packet_processed as true...");
+        // LOG_DEBUG("original_packet_processed_before={}",
+        //           *pkt.original_packet_processed);
+        // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
+        //           *pkt.original_packet_processed);
+
+        end_packet_done = true;
+        if (start_packet_done && end_packet_done) {
+          // we don't need the allow_overwrite gate here as there are no
+          // situations where we need to keep the packet around anymore - can be
+          // overwritten.
+          *(pkt.original_packet_processed) = true;
+          return;
+        }
       }
     }
     // LOG_DEBUG(
@@ -258,26 +348,33 @@ public:
              fpga_id, first_count);
     std::lock_guard lock(buffer_index_mutex);
     const int fpga_index = fpga_ids[fpga_id];
+    const int fpga_delay = fpga_delays[fpga_index];
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      buffers[i].start_seq[fpga_index] =
-          first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
-      buffers[i].end_seq[fpga_index] =
-          first_count +
-          ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-      buffers[i].is_ready = true;
-      LOG_INFO("[BufferInitialization] Buffer {} goes from {} to {}", i,
-               buffers[i].start_seq[fpga_index],
-               buffers[i].end_seq[fpga_index]);
-      // we know 0 will be the first one - so no need to add zero
-      if (i != 0 && fpga_index == 0) {
-        // can just use the first FPGA for checking which buffer should
-        // come next.
-        buffer_ordering_queue.push({i, buffers[i].start_seq[0]});
-      };
+      for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
+        // need to minus the delay for whichever FPGA the reference is, then add
+        // the delay for the alveo this is.
+        buffers[i].start_seq[j] =
+            first_count - fpga_delay + fpga_delays[j] +
+            i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
+        buffers[i].end_seq[j] =
+            first_count - fpga_delay + fpga_delays[j] +
+            ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+        buffers[i].is_ready = true;
+        LOG_INFO(
+            "[BufferInitialization] Buffer {} for FPGA {} goes from {} to {}",
+            i, j, buffers[i].start_seq[j], buffers[i].end_seq[j]);
+        // we know 0 will be the first one - so no need to add zero
+        if (i != 0 && j == 0) {
+          // can just use the first FPGA for checking which buffer should
+          // come next.
+          buffer_ordering_queue.push({i, buffers[i].start_seq[0]});
+        };
+      }
     }
-    global_max_end_seq[fpga_index].store(
-        buffers[NR_INPUT_BUFFERS - 1].end_seq[fpga_index],
-        std::memory_order_release);
+    for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
+      global_max_end_seq[j].store(buffers[NR_INPUT_BUFFERS - 1].end_seq[j],
+                                  std::memory_order_release);
+    }
   };
 
   __attribute__((hot)) void process_packet_data(
@@ -306,7 +403,7 @@ public:
           "parsed sample count was zero - something has gone wrong!");
     }
 
-    std::call_once(buffer_init_flag[fpga_ids[parsed.fpga_id]], [&]() {
+    std::call_once(buffer_init_flag, [&]() {
       LOG_INFO("Initializing buffers for FPGA {} / {} as this is the first "
                "packet...",
                fpga_ids[parsed.fpga_id], parsed.fpga_id);
@@ -366,9 +463,9 @@ public:
       // for "
       //           "buffer {}...",
       //           buffer_index);
-      std::memset(d_samples[buf_idx]->arrivals, 0,
-                  T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
-                      T::NR_FPGA_SOURCES * sizeof(bool));
+      d_samples[buf_idx]->zero_arrivals();
+
+      d_samples[buf_idx]->zero_samples();
 
       buffer.is_populated.reset();
       // LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index
@@ -417,6 +514,7 @@ public:
     // completion check in case there are packets that went ahead.
     std::fill(modified_since_last_completion_check.begin(),
               modified_since_last_completion_check.end(), true);
+
     //  LOG_INFO(
     //      "Current buffer is all complete. Moving to next buffer which is
     //      #{}", current_buffer);
@@ -827,7 +925,8 @@ private:
       buffer_ordering_queue;
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
-  std::array<std::once_flag, T::NR_FPGA_SOURCES> buffer_init_flag;
+  std::once_flag buffer_init_flag;
+  std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays;
 
   std::mutex latest_packet_mutex;
   static constexpr int WORKER_COUNT = 3;
