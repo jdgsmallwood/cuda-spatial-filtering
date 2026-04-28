@@ -2784,7 +2784,9 @@ public:
 
     // cudaMemsetAsync
     CUDA_CHECK(cudaMemsetAsync(
-        reinterpret_cast<char *>(d_samples_padded[current_buffer]) + 0,
+        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
+            sizeof(typename T::HalfPacketSamplesType),
+        0,
         sizeof(typename T::PaddedPacketSamplesType) -
             sizeof(typename T::HalfPacketSamplesType),
         streams[current_buffer]));
