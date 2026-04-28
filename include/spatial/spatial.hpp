@@ -63,7 +63,8 @@ public:
   virtual void *get_current_write_pointer() = 0;
   virtual void add_received_packet_metadata(const int length,
                                             const sockaddr_in &client_addr) = 0;
-  virtual void release_buffer(const int buffer_index) = 0;
+  virtual void release_buffer(const int buffer_index,
+                              const bool zero = true) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
   virtual void process_all_available_packets() = 0;
 
@@ -89,7 +90,7 @@ public:
   ProcessorState(
       size_t nr_packets_for_correlation, size_t nr_between_samples,
       size_t min_freq_channel,
-      std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays,
+      std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
       std::unique_ptr<std::unordered_map<uint32_t, int>> *fpga_ids_ = nullptr)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
@@ -243,12 +244,18 @@ public:
         // be copied to the end of this packet.
         const int num_to_copy =
             T::NR_TIME_STEPS_PER_PACKET - packet_index_start_remainder;
+        if (num_to_copy == T::NR_TIME_STEPS_PER_PACKET) {
+          end_packet_done = true;
+        }
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        LOG_INFO(
+        LOG_DEBUG(
             "Copying data to end of packet_index {} and channel index {} and "
-            "receiver_index {} of buffer {}. Num to copy is {}",
+            "receiver_index {} of buffer {}. Num to copy is {}, "
+            "packet_index_start_remainder is {} and packet_index_end_remainder "
+            "is {}",
             packet_index_start, freq_channel, receiver_index, buffer_index,
-            num_to_copy);
+            num_to_copy, packet_index_start_remainder,
+            packet_index_end_remainder);
 
         auto &buffer = d_samples[buffer_index];
         auto &samples =
@@ -256,14 +263,18 @@ public:
         auto &arrival =
             buffer->arrivals[0][freq_channel][packet_index_start][fpga_index];
 
+        void *dest_ptr =
+            (void *)((char *)&samples +
+                     sizeof(typename T::OutputPacketDataStructure) *
+                         packet_index_start_remainder /
+                         T::NR_TIME_STEPS_PER_PACKET);
+        size_t size_to_transfer =
+            sizeof(typename T::OutputPacketDataStructure) * num_to_copy /
+            T::NR_TIME_STEPS_PER_PACKET;
+
         // we want to only copy the first part of this.
-        std::memcpy((char *)&samples +
-                        sizeof(typename T::OutputPacketDataStructure) *
-                            packet_index_start_remainder /
-                            T::NR_TIME_STEPS_PER_PACKET,
-                    pkt.payload,
-                    sizeof(typename T::OutputPacketDataStructure) *
-                        num_to_copy / T::NR_TIME_STEPS_PER_PACKET);
+        std::memcpy(dest_ptr, pkt.payload, size_to_transfer);
+
         arrival += num_to_copy;
         // LOG_DEBUG("Setting original_packet_processed as true...");
         // LOG_DEBUG("original_packet_processed_before={}",
@@ -285,7 +296,8 @@ public:
 
         // this will be some number from the beginning that should
         // be copied to the end of this packet.
-        const int num_to_copy = packet_index_end_remainder + 1;
+        const int num_to_copy =
+            (packet_index_end_remainder + 1) % NR_BETWEEN_SAMPLES;
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
         LOG_DEBUG(
             "Copying data to start of packet_index {} and channel index {} and "
@@ -303,12 +315,17 @@ public:
         // from the beginning by the number that would have been copied
         // from the previous if statement, then only copy the remaining
         // number.
+        size_t size_to_transfer =
+            sizeof(typename T::OutputPacketDataStructure) * num_to_copy /
+            T::NR_TIME_STEPS_PER_PACKET;
         std::memcpy(&samples,
                     (char *)pkt.payload +
                         sizeof(typename T::OutputPacketDataStructure) *
-                            (T::NR_TIME_STEPS_PER_PACKET - num_to_copy),
+                            (T::NR_TIME_STEPS_PER_PACKET - num_to_copy) /
+                            T::NR_TIME_STEPS_PER_PACKET,
                     sizeof(typename T::OutputPacketDataStructure) *
                         num_to_copy / T::NR_TIME_STEPS_PER_PACKET);
+
         arrival += num_to_copy;
         // LOG_DEBUG("Setting original_packet_processed as true...");
         // LOG_DEBUG("original_packet_processed_before={}",
@@ -353,7 +370,7 @@ public:
              fpga_id, first_count);
     std::lock_guard lock(buffer_index_mutex);
     const int fpga_index = fpga_ids[fpga_id];
-    const int fpga_delay = fpga_delays[fpga_index];
+    const int64_t fpga_delay = fpga_delays[fpga_index];
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
         // need to minus the delay for whichever FPGA the reference is, then add
@@ -432,7 +449,8 @@ public:
 
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
-  __attribute__((hot)) void release_buffer(const int buffer_index) {
+  __attribute__((hot)) void release_buffer(const int buffer_index,
+                                           const bool zero = true) {
     // LOG_INFO("[ProcessorState] Releasing buffer with index {}",
     // buffer_index);
     //  This is called to let the processor know that the buffer has been
@@ -469,10 +487,12 @@ public:
       //           "buffer {}...",
       //           buffer_index);
       d_samples[buf_idx]->zero_arrivals();
+      if (zero) {
 
-      d_samples[buf_idx]->zero_samples();
+        d_samples[buf_idx]->zero_samples();
 
-      buffer.is_populated.reset();
+        buffer.is_populated.reset();
+      }
       // LOG_DEBUG("[ProcessorState - release_buffer] pushing to queue for index
       // {} "
       //           "with seq {}",
@@ -930,7 +950,7 @@ private:
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
   std::once_flag buffer_init_flag;
-  std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays;
+  std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays;
 
   std::mutex latest_packet_mutex;
   static constexpr int WORKER_COUNT = 3;

@@ -18,7 +18,7 @@ struct FakeProcessorState : public ProcessorStateBase {
   bool released = false;
   int last_index = -1;
 
-  void release_buffer(const int buffer_index) override {
+  void release_buffer(const int buffer_index, const bool zero = true) override {
     released = true;
     last_index = buffer_index;
   }
@@ -59,7 +59,7 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
 
   void zero_samples() override {};
   void zero_arrivals() override {};
-  int get_num_missing_packets() override { return -1; };
+  size_t get_num_missing_packets() override { return -1; };
 };
 
 constexpr size_t NR_CHANNELS = 1;

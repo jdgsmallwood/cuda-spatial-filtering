@@ -237,9 +237,13 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
 
+  std::array<int64_t, nr_fpga_sources> delays;
+  for (auto i = 0; i < nr_fpga_sources; ++i) {
+    delays[i] = 0;
+  }
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      min_freq_channel, &fpga_ids);
+      min_freq_channel, delays, &fpga_ids);
 
   AntennaMapRegistry registry;
 

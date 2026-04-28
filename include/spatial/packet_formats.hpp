@@ -60,7 +60,7 @@ struct FinalPacketData {
 
   virtual void zero_samples() = 0;
   virtual void zero_arrivals() = 0;
-  virtual int get_num_missing_packets() = 0;
+  virtual size_t get_num_missing_packets() = 0;
 };
 
 // This one needs to be like this because it will be defined in the
@@ -91,16 +91,18 @@ struct LambdaFinalPacketData : public FinalPacketData {
 
     std::memset(arrivals, 0, sizeof(ArrivalsType));
   }
-  int get_num_missing_packets() override {
-    int sum = 0;
+  size_t get_num_missing_packets() override {
+    size_t sum = 0;
     for (auto i = 0; i < NR_CHANNELS; ++i) {
       for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
-          sum += arrivals[0][i][j][k];
+          sum += NR_TIME_STEPS_PER_PACKET - arrivals[0][i][j][k];
         }
       }
     }
-    return sum / NR_TIME_STEPS_PER_PACKET;
+    size_t missing_packets =
+        sum / NR_TIME_STEPS_PER_PACKET + (sum % NR_TIME_STEPS_PER_PACKET != 0);
+    return missing_packets;
   };
 
   LambdaFinalPacketData() {
@@ -218,7 +220,6 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
     for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
       for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
         int scale_factor = static_cast<int>(payload->scales[i][j]);
-        // LOG_INFO("Scale factor i {} j {} is {}", i, j, scale_factor);
 
         for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
           std::complex<int8_t> data = payload->data[k][i][j];
