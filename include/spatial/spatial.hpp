@@ -616,7 +616,7 @@ public:
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
-    constexpr int REGULAR_BATCH_SIZE = 600;
+    constexpr int REGULAR_BATCH_SIZE = 1000;
     while (running.load(std::memory_order_acquire)) [[likely]] {
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
@@ -953,7 +953,7 @@ private:
   std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays;
 
   std::mutex latest_packet_mutex;
-  static constexpr int WORKER_COUNT = 3;
+  static constexpr int WORKER_COUNT = 5;
   struct WorkRange {
     int start;
     int end;
