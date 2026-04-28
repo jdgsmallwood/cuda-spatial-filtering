@@ -31,6 +31,12 @@ add_library(sanitizer_flags INTERFACE)
     # add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
     #add_link_options(-fsanitize=address)
 endif()
+add_compile_options(
+    -O3
+    -mavx2
+    -mf16c
+    -march=native
+)
   # Disable testing for dependencies forcibly
   set(BUILD_TESTING OFF CACHE BOOL "Disable tests for dependencies" FORCE)
   find_package(CUDAToolkit REQUIRED)
