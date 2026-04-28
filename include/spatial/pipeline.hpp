@@ -525,8 +525,8 @@ public:
                          output_transfer_complete_host_func, output_ctx);
 
       // memcpy arrivals
-      bool *arrivals_output_pointer =
-          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
+      int *arrivals_output_pointer =
+          (int *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
@@ -2344,8 +2344,8 @@ public:
       cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
                          beam_output_ctx);
 
-      bool *arrivals_output_pointer =
-          (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
+      int *arrivals_output_pointer =
+          (int *)output_->get_arrivals_data_landing_pointer(beam_block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(beam_block_num);
@@ -2831,8 +2831,8 @@ public:
                          output_transfer_complete_host_func, output_ctx);
 
       // memcpy arrivals
-      bool *arrivals_output_pointer =
-          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
+      int *arrivals_output_pointer =
+          (int *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
