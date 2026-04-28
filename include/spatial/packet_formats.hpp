@@ -215,17 +215,26 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
   };
 
   void unpack_packet_data(
-      const PacketPayload<PacketScaleStructure, InputPacketDataStructure>
-          *payload) {
+      const PacketPayload<PacketScaleStructure,
+                          InputPacketDataStructure> __restrict__ *payload) {
     using clock = std::chrono::steady_clock;
     auto start = clock::now();
+
+    std::array<int, NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET> scales;
     for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
       for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
-        int scale_factor = static_cast<int>(payload->scales[i][j]);
+        scales[i * NR_POLARIZATIONS + j] =
+            static_cast<int>(payload->scales[i][j]);
+      }
+    }
 
-        for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+    for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+      for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
+        for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+
           std::complex<int8_t> data = payload->data[k][i][j];
-          std::complex<int> data_int = convert_and_scale(data, scale_factor);
+          std::complex<int> data_int =
+              convert_and_scale(data, scales[i * NR_POLARIZATIONS + j]);
           this->output_data[k][i][j] = convert_float_to_half(data_int);
         }
       }
