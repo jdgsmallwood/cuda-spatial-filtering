@@ -117,18 +117,15 @@ TEST(PacketFormatTests, TestLambdaPacketEntryParsedFormat) {
   Config::PacketEntryType test_packet =
       create_valid_test_packet<Config>(sample_count, fpga_id, channel);
 
-  ProcessedPacket<Config::PacketScaleStructure, Config::PacketDataStructure>
-      processed_packet = test_packet.parse();
+  ProcessedPacket<Config::OutputPacketDataStructure> processed_packet =
+      test_packet.parse();
 
   ASSERT_EQ(processed_packet.sample_count, sample_count);
   ASSERT_EQ(processed_packet.fpga_id, fpga_id);
   ASSERT_EQ(processed_packet.freq_channel, channel);
 
-  ASSERT_EQ(processed_packet.payload->scales[0][0], 0);
-  ASSERT_EQ(processed_packet.payload->scales[1][0], 10);
-
-  ASSERT_EQ(processed_packet.payload->data[0][0][0],
-            std::complex<int8_t>(0, 0));
+  ASSERT_EQ(__half2float(processed_packet.payload[0][0][0][0].real()), 0.0f);
+  ASSERT_EQ(__half2float(processed_packet.payload[0][0][0][0].imag()), 0.0f);
 }
 
 TEST(PacketFormatTests, TestIPThirdOctetFPGAIDParsing) {
@@ -144,7 +141,6 @@ TEST(PacketFormatTests, TestIPThirdOctetFPGAIDParsing) {
   Config::PacketEntryType test_packet = create_valid_test_packet<Config>(
       sample_count, fpga_id, channel, desired_fpga_id);
 
-  ProcessedPacket<Config::PacketScaleStructure, Config::PacketDataStructure>
-      processed_packet = test_packet.parse();
+  auto processed_packet = test_packet.parse();
   ASSERT_EQ(processed_packet.fpga_id, desired_fpga_id);
 }

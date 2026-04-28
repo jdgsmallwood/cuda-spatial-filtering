@@ -274,9 +274,11 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
 
+  std::array<int64_t, nr_fpga_sources> delays = {0, 151507197023};
+
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      min_freq_channel, &fpga_ids);
+      min_freq_channel, delays, &fpga_ids);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
@@ -352,10 +354,11 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < num_lambda_channels; ++i)
     channel_freqs_hz[i] = (min_freq_channel + i) * CHANNEL_WIDTH_HZ;
 
-auto vis_writer = std::make_unique<
-      HDF5AndRedisVisibilitiesWriter<Config::VisibilitiesOutputType>>(
-      vis_file, 55 /* nr baselines */, min_freq_channel,
-      min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
+  auto vis_writer =
+      std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
+          vis_file, min_freq_channel,
+          min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
+
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
