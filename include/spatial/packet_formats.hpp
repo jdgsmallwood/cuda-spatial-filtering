@@ -233,7 +233,8 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
 
     auto end = clock::now();
     auto duration_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
+            .count();
     LOG_INFO("Duration was {}ns", duration_ns);
   };
 };
