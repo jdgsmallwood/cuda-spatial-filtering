@@ -616,7 +616,7 @@ public:
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
-    constexpr int REGULAR_BATCH_SIZE = 1000;
+    constexpr int REGULAR_BATCH_SIZE = 6000;
     while (running.load(std::memory_order_acquire)) [[likely]] {
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
