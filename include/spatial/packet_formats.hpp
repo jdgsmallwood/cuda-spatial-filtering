@@ -283,9 +283,6 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
     constexpr int OFF_4 = FULL8 * 8;
     constexpr int OFF_SCALAR = FULL8 * 8 + HAS4 * 4;
 
-    using clock = std::chrono::steady_clock;
-    auto start = clock::now();
-
     alignas(32) int32_t scales[NR_CHANNELS] = {};
     for (int i = 0; i < NR_RECEIVERS_PER_PACKET; ++i)
       for (int j = 0; j < NR_POLARIZATIONS; ++j)
@@ -311,12 +308,6 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
         );
       }
     }
-
-    auto end = clock::now();
-    auto duration_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
-            .count();
-    LOG_INFO("Duration was {}ns", duration_ns);
   };
 };
 
