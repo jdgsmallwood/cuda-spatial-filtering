@@ -124,8 +124,8 @@ TEST(PacketFormatTests, TestLambdaPacketEntryParsedFormat) {
   ASSERT_EQ(processed_packet.fpga_id, fpga_id);
   ASSERT_EQ(processed_packet.freq_channel, channel);
 
-  ASSERT_EQ(__half2float(processed_packet.payload[0][0][0][0].real()), 0.0f);
-  ASSERT_EQ(__half2float(processed_packet.payload[0][0][0][0].imag()), 0.0f);
+  ASSERT_EQ(processed_packet.payload[0][0][0][0].real(), 0);
+  ASSERT_EQ(processed_packet.payload[0][0][0][0].imag(), 0);
 }
 
 TEST(PacketFormatTests, TestIPThirdOctetFPGAIDParsing) {

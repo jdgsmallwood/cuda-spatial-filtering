@@ -731,3 +731,26 @@ inline void detect_launch(const float4 *d_input, float *d_output, const int n,
                           cudaStream_t stream) {
   detect<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input, d_output, n);
 }
+
+__global__ void convert_int32_to_half(const int32_t *__restrict__ d_input,
+                                      __half *__restrict__ d_output,
+                                      const int n) {
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = blockDim.x * gridDim.x;
+
+  while (tid < n) {
+    int32_t output = d_input[tid];
+    __half out = __int2half_rn(output);
+    d_output[tid] = out;
+
+    tid += stride;
+  };
+};
+
+inline void convert_int32_to_half_launch(const int32_t *d_input,
+                                         __half *d_output, const int n,
+                                         cudaStream_t stream) {
+  convert_int32_to_half<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input, d_output,
+                                                             n);
+}
