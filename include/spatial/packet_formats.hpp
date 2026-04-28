@@ -12,10 +12,6 @@
 #define BUFFER_SIZE 4096
 #define MIN_PCAP_HEADER_SIZE 64
 
-// this is a hack as we are not utilizing the fp16 in math
-// we just need a type that is 16 bytes for storage
-using fp16_t = uint16_t;
-
 #pragma pack(push, 1)
 struct EthernetHeader {
   uint8_t dst[6];
@@ -208,82 +204,48 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
   };
 
   OutputPacketDataStructure output_data;
-  inline std::complex<int> convert_and_scale(std::complex<int8_t> z,
-                                             int scale) {
-    return {static_cast<int>(z.real()) * scale,
-            static_cast<int>(z.imag()) * scale};
-  };
-
-  std::complex<__half> convert_float_to_half(std::complex<int> z) {
-    return {__float2half(static_cast<float>(z.real())),
-            __float2half(static_cast<float>(z.imag()))};
-  };
 
   [[gnu::always_inline]] static inline void process_8_complex(
-      const int8_t *__restrict__ src,     // 16 bytes: 8 × complex<int8>
-      const int32_t *__restrict__ scales, // 8 × int32 scale factors
-      fp16_t *__restrict__ dst            // 8 × complex<fp16> = 32 bytes output
+      const int8_t *__restrict__ src, const int32_t *__restrict__ scales,
+      int32_t *__restrict__ dst // 8 × complex<int32> = 64 bytes output
   ) {
-    // Load 16 bytes: 8 complex<int8_t>
-    // [r0,i0,r1,i1,r2,i2,r3,i3, r4,i4,r5,i5,r6,i6,r7,i7]
     __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i *>(src));
 
-    // Deinterleave with pshufb: pull out all real bytes, then all imag bytes.
-    // -1 (0x80) in the shuffle mask zeroes that output byte.
     const __m128i shuf_r =
         _mm_set_epi8(-1, -1, -1, -1, -1, -1, -1, -1, 14, 12, 10, 8, 6, 4, 2, 0);
     const __m128i shuf_i =
         _mm_set_epi8(-1, -1, -1, -1, -1, -1, -1, -1, 15, 13, 11, 9, 7, 5, 3, 1);
-    __m128i reals_i8 = _mm_shuffle_epi8(raw, shuf_r); // [r0..r7] in low 8 bytes
-    __m128i imags_i8 = _mm_shuffle_epi8(raw, shuf_i); // [i0..i7] in low 8 bytes
+    __m128i reals_i8 = _mm_shuffle_epi8(raw, shuf_r);
+    __m128i imags_i8 = _mm_shuffle_epi8(raw, shuf_i);
 
-    // Sign-extend int8 → int32: _mm256_cvtepi8_epi32 reads the low 8 bytes of
-    // its __m128i argument and produces 8 × int32 in a 256-bit register.
     __m256i reals_i32 = _mm256_cvtepi8_epi32(reals_i8);
     __m256i imags_i32 = _mm256_cvtepi8_epi32(imags_i8);
 
-    // Load 8 scale factors and broadcast-multiply.
-    // mullo_epi32 keeps the low 32 bits of each 32×32 product.
-    // Scale values are already int32 so no overflow risk for typical radio
-    // data.
     __m256i vscale =
         _mm256_loadu_si256(reinterpret_cast<const __m256i *>(scales));
     __m256i scaled_r = _mm256_mullo_epi32(reals_i32, vscale);
     __m256i scaled_i = _mm256_mullo_epi32(imags_i32, vscale);
 
-    // Convert int32 → float32 (exact for 32-bit integers up to 2^24)
-    __m256 float_r = _mm256_cvtepi32_ps(scaled_r);
-    __m256 float_i = _mm256_cvtepi32_ps(scaled_i);
-
-    // Convert float32 → float16 using F16C (vcvtps2ph).
-    // _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC = round-to-nearest, no
-    // exceptions. Result: 8 × fp16 packed into a 128-bit register (8 × 16-bit
-    // lanes).
-    __m128i half_r =
-        _mm256_cvtps_ph(float_r, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-    __m128i half_i =
-        _mm256_cvtps_ph(float_i, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-
-    // Re-interleave: punpcklwd / punpckhwd merge two int16 streams
-    // element-by-element. half_r = [r0,r1,r2,r3, r4,r5,r6,r7] half_i =
-    // [i0,i1,i2,i3, i4,i5,i6,i7] lo = [r0,i0, r1,i1, r2,i2, r3,i3]
-    // (complex<fp16> × 4 = 16 bytes) hi = [r4,i4, r5,i5, r6,i6, r7,i7]
-    // (complex<fp16> × 4 = 16 bytes)
-    __m128i lo = _mm_unpacklo_epi16(half_r, half_i);
-    __m128i hi = _mm_unpackhi_epi16(half_r, half_i);
-
-    // Store 32 bytes = 8 × complex<fp16>
-    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), lo);
-    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 8), hi);
+    // Re-interleave int32 real/imag pairs back into complex<int32> layout.
+    // unpacklo/hi operate per 128-bit lane, then permute2x128 stitches the
+    // lanes into the correct output order.
+    //
+    // unpacklo: [r0,i0,r1,i1 | r4,i4,r5,i5]
+    // unpackhi: [r2,i2,r3,i3 | r6,i6,r7,i7]
+    // permute 0x20 (low of each)  → [r0,i0,r1,i1, r2,i2,r3,i3]
+    // permute 0x31 (high of each) → [r4,i4,r5,i5, r6,i6,r7,i7]
+    __m256i lo = _mm256_unpacklo_epi32(scaled_r, scaled_i);
+    __m256i hi = _mm256_unpackhi_epi32(scaled_r, scaled_i);
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
+                        _mm256_permute2x128_si256(lo, hi, 0x20));
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 8),
+                        _mm256_permute2x128_si256(lo, hi, 0x31));
   }
 
   [[gnu::always_inline]] static inline void process_4_complex(
-      const int8_t *__restrict__ src,     // 8 bytes: 4 × complex<int8>
-      const int32_t *__restrict__ scales, // 4 × int32
-      fp16_t *__restrict__ dst            // 4 × complex<fp16> = 16 bytes
+      const int8_t *__restrict__ src, const int32_t *__restrict__ scales,
+      int32_t *__restrict__ dst // 4 × complex<int32> = 32 bytes output
   ) {
-    // _mm_loadl_epi64: loads exactly 8 bytes into the low half of a __m128i,
-    // zeroing the upper half. Avoids any read past the end of the buffer.
     __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(src));
 
     const __m128i shuf_r = _mm_set_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -293,34 +255,19 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
     __m128i reals_i8 = _mm_shuffle_epi8(raw, shuf_r);
     __m128i imags_i8 = _mm_shuffle_epi8(raw, shuf_i);
 
-    // _mm_cvtepi8_epi32: SSE4.1 scalar of the AVX2 version — sign-extends
-    // the low 4 bytes of the __m128i into 4 × int32.
     __m128i reals_i32 = _mm_cvtepi8_epi32(reals_i8);
     __m128i imags_i32 = _mm_cvtepi8_epi32(imags_i8);
 
-    // 4 scales fit exactly in one __m128i (4 × 32-bit = 16 bytes).
     __m128i vscale = _mm_loadu_si128(reinterpret_cast<const __m128i *>(scales));
     __m128i scaled_r = _mm_mullo_epi32(reals_i32, vscale);
     __m128i scaled_i = _mm_mullo_epi32(imags_i32, vscale);
 
-    __m128 float_r = _mm_cvtepi32_ps(scaled_r);
-    __m128 float_i = _mm_cvtepi32_ps(scaled_i);
-
-    // _mm_cvtps_ph: the 128-bit F16C variant. Converts 4 × float32 → 4 × fp16,
-    // packed into the low 64 bits of the returned __m128i (upper 64 bits
-    // zeroed).
-    __m128i half_r =
-        _mm_cvtps_ph(float_r, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-    __m128i half_i =
-        _mm_cvtps_ph(float_i, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-
-    // Both registers have 4 fp16 values in their low 64 bits.
-    // unpacklo_epi16 interleaves those low halves: [r0,i0, r1,i1, r2,i2,
-    // r3,i3].
-    __m128i interleaved = _mm_unpacklo_epi16(half_r, half_i);
-
-    // Store exactly 16 bytes — 4 × complex<fp16>. No overrun.
-    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), interleaved);
+    // unpacklo: [r0,i0,r1,i1]
+    // unpackhi: [r2,i2,r3,i3]
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst),
+                     _mm_unpacklo_epi32(scaled_r, scaled_i));
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 4),
+                     _mm_unpackhi_epi32(scaled_r, scaled_i));
   }
 
   void unpack_packet_data(
@@ -344,65 +291,27 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
       for (int j = 0; j < NR_POLARIZATIONS; ++j)
         scales[i * NR_POLARIZATIONS + j] =
             static_cast<int32_t>(payload->scales[i][j]);
-    // scales[20..23] remain zero — harmless for the padded tail.
-
-    // ── Step 2: Outer loop over time steps ─────────────────────────────────
-    // data[k][0..9][0..1] is a contiguous 40-byte row in memory.
-    // output_data[k][0..9][0..1] is a contiguous 80-byte row.
-    // Processing k as the outermost dimension gives us sequential 40-byte
-    // reads.
     for (int k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
 
       const int8_t *__restrict__ src =
           reinterpret_cast<const int8_t *>(&payload->data[k][0][0]);
-      fp16_t *__restrict__ dst =
-          reinterpret_cast<fp16_t *>(&this->output_data[k][0][0]);
+      int32_t *__restrict__ dst =
+          reinterpret_cast<int32_t *>(&this->output_data[k][0][0]);
 
-      // ── AVX2 (8-wide) chunks ────────────────────────────────────────────
-      // Loop bound is a compile-time constant, so this is fully unrolled.
-      // For your 10×2=20 case: FULL8=2, emits exactly 2 inlined call bodies.
       for (int c = 0; c < FULL8; ++c)
         process_8_complex(src + c * 16,   // 8 complex<int8> = 16 bytes
                           scales + c * 8, // 8 × int32
-                          dst + c * 16    // 8 complex<fp16> = 16 fp16 values
+                          dst + c * 16 // 8 complex<int32_t> = 16 int32_t values
         );
 
-      // ── SSE (4-wide) chunk, if REM >= 4 ────────────────────────────────
-      // if constexpr: branch is eliminated entirely at compile time when false.
-      // For 10×2=20: REM=4, HAS4=1 — this branch is kept, OFF_4=16.
-      // For  4×2= 8: REM=0, HAS4=0 — this branch disappears.
       if constexpr (HAS4) {
         process_4_complex(src + OFF_4 * 2, // byte offset
                           scales + OFF_4,
                           dst + OFF_4 * 2 // fp16 offset
         );
       }
-      // ── Step 3: SIMD over all 20 channels, 8 at a time ─────────────────
-      // 20 channels → chunk 0: [0..7], chunk 1: [8..15], chunk 2: [16..23]
-      // Chunk 2 reads 4 real channels + 4 zero-padded; output is discarded for
-      // [20..23]. Each complex<int8_t> = 2 bytes, complex<fp16> = 4 bytes.
     }
 
-    // std::array<int, NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET> scales;
-    // for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
-    //   for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
-    //     scales[i * NR_POLARIZATIONS + j] =
-    //         static_cast<int>(payload->scales[i][j]);
-    //   }
-    // }
-    //
-    // for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
-    //   for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
-    //     for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
-    //
-    //       std::complex<int8_t> data = payload->data[k][i][j];
-    //       std::complex<int> data_int =
-    //           convert_and_scale(data, scales[i * NR_POLARIZATIONS + j]);
-    //       this->output_data[k][i][j] = convert_float_to_half(data_int);
-    //     }
-    //   }
-    // }
-    //
     auto end = clock::now();
     auto duration_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
@@ -460,9 +369,9 @@ struct LambdaConfig {
 
   using Sample = std::complex<int8_t>;
   using InputPacketSamplesType =
-      std::complex<__half>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
-                          [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
-                          [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
+      std::complex<int32_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
+                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
   using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<__half>;
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
@@ -481,8 +390,8 @@ struct LambdaConfig {
       std::complex<int8_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
                           [NR_POLARIZATIONS];
   using OutputPacketDataStructure =
-      std::complex<__half>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
-                          [NR_POLARIZATIONS];
+      std::complex<int32_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
+                           [NR_POLARIZATIONS];
   using PacketPayloadType =
       PacketPayload<PacketScaleStructure, PacketDataStructure>;
   using ProcessedPacketType = ProcessedPacket<OutputPacketDataStructure>;
@@ -500,7 +409,7 @@ struct LambdaConfig {
       __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
             [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
   using ArrivalsOutputType =
-      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
+      int[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
       float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
            [NR_POLARIZATIONS][COMPLEX];

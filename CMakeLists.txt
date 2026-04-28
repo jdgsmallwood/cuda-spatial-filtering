@@ -32,9 +32,8 @@ add_library(sanitizer_flags INTERFACE)
     #add_link_options(-fsanitize=address)
 endif()
 add_compile_options(
-    -O3
+    -O2
     -mavx2
-    -mf16c
     -march=native
 )
   # Disable testing for dependencies forcibly
