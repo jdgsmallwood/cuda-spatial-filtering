@@ -3309,7 +3309,7 @@ private:
 
     // Raw samples
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
-    DevicePtr<typename T::HalfPacketSamplesType> samples_padding;
+    DevicePtr<typename T::HalfPacketSamplesType> samples_half, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
 
     // Correlator I/O
@@ -3350,6 +3350,7 @@ private:
     explicit PipelineResources(
         const DecompositionVisibilities *decomp_for_workspace_query)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
+          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_padding(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_padded(
               make_device_ptr<typename T::PaddedPacketSamplesType>()),
