@@ -215,8 +215,8 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
   };
 
   void unpack_packet_data(
-      const PacketPayload<PacketScaleStructure,
-                          InputPacketDataStructure> __restrict__ *payload) {
+      const PacketPayload<PacketScaleStructure, InputPacketDataStructure>
+          *payload) {
     using clock = std::chrono::steady_clock;
     auto start = clock::now();
 
