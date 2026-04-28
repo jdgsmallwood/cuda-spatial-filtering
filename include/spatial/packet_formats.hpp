@@ -238,7 +238,7 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
     __m256i hi = _mm256_unpackhi_epi32(scaled_r, scaled_i);
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst),
                         _mm256_permute2x128_si256(lo, hi, 0x20));
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 16),
+    _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst + 8),
                         _mm256_permute2x128_si256(lo, hi, 0x31));
   }
 
@@ -266,7 +266,7 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
     // unpackhi: [r2,i2,r3,i3]
     _mm_storeu_si128(reinterpret_cast<__m128i *>(dst),
                      _mm_unpacklo_epi32(scaled_r, scaled_i));
-    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 8),
+    _mm_storeu_si128(reinterpret_cast<__m128i *>(dst + 4),
                      _mm_unpackhi_epi32(scaled_r, scaled_i));
   }
 
