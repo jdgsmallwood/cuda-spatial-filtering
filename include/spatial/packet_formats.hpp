@@ -201,6 +201,41 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
             static_cast<uint32_t>(length - (offset + sizeof(CustomHeader))),
         .freq_channel = custom->freq_channel};
   };
+
+  OutputPacketDataStructure output_data;
+  inline std::complex<int> convert_and_scale(std::complex<int8_t> z,
+                                             int scale) {
+    return {static_cast<int>(z.real()) * scale,
+            static_cast<int>(z.imag()) * scale};
+  };
+
+  std::complex<__half> convert_float_to_half(std::complex<int> z) {
+    return {__float2half(static_cast<float>(z.real())),
+            __float2half(static_cast<float>(z.imag()))};
+  };
+
+  void unpack_packet_data(
+      const PacketPayload<PacketScaleStructure, InputPacketDataStructure>
+          *payload) {
+    using clock = std::chrono::steady_clock;
+    auto start = clock::now();
+    for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
+      for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
+        int scale_factor = static_cast<int>(payload->scales[i][j]);
+
+        for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
+          std::complex<int8_t> data = payload->data[k][i][j];
+          std::complex<int> data_int = convert_and_scale(data, scale_factor);
+          this->output_data[k][i][j] = convert_float_to_half(data_int);
+        }
+      }
+    }
+
+    auto end = clock::now();
+    auto duration_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    LOG_INFO("Duration was {}ns", duration_ns);
+  };
 };
 
 template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
