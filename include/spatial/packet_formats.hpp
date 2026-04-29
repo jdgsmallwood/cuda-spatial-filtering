@@ -4,17 +4,12 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <immintrin.h>
 #include <iostream>
 #include <netinet/in.h>
 #include <sys/time.h>
 #include <unistd.h>
 #define BUFFER_SIZE 4096
 #define MIN_PCAP_HEADER_SIZE 64
-
-// this is a hack as we are not utilizing the fp16 in math
-// we just need a type that is 16 bytes for storage
-using fp16_t = uint16_t;
 
 #pragma pack(push, 1)
 struct EthernetHeader {
