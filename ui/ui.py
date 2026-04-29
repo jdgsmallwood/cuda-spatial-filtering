@@ -107,7 +107,6 @@ class CMakeBuilder(App):
 
         build_dir = Path.cwd() / "build"
         env_name = "base"
-        nproc = os.cpu_count()
 
         cmds = [
             [
@@ -134,7 +133,7 @@ class CMakeBuilder(App):
                 "cmake",
                 "--build",
                 ".",
-                "-j" + str(nproc),
+                "-j$(nproc)",
             ],
         ]
 
