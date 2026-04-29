@@ -3930,7 +3930,6 @@ private:
     ManagedCufftPlan fft_plan;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
-    DevicePtr<typename T::HalfPacketSamplesType> samples_half;
     DevicePtr<typename T::FFTCUFFTPreprocessingType>
         samples_cufft_preprocessing;
     DevicePtr<typename T::MultiChannelFFTCUFFTInputType> samples_cufft_input;
@@ -3940,7 +3939,6 @@ private:
 
     PipelineResources(size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
-          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_cufft_preprocessing(
               make_device_ptr<typename T::FFTCUFFTPreprocessingType>()),
           samples_cufft_input(
