@@ -12,6 +12,10 @@
 #define BUFFER_SIZE 4096
 #define MIN_PCAP_HEADER_SIZE 64
 
+// this is a hack as we are not utilizing the fp16 in math
+// we just need a type that is 16 bytes for storage
+using fp16_t = uint16_t;
+
 #pragma pack(push, 1)
 struct EthernetHeader {
   uint8_t dst[6];
@@ -253,9 +257,9 @@ struct LambdaConfig {
 
   using Sample = std::complex<int8_t>;
   using InputPacketSamplesType =
-      std::complex<int32_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
-                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
-                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
+      std::complex<__half>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+                          [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
+                          [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
   using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<__half>;
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
@@ -274,8 +278,8 @@ struct LambdaConfig {
       std::complex<int8_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
                           [NR_POLARIZATIONS];
   using OutputPacketDataStructure =
-      std::complex<int32_t>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
-                           [NR_POLARIZATIONS];
+      std::complex<__half>[NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
+                          [NR_POLARIZATIONS];
   using PacketPayloadType =
       PacketPayload<PacketScaleStructure, PacketDataStructure>;
   using ProcessedPacketType = ProcessedPacket<OutputPacketDataStructure>;
@@ -293,7 +297,7 @@ struct LambdaConfig {
       __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
             [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
   using ArrivalsOutputType =
-      int[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
+      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
       float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
            [NR_POLARIZATIONS][COMPLEX];

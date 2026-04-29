@@ -280,8 +280,8 @@ private:
   tcc::Correlator correlator;
 
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry;
-  std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
+
+  std::vector<typename T::HalfPacketSamplesType *> d_samples_padding;
   std::vector<typename T::FFTCUFFTPreprocessingType *>
       d_samples_cufft_preprocessing;
   std::vector<typename T::FFTCUFFTInputType *> d_samples_cufft_input;
@@ -364,18 +364,13 @@ public:
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch((int32_t *)d_samples_entry[current_buffer],
-                                 (__half *)d_samples_half[current_buffer],
-                                 sizeof(typename T::InputPacketSamplesType) /
-                                     sizeof(int32_t),
-                                 streams[current_buffer]);
     // tensor_16.runPermutation "packetToFPGA"
     tensor_16.runPermutation(
-        "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
+        "packetToPadding", alpha, (__half *)d_samples_entry[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
 
     tensor_16.runPermutation(
-        "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
+        "packetToCUFFTInput", alpha, (__half *)d_samples_entry[current_buffer],
         (__half *)d_samples_cufft_preprocessing[current_buffer],
         streams[current_buffer]);
 
@@ -471,7 +466,7 @@ public:
                             streams[current_buffer]);
 
     tensor_16.runPermutation("packetToPlanar", alpha,
-                             (__half *)d_samples_half[current_buffer],
+                             (__half *)d_samples_entry[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
     tensor_16.runPermutation(
@@ -530,8 +525,8 @@ public:
                          output_transfer_complete_host_func, output_ctx);
 
       // memcpy arrivals
-      int *arrivals_output_pointer =
-          (int *)output_->get_arrivals_data_landing_pointer(block_num);
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
@@ -624,7 +619,6 @@ public:
     d_samples_cufft_output.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
-    d_samples_half.resize(num_buffers);
     d_samples_consolidated.resize(num_buffers);
     d_samples_consolidated_col_maj.resize(num_buffers);
     d_samples_reord.resize(num_buffers);
@@ -673,8 +667,6 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_padded[i],
                             sizeof(typename T::PaddedPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_padding[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_reord[i],
                             sizeof(typename T::PaddedPacketSamplesType)));
@@ -893,9 +885,6 @@ public:
       cudaFree(samples_padding);
     }
 
-    for (auto samples_padding : d_samples_half) {
-      cudaFree(samples_padding);
-    }
     for (auto samples_cufft : d_samples_cufft_input) {
       cudaFree(samples_cufft);
     }
@@ -1045,8 +1034,7 @@ private:
 
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry;
 
-  std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
+  std::vector<typename T::HalfPacketSamplesType *> d_samples_padding;
   std::vector<typename T::FFTCUFFTPreprocessingType *>
       d_samples_cufft_preprocessing;
   std::vector<typename T::MultiChannelFFTCUFFTInputType *>
@@ -1089,13 +1077,8 @@ public:
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch((int32_t *)d_samples_entry[current_buffer],
-                                 (__half *)d_samples_half[current_buffer],
-                                 sizeof(typename T::InputPacketSamplesType) /
-                                     sizeof(int32_t),
-                                 streams[current_buffer]);
     tensor_16.runPermutation(
-        "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
+        "packetToCUFFTInput", alpha, (__half *)d_samples_entry[current_buffer],
         (__half *)d_samples_cufft_preprocessing[current_buffer],
         streams[current_buffer]);
 
@@ -1162,7 +1145,6 @@ public:
 
     streams.resize(2 * num_buffers);
     d_samples_entry.resize(num_buffers);
-    d_samples_half.resize(num_buffers);
     d_samples_cufft_input.resize(num_buffers);
     d_samples_cufft_preprocessing.resize(num_buffers);
     d_cufft_downsampled_output.resize(num_buffers);
@@ -1177,8 +1159,6 @@ public:
                                            cudaStreamNonBlocking));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
                             sizeof(typename T::InputPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_preprocessing[i],
                             sizeof(typename T::FFTCUFFTPreprocessingType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_input[i],
@@ -1252,10 +1232,6 @@ public:
       cudaFree(sample);
     }
 
-    for (auto sample : d_samples_half) {
-      cudaFree(sample);
-    }
-
     for (auto samples_cufft : d_samples_cufft_input) {
       cudaFree(samples_cufft);
     }
@@ -1308,8 +1284,8 @@ private:
     ManagedCufftPlan fft_plan;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
-    DevicePtr<typename T::HalfPacketSamplesType> samples_half,
-        samples_consolidated, samples_consolidated_col_maj;
+    DevicePtr<typename T::HalfPacketSamplesType> samples_consolidated,
+        samples_consolidated_col_maj;
     DevicePtr<FFTCUFFTInputType> samples_cufft_input;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
@@ -1322,8 +1298,6 @@ private:
 
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
-
-          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_consolidated(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_consolidated_col_maj(
@@ -1355,7 +1329,6 @@ private:
         : stream(other.stream), host_stream(other.host_stream),
           fft_plan(std::move(other.fft_plan)),
           samples_entry(std::move(other.samples_entry)),
-          samples_half(std::move(other.samples_half)),
           samples_consolidated(std::move(other.samples_consolidated)),
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
@@ -1507,11 +1480,8 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
     tensor_16.runPermutation("packetToPlanar", alpha,
-                             (__half *)b.samples_half.get(),
+                             (__half *)b.samples_entry.get(),
                              (__half *)b.samples_consolidated.get(), b.stream);
 
     tensor_16.runPermutation(
@@ -1759,8 +1729,8 @@ private:
     ManagedCufftPlan fft_plan, fft_plan_fine_channel;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
-    DevicePtr<typename T::HalfPacketSamplesType> samples_half,
-        samples_consolidated, samples_consolidated_col_maj, samples_padding;
+    DevicePtr<typename T::HalfPacketSamplesType> samples_consolidated,
+        samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
     DevicePtr<FFTCUFFTInputType> samples_cufft_input;
     DevicePtr<BeamOutput> beam_output;
@@ -1808,7 +1778,6 @@ private:
 
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
-          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_consolidated(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_consolidated_col_maj(
@@ -2120,11 +2089,8 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
     tensor_16.runPermutation("packetToPlanar", alpha,
-                             (__half *)b.samples_half.get(),
+                             (__half *)b.samples_entry.get(),
                              (__half *)b.samples_consolidated.get(), b.stream);
 
     tensor_16.runPermutation(
@@ -2133,7 +2099,7 @@ public:
 
     tensor_16.runPermutation(
         "packetToPadding", alpha,
-        reinterpret_cast<__half *>(b.samples_half.get()),
+        reinterpret_cast<__half *>(b.samples_entry.get()),
         reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
 
     // ------------------------------------------------------------------
@@ -2378,8 +2344,8 @@ public:
       cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
                          beam_output_ctx);
 
-      int *arrivals_output_pointer =
-          (int *)output_->get_arrivals_data_landing_pointer(beam_block_num);
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(beam_block_num);
@@ -2705,8 +2671,7 @@ private:
 
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry;
 
-  std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
+  std::vector<typename T::HalfPacketSamplesType *> d_samples_padding;
   std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
       d_samples_reord; // This is not the right type for reord
                        // - but it will do I guess. Size will be correct.
@@ -2766,14 +2731,9 @@ public:
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch((int32_t *)d_samples_entry[current_buffer],
-                                 (__half *)d_samples_half[current_buffer],
-                                 sizeof(typename T::InputPacketSamplesType) /
-                                     sizeof(int32_t),
-                                 streams[current_buffer]);
     // tensor_16.runPermutation "packetToFPGA"
     tensor_16.runPermutation(
-        "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
+        "packetToPadding", alpha, (__half *)d_samples_entry[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
 
     // cudaMemcpyAsync for padding
@@ -2784,7 +2744,9 @@ public:
 
     // cudaMemsetAsync
     CUDA_CHECK(cudaMemsetAsync(
-        reinterpret_cast<char *>(d_samples_padded[current_buffer]) + 0,
+        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
+            sizeof(typename T::HalfPacketSamplesType),
+        0,
         sizeof(typename T::PaddedPacketSamplesType) -
             sizeof(typename T::HalfPacketSamplesType),
         streams[current_buffer]));
@@ -2821,7 +2783,7 @@ public:
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
     tensor_16.runPermutation("packetToPlanar", alpha,
-                             (__half *)d_samples_half[current_buffer],
+                             (__half *)d_samples_entry[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
 
@@ -2869,8 +2831,8 @@ public:
                          output_transfer_complete_host_func, output_ctx);
 
       // memcpy arrivals
-      int *arrivals_output_pointer =
-          (int *)output_->get_arrivals_data_landing_pointer(block_num);
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
@@ -2916,7 +2878,6 @@ public:
     d_weights.resize(num_buffers);
     d_weights_permuted.resize(num_buffers);
     d_samples_entry.resize(num_buffers);
-    d_samples_half.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
     d_samples_consolidated.resize(num_buffers);
@@ -2940,8 +2901,6 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
                             sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
                             sizeof(typename T::HalfPacketSamplesType)));
@@ -3076,9 +3035,6 @@ public:
     }
 
     for (auto sample : d_samples_entry) {
-      cudaFree(sample);
-    }
-    for (auto sample : d_samples_half) {
       cudaFree(sample);
     }
 
@@ -3488,10 +3444,17 @@ public:
 
     auto &b = buffers[current_buffer];
 
+    // ------------------------------------------------------------------
+    // 1. Transfer raw samples to device
+    // ------------------------------------------------------------------
     CUDA_CHECK(cudaMemcpyAsync(
         b.samples_entry.get(), packet_data->get_samples_ptr(),
         packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream));
 
+    // ------------------------------------------------------------------
+    // 2. Release the input buffer asynchronously on the host stream so
+    //    the GPU pipeline stream is not stalled.
+    // ------------------------------------------------------------------
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
@@ -3499,12 +3462,12 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
+    // ------------------------------------------------------------------
+    // 4. Permute packet → padding layout
+    // ------------------------------------------------------------------
     tensor_16.runPermutation(
         "packetToPadding", alpha_16,
-        reinterpret_cast<__half *>(b.samples_half.get()),
+        reinterpret_cast<__half *>(b.samples_entry.get()),
         reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
 
     // ------------------------------------------------------------------
@@ -4086,12 +4049,9 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
     tensor_16.runPermutation(
         "packetToCUFFTInput", alpha,
-        reinterpret_cast<__half *>(b.samples_half.get()),
+        reinterpret_cast<__half *>(b.samples_entry.get()),
         reinterpret_cast<__half *>(b.samples_cufft_preprocessing.get()),
         b.stream);
 

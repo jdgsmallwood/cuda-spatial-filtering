@@ -46,12 +46,6 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE GTest::gtest_main spatial CUDA::cudart HighFive::HighFive ccglib)
 
-target_precompile_headers(ProcessorTests PRIVATE
-    <immintrin.h>
-    <cstdint>
-)
-
-
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)

@@ -194,14 +194,16 @@ public:
     for (int t = 0; t < TestConfig::NR_TIME_STEPS_PER_PACKET; t++) {
       for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
         for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
-          EXPECT_EQ(packet_samples[0][channel][packet_number][0][t][r][p]
-                        .real(), // [0] is for FPGA and there is only
-                                 // one in the config.
-                    val * (r + 1));
-          EXPECT_EQ(packet_samples[0][channel][packet_number][0][t][r][p]
-                        .imag(), // [0] is for FPGA and there is only
-                                 // one in the config.
-                    val * (r + 1));
+          EXPECT_EQ(
+              __half2float(packet_samples[0][channel][packet_number][0][t][r][p]
+                               .real()), // [0] is for FPGA and there is only
+                                         // one in the config.
+              static_cast<float>(val * (r + 1)));
+          EXPECT_EQ(
+              __half2float(packet_samples[0][channel][packet_number][0][t][r][p]
+                               .imag()), // [0] is for FPGA and there is only
+                                         // one in the config.
+              static_cast<float>(val * (r + 1)));
         }
       }
     }
@@ -628,27 +630,32 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
                t++) {
             for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
                  pol++) {
-              std::complex<int> expected_value;
+              std::complex<float> expected_value;
               if (fpga == 1 && ((pkt == 8 && t >= 3) || pkt == 9)) {
                 // Because of the delay shift the last few
                 // should be missing for fpga 1.
-                expected_value = {0, 0};
+                expected_value = {0.0f, 0.0f};
               } else {
-                expected_value = {(fpga + 1) * (fpga + receiver + 1),
-                                  (fpga + 1) * (fpga + receiver + 1)};
+                expected_value = {
+                    static_cast<float>((fpga + 1) * (fpga + receiver + 1)),
+                    static_cast<float>((fpga + 1) * (fpga + receiver + 1))};
               }
               EXPECT_EQ(
-
-                  samples[0][channel][pkt][fpga][t][receiver][pol].real(),
+                  __half2float(
+                      samples[0][channel][pkt][fpga][t][receiver][pol].real()),
                   expected_value.real())
                   << "Mismatch at channel " << channel << " receiver "
                   << receiver << " pkt " << pkt << " fpga " << fpga << " t "
                   << t << " pol " << pol << ". Should be "
                   << expected_value.real() << " got "
-                  << samples[0][channel][pkt][fpga][t][receiver][pol].real()
+                  << __half2float(
+                         samples[0][channel][pkt][fpga][t][receiver][pol]
+                             .real())
                   << std::endl;
-              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol].imag(),
-                        expected_value.imag());
+              EXPECT_EQ(
+                  __half2float(
+                      samples[0][channel][pkt][fpga][t][receiver][pol].imag()),
+                  expected_value.imag());
             }
           }
         }
@@ -704,26 +711,33 @@ TEST_F(ProcessorStateMultipleFPGAWithOctetTest,
             for (int pol = 0;
                  pol < TestMultipleFPGAWithOctetConfig::NR_POLARIZATIONS;
                  pol++) {
-              std::complex<int> expected_value;
+              std::complex<float> expected_value;
               if (fpga > 0 &&
                       ((fpga == 1) && ((pkt == 8 && t >= 3) || pkt == 9)) ||
                   ((fpga == 2) && ((pkt == 6 && t >= 6) || pkt >= 7)) ||
                   ((fpga == 3) && (pkt == 9 && t >= 4))) {
-                expected_value = {0, 0};
+                expected_value = {0.0f, 0.0f};
               } else {
-                expected_value = {(fpga + 1) * (1 + fpga + receiver),
-                                  (fpga + 1) * (1 + fpga + receiver)};
+                expected_value = {
+                    static_cast<float>((fpga + 1) * (1 + fpga + receiver)),
+                    static_cast<float>((fpga + 1) * (1 + fpga + receiver))};
               }
-              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol].real(),
-                        expected_value.real())
+              EXPECT_EQ(
+                  __half2float(
+                      samples[0][channel][pkt][fpga][t][receiver][pol].real()),
+                  expected_value.real())
                   << "Mismatch at channel " << channel << " receiver "
                   << receiver << " pkt " << pkt << " fpga " << fpga << " t "
                   << t << " pol " << pol << ". Should be "
                   << expected_value.real() << " got "
-                  << samples[0][channel][pkt][fpga][t][receiver][pol].real()
+                  << __half2float(
+                         samples[0][channel][pkt][fpga][t][receiver][pol]
+                             .real())
                   << std::endl;
-              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol].imag(),
-                        expected_value.imag());
+              EXPECT_EQ(
+                  __half2float(
+                      samples[0][channel][pkt][fpga][t][receiver][pol].imag()),
+                  expected_value.imag());
             }
           }
         }
