@@ -286,6 +286,7 @@ public:
         if (start_packet_done && end_packet_done) {
           if (allow_overwrite) {
             *(pkt.original_packet_processed) = true;
+            LOG_INFO("Packet marked for overwrite...");
           }
           return;
         }
@@ -339,6 +340,7 @@ public:
           // situations where we need to keep the packet around anymore - can be
           // overwritten.
           *(pkt.original_packet_processed) = true;
+          LOG_INFO("Packet marked for overwrite.");
           return;
         }
       }

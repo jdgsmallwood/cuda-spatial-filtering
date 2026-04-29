@@ -217,8 +217,6 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
   void unpack_packet_data(
       const PacketPayload<PacketScaleStructure, InputPacketDataStructure>
           *payload) {
-    using clock = std::chrono::steady_clock;
-    auto start = clock::now();
     for (auto i = 0; i < NR_RECEIVERS_PER_PACKET; ++i) {
       for (auto j = 0; j < NR_POLARIZATIONS; ++j) {
         int scale_factor = static_cast<int>(payload->scales[i][j]);
@@ -230,11 +228,6 @@ struct LambdaPacketEntry : public PacketEntry<OutputPacketDataStructure> {
         }
       }
     }
-
-    auto end = clock::now();
-    auto duration_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    LOG_INFO("Duration was {}ns", duration_ns);
   };
 };
 
