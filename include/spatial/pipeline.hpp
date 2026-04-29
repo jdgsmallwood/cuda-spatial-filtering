@@ -1229,6 +1229,8 @@ private:
       d_cufft_downsampled_output;
   std::vector<typename T::PacketScalesType *> d_scales;
 
+  static constexpr int fft_total_packets_per_block =
+      T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int fft_missing_packets;
   std::vector<cufftHandle> fft_plan;
   std::vector<void *> d_cufft_work_area;
@@ -1951,9 +1953,9 @@ private:
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
   using BeamOutput =
-      float[2 * T::NR_BEAMS][T::NR_PACKETS_FOR_CORRELATION]
-           [T::NR_CHANNELS * (T::NR_TIME_STEPS_PER_PACKET -
-                              2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE)];
+      __half[2 * T::NR_BEAMS][T::NR_PACKETS_FOR_CORRELATION]
+            [T::NR_CHANNELS * (T::NR_TIME_STEPS_PER_PACKET -
+                               2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE)];
   using ProjectionMatrix =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                           [T::NR_RECEIVERS];
@@ -2592,8 +2594,9 @@ public:
     //     T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
     //     2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
 
-    detect_launch((float4 *)b.beam_shape.get(), (float *)b.beam_output.get(),
-                  sizeof(BeamOutput) / sizeof(float), b.stream);
+    detect_and_convert_to_half_launch(
+        (float4 *)b.beam_shape.get(), (__half *)b.beam_output.get(),
+        sizeof(BeamOutput) / sizeof(__half), b.stream);
 
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /

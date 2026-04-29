@@ -229,8 +229,8 @@ int main(int argc, char *argv[]) {
             NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
 
   using BeamOutputType =
-      float[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
-           [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
+      __half[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
+            [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
