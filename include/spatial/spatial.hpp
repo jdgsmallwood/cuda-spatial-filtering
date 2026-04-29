@@ -963,7 +963,7 @@ private:
   std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays;
 
   std::mutex latest_packet_mutex;
-  static constexpr int WORKER_COUNT = 5;
+  static constexpr int WORKER_COUNT = 3;
   struct WorkRange {
     int start;
     int end;
