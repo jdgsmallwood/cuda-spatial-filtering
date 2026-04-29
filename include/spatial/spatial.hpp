@@ -622,10 +622,20 @@ public:
           write_index.load(std::memory_order_acquire);
 
       int slice_end = current_read_index;
-      for (auto i = 0; i < REGULAR_BATCH_SIZE; ++i) {
-        if (slice_end == current_write_index)
-          break;
-        slice_end = (slice_end + 1) % RING_BUFFER_SIZE;
+
+      if (current_write_index - current_read_index > 0) {
+        // write index is ahead of read index linearly
+        slice_end = std::min(current_write_index,
+                             current_read_index + REGULAR_BATCH_SIZE);
+      } else {
+        // write index has wrapped around the buffer
+        int to_end_of_buffer = (RING_BUFFER_SIZE - 1) - current_read_index;
+        if (to_end_of_buffer >= REGULAR_BATCH_SIZE) {
+          slice_end = current_read_index + REGULAR_BATCH_SIZE;
+        } else {
+          slice_end = std::min(REGULAR_BATCH_SIZE - to_end_of_buffer,
+                               current_write_index);
+        }
       }
 
       int slice_len = (slice_end - current_read_index + RING_BUFFER_SIZE) %
