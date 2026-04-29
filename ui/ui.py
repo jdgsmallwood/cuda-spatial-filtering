@@ -133,7 +133,6 @@ class CMakeBuilder(App):
                 "cmake",
                 "--build",
                 ".",
-                "-j$(nproc)",
             ],
         ]
 

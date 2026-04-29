@@ -42,9 +42,21 @@ add_executable(
 target_link_libraries(WriterTests PRIVATE GTest::gtest_main spatial HighFive::HighFive ${CASACORE_LIBRARIES} redis++ hiredis)
 
 add_executable(
-  ProcessorTests test_processor.cpp
+  ProcessorTests test_processor.cu
 )
 target_link_libraries(ProcessorTests PRIVATE GTest::gtest_main spatial CUDA::cudart HighFive::HighFive ccglib)
+
+add_executable(
+  IncoherentSumTests test_incoherent_sum.cu
+)
+target_link_libraries(IncoherentSumTests PRIVATE GTest::gtest_main spatial CUDA::cudart)
+
+
+
+add_executable(
+  FoldingTests test_folding.cu
+)
+target_link_libraries(FoldingTests PRIVATE GTest::gtest_main spatial CUDA::cudart)
 
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
@@ -52,3 +64,5 @@ gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(IncoherentSumTests)
+gtest_discover_tests(FoldingTests)
