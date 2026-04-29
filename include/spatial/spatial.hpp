@@ -88,6 +88,7 @@ public:
   ProcessorState(
       size_t nr_packets_for_correlation, size_t nr_between_samples,
       size_t min_freq_channel,
+      std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays,
       std::unique_ptr<std::unordered_map<uint32_t, int>> *fpga_ids_ = nullptr)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
@@ -837,7 +838,8 @@ private:
       buffer_ordering_queue;
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
-  std::array<std::once_flag, T::NR_FPGA_SOURCES> buffer_init_flag;
+  std::once_flag buffer_init_flag;
+  std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays;
 
   std::mutex latest_packet_mutex;
   static constexpr int WORKER_COUNT = 3;
