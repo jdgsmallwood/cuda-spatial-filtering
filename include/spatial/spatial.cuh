@@ -106,29 +106,6 @@ void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
 }
 
 template <typename T>
-__global__ void
-debug_kernel(typename T::InputPacketSamplesPlanarType *d_samples_entry,
-             typename T::PacketScalesType *d_scales,
-             typename T::HalfInputPacketSamplesPlanarType *d_samples_half,
-             typename T::HalfPacketSamplesPlanarType *d_samples_padding,
-             typename T::PaddedPacketSamplesPlanarType *d_samples_padded) {
-  int i = 1;
-};
-
-template <typename T>
-void debug_kernel_launch(
-    typename T::InputPacketSamplesPlanarType *d_samples_entry,
-    typename T::PacketScalesType *d_scales,
-    typename T::HalfInputPacketSamplesPlanarType *d_samples_half,
-    typename T::HalfPacketSamplesPlanarType *d_samples_padding,
-    typename T::PaddedPacketSamplesPlanarType *d_samples_padded,
-    cudaStream_t stream) {
-  debug_kernel<T><<<1, 1, 0, stream>>>(d_samples_entry, d_scales,
-                                       d_samples_half, d_samples_padding,
-                                       d_samples_padded);
-};
-
-template <typename T>
 __global__ void unpack_triangular_baseline_batch_kernel(
     const T *__restrict__ packedData, // Input: [Batch, N*(N+1)/2]
     T *__restrict__ denseData,        // Output: [Batch, N, N]
@@ -714,15 +691,18 @@ inline void detect_and_convert_to_half_launch(const float4 *d_input,
 __global__ void apply_delays(const __half *__restrict__ d_input,
                              __half *__restrict__ d_output,
                              const int *__restrict__ d_fpga_delays,
+                             const size_t input_stride_per_fpga,
+                             const size_t nr_time_samples_per_packet,
                              const size_t total_to_copy_per_fpga,
                              const size_t total_to_copy_per_time_step) {
   const int thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
   const int fpga_idx = blockIdx.y;
   const int delay = d_fpga_delays[fpga_idx];
 
-  const int base_pointer = fpga_idx * total_to_copy_per_fpga +
-                           (64 + delay) * total_to_copy_per_time_step +
-                           thread_idx;
+  const int base_pointer =
+      fpga_idx * input_stride_per_fpga +
+      (nr_time_samples_per_packet + delay) * total_to_copy_per_time_step +
+      thread_idx;
   const int output_base_pointer =
       fpga_idx * total_to_copy_per_fpga + thread_idx;
 
@@ -741,6 +721,9 @@ apply_delays_launch(const __half *d_input, __half *d_output,
   const size_t total_to_copy_per_fpga =
       nr_receivers_per_packet * nr_channels * nr_time_samples_per_packet *
       nr_packets_for_correlation * 2 /* complex */ * nr_polarizations;
+  const size_t input_stride_per_fpga =
+      nr_receivers_per_packet * nr_channels * nr_time_samples_per_packet *
+      (nr_packets_for_correlation + 2) * 2 * nr_polarizations;
 
   const size_t total_to_copy_per_time_step =
       nr_receivers_per_packet * nr_channels * 2 * nr_polarizations;
@@ -749,7 +732,8 @@ apply_delays_launch(const __half *d_input, __half *d_output,
 
   const dim3 grid(blocks_needed, nr_fpgas, 1);
 
-  apply_delays<<<grid, 1024, 0, stream>>>(d_input, d_output, d_fpga_delays,
-                                          total_to_copy_per_fpga,
-                                          total_to_copy_per_time_step);
+  apply_delays<<<grid, 1024, 0, stream>>>(
+      d_input, d_output, d_fpga_delays, input_stride_per_fpga,
+      nr_time_samples_per_packet, total_to_copy_per_fpga,
+      total_to_copy_per_time_step);
 };

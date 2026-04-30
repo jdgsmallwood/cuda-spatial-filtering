@@ -177,15 +177,16 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS_PER_PACKET; ++l) {
-          packet_data.samples[0][i][j][0][k][l][0] =
+          packet_data.samples[0][i][j + 1][0][k][l][0] =
               std::complex<int8_t>(2, -2);
-          packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
-          packet_data.samples[0][i][j][0][k][l][1] = std::complex<int8_t>(0, 0);
+          packet_data.scales[0][i][j + 1][l][0] = static_cast<int16_t>(1);
+          packet_data.samples[0][i][j + 1][0][k][l][1] =
+              std::complex<int8_t>(0, 0);
           // Deliberately have the scale non-zero.
-          packet_data.scales[0][i][j][l][1] = static_cast<int16_t>(1);
+          packet_data.scales[0][i][j + 1][l][1] = static_cast<int16_t>(1);
         }
       }
     }
@@ -282,15 +283,16 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest2) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS + 5; ++i) {
-    for (auto j = -1; j < NR_PACKETS + 1; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS_PER_PACKET; ++l) {
-          packet_data.samples[0][i][j][0][k][l][0] = std::complex<int8_t>(0, 0);
-          packet_data.scales[0][i][j][l][0] = static_cast<int16_t>(1);
-          packet_data.samples[0][i][j][0][k][l][1] =
+          packet_data.samples[0][i][j + 1][0][k][l][0] =
+              std::complex<int8_t>(0, 0);
+          packet_data.scales[0][i][j + 1][l][0] = static_cast<int16_t>(1);
+          packet_data.samples[0][i][j + 1][0][k][l][1] =
               std::complex<int8_t>(2, -2);
           // Deliberately have the scale non-zero.
-          packet_data.scales[0][i][j][l][1] = static_cast<int16_t>(1);
+          packet_data.scales[0][i][j + 1][l][1] = static_cast<int16_t>(1);
         }
       }
     }
@@ -383,13 +385,13 @@ TEST_F(CudaIsolatedTest, BeamBlankTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(1);
           }
         }
       }
@@ -465,13 +467,13 @@ TEST_F(CudaIsolatedTest, ChannelWeightBlankTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(1);
           }
         }
       }
@@ -547,19 +549,19 @@ TEST_F(CudaIsolatedTest, ChannelSamplesBlankTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
             if (i == 0) {
-              packet_data.samples[0][i][j][0][k][l][m] =
+              packet_data.samples[0][i][j + 1][0][k][l][m] =
                   std::complex<int8_t>(2, -2);
-              packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+              packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(1);
             } else {
 
-              packet_data.samples[0][i][j][0][k][l][m] =
+              packet_data.samples[0][i][j + 1][0][k][l][m] =
                   std::complex<int8_t>(0, 0);
-              packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+              packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(1);
             }
           }
         }
@@ -625,14 +627,14 @@ TEST_F(CudaIsolatedTest, ScalesTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS); ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
             // 0 is on FPGA_ID
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(2);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(2);
           }
         }
       }
@@ -717,13 +719,14 @@ TEST_F(CudaIsolatedTest, ScalesMultiplePacketsTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < Config::NR_PACKETS_FOR_CORRELATION; ++j) {
+    for (auto j = -1;
+         j < static_cast<int>(Config::NR_PACKETS_FOR_CORRELATION) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(j);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(j);
           }
         }
       }
@@ -805,13 +808,14 @@ TEST_F(CudaIsolatedTest, ScalesPerReceiverTest) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < Config::NR_PACKETS_FOR_CORRELATION; ++j) {
+    for (auto j = -1;
+         j < static_cast<int>(Config::NR_PACKETS_FOR_CORRELATION) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(l, -l);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(l);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(l);
           }
         }
       }
@@ -907,13 +911,13 @@ TEST_F(CudaIsolatedTest, EigenvalueBasic) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(1);
           }
         }
       }
