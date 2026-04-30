@@ -695,13 +695,19 @@ __global__ void apply_delays(const __half *__restrict__ d_input,
                              const size_t nr_time_samples_per_packet,
                              const size_t total_to_copy_per_fpga,
                              const size_t total_to_copy_per_time_step) {
+  __shared__ int fpga_delay;
+
+  if (threadIdx.x == 0) {
+    fpga_delay = d_fpga_delays[blockIdx.y];
+  }
+  __syncthreads();
+
   const int thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
   const int fpga_idx = blockIdx.y;
-  const int delay = d_fpga_delays[fpga_idx];
 
   const int base_pointer =
       fpga_idx * input_stride_per_fpga +
-      (nr_time_samples_per_packet + delay) * total_to_copy_per_time_step +
+      (nr_time_samples_per_packet + fpga_delay) * total_to_copy_per_time_step +
       thread_idx;
   const int output_base_pointer =
       fpga_idx * total_to_copy_per_fpga + thread_idx;

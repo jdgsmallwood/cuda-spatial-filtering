@@ -84,6 +84,14 @@ using Config =
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                  NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
                  NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
+
+using MultiFPGAConfig =
+    LambdaConfig<NR_CHANNELS, 3 /* fpga sources */, NR_TIME_STEPS_PER_PACKET,
+                 6 /* receivers */, NR_POLARIZATIONS,
+                 2 /* receivers_per_packet */, NR_PACKETS_FOR_CORRELATION,
+                 NR_BEAMS, NR_PADDED_RECEIVERS, NR_PADDED_RECEIVERS_PER_BLOCK,
+                 NR_VISIBILITIES_BEFORE_DUMP>;
+
 TEST_F(CudaIsolatedTest, Ex1) {
   FakeProcessorState state;
 
@@ -993,6 +1001,106 @@ TEST_F(CudaIsolatedTest, EigenvalueBasic) {
                 << ", n:" << n;
             EXPECT_NEAR(output->eigenvectors[0][i][j][k][n][l].imag(), 0.0f,
                         1e-4f);
+          }
+        }
+      }
+    }
+  }
+};
+
+TEST_F(CudaIsolatedTest, DelayBeamTest) {
+  // Ensure that beam weights are respected. Make the weights in one
+  // beam zero and then check that means everything in that beam
+  // is zero too.
+  using Config = MultiFPGAConfig;
+  FakeProcessorState state;
+
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  subpacket_delays[0] = 0;
+  subpacket_delays[1] = 3;
+  subpacket_delays[2] = -4;
+
+  DummyFinalPacketData<Config> packet_data;
+  for (auto f = 0; f < Config::NR_FPGA_SOURCES; ++f) {
+    for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
+      for (auto j = -1;
+           j < static_cast<int>(Config::NR_PACKETS_FOR_CORRELATION) + 1; ++j) {
+        for (auto l = 0; l < Config::NR_RECEIVERS_PER_PACKET; ++l) {
+          for (auto m = 0; m < Config::NR_POLARIZATIONS; ++m) {
+            packet_data.scales[0][i][j + 1]
+                              [f * Config::NR_RECEIVERS_PER_PACKET + l][m] =
+                static_cast<int16_t>(1);
+            for (int k = 0; k < Config::NR_TIME_STEPS_PER_PACKET; ++k) {
+
+              std::complex<int8_t> val;
+              if ((f == 0 &&
+                   (j != -1 && j != Config::NR_PACKETS_FOR_CORRELATION)) ||
+                  (f == 1 && ((j == Config::NR_PACKETS_FOR_CORRELATION &&
+                               k < subpacket_delays[1]) ||
+                              (j == 0 && k >= subpacket_delays[1]))
+
+                       ) ||
+                  (f == 2 &&
+                   ((j == 0 &&
+                     k < -1 * static_cast<int>(subpacket_delays[2])) ||
+                    (j == -1 && k >= Config::NR_TIME_STEPS_PER_PACKET +
+                                         subpacket_delays[2])))
+
+              ) {
+                val = {2, -2};
+              } else {
+                val = {0, 0};
+              }
+              packet_data.samples[0][i][j + 1][f][k][l][m] = val;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  BeamWeightsT<Config> h_weights;
+  for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
+    for (auto j = 0; j < Config::NR_RECEIVERS; ++j) {
+      for (auto k = 0; k < Config::NR_POLARIZATIONS; ++k) {
+        for (auto l = 0; l < Config::NR_BEAMS; ++l) {
+          h_weights.weights[i][k][l][j] =
+              std::complex<__half>(__float2half(1.0f), 0);
+        }
+      }
+    }
+  }
+
+  auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
+
+  LambdaGPUPipeline<Config> pipeline(Config::NR_PACKETS_FOR_CORRELATION,
+                                     &h_weights);
+
+  pipeline.set_state(&state);
+  pipeline.set_output(output);
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
+  pipeline.execute_pipeline(&packet_data);
+  cudaDeviceSynchronize();
+
+  for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
+    for (auto j = 0; j < Config::NR_POLARIZATIONS; ++j) {
+      for (auto k = 0; k < Config::NR_BEAMS; ++k) {
+        for (auto l = 0; l < Config::NR_PACKETS_FOR_CORRELATION *
+                                 Config::NR_TIME_STEPS_PER_PACKET;
+             ++l) {
+          for (auto m = 0; m < 2; ++m) {
+            float expected;
+            if (m == 0) {
+              expected = 12.0f;
+            } else {
+              expected = -12.0f;
+            }
+
+            EXPECT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected)
+                << "Mismatch at i=" << i << ", j=" << j << ", k =" << k
+                << ", l=" << l << ", m=" << m;
           }
         }
       }
