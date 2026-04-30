@@ -69,8 +69,8 @@ public:
       T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
   using Visibilities = float[T::NR_CHANNELS][T::NR_BASELINES_UNPADDED]
                             [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS][2];
-  using Arrivals =
-      bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION][T::NR_FPGA_SOURCES];
+  using Arrivals = bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION + 2]
+                       [T::NR_FPGA_SOURCES];
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
   using FFTOutput = typename T::FFTOutputType;
@@ -157,13 +157,13 @@ public:
         cudaMallocHost((void **)&pulsar_fold_output, sizeof(PulsarFoldOutput)));
   };
   ~SingleHostMemoryOutput() {
-    cudaFreeHost(beam_data);
-    cudaFreeHost(visibilities);
-    cudaFreeHost(arrivals);
-    cudaFreeHost(eigenvalues);
-    cudaFreeHost(eigenvectors);
-    cudaFreeHost(fft_output);
-    cudaFreeHost(pulsar_fold_output);
+    CUDA_CHECK(cudaFreeHost(beam_data));
+    CUDA_CHECK(cudaFreeHost(visibilities));
+    CUDA_CHECK(cudaFreeHost(arrivals));
+    CUDA_CHECK(cudaFreeHost(eigenvalues));
+    CUDA_CHECK(cudaFreeHost(eigenvectors));
+    CUDA_CHECK(cudaFreeHost(fft_output));
+    CUDA_CHECK(cudaFreeHost(pulsar_fold_output));
   };
 };
 

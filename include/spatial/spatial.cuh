@@ -106,29 +106,6 @@ void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
 }
 
 template <typename T>
-__global__ void
-debug_kernel(typename T::InputPacketSamplesPlanarType *d_samples_entry,
-             typename T::PacketScalesType *d_scales,
-             typename T::HalfInputPacketSamplesPlanarType *d_samples_half,
-             typename T::HalfPacketSamplesPlanarType *d_samples_padding,
-             typename T::PaddedPacketSamplesPlanarType *d_samples_padded) {
-  int i = 1;
-};
-
-template <typename T>
-void debug_kernel_launch(
-    typename T::InputPacketSamplesPlanarType *d_samples_entry,
-    typename T::PacketScalesType *d_scales,
-    typename T::HalfInputPacketSamplesPlanarType *d_samples_half,
-    typename T::HalfPacketSamplesPlanarType *d_samples_padding,
-    typename T::PaddedPacketSamplesPlanarType *d_samples_padded,
-    cudaStream_t stream) {
-  debug_kernel<T><<<1, 1, 0, stream>>>(d_samples_entry, d_scales,
-                                       d_samples_half, d_samples_padding,
-                                       d_samples_padded);
-};
-
-template <typename T>
 __global__ void unpack_triangular_baseline_batch_kernel(
     const T *__restrict__ packedData, // Input: [Batch, N*(N+1)/2]
     T *__restrict__ denseData,        // Output: [Batch, N, N]
@@ -711,46 +688,58 @@ inline void detect_and_convert_to_half_launch(const float4 *d_input,
                                                                   d_output, n);
 }
 
-__global__ void detect(const float4 *__restrict__ d_input,
-                       float *__restrict__ d_output, const int n) {
+__global__ void apply_delays(const __half *__restrict__ d_input,
+                             __half *__restrict__ d_output,
+                             const int *__restrict__ d_fpga_delays,
+                             const size_t input_stride_per_fpga,
+                             const size_t nr_time_samples_per_packet,
+                             const size_t total_to_copy_per_fpga,
+                             const size_t total_to_copy_per_time_step) {
+  __shared__ int fpga_delay;
 
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int stride = blockDim.x * gridDim.x;
+  if (threadIdx.x == 0) {
+    fpga_delay = d_fpga_delays[blockIdx.y];
+  }
+  __syncthreads();
 
-  while (tid < n) {
-    float4 output = d_input[tid];
-    float out = sqrtf(output.x * output.x + output.y * output.y +
-                      output.w * output.w + output.z * output.z);
-    d_output[tid] = out;
+  const int thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
+  const int fpga_idx = blockIdx.y;
 
-    tid += stride;
-  };
+  const int base_pointer =
+      fpga_idx * input_stride_per_fpga +
+      (nr_time_samples_per_packet + fpga_delay) * total_to_copy_per_time_step +
+      thread_idx;
+  const int output_base_pointer =
+      fpga_idx * total_to_copy_per_fpga + thread_idx;
+
+  if (thread_idx < total_to_copy_per_fpga) {
+    d_output[output_base_pointer] = d_input[base_pointer];
+  }
 };
 
-inline void detect_launch(const float4 *d_input, float *d_output, const int n,
-                          cudaStream_t stream) {
-  detect<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input, d_output, n);
-}
+inline void
+apply_delays_launch(const __half *d_input, __half *d_output,
+                    const int *d_fpga_delays, const int nr_receivers_per_packet,
+                    const int nr_fpgas, const int nr_packets_for_correlation,
+                    const int nr_polarizations, const int nr_channels,
+                    const int nr_time_samples_per_packet, cudaStream_t stream) {
 
-__global__ void convert_int32_to_half(const int32_t *__restrict__ d_input,
-                                      __half *__restrict__ d_output,
-                                      const int n) {
+  const size_t total_to_copy_per_fpga =
+      nr_receivers_per_packet * nr_channels * nr_time_samples_per_packet *
+      nr_packets_for_correlation * 2 /* complex */ * nr_polarizations;
+  const size_t input_stride_per_fpga =
+      nr_receivers_per_packet * nr_channels * nr_time_samples_per_packet *
+      (nr_packets_for_correlation + 2) * 2 * nr_polarizations;
 
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int stride = blockDim.x * gridDim.x;
+  const size_t total_to_copy_per_time_step =
+      nr_receivers_per_packet * nr_channels * 2 * nr_polarizations;
 
-  while (tid < n) {
-    int32_t output = d_input[tid];
-    __half out = __int2half_rn(output);
-    d_output[tid] = out;
+  const int blocks_needed = (total_to_copy_per_fpga + 1024 - 1) / 1024;
 
-    tid += stride;
-  };
+  const dim3 grid(blocks_needed, nr_fpgas, 1);
+
+  apply_delays<<<grid, 1024, 0, stream>>>(
+      d_input, d_output, d_fpga_delays, input_stride_per_fpga,
+      nr_time_samples_per_packet, total_to_copy_per_fpga,
+      total_to_copy_per_time_step);
 };
-
-inline void convert_int32_to_half_launch(const int32_t *d_input,
-                                         __half *d_output, const int n,
-                                         cudaStream_t stream) {
-  convert_int32_to_half<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input, d_output,
-                                                             n);
-}

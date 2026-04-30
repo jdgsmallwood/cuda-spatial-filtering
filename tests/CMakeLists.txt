@@ -42,14 +42,9 @@ add_executable(
 target_link_libraries(WriterTests PRIVATE GTest::gtest_main spatial HighFive::HighFive ${CASACORE_LIBRARIES} redis++ hiredis)
 
 add_executable(
-  ProcessorTests test_processor.cpp
+  ProcessorTests test_processor.cu
 )
 target_link_libraries(ProcessorTests PRIVATE GTest::gtest_main spatial CUDA::cudart HighFive::HighFive ccglib)
-
-target_precompile_headers(ProcessorTests PRIVATE
-    <immintrin.h>
-    <cstdint>
-)
 
 
 include(GoogleTest)

@@ -229,8 +229,8 @@ int main(int argc, char *argv[]) {
             NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
 
   using BeamOutputType =
-      float[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
-           [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
+      __half[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
+            [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -261,13 +261,14 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
 
-  std::array<int64_t, nr_fpga_sources> delays;
+  std::array<int64_t, nr_fpga_sources> fpga_delays;
   for (auto i = 0; i < nr_fpga_sources; ++i) {
-    delays[i] = 0;
+    fpga_delays[i] = 0;
   }
+
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      min_freq_channel, delays, &fpga_ids);
+      min_freq_channel, fpga_delays, &fpga_ids);
 
   AntennaMapRegistry registry;
 

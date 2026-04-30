@@ -96,7 +96,7 @@ public:
     using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
 
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
-    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
+    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
     beam_dims_ = get_array_dims<BeamT>();
     arrivals_dims_ = get_array_dims<ArrivalsT>();
 
@@ -309,7 +309,7 @@ public:
     using beam_type = typename std::remove_all_extents<BeamT>::type;
     using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
-    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
+    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
     beam_dims_ = get_array_dims<BeamT>();
     arrivals_dims_ = get_array_dims<ArrivalsT>();
 

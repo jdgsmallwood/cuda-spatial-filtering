@@ -41,33 +41,36 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
 
   DummyFinalPacketData() {
     CUDA_CHECK(cudaMallocHost((void **)&samples, sizeof(sampleT)));
+    CUDA_CHECK(cudaMallocHost((void **)&scales, sizeof(scaleT)));
     CUDA_CHECK(cudaMallocHost((void **)&arrivals,
                               sizeof(typename T::ArrivalsOutputType)));
   };
 
   ~DummyFinalPacketData() {
     cudaFreeHost(samples);
+    cudaFreeHost(scales);
     cudaFreeHost(arrivals);
   }
 
   void *get_samples_ptr() override { return samples; };
   size_t get_samples_elements_size() override { return sizeof(sampleT); };
+  void *get_scales_ptr() override { return scales; };
+  size_t get_scales_element_size() override { return sizeof(scaleT); };
 
-  int *get_arrivals_ptr() override { return (int *)&arrivals; };
+  bool *get_arrivals_ptr() override { return (bool *)&arrivals; };
   size_t get_arrivals_size() override {
     return sizeof(typename T::ArrivalsOutputType);
   }
 
-  void zero_samples() override {};
-  void zero_arrivals() override {};
-  size_t get_num_missing_packets() override { return 0; };
+  void zero_missing_packets() override {};
+  int get_num_missing_packets() override { return -1; };
 };
 
 struct FakeProcessorState : public ProcessorStateBase {
   bool released = false;
   int last_index = -1;
 
-  void release_buffer(const int buffer_index, const bool zero = true) override {
+  void release_buffer(const int buffer_index) override {
     released = true;
     last_index = buffer_index;
   }

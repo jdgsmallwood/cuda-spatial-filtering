@@ -16,7 +16,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CUDA_STANDARD 17)
   set(CMAKE_CUDA_EXTENSIONS OFF)
-  set(CMAKE_CUDA_FLAGS_DEBUG "-G -g --ptxas-options=-v -Xptxas -O0 -Xcompiler -fno-inline")
+  set(CMAKE_CUDA_FLAGS_DEBUG "-G -g --ptxas-options=-v -O0 -Xcompiler -fno-inline")
   #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -31,11 +31,6 @@ add_library(sanitizer_flags INTERFACE)
     # add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
     #add_link_options(-fsanitize=address)
 endif()
-add_compile_options(
-    -O2
-    -mavx2
-    -march=native
-)
   # Disable testing for dependencies forcibly
   set(BUILD_TESTING OFF CACHE BOOL "Disable tests for dependencies" FORCE)
   find_package(CUDAToolkit REQUIRED)

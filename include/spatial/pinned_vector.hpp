@@ -29,7 +29,7 @@ template <typename T> struct CudaPinnedAllocator {
 
   void deallocate(T *ptr, std::size_t) noexcept {
     if (ptr)
-      cudaFreeHost(ptr);
+      CUDA_CHECK(cudaFreeHost(ptr));
   }
 
   template <typename U>

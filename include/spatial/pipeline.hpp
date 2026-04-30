@@ -129,7 +129,6 @@ template <typename T> class LambdaGPUPipeline : public GPUPipeline {
 
 private:
   int num_buffers;
-  std::vector<cudaStream_t> streams;
 
   // We are converting it to fp16 so this should not be changable anymore.
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // NR_BITS;
@@ -206,8 +205,12 @@ private:
   // u = time steps per packet
   // z = complex
 
-  inline static const std::vector<int> modePacket{'c', 'o', 'f', 'u',
+  inline static const std::vector<int> modePacket{'c', 'g', 'f', 'u',
                                                   'n', 'p', 'z'};
+  inline static const std::vector<int> modePacketPreAlign{'f', 'g', 'u', 'c',
+                                                          'n', 'p', 'z'};
+  inline static const std::vector<int> modePacketAligned{'f', 'o', 'u', 'c',
+                                                         'n', 'p', 'z'};
   // o and u need to end up together and will be interpreted as b x t in the
   // next transformation. Similarly f x n = r in next transformation.
   inline static const std::vector<int> modePacketPadding{'f', 'n', 'c', 'o',
@@ -253,6 +256,7 @@ private:
       {'c', T::NR_CHANNELS},
       {'d', T::NR_PADDED_RECEIVERS},
       {'f', T::NR_FPGA_SOURCES},
+      {'g', T::NR_PACKETS_FOR_CORRELATION + 2},
       {'l', NR_BASELINES},
       {'m', T::NR_BEAMS},
       {'n', T::NR_RECEIVERS_PER_PACKET},
@@ -275,55 +279,209 @@ private:
   std::atomic<int> num_integrated_units_processed;
   std::atomic<int> num_correlation_units_integrated;
 
-  std::vector<std::unique_ptr<ccglib::pipeline::Pipeline>> gemm_handles;
-
   tcc::Correlator correlator;
 
-  std::vector<typename T::InputPacketSamplesType *> d_samples_entry;
-  std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
-  std::vector<typename T::FFTCUFFTPreprocessingType *>
-      d_samples_cufft_preprocessing;
-  std::vector<typename T::FFTCUFFTInputType *> d_samples_cufft_input;
-  std::vector<typename T::FFTCUFFTOutputType *> d_samples_cufft_output;
-  std::vector<typename T::FFTOutputType *> d_cufft_downsampled_output;
-  std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
-      d_samples_reord; // This is not the right type for reord
-                       // - but it will do I guess. Size will be correct.
-  std::vector<CorrelatorInput *> d_correlator_input;
-  std::vector<CorrelatorOutput *> d_correlator_output;
+  struct PipelineResources {
+    cudaStream_t stream;
+    cudaStream_t host_stream;
+    ManagedCufftPlan fft_plan;
 
-  std::vector<Visibilities *> d_visibilities_converted;
-  std::vector<TrimmedVisibilities *> d_visibilities_baseline,
-      d_visibilities_trimmed_baseline, d_visibilities_trimmed,
-      d_visibilities_permuted;
-  std::vector<DecompositionVisibilities *> d_decomposition_visibilities_input;
-  std::vector<Eigenvalues *> d_eigenvalues;
-  TrimmedVisibilities *d_visibilities_accumulator;
-  std::vector<BeamformerInput *> d_beamformer_input;
-  std::vector<BeamformerOutput *> d_beamformer_output, d_beamformer_data_output;
-  std::vector<HalfBeamformerOutput *> d_beamformer_data_output_half;
-  std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
-      d_weights, d_weights_updated, d_weights_permuted;
+    DevicePtr<typename T::InputPacketSamplesType> samples_entry; // y
+    DevicePtr<typename T::PacketScalesType> scales;              // y
+    DevicePtr<typename T::HalfPacketSamplesType> samples_half,
+        samples_pre_align; // y
+    DevicePtr<typename T::HalfPacketAlignedSamplesType> samples_aligned,
+        samples_padding, samples_consolidated,
+        samples_consolidated_col_maj;                               // y
+    DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;  // y
+    DevicePtr<typename T::FFTCUFFTInputType> samples_cufft_input;   // y
+    DevicePtr<typename T::FFTCUFFTOutputType> samples_cufft_output; // y
+    DevicePtr<typename T::FFTOutputType> cufft_downsampled_output;  // y
+    DevicePtr<typename T::FFTCUFFTPreprocessingType>
+        samples_cufft_preprocessing;                                       // y
+    DevicePtr<BeamWeights> weights, weights_permuted, weights_updated;     // y
+    DevicePtr<BeamformerOutput> beamformer_output, beamformer_data_output; // y
+    DevicePtr<HalfBeamformerOutput> beamformer_data_output_half;           // y
+    DevicePtr<void> cufft_work_area;                                       // y
+
+    // Correlator I/O
+    DevicePtr<CorrelatorInput> correlator_input;   // y
+    DevicePtr<CorrelatorOutput> correlator_output; // y
+
+    // Intermediate visibility layout buffers
+    DevicePtr<Visibilities> visibilities_baseline; // y
+    DevicePtr<TrimmedVisibilities> visibilities_trimmed_baseline,
+        visibilities_trimmed, visibilities_permuted; // y
+
+    // Per-block correlation matrix (input to cuSOLVER, overwritten in-place
+    // with eigenvectors on output).
+    DevicePtr<DecompositionVisibilities> decomp_visibilities; // y
+
+    // Per-block eigenvalues (ascending order from cuSOLVER).
+    DevicePtr<Eigenvalues> eigenvalues; // y
+
+    // cuSOLVER handles / workspace
+    cusolverDnHandle_t cusolver_handle = nullptr;
+    cusolverDnParams_t cusolver_params = nullptr;
+    DevicePtr<int> cusolver_info; // [CUSOLVER_BATCH_SIZE]
+    DevicePtr<void> cusolver_work_device;
+    void *cusolver_work_host = nullptr;
+    size_t cusolver_work_device_size = 0;
+    size_t cusolver_work_host_size = 0;
+    std::unique_ptr<ccglib::pipeline::Pipeline> gemm_handle;
+
+    PipelineResources(CUdevice cu_device, size_t work_size)
+        : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
+          scales(make_device_ptr<typename T::PacketScalesType>()),
+          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_pre_align(
+              make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_aligned(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_padding(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_consolidated(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_consolidated_col_maj(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_cufft_input(make_device_ptr<typename T::FFTCUFFTInputType>()),
+          samples_cufft_preprocessing(
+              make_device_ptr<typename T::FFTCUFFTPreprocessingType>()),
+          samples_cufft_output(
+              make_device_ptr<typename T::FFTCUFFTOutputType>()),
+          cufft_downsampled_output(
+              make_device_ptr<typename T::FFTOutputType>()),
+          beamformer_data_output_half(make_device_ptr<HalfBeamformerOutput>()),
+          weights(make_device_ptr<BeamWeights>()),
+          weights_permuted(make_device_ptr<BeamWeights>()),
+          weights_updated(make_device_ptr<BeamWeights>()),
+          beamformer_output(make_device_ptr<BeamformerOutput>()),
+          beamformer_data_output(make_device_ptr<BeamformerOutput>()),
+          samples_padded(
+              make_device_ptr<typename T::PaddedPacketSamplesType>()),
+          correlator_input(make_device_ptr<CorrelatorInput>()),
+          correlator_output(make_device_ptr<CorrelatorOutput>()),
+          visibilities_baseline(make_device_ptr<Visibilities>()),
+          visibilities_trimmed_baseline(make_device_ptr<TrimmedVisibilities>()),
+          visibilities_trimmed(make_device_ptr<TrimmedVisibilities>()),
+          visibilities_permuted(make_device_ptr<TrimmedVisibilities>()),
+          decomp_visibilities(make_device_ptr<DecompositionVisibilities>()),
+          eigenvalues(make_device_ptr<Eigenvalues>()),
+          cusolver_info(
+              make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
+          cufft_work_area(make_device_ptr<void>(work_size)) {
+      // Stream Creation
+      CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+      CUDA_CHECK(
+          cudaStreamCreateWithFlags(&host_stream, cudaStreamNonBlocking));
+
+      CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle));
+      CUSOLVER_CHECK(cusolverDnCreateParams(&cusolver_params));
+      CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle, stream));
+
+      CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
+          cusolver_handle, cusolver_params, CUSOLVER_EIG_MODE_VECTOR,
+          CUBLAS_FILL_MODE_UPPER, T::NR_RECEIVERS, CUDA_C_32F,
+          reinterpret_cast<void *>(decomp_visibilities.get()), T::NR_RECEIVERS,
+          CUDA_R_32F, reinterpret_cast<void *>(eigenvalues.get()), CUDA_C_32F,
+          &cusolver_work_device_size, &cusolver_work_host_size,
+          CUSOLVER_BATCH_SIZE));
+
+      cusolver_work_device = make_device_ptr<void>(cusolver_work_device_size);
+      cusolver_work_host = std::malloc(cusolver_work_host_size);
+
+      const std::complex<float> alpha_ccglib = {1, 0};
+      const std::complex<float> beta_ccglib = {0, 0};
+      // GEMM Initialization
+      gemm_handle = std::make_unique<ccglib::pipeline::Pipeline>(
+          T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
+          NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, T::NR_RECEIVERS,
+          cu_device, stream, ccglib::complex_planar, ccglib::complex_planar,
+          ccglib::mma::row_major, ccglib::mma::col_major,
+          ccglib::mma::row_major, ccglib::ValueType::float16,
+          ccglib::ValueType::float32, ccglib::mma::opt, alpha_ccglib,
+          beta_ccglib);
+    }
+
+    ~PipelineResources() {
+      cudaStreamDestroy(stream);
+      cudaStreamDestroy(host_stream);
+      if (cusolver_handle)
+        cusolverDnDestroy(cusolver_handle);
+      if (cusolver_params)
+        cusolverDnDestroyParams(cusolver_params);
+      if (cusolver_work_host)
+        std::free(cusolver_work_host);
+    }
+
+    PipelineResources(PipelineResources &&other) noexcept
+        : stream(other.stream), host_stream(other.host_stream),
+          fft_plan(std::move(other.fft_plan)),
+          samples_entry(std::move(other.samples_entry)),
+          scales(std::move(other.scales)),
+          samples_half(std::move(other.samples_half)),
+          samples_consolidated(std::move(other.samples_consolidated)),
+          samples_consolidated_col_maj(
+              std::move(other.samples_consolidated_col_maj)),
+          samples_cufft_input(std::move(other.samples_cufft_input)),
+          samples_cufft_output(std::move(other.samples_cufft_output)),
+          cufft_downsampled_output(std::move(other.cufft_downsampled_output)),
+          weights(std::move(other.weights)),
+          weights_permuted(std::move(other.weights_permuted)),
+          beamformer_output(std::move(other.beamformer_output)),
+          cufft_work_area(std::move(other.cufft_work_area)),
+          gemm_handle(std::move(other.gemm_handle)) {
+      other.stream = nullptr;
+      other.host_stream = nullptr;
+    }
+
+    PipelineResources &operator=(PipelineResources &&other) noexcept {
+      if (this != &other) {
+        if (stream)
+          cudaStreamDestroy(stream);
+        if (host_stream)
+          cudaStreamDestroy(host_stream);
+
+        stream = other.stream;
+        host_stream = other.host_stream;
+        fft_plan = std::move(other.fft_plan);
+        samples_entry = std::move(other.samples_entry);
+        scales = std::move(other.scales);
+        samples_half = std::move(other.samples_half);
+        samples_consolidated = std::move(other.samples_consolidated);
+        samples_consolidated_col_maj =
+            std::move(other.samples_consolidated_col_maj);
+        samples_cufft_input = std::move(other.samples_cufft_input);
+        samples_cufft_output = std::move(other.samples_cufft_output);
+        cufft_downsampled_output = std::move(other.cufft_downsampled_output);
+        weights = std::move(other.weights);
+        weights_permuted = std::move(other.weights_permuted);
+        beamformer_output = std::move(other.beamformer_output);
+        cufft_work_area = std::move(other.cufft_work_area);
+        gemm_handle = std::move(other.gemm_handle);
+
+        other.stream = nullptr;
+        other.host_stream = nullptr;
+      }
+      return *this;
+    }
+
+    // 3. Explicitly Delete Copying
+    PipelineResources(const PipelineResources &) = delete;
+    PipelineResources &operator=(const PipelineResources &) = delete;
+  };
 
   BeamWeights *h_weights;
-
+  TrimmedVisibilities *d_visibilities_accumulator;
+  std::vector<PipelineResources> buffers;
+  int *d_subpacket_delays;
   int visibilities_start_seq_num;
   int visibilities_end_seq_num;
   static constexpr int visibilities_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int visibilities_missing_packets;
-  std::vector<cufftHandle> fft_plan;
-  std::vector<void *> d_cufft_work_area;
-  std::vector<int *> d_cusolver_info;
-  std::vector<cusolverDnParams_t> cusolver_params;
-  std::vector<void *> d_cusolver_work_area;
-  std::vector<void *> h_cusolver_work_area;
-  std::vector<size_t> d_cusolver_work_area_size;
-  std::vector<size_t> h_cusolver_work_area_size;
   cusolverEigMode_t cusolver_jobz;
   cublasFillMode_t cusolver_uplo;
-  std::vector<cusolverDnHandle_t> cusolver_handle;
   static constexpr int CUSOLVER_BATCH_SIZE =
       T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS;
   int next_fft_channel_pol;
@@ -339,6 +497,7 @@ public:
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
 
+    auto &b = buffers[current_buffer];
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
     if (visibilities_start_seq_num == -1) {
@@ -347,37 +506,50 @@ public:
     visibilities_missing_packets += packet_data->get_num_missing_packets();
 
     // Record GPU start event
-    cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
+    cudaEventRecord(start_run[benchmark_runs_done], b.stream);
+    cudaMemcpyAsync(
+        b.samples_entry.get(), (void *)packet_data->get_samples_ptr(),
+        packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream);
 
-    // d_samples_entry memcpy
-    cudaMemcpyAsync(d_samples_entry[current_buffer],
-                    (void *)packet_data->get_samples_ptr(),
-                    packet_data->get_samples_elements_size(), cudaMemcpyDefault,
-                    streams[current_buffer]);
+    cudaMemcpyAsync(b.scales.get(), (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
+                    b.stream);
 
-    // BufferReleaseContext + host function
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
                                  .dummy_run = dummy_run};
     // do in separate thread - no need to tie up GPU pipeline.
-    CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
-                                  release_buffer_host_func, ctx));
+    CUDA_CHECK(
+        cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch((int32_t *)d_samples_entry[current_buffer],
-                                 (__half *)d_samples_half[current_buffer],
-                                 sizeof(typename T::InputPacketSamplesType) /
-                                     sizeof(int32_t),
-                                 streams[current_buffer]);
-    // tensor_16.runPermutation "packetToFPGA"
-    tensor_16.runPermutation(
-        "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
-        (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION + 2>(
+        (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
+        b.scales.get(),
+        (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
+        b.stream);
+
+    tensor_16.runPermutation("packetToPreAlign", alpha,
+                             (__half *)b.samples_half.get(),
+                             (__half *)b.samples_pre_align.get(), b.stream);
+
+    apply_delays_launch((__half *)b.samples_pre_align.get(),
+                        (__half *)b.samples_aligned.get(), d_subpacket_delays,
+                        T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
+                        T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
+                        T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+
+    tensor_16.runPermutation("alignedToPadding", alpha,
+                             (__half *)b.samples_aligned.get(),
+                             (__half *)b.samples_padding.get(), b.stream);
 
     tensor_16.runPermutation(
-        "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
-        (__half *)d_samples_cufft_preprocessing[current_buffer],
-        streams[current_buffer]);
+        "alignedToCUFFTInput", alpha, (__half *)b.samples_aligned.get(),
+        (__half *)b.samples_cufft_preprocessing.get(), b.stream);
 
     int channel_to_fft = (next_fft_channel_pol) % T::NR_CHANNELS;
     int polarization_to_fft = (next_fft_channel_pol) / T::NR_CHANNELS;
@@ -385,130 +557,105 @@ public:
     get_data_for_fft_launch<typename T::FFTCUFFTPreprocessingType,
                             typename T::FFTCUFFTInputType>(
         (typename T::FFTCUFFTPreprocessingType *)
-            d_samples_cufft_preprocessing[current_buffer],
-        d_samples_cufft_input[current_buffer], T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, NR_TIME_STEPS_FOR_CORRELATION, T::NR_RECEIVERS,
-        channel_to_fft, polarization_to_fft, streams[current_buffer]);
+            b.samples_cufft_preprocessing.get(),
+        b.samples_cufft_input.get(), T::NR_CHANNELS, T::NR_POLARIZATIONS,
+        NR_TIME_STEPS_FOR_CORRELATION, T::NR_RECEIVERS, channel_to_fft,
+        polarization_to_fft, b.stream);
 
-    CUFFT_CHECK(cufftXtExec(
-        fft_plan[current_buffer], (void *)d_samples_cufft_input[current_buffer],
-        (void *)d_samples_cufft_output[current_buffer], CUFFT_FORWARD));
+    CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
+                            (void *)b.samples_cufft_output.get(),
+                            CUFFT_FORWARD));
 
     detect_and_average_fft_launch<typename T::FFTCUFFTOutputType,
                                   typename T::FFTOutputType>(
-        d_samples_cufft_output[current_buffer],
-        d_cufft_downsampled_output[current_buffer],
+        b.samples_cufft_output.get(), b.cufft_downsampled_output.get(),
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
-        T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer]);
-    // cudaMemcpyAsync for padding
-    CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
-                               d_samples_padding[current_buffer],
-                               sizeof(typename T::HalfPacketSamplesType),
-                               cudaMemcpyDefault, streams[current_buffer]));
+        T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+    CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
+                               sizeof(typename T::HalfPacketAlignedSamplesType),
+                               cudaMemcpyDefault, b.stream));
 
-    // cudaMemsetAsync
-    CUDA_CHECK(cudaMemsetAsync(
-        reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
-            sizeof(typename T::HalfPacketSamplesType),
-        0,
-        sizeof(typename T::PaddedPacketSamplesType) -
-            sizeof(typename T::HalfPacketSamplesType),
-        streams[current_buffer]));
+    CUDA_CHECK(
+        cudaMemsetAsync(reinterpret_cast<char *>(b.samples_padded.get()) +
+                            sizeof(typename T::HalfPacketAlignedSamplesType),
+                        0,
+                        sizeof(typename T::PaddedPacketSamplesType) -
+                            sizeof(typename T::HalfPacketAlignedSamplesType),
+                        b.stream));
 
-    // tensor_16.runPermutation "paddedToCorrInput"
-    tensor_16.runPermutation(
-        "paddedToCorrInput", alpha, (__half *)d_samples_padded[current_buffer],
-        (__half *)d_correlator_input[current_buffer], streams[current_buffer]);
+    tensor_16.runPermutation("paddedToCorrInput", alpha,
+                             (__half *)b.samples_padded.get(),
+                             (__half *)b.correlator_input.get(), b.stream);
 
-    // correlator.launchAsync
-    correlator.launchAsync((CUstream)streams[current_buffer],
-                           (CUdeviceptr)d_correlator_output[current_buffer],
-                           (CUdeviceptr)d_correlator_input[current_buffer]);
+    correlator.launchAsync((CUstream)b.stream,
+                           (CUdeviceptr)b.correlator_output.get(),
+                           (CUdeviceptr)b.correlator_input.get());
 
     tensor_32.runPermutation("visCorrToBaseline", alpha_32,
-                             (float *)d_correlator_output[current_buffer],
-                             (float *)d_visibilities_baseline[current_buffer],
-                             streams[current_buffer]);
-    CUDA_CHECK(cudaMemcpyAsync(d_visibilities_trimmed_baseline[current_buffer],
-                               d_visibilities_baseline[current_buffer],
-                               sizeof(TrimmedVisibilities), cudaMemcpyDefault,
-                               streams[current_buffer]));
+                             (float *)b.correlator_output.get(),
+                             (float *)b.visibilities_baseline.get(), b.stream);
+    CUDA_CHECK(cudaMemcpyAsync(
+        b.visibilities_trimmed_baseline.get(), b.visibilities_baseline.get(),
+        sizeof(TrimmedVisibilities), cudaMemcpyDefault, b.stream));
 
-    tensor_32.runPermutation(
-        "visBaselineTrimmedToTrimmed", alpha_32,
-        (float *)d_visibilities_trimmed_baseline[current_buffer],
-        (float *)d_visibilities_trimmed[current_buffer],
-        streams[current_buffer]);
-    // tensor_32.runPermutation "visCorrToDecomp"
+    tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
+                             (float *)b.visibilities_trimmed_baseline.get(),
+                             (float *)b.visibilities_trimmed.get(), b.stream);
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
-                             (float *)d_visibilities_trimmed[current_buffer],
-                             (float *)d_visibilities_permuted[current_buffer],
-                             streams[current_buffer]);
-
+                             (float *)b.visibilities_trimmed.get(),
+                             (float *)b.visibilities_permuted.get(), b.stream);
     unpack_triangular_baseline_batch_launch<cuComplex>(
-        (cuComplex *)d_visibilities_permuted[current_buffer],
-        (cuComplex *)d_decomposition_visibilities_input[current_buffer],
-        T::NR_RECEIVERS,
+        (cuComplex *)b.visibilities_permuted.get(),
+        (cuComplex *)b.decomp_visibilities.get(), T::NR_RECEIVERS,
         T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
-        T::NR_CHANNELS, streams[current_buffer]);
+        T::NR_CHANNELS, b.stream);
 
     CUSOLVER_CHECK(cusolverDnXsyevBatched(
-        cusolver_handle[current_buffer], cusolver_params[current_buffer],
-        cusolver_jobz, cusolver_uplo, T::NR_RECEIVERS, CUDA_C_32F,
-        (void *)d_decomposition_visibilities_input[current_buffer],
-        T::NR_RECEIVERS, CUDA_R_32F, (void *)d_eigenvalues[current_buffer],
-        CUDA_C_32F, d_cusolver_work_area[current_buffer],
-        d_cusolver_work_area_size[current_buffer],
-        h_cusolver_work_area[current_buffer],
-        h_cusolver_work_area_size[current_buffer],
-        d_cusolver_info[current_buffer], CUSOLVER_BATCH_SIZE));
+        b.cusolver_handle, b.cusolver_params, cusolver_jobz, cusolver_uplo,
+        T::NR_RECEIVERS, CUDA_C_32F,
+        reinterpret_cast<void *>(b.decomp_visibilities.get()), T::NR_RECEIVERS,
+        CUDA_R_32F, reinterpret_cast<void *>(b.eigenvalues.get()), CUDA_C_32F,
+        b.cusolver_work_device.get(), b.cusolver_work_device_size,
+        b.cusolver_work_host, b.cusolver_work_host_size, b.cusolver_info.get(),
+        CUSOLVER_BATCH_SIZE));
 
-    // accumulate_visibilities (CPU wrapper)
-    accumulate_visibilities((float *)d_visibilities_trimmed[current_buffer],
+    accumulate_visibilities((float *)b.visibilities_trimmed.get(),
                             (float *)d_visibilities_accumulator,
                             2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
-                            streams[current_buffer]);
+                            b.stream);
 
-    tensor_16.runPermutation("packetToPlanar", alpha,
-                             (__half *)d_samples_half[current_buffer],
-                             (__half *)d_samples_consolidated[current_buffer],
-                             streams[current_buffer]);
+    tensor_16.runPermutation("alignedToPlanar", alpha,
+                             (__half *)b.samples_aligned.get(),
+                             (__half *)b.samples_consolidated.get(), b.stream);
+
     tensor_16.runPermutation(
-        "consToColMajCons", alpha,
-        (__half *)d_samples_consolidated[current_buffer],
-        (__half *)d_samples_consolidated_col_maj[current_buffer],
-        streams[current_buffer]);
+        "consToColMajCons", alpha, (__half *)b.samples_consolidated.get(),
+        (__half *)b.samples_consolidated_col_maj.get(), b.stream);
 
-    update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
+    update_weights((__half *)b.weights.get(), (__half *)b.weights_updated.get(),
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
-                   T::NR_POLARIZATIONS, (float *)d_eigenvalues[current_buffer],
-                   (float *)d_visibilities_converted[current_buffer],
-                   streams[current_buffer]);
+                   T::NR_POLARIZATIONS, (float *)b.eigenvalues.get(),
+                   (float *)b.visibilities_trimmed.get(), b.stream);
 
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
-                             (__half *)d_weights_updated[current_buffer],
-                             (__half *)d_weights_permuted[current_buffer],
-                             streams[current_buffer]);
+                             (__half *)b.weights_updated.get(),
+                             (__half *)b.weights_permuted.get(), b.stream);
 
-    (*gemm_handles[current_buffer])
-        .Run((CUdeviceptr)d_weights_permuted[current_buffer],
-             (CUdeviceptr)d_samples_consolidated_col_maj[current_buffer],
-             (CUdeviceptr)d_beamformer_output[current_buffer]);
-
+    b.gemm_handle->Run((CUdeviceptr)b.weights_permuted.get(),
+                       (CUdeviceptr)b.samples_consolidated_col_maj.get(),
+                       (CUdeviceptr)b.beamformer_output.get());
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
-                             (float *)d_beamformer_output[current_buffer],
-                             (float *)d_beamformer_data_output[current_buffer],
-                             streams[current_buffer]);
+                             (float *)b.beamformer_output.get(),
+                             (float *)b.beamformer_data_output.get(), b.stream);
 
-    convert_float_to_half(
-        (float *)d_beamformer_data_output[current_buffer],
-        (__half *)d_beamformer_data_output_half[current_buffer],
-        2 * T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_BEAMS *
-            NR_TIME_STEPS_FOR_CORRELATION,
-        streams[current_buffer]);
+    convert_float_to_half((float *)b.beamformer_data_output.get(),
+                          (__half *)b.beamformer_data_output_half.get(),
+                          2 * T::NR_CHANNELS * T::NR_POLARIZATIONS *
+                              T::NR_BEAMS * NR_TIME_STEPS_FOR_CORRELATION,
+                          b.stream);
 
-    cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
+    cudaEventRecord(stop_run[benchmark_runs_done], b.stream);
 
     // Output handling
     if (output_ != nullptr && !dummy_run) {
@@ -520,18 +667,16 @@ public:
       size_t fft_block_num = output_->register_fft_block(
           start_seq_num, end_seq_num, channel_to_fft, polarization_to_fft);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
-      cudaMemcpyAsync(landing_pointer,
-                      d_beamformer_data_output_half[current_buffer],
+      cudaMemcpyAsync(landing_pointer, b.beamformer_data_output_half.get(),
                       sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
-                      streams[current_buffer]);
+                      b.stream);
       auto *output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = block_num};
-      cudaLaunchHostFunc(streams[current_buffer],
-                         output_transfer_complete_host_func, output_ctx);
+      cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
+                         output_ctx);
 
-      // memcpy arrivals
-      int *arrivals_output_pointer =
-          (int *)output_->get_arrivals_data_landing_pointer(block_num);
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
@@ -544,35 +689,30 @@ public:
           (void *)output_->get_eigenvectors_data_landing_pointer(
               eigenvalue_block_num);
 
-      cudaMemcpyAsync(eigenvalues_output_pointer, d_eigenvalues[current_buffer],
-                      sizeof(Eigenvalues), cudaMemcpyDefault,
-                      streams[current_buffer]);
+      cudaMemcpyAsync(eigenvalues_output_pointer, b.eigenvalues.get(),
+                      sizeof(Eigenvalues), cudaMemcpyDefault, b.stream);
 
-      cudaMemcpyAsync(eigenvectors_output_pointer,
-                      d_decomposition_visibilities_input[current_buffer],
+      cudaMemcpyAsync(eigenvectors_output_pointer, b.decomp_visibilities.get(),
                       sizeof(DecompositionVisibilities), cudaMemcpyDefault,
-                      streams[current_buffer]);
+                      b.stream);
 
       auto *eig_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = eigenvalue_block_num};
-      cudaLaunchHostFunc(streams[current_buffer],
-                         eigen_output_transfer_complete_host_func,
+      cudaLaunchHostFunc(b.stream, eigen_output_transfer_complete_host_func,
                          eig_output_ctx);
 
       auto *fft_output_pointer =
           (void *)output_->get_fft_landing_pointer(fft_block_num);
-      cudaMemcpyAsync(fft_output_pointer,
-                      d_cufft_downsampled_output[current_buffer],
+      cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
                       sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
-                      streams[current_buffer]);
+                      b.stream);
 
       next_fft_channel_pol =
           (next_fft_channel_pol + 1) % (T::NR_CHANNELS * T::NR_POLARIZATIONS);
 
       auto *fft_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = fft_block_num};
-      cudaLaunchHostFunc(streams[current_buffer],
-                         fft_output_transfer_complete_host_func,
+      cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
                          fft_output_ctx);
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=
@@ -590,11 +730,9 @@ public:
   LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
 
       : num_buffers(num_buffers), h_weights(h_weights),
-
         correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
-
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         cusolver_jobz(CUSOLVER_EIG_MODE_VECTOR),
@@ -613,105 +751,25 @@ public:
 
     next_fft_channel_pol = 0;
 
-    streams.resize(2 * num_buffers);
-    d_weights.resize(num_buffers);
-    d_weights_updated.resize(num_buffers);
-    d_weights_permuted.resize(num_buffers);
-    d_samples_entry.resize(num_buffers);
-    d_samples_cufft_input.resize(num_buffers);
-    d_samples_cufft_preprocessing.resize(num_buffers);
-    d_cufft_downsampled_output.resize(num_buffers);
-    d_samples_cufft_output.resize(num_buffers);
-    d_samples_padded.resize(num_buffers);
-    d_samples_padding.resize(num_buffers);
-    d_samples_half.resize(num_buffers);
-    d_samples_consolidated.resize(num_buffers);
-    d_samples_consolidated_col_maj.resize(num_buffers);
-    d_samples_reord.resize(num_buffers);
-    d_correlator_input.resize(num_buffers);
-    d_correlator_output.resize(num_buffers);
-    d_beamformer_input.resize(num_buffers);
-    d_beamformer_output.resize(num_buffers);
-    d_beamformer_data_output.resize(num_buffers);
-    d_beamformer_data_output_half.resize(num_buffers);
-    d_visibilities_converted.resize(num_buffers);
-    d_visibilities_permuted.resize(num_buffers);
-    d_visibilities_baseline.resize(num_buffers);
-    d_visibilities_trimmed_baseline.resize(num_buffers);
-    d_visibilities_trimmed.resize(num_buffers);
-    d_decomposition_visibilities_input.resize(num_buffers);
-    d_eigenvalues.resize(num_buffers);
-
-    fft_plan.resize(num_buffers);
-    d_cufft_work_area.resize(num_buffers);
-    d_cusolver_info.resize(num_buffers);
-    cusolver_params.resize(num_buffers);
-    d_cusolver_work_area.resize(num_buffers);
-    h_cusolver_work_area.resize(num_buffers);
-    d_cusolver_work_area_size.resize(num_buffers);
-    h_cusolver_work_area_size.resize(num_buffers);
-    cusolver_handle.resize(num_buffers);
-
-    for (auto i = 0; i < num_buffers; ++i) {
-      CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
-      CUDA_CHECK(cudaStreamCreateWithFlags(&streams[num_buffers + i],
-                                           cudaStreamNonBlocking));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
-                            sizeof(typename T::InputPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_preprocessing[i],
-                            sizeof(typename T::FFTCUFFTPreprocessingType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_input[i],
-                            sizeof(typename T::FFTCUFFTInputType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_cufft_output[i],
-                            sizeof(typename T::FFTCUFFTOutputType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_cufft_downsampled_output[i],
-                            sizeof(typename T::FFTOutputType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_padded[i],
-                            sizeof(typename T::PaddedPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_padding[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_reord[i],
-                            sizeof(typename T::PaddedPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_weights[i], sizeof(BeamWeights)));
-      CUDA_CHECK(
-          cudaMalloc((void **)&d_weights_permuted[i], sizeof(BeamWeights)));
-      CUDA_CHECK(
-          cudaMalloc((void **)&d_weights_updated[i], sizeof(BeamWeights)));
-      CUDA_CHECK(
-          cudaMalloc((void **)&d_correlator_input[i], sizeof(CorrelatorInput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_correlator_output[i],
-                            sizeof(CorrelatorOutput)));
-      CUDA_CHECK(
-          cudaMalloc((void **)&d_beamformer_input[i], sizeof(BeamformerInput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_beamformer_output[i],
-                            sizeof(BeamformerOutput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output[i],
-                            sizeof(BeamformerOutput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output_half[i],
-                            sizeof(HalfBeamformerOutput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_converted[i],
-                            sizeof(Visibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_permuted[i],
-                            sizeof(TrimmedVisibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_baseline[i],
-                            sizeof(Visibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed_baseline[i],
-                            sizeof(TrimmedVisibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed[i],
-                            sizeof(TrimmedVisibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_eigenvalues[i], sizeof(Eigenvalues)));
-      CUDA_CHECK(cudaMalloc((void **)&d_decomposition_visibilities_input[i],
-                            sizeof(DecompositionVisibilities)));
-    }
+    const int CUFFT_RANK = 1;
+    const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
+    long long N[] = {CUFFT_FFT_SIZE};
+    const long long CUFFT_ISTRIDE = 1;
+    const long long CUFFT_OSTRIDE = 1;
+    const long long CUFFT_IDIST = CUFFT_FFT_SIZE;
+    const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
+    const size_t NUM_TOTAL_BATCHES = T::NR_RECEIVERS;
+    cudaDataType input_type = CUDA_C_32F;
+    cudaDataType output_type = CUDA_C_32F;
+    cudaDataType compute_type = CUDA_C_32F;
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
                           sizeof(TrimmedVisibilities)));
+
+    CUDA_CHECK(cudaMalloc((void **)&d_subpacket_delays,
+                          sizeof(int) * T::NR_FPGA_SOURCES));
+    CUDA_CHECK(
+        cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
@@ -722,29 +780,22 @@ public:
     const std::complex<float> alpha_ccglib = {1, 0};
     const std::complex<float> beta_ccglib = {0, 0};
     //    tcc::Format inputFormat = tcc::Format::fp16;
-    for (auto i = 0; i < num_buffers; ++i) {
-      gemm_handles.emplace_back(std::make_unique<ccglib::pipeline::Pipeline>(
-          T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
-          NR_TIMES_PER_BLOCK * NR_BLOCKS_FOR_CORRELATION, T::NR_RECEIVERS,
-          cu_device, streams[i], ccglib::complex_planar, ccglib::complex_planar,
-          ccglib::mma::row_major, ccglib::mma::col_major,
-          ccglib::mma::row_major, ccglib::ValueType::float16,
-          ccglib::ValueType::float32, ccglib::mma::opt, alpha_ccglib,
-          beta_ccglib));
+
+    size_t work_size = 0;
+    {
+      // Temporary plan to calculate work_size
+      cufftHandle temp_plan;
+      CUFFT_CHECK(cufftCreate(&temp_plan));
+      CUFFT_CHECK(cufftXtMakePlanMany(temp_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
+                                      CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
+                                      CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
+                                      CUDA_C_32F));
+      cufftDestroy(temp_plan);
     }
 
-    LOG_DEBUG("Copying weights...");
-    for (auto i = 0; i < num_buffers; ++i) {
-      cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights),
-                 cudaMemcpyDefault);
-    }
-    for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
-      cudaEventCreate(&start_run[i]);
-      cudaEventCreate(&stop_run[i]);
-    }
-
-    cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
+    tensor_16.addTensor(modePacketPreAlign, "prealign");
+    tensor_16.addTensor(modePacketAligned, "aligned");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
     tensor_16.addTensor(modePacketPadded, "packet_padded");
     tensor_16.addTensor(modeCorrelatorInput, "corr_input");
@@ -764,14 +815,16 @@ public:
     tensor_32.addTensor(modeBeamCCGLIB, "beamCCGLIB");
     tensor_32.addTensor(modeBeamOutput, "beamOutput");
 
-    tensor_16.addPermutation("packet", "packet_padding",
-                             CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
-    tensor_16.addPermutation("packet", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
-                             "packetToCUFFTInput");
+    tensor_16.addPermutation("aligned", "packet_padding",
+                             CUTENSOR_COMPUTE_DESC_16F, "alignedToPadding");
+    tensor_16.addPermutation("packet", "prealign", CUTENSOR_COMPUTE_DESC_16F,
+                             "packetToPreAlign");
+    tensor_16.addPermutation("aligned", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
+                             "alignedToCUFFTInput");
     tensor_16.addPermutation("packet_padded", "corr_input",
                              CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
-    tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
-                             "packetToPlanar");
+    tensor_16.addPermutation("aligned", "planar", CUTENSOR_COMPUTE_DESC_16F,
+                             "alignedToPlanar");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
@@ -786,61 +839,41 @@ public:
                              CUTENSOR_COMPUTE_DESC_32F,
                              "visBaselineTrimmedToTrimmed");
 
-    // set up CUFFT plan for fine-channelization
-    const int CUFFT_RANK = 1;
-    const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
-    long long N[] = {CUFFT_FFT_SIZE};
-    const long long CUFFT_ISTRIDE = 1;
-    const long long CUFFT_OSTRIDE = 1;
-    const long long CUFFT_IDIST = CUFFT_FFT_SIZE;
-    const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
-    const size_t NUM_TOTAL_BATCHES = T::NR_RECEIVERS;
-    size_t work_size = 0;
-    cudaDataType input_type = CUDA_C_32F;
-    cudaDataType output_type = CUDA_C_32F;
-    cudaDataType compute_type = CUDA_C_32F;
-
+    buffers.reserve(num_buffers);
     for (int i = 0; i < num_buffers; ++i) {
-      CUFFT_CHECK(cufftCreate(&fft_plan[i]));
-      CUFFT_CHECK(cufftXtMakePlanMany(
-          fft_plan[i], CUFFT_RANK, N, NULL, CUFFT_ISTRIDE, CUFFT_IDIST,
-          input_type, NULL, CUFFT_OSTRIDE, CUFFT_ODIST, output_type,
-          NUM_TOTAL_BATCHES, &work_size, compute_type));
+      buffers.emplace_back(cu_device, work_size);
 
-      CUFFT_CHECK(cufftSetStream(fft_plan[i], streams[i]));
-      CUDA_CHECK(cudaMalloc(&d_cufft_work_area[i], work_size));
-      CUFFT_CHECK(cufftSetWorkArea(fft_plan[i], d_cufft_work_area[i]));
+      // Finalize cuFFT plan for this buffer
+      auto &b = buffers.back();
+      CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
+                                      CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
+                                      CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
+                                      CUDA_C_32F));
+      CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
+      CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
+
+      // Copy initial weights
+      cudaMemcpyAsync(b.weights.get(), h_weights, sizeof(BeamWeights),
+                      cudaMemcpyDefault, b.stream);
+      tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
+                               (__half *)b.weights.get(),
+                               (__half *)b.weights_permuted.get(), b.stream);
     }
-    // set up cuSOLVER for correlation matrix decomposition.
-    //
-    //
-    for (int i = 0; i < num_buffers; ++i) {
-
-      CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle[i]));
-
-      CUSOLVER_CHECK(cusolverDnCreateParams(&cusolver_params[i]));
-      CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle[i], streams[i]));
-      CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
-          cusolver_handle[i], cusolver_params[i], cusolver_jobz, cusolver_uplo,
-          T::NR_RECEIVERS, CUDA_C_32F, d_decomposition_visibilities_input[i],
-          T::NR_RECEIVERS, // LDA
-          CUDA_R_32F,      // Eigenvalue Type (Real)
-          d_eigenvalues[i],
-          CUDA_C_32F, // Computation Type
-          &d_cusolver_work_area_size[i], &h_cusolver_work_area_size[i],
-          CUSOLVER_BATCH_SIZE));
-      CUDA_CHECK(cudaMalloc((void **)&d_cusolver_work_area[i],
-                            d_cusolver_work_area_size[i]));
-      h_cusolver_work_area[i] = std::malloc(h_cusolver_work_area_size[i]);
-      CUDA_CHECK(cudaMalloc((void **)&d_cusolver_info[i],
-                            CUSOLVER_BATCH_SIZE * sizeof(int)));
+    for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
+      cudaEventCreate(&start_run[i]);
+      cudaEventCreate(&stop_run[i]);
     }
+
+    cudaDeviceSynchronize();
+
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time
     // Because everything is zeroed it should have negligible effect on output.
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
@@ -854,97 +887,12 @@ public:
     // out to disk. These will get tagged with a -1 end_seq_id currently
     // which is not fully ideal.
 
-    for (auto stream : streams) {
-      cudaStreamDestroy(stream);
-    }
-
-    for (auto sample : d_samples_entry) {
-      cudaFree(sample);
-    }
-
-    for (auto weight : d_weights) {
-      cudaFree(weight);
-    }
-
-    for (auto weight : d_weights_updated) {
-      cudaFree(weight);
-    }
-
-    for (auto weight : d_weights_permuted) {
-      cudaFree(weight);
-    }
-
-    for (auto correlator_input : d_correlator_input) {
-      cudaFree(correlator_input);
-    }
-
-    for (auto correlator_output : d_correlator_output) {
-      cudaFree(correlator_output);
-    }
-
-    for (auto beamformer_input : d_beamformer_input) {
-      cudaFree(beamformer_input);
-    }
-    for (auto beamformer_output : d_beamformer_output) {
-      cudaFree(beamformer_output);
-    }
-
-    for (auto samples_padding : d_samples_padding) {
-      cudaFree(samples_padding);
-    }
-
-    for (auto samples_padding : d_samples_half) {
-      cudaFree(samples_padding);
-    }
-    for (auto samples_cufft : d_samples_cufft_input) {
-      cudaFree(samples_cufft);
-    }
-
-    for (auto samples_cufft : d_samples_cufft_preprocessing) {
-      cudaFree(samples_cufft);
-    }
-    for (auto samples_cufft : d_samples_cufft_output) {
-      cudaFree(samples_cufft);
-    }
-    for (auto cufft : d_cufft_downsampled_output) {
-      cudaFree(cufft);
-    }
-
-    for (auto samples_padded : d_samples_padded) {
-      cudaFree(samples_padded);
-    }
-
-    for (auto samples_consolidated : d_samples_consolidated) {
-      cudaFree(samples_consolidated);
-    }
-
-    for (auto samples_consolidated_col_maj : d_samples_consolidated_col_maj) {
-      cudaFree(samples_consolidated_col_maj);
-    }
-
-    for (auto eigenvalues : d_eigenvalues) {
-      cudaFree(eigenvalues);
-    }
-
-    for (auto vis : d_visibilities_trimmed_baseline) {
-      cudaFree(vis);
-    }
-
-    for (auto vis : d_visibilities_baseline) {
-      cudaFree(vis);
-    }
-
-    for (auto vis : d_visibilities_trimmed) {
-      cudaFree(vis);
-    }
-
-    for (auto event : start_run) {
-      cudaEventDestroy(event);
-    }
-    for (auto event : stop_run) {
-      cudaEventDestroy(event);
-    }
   };
+  virtual void set_subpacket_delays(int *delays_subpacket) {
+    subpacket_delays_ = delays_subpacket;
+    CUDA_CHECK(cudaMemcpy(d_subpacket_delays, subpacket_delays_,
+                          sizeof(int) * T::NR_FPGA_SOURCES, cudaMemcpyDefault));
+  }
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
 
@@ -965,15 +913,16 @@ public:
     void *landing_pointer =
         output_->get_visibilities_landing_pointer(block_num);
     cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
-                    sizeof(TrimmedVisibilities), cudaMemcpyDefault, streams[0]);
+                    sizeof(TrimmedVisibilities), cudaMemcpyDefault,
+                    buffers[0].stream);
     auto *output_ctx = new OutputTransferCompleteContext{
         .output = this->output_, .block_index = block_num};
 
-    cudaLaunchHostFunc(streams[0],
+    cudaLaunchHostFunc(buffers[0].stream,
                        output_visibilities_transfer_complete_host_func,
                        output_ctx);
     cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(TrimmedVisibilities),
-                    streams[0]);
+                    buffers[0].stream);
     num_correlation_units_integrated.store(0);
     cudaDeviceSynchronize();
   };
@@ -1044,7 +993,6 @@ private:
   std::atomic<int> last_frame_processed;
 
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry;
-
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
       d_samples_padding;
   std::vector<typename T::FFTCUFFTPreprocessingType *>
@@ -1055,7 +1003,10 @@ private:
       d_samples_cufft_output;
   std::vector<typename T::MultiChannelAntennaFFTOutputType *>
       d_cufft_downsampled_output;
+  std::vector<typename T::PacketScalesType *> d_scales;
 
+  static constexpr int fft_total_packets_per_block =
+      T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int fft_missing_packets;
   std::vector<cufftHandle> fft_plan;
   std::vector<void *> d_cufft_work_area;
@@ -1080,6 +1031,12 @@ public:
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
 
+    // d_scales memcpy
+    cudaMemcpyAsync(d_scales[current_buffer],
+                    (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
+                    streams[current_buffer]);
+
     // BufferReleaseContext + host function
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
@@ -1089,11 +1046,19 @@ public:
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch((int32_t *)d_samples_entry[current_buffer],
-                                 (__half *)d_samples_half[current_buffer],
-                                 sizeof(typename T::InputPacketSamplesType) /
-                                     sizeof(int32_t),
-                                 streams[current_buffer]);
+    // scale_and_convert_to_half kernel
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        (typename T::InputPacketSamplesPlanarType *)
+            d_samples_entry[current_buffer],
+        d_scales[current_buffer],
+        (typename T::HalfInputPacketSamplesPlanarType *)
+            d_samples_half[current_buffer],
+        streams[current_buffer]);
+
     tensor_16.runPermutation(
         "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
         (__half *)d_samples_cufft_preprocessing[current_buffer],
@@ -1162,6 +1127,7 @@ public:
 
     streams.resize(2 * num_buffers);
     d_samples_entry.resize(num_buffers);
+    d_scales.resize(num_buffers);
     d_samples_half.resize(num_buffers);
     d_samples_cufft_input.resize(num_buffers);
     d_samples_cufft_preprocessing.resize(num_buffers);
@@ -1189,6 +1155,8 @@ public:
       CUDA_CHECK(
           cudaMalloc((void **)&d_cufft_downsampled_output[i],
                      sizeof(typename T::MultiChannelAntennaFFTOutputType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_scales[i],
+                            sizeof(typename T::PacketScalesType)));
     }
 
     last_frame_processed = 0;
@@ -1235,6 +1203,8 @@ public:
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
@@ -1252,8 +1222,12 @@ public:
       cudaFree(sample);
     }
 
-    for (auto sample : d_samples_half) {
-      cudaFree(sample);
+    for (auto scale : d_scales) {
+      cudaFree(scale);
+    }
+
+    for (auto samples_half : d_samples_half) {
+      cudaFree(samples_half);
     }
 
     for (auto samples_cufft : d_samples_cufft_input) {
@@ -1308,6 +1282,7 @@ private:
     ManagedCufftPlan fft_plan;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
+    DevicePtr<typename T::PacketScalesType> scales;
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_consolidated, samples_consolidated_col_maj;
     DevicePtr<FFTCUFFTInputType> samples_cufft_input;
@@ -1322,7 +1297,7 @@ private:
 
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
-
+          scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_consolidated(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
@@ -1355,6 +1330,7 @@ private:
         : stream(other.stream), host_stream(other.host_stream),
           fft_plan(std::move(other.fft_plan)),
           samples_entry(std::move(other.samples_entry)),
+          scales(std::move(other.scales)),
           samples_half(std::move(other.samples_half)),
           samples_consolidated(std::move(other.samples_consolidated)),
           samples_consolidated_col_maj(
@@ -1382,6 +1358,8 @@ private:
         host_stream = other.host_stream;
         fft_plan = std::move(other.fft_plan);
         samples_entry = std::move(other.samples_entry);
+        scales = std::move(other.scales);
+        samples_half = std::move(other.samples_half);
         samples_consolidated = std::move(other.samples_consolidated);
         samples_consolidated_col_maj =
             std::move(other.samples_consolidated_col_maj);
@@ -1498,6 +1476,10 @@ public:
         b.samples_entry.get(), (void *)packet_data->get_samples_ptr(),
         packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream);
 
+    cudaMemcpyAsync(b.scales.get(), (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
+                    b.stream);
+
     // BufferReleaseContext + host function
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
@@ -1507,9 +1489,17 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
+    // scale_and_convert_to_half kernel
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
+        b.scales.get(),
+        (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
+        b.stream);
+
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_consolidated.get(), b.stream);
@@ -1642,6 +1632,8 @@ public:
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
@@ -1734,9 +1726,9 @@ private:
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
   using BeamOutput =
-      float[2 * T::NR_BEAMS][T::NR_PACKETS_FOR_CORRELATION]
-           [T::NR_CHANNELS * (T::NR_TIME_STEPS_PER_PACKET -
-                              2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE)];
+      __half[2 * T::NR_BEAMS][T::NR_PACKETS_FOR_CORRELATION]
+            [T::NR_CHANNELS * (T::NR_TIME_STEPS_PER_PACKET -
+                               2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE)];
   using ProjectionMatrix =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                           [T::NR_RECEIVERS];
@@ -1759,6 +1751,7 @@ private:
     ManagedCufftPlan fft_plan, fft_plan_fine_channel;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
+    DevicePtr<typename T::PacketScalesType> scales;
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
@@ -1808,6 +1801,7 @@ private:
 
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
+          scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_consolidated(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
@@ -1904,6 +1898,8 @@ private:
         : stream(other.stream), host_stream(other.host_stream),
           fft_plan(std::move(other.fft_plan)),
           samples_entry(std::move(other.samples_entry)),
+          scales(std::move(other.scales)),
+          samples_half(std::move(other.samples_half)),
           samples_consolidated(std::move(other.samples_consolidated)),
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
@@ -1956,6 +1952,8 @@ private:
         host_stream = other.host_stream;
         fft_plan = std::move(other.fft_plan);
         samples_entry = std::move(other.samples_entry);
+        scales = std::move(other.scales);
+        samples_half = std::move(other.samples_half);
         samples_consolidated = std::move(other.samples_consolidated);
         samples_consolidated_col_maj =
             std::move(other.samples_consolidated_col_maj);
@@ -2111,6 +2109,10 @@ public:
         b.samples_entry.get(), (void *)packet_data->get_samples_ptr(),
         packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream);
 
+    cudaMemcpyAsync(b.scales.get(), (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
+                    b.stream);
+
     // BufferReleaseContext + host function
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
@@ -2120,9 +2122,17 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
+    // scale_and_convert_to_half kernel
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
+        b.scales.get(),
+        (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
+        b.stream);
+
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_consolidated.get(), b.stream);
@@ -2357,8 +2367,9 @@ public:
     //     T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
     //     2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
 
-    detect_launch((float4 *)b.beam_shape.get(), (float *)b.beam_output.get(),
-                  sizeof(BeamOutput) / sizeof(float), b.stream);
+    detect_and_convert_to_half_launch(
+        (float4 *)b.beam_shape.get(), (__half *)b.beam_output.get(),
+        sizeof(BeamOutput) / sizeof(__half), b.stream);
 
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
@@ -2378,8 +2389,8 @@ public:
       cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
                          beam_output_ctx);
 
-      int *arrivals_output_pointer =
-          (int *)output_->get_arrivals_data_landing_pointer(beam_block_num);
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(beam_block_num);
@@ -2548,6 +2559,8 @@ public:
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
@@ -2707,13 +2720,10 @@ private:
 
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
       d_samples_padding;
-  std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded,
-      d_samples_reord; // This is not the right type for reord
-                       // - but it will do I guess. Size will be correct.
+  std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded;
   std::vector<CorrelatorInput *> d_correlator_input;
   std::vector<CorrelatorOutput *> d_correlator_output;
 
-  std::vector<Visibilities *> d_visibilities_converted;
   std::vector<TrimmedVisibilities *> d_visibilities_baseline,
       d_visibilities_trimmed_baseline, d_visibilities_trimmed;
   TrimmedVisibilities *d_visibilities_accumulator;
@@ -2722,6 +2732,7 @@ private:
   std::vector<HalfBeamformerOutput *> d_beamformer_data_output_half;
   std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
       d_weights, d_weights_permuted;
+  std::vector<typename T::PacketScalesType *> d_scales;
 
   BeamWeights *h_weights;
 
@@ -2752,10 +2763,14 @@ public:
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
 
-    // d_samples_entry memcpy
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
+                    streams[current_buffer]);
+
+    cudaMemcpyAsync(d_scales[current_buffer],
+                    (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
 
     auto *ctx =
@@ -2766,23 +2781,28 @@ public:
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch((int32_t *)d_samples_entry[current_buffer],
-                                 (__half *)d_samples_half[current_buffer],
-                                 sizeof(typename T::InputPacketSamplesType) /
-                                     sizeof(int32_t),
-                                 streams[current_buffer]);
-    // tensor_16.runPermutation "packetToFPGA"
+    // scale_and_convert_to_half kernel
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        (typename T::InputPacketSamplesPlanarType *)
+            d_samples_entry[current_buffer],
+        d_scales[current_buffer],
+        (typename T::HalfInputPacketSamplesPlanarType *)
+            d_samples_half[current_buffer],
+        streams[current_buffer]);
+
     tensor_16.runPermutation(
         "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
 
-    // cudaMemcpyAsync for padding
     CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
                                d_samples_padding[current_buffer],
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, streams[current_buffer]));
 
-    // cudaMemsetAsync
     CUDA_CHECK(cudaMemsetAsync(
         reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
             sizeof(typename T::HalfPacketSamplesType),
@@ -2791,12 +2811,10 @@ public:
             sizeof(typename T::HalfPacketSamplesType),
         streams[current_buffer]));
 
-    // tensor_16.runPermutation "paddedToCorrInput"
     tensor_16.runPermutation(
         "paddedToCorrInput", alpha, (__half *)d_samples_padded[current_buffer],
         (__half *)d_correlator_input[current_buffer], streams[current_buffer]);
 
-    // correlator.launchAsync
     correlator.launchAsync((CUstream)streams[current_buffer],
                            (CUdeviceptr)d_correlator_output[current_buffer],
                            (CUdeviceptr)d_correlator_input[current_buffer]);
@@ -2822,6 +2840,7 @@ public:
                             2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
+
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)d_samples_half[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
@@ -2836,7 +2855,6 @@ public:
     tensor_16.runPermutation(
         "weightsInputToCCGLIB", alpha, (__half *)d_weights[current_buffer],
         (__half *)d_weights_permuted[current_buffer], streams[current_buffer]);
-
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
              (CUdeviceptr)d_samples_consolidated_col_maj[current_buffer],
@@ -2871,8 +2889,8 @@ public:
                          output_transfer_complete_host_func, output_ctx);
 
       // memcpy arrivals
-      int *arrivals_output_pointer =
-          (int *)output_->get_arrivals_data_landing_pointer(block_num);
+      bool *arrivals_output_pointer =
+          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
@@ -2918,19 +2936,18 @@ public:
     d_weights.resize(num_buffers);
     d_weights_permuted.resize(num_buffers);
     d_samples_entry.resize(num_buffers);
+    d_scales.resize(num_buffers);
     d_samples_half.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
     d_samples_consolidated.resize(num_buffers);
     d_samples_consolidated_col_maj.resize(num_buffers);
-    d_samples_reord.resize(num_buffers);
     d_correlator_input.resize(num_buffers);
     d_correlator_output.resize(num_buffers);
     d_beamformer_input.resize(num_buffers);
     d_beamformer_output.resize(num_buffers);
     d_beamformer_data_output.resize(num_buffers);
     d_beamformer_data_output_half.resize(num_buffers);
-    d_visibilities_converted.resize(num_buffers);
     d_visibilities_baseline.resize(num_buffers);
     d_visibilities_trimmed_baseline.resize(num_buffers);
     d_visibilities_trimmed.resize(num_buffers);
@@ -2941,9 +2958,9 @@ public:
                                            cudaStreamNonBlocking));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
                             sizeof(typename T::InputPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
+                            sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
                             sizeof(typename T::HalfPacketSamplesType)));
@@ -2951,8 +2968,8 @@ public:
                             sizeof(typename T::PaddedPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_padding[i],
                             sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_reord[i],
-                            sizeof(typename T::PaddedPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_scales[i],
+                            sizeof(typename T::PacketScalesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_weights[i], sizeof(BeamWeights)));
       CUDA_CHECK(
           cudaMalloc((void **)&d_weights_permuted[i], sizeof(BeamWeights)));
@@ -2968,8 +2985,6 @@ public:
                             sizeof(BeamformerOutput)));
       CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output_half[i],
                             sizeof(HalfBeamformerOutput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_converted[i],
-                            sizeof(Visibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_baseline[i],
                             sizeof(Visibilities)));
       CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed_baseline[i],
@@ -3060,6 +3075,8 @@ public:
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
@@ -3080,8 +3097,9 @@ public:
     for (auto sample : d_samples_entry) {
       cudaFree(sample);
     }
-    for (auto sample : d_samples_half) {
-      cudaFree(sample);
+
+    for (auto scale : d_scales) {
+      cudaFree(scale);
     }
 
     for (auto weight : d_weights) {
@@ -3109,6 +3127,10 @@ public:
 
     for (auto samples_padding : d_samples_padding) {
       cudaFree(samples_padding);
+    }
+
+    for (auto samples_half : d_samples_half) {
+      cudaFree(samples_half);
     }
 
     for (auto samples_padded : d_samples_padded) {
@@ -3309,7 +3331,9 @@ private:
 
     // Raw samples
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
-    DevicePtr<typename T::HalfPacketSamplesType> samples_half, samples_padding;
+    DevicePtr<typename T::PacketScalesType> scales;
+    DevicePtr<typename T::HalfPacketSamplesType> samples_half;
+    DevicePtr<typename T::HalfPacketSamplesType> samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
 
     // Correlator I/O
@@ -3350,6 +3374,7 @@ private:
     explicit PipelineResources(
         const DecompositionVisibilities *decomp_for_workspace_query)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
+          scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_padding(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_padded(
@@ -3407,6 +3432,7 @@ private:
     PipelineResources(PipelineResources &&o) noexcept
         : stream(o.stream), host_stream(o.host_stream),
           samples_entry(std::move(o.samples_entry)),
+          scales(std::move(o.scales)), samples_half(std::move(o.samples_half)),
           samples_padding(std::move(o.samples_padding)),
           samples_padded(std::move(o.samples_padded)),
           correlator_input(std::move(o.correlator_input)),
@@ -3491,10 +3517,20 @@ public:
 
     auto &b = buffers[current_buffer];
 
+    // ------------------------------------------------------------------
+    // 1. Transfer raw samples and scales to device
+    // ------------------------------------------------------------------
     CUDA_CHECK(cudaMemcpyAsync(
         b.samples_entry.get(), packet_data->get_samples_ptr(),
         packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream));
+    CUDA_CHECK(cudaMemcpyAsync(b.scales.get(), packet_data->get_scales_ptr(),
+                               packet_data->get_scales_element_size(),
+                               cudaMemcpyDefault, b.stream));
 
+    // ------------------------------------------------------------------
+    // 2. Release the input buffer asynchronously on the host stream so
+    //    the GPU pipeline stream is not stalled.
+    // ------------------------------------------------------------------
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
@@ -3502,17 +3538,29 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
+    // ------------------------------------------------------------------
+    // 3. Scale integer samples to fp16
+    // ------------------------------------------------------------------
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        reinterpret_cast<typename T::InputPacketSamplesPlanarType *>(
+            b.samples_entry.get()),
+        b.scales.get(),
+        reinterpret_cast<typename T::HalfInputPacketSamplesPlanarType *>(
+            b.samples_half.get()),
+        b.stream);
+
+    // ------------------------------------------------------------------
+    // 4. Permute packet → padding layout
+    // ------------------------------------------------------------------
     tensor_16.runPermutation(
         "packetToPadding", alpha_16,
         reinterpret_cast<__half *>(b.samples_half.get()),
         reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
 
-    // ------------------------------------------------------------------
-    // 5. Copy unpadded → padded buffer then zero-fill the padding region
-    // ------------------------------------------------------------------
     CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, b.stream));
@@ -3523,23 +3571,16 @@ public:
                         sizeof(typename T::PaddedPacketSamplesType) -
                             sizeof(typename T::HalfPacketSamplesType),
                         b.stream));
-    // ------------------------------------------------------------------
-    // 6. Permute padded → correlator input layout
-    // ------------------------------------------------------------------
+
     tensor_16.runPermutation(
         "paddedToCorrInput", alpha_16,
         reinterpret_cast<__half *>(b.samples_padded.get()),
         reinterpret_cast<__half *>(b.correlator_input.get()), b.stream);
-    // ------------------------------------------------------------------
-    // 7. Cross-correlate with tcc::Correlator
-    // ------------------------------------------------------------------
     correlator.launchAsync(
         static_cast<CUstream>(b.stream),
         reinterpret_cast<CUdeviceptr>(b.correlator_output.get()),
         reinterpret_cast<CUdeviceptr>(b.correlator_input.get()));
-    // ------------------------------------------------------------------
-    // 8. Rearrange correlator output to baseline-major, then trim padding
-    // ------------------------------------------------------------------
+
     tensor_32.runPermutation(
         "visCorrToBaseline", alpha_32,
         reinterpret_cast<float *>(b.correlator_output.get()),
@@ -3582,28 +3623,6 @@ public:
         b.cusolver_work_host, b.cusolver_work_host_size, b.cusolver_info.get(),
         CUSOLVER_BATCH_SIZE));
 
-    // ------------------------------------------------------------------
-    // 11. Form P_block = U U^H via batched cuBLAS cherk.
-    //
-    //     After cuSOLVER, decomp_visibilities holds the full eigenvector
-    //     matrix V (NR_RECEIVERS × NR_RECEIVERS, column = eigenvector,
-    //     ascending order).  The signal subspace U consists of the last
-    //     NR_SIGNAL_EIGENVECTORS columns, i.e. the sub-matrix starting at
-    //     column offset (NR_RECEIVERS - NR_SIGNAL_EIGENVECTORS).
-    //
-    //     cuSOLVER stores column-major (Fortran order), so column j starts
-    //     at row-offset 0 and the pointer to column j is:
-    //       V_ptr + j * NR_RECEIVERS    (in cuComplex elements)
-    //
-    //     cherk computes:  C ← alpha * A * A^H + beta * C
-    //       A = U  (NR_RECEIVERS × NR_SIGNAL_EIGENVECTORS, col-major)
-    //       C = P  (NR_RECEIVERS × NR_RECEIVERS, col-major)
-    //
-    //     We call it once per batch element in a simple loop.  A batched
-    //     cherk variant is not available in cuBLAS; the loop is over
-    //     CUSOLVER_BATCH_SIZE elements and is negligible CPU overhead
-    //     compared with the GPU kernels.
-    // ------------------------------------------------------------------
     {
       constexpr int N = T::NR_RECEIVERS;
       constexpr int K = NR_SIGNAL_EIGENVECTORS;
@@ -3748,6 +3767,8 @@ public:
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, /*dummy_run=*/true);
     cudaDeviceSynchronize();
@@ -3877,6 +3898,26 @@ struct PulsarFoldParameters {
   double lowest_chan_freq_mhz;
 };
 
+// Signal path per execute_pipeline() call:
+//  1. H→D transfer of raw samples and scales.
+//  2. Release input buffer on host stream.
+//  3. scale_and_convert_to_half — int → fp16.
+//  4. cuTENSOR permutation → cuFFT-ready axis order.
+//  5. get_data_for_multi_channel_fft_launch — fp16 → fp32.
+//  6. Batched forward FFT: NR_CHANNELS × NR_POLARIZATIONS × NR_RECEIVERS
+//     batches, each of length NR_TIME_STEPS_FOR_CORR (= NR_FINE_CHANNELS).
+//  7. detect_and_downsample_multi_channel_fft_launch — |z|², time-average.
+//     Output: [NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+//             [NR_TIME_BINS_PER_BLOCK][NR_FINE_CHANNELS]
+//  8. incoherent_sum_launch — sum over NR_RECEIVERS.
+//     Output: [NR_CHANNELS][NR_FINE_CHANNELS][NR_POLARIZATIONS]
+//             [NR_TIME_BINS_PER_BLOCK]
+//  9. fold_and_accumulate_launch — phase-bin each time sample (with per-channel
+//     DM delay correction) and atomically accumulate into the fold profile.
+// 10. After nr_blocks_per_dump blocks, copy D→H and reset the accumulator.
+//
+// Exported fold profile layout:
+//   float[NR_CHANNELS][NR_FINE_CHANNELS][NR_POLARIZATIONS][n_bins]
 template <typename T, size_t NR_FINE_CHANNELS = 16>
 class LambdaPulsarFoldPipeline : public GPUPipeline {
 
@@ -3930,6 +3971,7 @@ private:
     ManagedCufftPlan fft_plan;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
+    DevicePtr<typename T::PacketScalesType> scales;
     DevicePtr<typename T::HalfPacketSamplesType> samples_half;
     DevicePtr<typename T::FFTCUFFTPreprocessingType>
         samples_cufft_preprocessing;
@@ -3940,6 +3982,7 @@ private:
 
     PipelineResources(size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
+          scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_cufft_preprocessing(
               make_device_ptr<typename T::FFTCUFFTPreprocessingType>()),
@@ -3965,6 +4008,7 @@ private:
         : stream(o.stream), host_stream(o.host_stream),
           fft_plan(std::move(o.fft_plan)),
           samples_entry(std::move(o.samples_entry)),
+          scales(std::move(o.scales)), samples_half(std::move(o.samples_half)),
           samples_cufft_preprocessing(std::move(o.samples_cufft_preprocessing)),
           samples_cufft_input(std::move(o.samples_cufft_input)),
           samples_cufft_output(std::move(o.samples_cufft_output)),
@@ -4084,6 +4128,9 @@ public:
         b.samples_entry.get(), packet_data->get_samples_ptr(),
         packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream));
 
+    CUDA_CHECK(cudaMemcpyAsync(b.scales.get(), packet_data->get_scales_ptr(),
+                               packet_data->get_scales_element_size(),
+                               cudaMemcpyDefault, b.stream));
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
@@ -4091,9 +4138,18 @@ public:
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
 
-    convert_int32_to_half_launch(
-        (int32_t *)b.samples_entry.get(), (__half *)b.samples_half.get(),
-        sizeof(typename T::InputPacketSamplesType) / sizeof(int32_t), b.stream);
+    scale_and_convert_to_half<
+        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
+        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
+        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        reinterpret_cast<typename T::InputPacketSamplesPlanarType *>(
+            b.samples_entry.get()),
+        b.scales.get(),
+        reinterpret_cast<typename T::HalfInputPacketSamplesPlanarType *>(
+            b.samples_half.get()),
+        b.stream);
+
     tensor_16.runPermutation(
         "packetToCUFFTInput", alpha,
         reinterpret_cast<__half *>(b.samples_half.get()),
@@ -4226,6 +4282,8 @@ public:
     typename T::PacketFinalDataType warmup_packet;
     std::memset(warmup_packet.samples, 0,
                 warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, /*dummy_run=*/true);
     cudaDeviceSynchronize();
