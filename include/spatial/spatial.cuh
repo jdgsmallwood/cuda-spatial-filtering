@@ -710,3 +710,46 @@ inline void detect_and_convert_to_half_launch(const float4 *d_input,
   detect_and_convert_to_half<<<dim3(16, 1, 1), 1024, 0, stream>>>(d_input,
                                                                   d_output, n);
 }
+
+__global__ void apply_delays(const __half *__restrict__ d_input,
+                             __half *__restrict__ d_output,
+                             const int *__restrict__ d_fpga_delays,
+                             const size_t total_to_copy_per_fpga,
+                             const size_t total_to_copy_per_time_step) {
+  const int thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
+  const int fpga_idx = blockIdx.y;
+  const int delay = d_fpga_delays[fpga_idx];
+
+  const int base_pointer = fpga_idx * total_to_copy_per_fpga +
+                           (64 + delay) * total_to_copy_per_time_step +
+                           thread_idx;
+  const int output_base_pointer =
+      fpga_idx * total_to_copy_per_fpga + thread_idx;
+
+  if (thread_idx < total_to_copy_per_fpga) {
+    d_output[output_base_pointer] = d_input[base_pointer];
+  }
+};
+
+inline void
+apply_delays_launch(const __half *d_input, __half *d_output,
+                    const int *d_fpga_delays, const int nr_receivers_per_packet,
+                    const int nr_fpgas, const int nr_packets_for_correlation,
+                    const int nr_polarizations, const int nr_channels,
+                    const int nr_time_samples_per_packet, cudaStream_t stream) {
+
+  const size_t total_to_copy_per_fpga =
+      nr_receivers_per_packet * nr_channels * nr_time_samples_per_packet *
+      nr_packets_for_correlation * 2 /* complex */ * nr_polarizations;
+
+  const size_t total_to_copy_per_time_step =
+      nr_receivers_per_packet * nr_channels * 2 * nr_polarizations;
+
+  const int blocks_needed = (total_to_copy_per_fpga + 1024 - 1) / 1024;
+
+  const dim3 grid(blocks_needed, nr_fpgas, 1);
+
+  apply_delays<<<grid, 1024, 0, stream>>>(d_input, d_output, d_fpga_delays,
+                                          total_to_copy_per_fpga,
+                                          total_to_copy_per_time_step);
+};

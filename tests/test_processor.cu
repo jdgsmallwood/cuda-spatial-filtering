@@ -65,7 +65,6 @@ public:
   FinalPacketData *last_packet_data;
 
   void execute_pipeline(FinalPacketData *packet_data,
-                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
     {
       std::lock_guard<std::mutex> lock(data_mutex);

@@ -137,9 +137,9 @@ struct LambdaFinalPacketData : public FinalPacketData {
                              cudaHostAllocDefault));
   };
   ~LambdaFinalPacketData() {
-    cudaFreeHost(samples);
-    cudaFreeHost(scales);
-    cudaFreeHost(arrivals);
+    CUDA_CHECK(cudaFreeHost(samples));
+    CUDA_CHECK(cudaFreeHost(scales));
+    CUDA_CHECK(cudaFreeHost(arrivals));
   };
 };
 
@@ -261,9 +261,14 @@ struct LambdaConfig {
       std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
 
+  template <typename T, int RECEIVERS = NR_RECEIVERS>
+  using LambdaPacketAlignedSamplesT =
+      std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+                     [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
+
   template <typename T>
   using LambdaInputPacketSamplesPlanarT =
-      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES]
+      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES]
        [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS][2];
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesPlanarT =
@@ -281,11 +286,12 @@ struct LambdaConfig {
   using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<int8_t>;
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
+  using HalfPacketAlignedSamplesType = LambdaPacketAlignedSamplesT<__half>;
   using HalfInputPacketSamplesPlanarType =
       LambdaInputPacketSamplesPlanarT<__half>;
 
   using PaddedPacketSamplesType =
-      LambdaPacketSamplesT<__half, NR_PADDED_RECEIVERS>;
+      LambdaPacketAlignedSamplesT<__half, NR_PADDED_RECEIVERS>;
   using PacketSamplesPlanarType = LambdaPacketSamplesPlanarT<int8_t>;
   using HalfPacketSamplesPlanarType = LambdaPacketSamplesPlanarT<__half>;
   using PaddedPacketSamplesPlanarType =

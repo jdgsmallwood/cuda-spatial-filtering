@@ -38,7 +38,7 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   using scaleT = typename T::PacketScalesType;
   sampleT *samples;
   scaleT *scales;
-  typename T::ArrivalsOutputType arrivals;
+  typename T::ArrivalsOutputType *arrivals;
 
   DummyFinalPacketData() {
     CUDA_CHECK(cudaMallocHost((void **)&samples, sizeof(sampleT)));
@@ -48,9 +48,9 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   };
 
   ~DummyFinalPacketData() {
-    cudaFreeHost(samples);
-    cudaFreeHost(scales);
-    cudaFreeHost(arrivals);
+    CUDA_CHECK(cudaFreeHost(samples));
+    CUDA_CHECK(cudaFreeHost(scales));
+    CUDA_CHECK(cudaFreeHost(arrivals));
   }
 
   void *get_samples_ptr() override { return samples; };
@@ -58,7 +58,7 @@ template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   void *get_scales_ptr() override { return scales; };
   size_t get_scales_element_size() override { return sizeof(scaleT); };
 
-  bool *get_arrivals_ptr() override { return (bool *)&arrivals; };
+  bool *get_arrivals_ptr() override { return (bool *)arrivals; };
   size_t get_arrivals_size() override {
     return sizeof(typename T::ArrivalsOutputType);
   }
@@ -89,13 +89,13 @@ TEST_F(CudaIsolatedTest, Ex1) {
 
   DummyFinalPacketData<Config> packet_data;
   for (auto i = 0; i < NR_CHANNELS; ++i) {
-    for (auto j = 0; j < NR_PACKETS; ++j) {
+    for (auto j = -1; j < static_cast<int>(NR_PACKETS) + 1; ++j) {
       for (auto k = 0; k < NR_TIME_STEPS_PER_PACKET; ++k) {
         for (auto l = 0; l < NR_RECEIVERS; ++l) {
           for (auto m = 0; m < NR_POLARIZATIONS; ++m) {
-            packet_data.samples[0][i][j][0][k][l][m] =
+            packet_data.samples[0][i][j + 1][0][k][l][m] =
                 std::complex<int8_t>(2, -2);
-            packet_data.scales[0][i][j][l][m] = static_cast<int16_t>(1);
+            packet_data.scales[0][i][j + 1][l][m] = static_cast<int16_t>(1);
           }
         }
       }
@@ -121,6 +121,12 @@ TEST_F(CudaIsolatedTest, Ex1) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();
@@ -137,8 +143,10 @@ TEST_F(CudaIsolatedTest, Ex1) {
             } else {
               expected = -8.0f;
             }
-            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
-                      expected);
+            EXPECT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected)
+                << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
+                << ", l=" << l << ", m=" << m << std::endl;
           }
         }
       }
@@ -201,6 +209,13 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest) {
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
+
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
 
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
@@ -300,6 +315,12 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest2) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();
@@ -320,8 +341,10 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest2) {
                 expected = -8.0f;
               }
             }
-            ASSERT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
-                      expected);
+            EXPECT_EQ(__half2float(output->beam_data[0][i][j][k][l][m]),
+                      expected)
+                << "Mismatch at i=" << i << ", j=" << j << ", k=" << k
+                << ", l=" << l << ", m=" << m << std::endl;
           }
         }
       }
@@ -396,6 +419,12 @@ TEST_F(CudaIsolatedTest, BeamBlankTest) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
 
@@ -472,6 +501,12 @@ TEST_F(CudaIsolatedTest, ChannelWeightBlankTest) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
 
@@ -551,6 +586,12 @@ TEST_F(CudaIsolatedTest, ChannelSamplesBlankTest) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   cudaDeviceSynchronize();
 
@@ -617,6 +658,12 @@ TEST_F(CudaIsolatedTest, ScalesTest) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();
@@ -702,6 +749,12 @@ TEST_F(CudaIsolatedTest, ScalesMultiplePacketsTest) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();
@@ -784,6 +837,12 @@ TEST_F(CudaIsolatedTest, ScalesPerReceiverTest) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();
@@ -880,6 +939,12 @@ TEST_F(CudaIsolatedTest, EigenvalueBasic) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
 
+  std::array<int, Config::NR_FPGA_SOURCES> subpacket_delays;
+  for (auto i = 0; i < Config::NR_FPGA_SOURCES; ++i) {
+    subpacket_delays[i] = 0;
+  }
+
+  pipeline.set_subpacket_delays(subpacket_delays.data());
   pipeline.execute_pipeline(&packet_data);
   pipeline.dump_visibilities();
   cudaDeviceSynchronize();

@@ -157,13 +157,13 @@ public:
         cudaMallocHost((void **)&pulsar_fold_output, sizeof(PulsarFoldOutput)));
   };
   ~SingleHostMemoryOutput() {
-    cudaFreeHost(beam_data);
-    cudaFreeHost(visibilities);
-    cudaFreeHost(arrivals);
-    cudaFreeHost(eigenvalues);
-    cudaFreeHost(eigenvectors);
-    cudaFreeHost(fft_output);
-    cudaFreeHost(pulsar_fold_output);
+    CUDA_CHECK(cudaFreeHost(beam_data));
+    CUDA_CHECK(cudaFreeHost(visibilities));
+    CUDA_CHECK(cudaFreeHost(arrivals));
+    CUDA_CHECK(cudaFreeHost(eigenvalues));
+    CUDA_CHECK(cudaFreeHost(eigenvectors));
+    CUDA_CHECK(cudaFreeHost(fft_output));
+    CUDA_CHECK(cudaFreeHost(pulsar_fold_output));
   };
 };
 

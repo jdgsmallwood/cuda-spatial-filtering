@@ -43,7 +43,7 @@ template <size_t NR_CHANNELS, size_t NR_FPGA_SOURCES> struct BufferState {
 
 struct Result {
   int64_t closest;
-  int64_t remainder;
+  int remainder;
 };
 
 inline Result nearest_multiple(int64_t x, int64_t k) {
@@ -52,7 +52,7 @@ inline Result nearest_multiple(int64_t x, int64_t k) {
       static_cast<int64_t>(std::llround(static_cast<long double>(x) / k));
 
   int64_t closest = m * k;
-  int64_t remainder = x - closest;
+  int remainder = static_cast<int>(x - closest);
 
   return {closest, remainder};
 }
@@ -158,7 +158,10 @@ public:
 
   ProcessorState(ProcessorState &&) = delete;
   ProcessorState &operator=(ProcessorState &&) = delete;
-  void set_pipeline(GPUPipeline *pipeline) { pipeline_ = pipeline; };
+  void set_pipeline(GPUPipeline *pipeline) {
+    pipeline_ = pipeline;
+    pipeline->set_subpacket_delays(fpga_delays_subpacket.data());
+  };
   bool get_next_write_index() {
     int next_write_index = -1;
     bool first_loop = true;
@@ -774,8 +777,7 @@ public:
           }
           buffer_ready_for_pipeline.notify_one();
         } else [[unlikely]] {
-          pipeline_->execute_pipeline(d_samples[current_buf],
-                                      fpga_delays_subpacket.data());
+          pipeline_->execute_pipeline(d_samples[current_buf]);
           pipeline_runs_queued += 1;
         }
       }
@@ -817,8 +819,7 @@ public:
       buffers_ready_for_pipeline.pop();
       lock.unlock();
       LOG_INFO("Buffer index {} picked up by pipeline feeder...", buffer_index);
-      pipeline_->execute_pipeline(d_samples[buffer_index],
-                                  fpga_delays_subpacket.data());
+      pipeline_->execute_pipeline(d_samples[buffer_index]);
       pipeline_runs_queued += 1;
     }
     std::cout << "Pipeline feeder exiting!\n";
@@ -901,7 +902,8 @@ private:
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
   std::once_flag buffer_init_flag;
   std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
-      fpga_delays_packet_aligned, fpga_delays_subpacket;
+      fpga_delays_packet_aligned;
+  std::array<int, T::NR_FPGA_SOURCES> fpga_delays_subpacket;
 
   std::mutex latest_packet_mutex;
   static constexpr int WORKER_COUNT = 3;
