@@ -335,10 +335,8 @@ public:
   size_t benchmark_runs_done = 0;
   cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
-    using clock = std::chrono::high_resolution_clock;
-
-    auto cpu_start_total = clock::now();
 
     if (!dummy_run && state_ == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
@@ -352,40 +350,17 @@ public:
     visibilities_missing_packets += packet_data->get_num_missing_packets();
 
     // Record GPU start event
-    auto cpu_start = clock::now();
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
-    auto cpu_end = clock::now();
-    LOG_DEBUG("CPU time for cudaEventRecord start_run: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    // d_samples_entry memcpy
-    cpu_start = clock::now();
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for d_samples_entry cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // d_scales memcpy
-    cpu_start = clock::now();
     cudaMemcpyAsync(d_scales[current_buffer],
                     (void *)packet_data->get_scales_ptr(),
                     packet_data->get_scales_element_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for d_scales cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // BufferReleaseContext + host function
-    cpu_start = clock::now();
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
@@ -393,15 +368,7 @@ public:
     // do in separate thread - no need to tie up GPU pipeline.
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
-    cpu_end = clock::now();
-    LOG_DEBUG(
-        "CPU time for BufferReleaseContext alloc + cudaLaunchHostFunc: {} us",
-        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                              cpu_start)
-            .count());
 
-    // scale_and_convert_to_half kernel
-    cpu_start = clock::now();
     scale_and_convert_to_half<
         typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
         typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
@@ -413,22 +380,10 @@ public:
         (typename T::HalfInputPacketSamplesPlanarType *)
             d_samples_half[current_buffer],
         streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for scale_and_convert_to_half launch: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // tensor_16.runPermutation "packetToFPGA"
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToFPGA: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     tensor_16.runPermutation(
         "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
@@ -456,20 +411,11 @@ public:
         d_cufft_downsampled_output[current_buffer],
         T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
         T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer]);
-    // cudaMemcpyAsync for padding
-    cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
                                d_samples_padding[current_buffer],
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, streams[current_buffer]));
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for d_samples_padded cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // cudaMemsetAsync
-    cpu_start = clock::now();
     CUDA_CHECK(cudaMemsetAsync(
         reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
             sizeof(typename T::HalfPacketSamplesType),
@@ -477,33 +423,14 @@ public:
         sizeof(typename T::PaddedPacketSamplesType) -
             sizeof(typename T::HalfPacketSamplesType),
         streams[current_buffer]));
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for cudaMemsetAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // tensor_16.runPermutation "paddedToCorrInput"
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "paddedToCorrInput", alpha, (__half *)d_samples_padded[current_buffer],
         (__half *)d_correlator_input[current_buffer], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation paddedToCorrInput: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // correlator.launchAsync
-    cpu_start = clock::now();
     correlator.launchAsync((CUstream)streams[current_buffer],
                            (CUdeviceptr)d_correlator_output[current_buffer],
                            (CUdeviceptr)d_correlator_input[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for correlator.launchAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     tensor_32.runPermutation("visCorrToBaseline", alpha_32,
                              (float *)d_correlator_output[current_buffer],
@@ -519,18 +446,10 @@ public:
         (float *)d_visibilities_trimmed_baseline[current_buffer],
         (float *)d_visibilities_trimmed[current_buffer],
         streams[current_buffer]);
-    // tensor_32.runPermutation "visCorrToDecomp"
-    cpu_start = clock::now();
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
                              (float *)d_visibilities_trimmed[current_buffer],
                              (float *)d_visibilities_permuted[current_buffer],
                              streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_32.runPermutation visCorrToDecomp: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
     unpack_triangular_baseline_batch_launch<cuComplex>(
         (cuComplex *)d_visibilities_permuted[current_buffer],
         (cuComplex *)d_decomposition_visibilities_input[current_buffer],
@@ -549,87 +468,43 @@ public:
         h_cusolver_work_area_size[current_buffer],
         d_cusolver_info[current_buffer], CUSOLVER_BATCH_SIZE));
 
-    // accumulate_visibilities (CPU wrapper)
-    cpu_start = clock::now();
     accumulate_visibilities((float *)d_visibilities_trimmed[current_buffer],
                             (float *)d_visibilities_accumulator,
                             2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for accumulate_visibilities: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)d_samples_half[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToPlanar: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "consToColMajCons", alpha,
         (__half *)d_samples_consolidated[current_buffer],
         (__half *)d_samples_consolidated_col_maj[current_buffer],
         streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation consToColMajCons: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     update_weights(d_weights[current_buffer], d_weights_updated[current_buffer],
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
                    T::NR_POLARIZATIONS, (float *)d_eigenvalues[current_buffer],
                    (float *)d_visibilities_converted[current_buffer],
                    streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for update_weights: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights_updated[current_buffer],
                              (__half *)d_weights_permuted[current_buffer],
                              streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG(
-        "CPU time for tensor_16.runPermutation weightsInputToCCGLIB: {} us",
-        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                              cpu_start)
-            .count());
 
-    cpu_start = clock::now();
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
              (CUdeviceptr)d_samples_consolidated_col_maj[current_buffer],
              (CUdeviceptr)d_beamformer_output[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for GEMM run: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
                              (float *)d_beamformer_output[current_buffer],
                              (float *)d_beamformer_data_output[current_buffer],
                              streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_32.runPermutation beamCCGLIBToOutput: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     convert_float_to_half(
         (float *)d_beamformer_data_output[current_buffer],
@@ -638,17 +513,10 @@ public:
             NR_TIME_STEPS_FOR_CORRELATION,
         streams[current_buffer]);
 
-    cpu_start = clock::now();
     cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for cudaEventRecord stop_run: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     // Output handling
     if (output_ != nullptr && !dummy_run) {
-      cpu_start = clock::now();
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
       size_t eigenvalue_block_num =
@@ -661,34 +529,16 @@ public:
                       d_beamformer_data_output_half[current_buffer],
                       sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
                       streams[current_buffer]);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for output registration + copying: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
-      cpu_start = clock::now();
       auto *output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = block_num};
       cudaLaunchHostFunc(streams[current_buffer],
                          output_transfer_complete_host_func, output_ctx);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for host function launch: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
 
-      // memcpy arrivals
-      cpu_start = clock::now();
       bool *arrivals_output_pointer =
           (bool *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for memcpy arrivals + register completion: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
 
       void *eigenvalues_output_pointer =
           (void *)output_->get_eigenvalues_data_landing_pointer(
@@ -740,11 +590,6 @@ public:
       current_buffer = (current_buffer + 1) % num_buffers;
       benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
     }
-    auto cpu_end_total = clock::now();
-    LOG_DEBUG("Total CPU time for execute_pipeline: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  cpu_end_total - cpu_start_total)
-                  .count());
   }
   LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
 
@@ -1009,7 +854,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
+    execute_pipeline(&warmup_packet, nullptr, true);
     cudaDeviceSynchronize();
     // these need to be set after the dummy run.
     visibilities_start_seq_num = -1;
@@ -1237,6 +1082,7 @@ private:
 
 public:
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
 
     if (!dummy_run && state_ == nullptr) {
@@ -1433,7 +1279,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
+    execute_pipeline(&warmup_packet, nullptr, true);
     cudaDeviceSynchronize();
   };
   ~LambdaAntennaSpectraPipeline() {
@@ -1687,6 +1533,7 @@ private:
 
 public:
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
 
     if (!dummy_run && state_ == nullptr) {
@@ -1862,7 +1709,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
+    execute_pipeline(&warmup_packet, nullptr, true);
     cudaDeviceSynchronize();
   };
 
@@ -2320,6 +2167,7 @@ private:
 
 public:
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
 
     if (!dummy_run && state_ == nullptr) {
@@ -2789,7 +2637,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
+    execute_pipeline(&warmup_packet, nullptr, true);
     cudaDeviceSynchronize();
   };
 
@@ -2977,11 +2825,8 @@ public:
   size_t benchmark_runs_done = 0;
   cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
-    using clock = std::chrono::high_resolution_clock;
-
-    auto cpu_start_total = clock::now();
-
     if (!dummy_run && state_ == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
@@ -2994,40 +2839,18 @@ public:
     visibilities_missing_packets += packet_data->get_num_missing_packets();
 
     // Record GPU start event
-    auto cpu_start = clock::now();
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
-    auto cpu_end = clock::now();
-    LOG_DEBUG("CPU time for cudaEventRecord start_run: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // d_samples_entry memcpy
-    cpu_start = clock::now();
     cudaMemcpyAsync(d_samples_entry[current_buffer],
                     (void *)packet_data->get_samples_ptr(),
                     packet_data->get_samples_elements_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for d_samples_entry cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // d_scales memcpy
-    cpu_start = clock::now();
     cudaMemcpyAsync(d_scales[current_buffer],
                     (void *)packet_data->get_scales_ptr(),
                     packet_data->get_scales_element_size(), cudaMemcpyDefault,
                     streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for d_scales cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // BufferReleaseContext + host function
-    cpu_start = clock::now();
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
@@ -3035,15 +2858,8 @@ public:
     // do in separate thread - no need to tie up GPU pipeline.
     CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
                                   release_buffer_host_func, ctx));
-    cpu_end = clock::now();
-    LOG_DEBUG(
-        "CPU time for BufferReleaseContext alloc + cudaLaunchHostFunc: {} us",
-        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                              cpu_start)
-            .count());
 
     // scale_and_convert_to_half kernel
-    cpu_start = clock::now();
     scale_and_convert_to_half<
         typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
         typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
@@ -3055,37 +2871,16 @@ public:
         (typename T::HalfInputPacketSamplesPlanarType *)
             d_samples_half[current_buffer],
         streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for scale_and_convert_to_half launch: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // tensor_16.runPermutation "packetToFPGA"
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
         (__half *)d_samples_padding[current_buffer], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToFPGA: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // cudaMemcpyAsync for padding
-    cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[current_buffer],
                                d_samples_padding[current_buffer],
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, streams[current_buffer]));
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for d_samples_padded cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // cudaMemsetAsync
-    cpu_start = clock::now();
     CUDA_CHECK(cudaMemsetAsync(
         reinterpret_cast<char *>(d_samples_padded[current_buffer]) +
             sizeof(typename T::HalfPacketSamplesType),
@@ -3093,33 +2888,14 @@ public:
         sizeof(typename T::PaddedPacketSamplesType) -
             sizeof(typename T::HalfPacketSamplesType),
         streams[current_buffer]));
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for cudaMemsetAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // tensor_16.runPermutation "paddedToCorrInput"
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "paddedToCorrInput", alpha, (__half *)d_samples_padded[current_buffer],
         (__half *)d_correlator_input[current_buffer], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation paddedToCorrInput: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    // correlator.launchAsync
-    cpu_start = clock::now();
     correlator.launchAsync((CUstream)streams[current_buffer],
                            (CUdeviceptr)d_correlator_output[current_buffer],
                            (CUdeviceptr)d_correlator_input[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for correlator.launchAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     tensor_32.runPermutation("visCorrToBaseline", alpha_32,
                              (float *)d_correlator_output[current_buffer],
@@ -3137,73 +2913,35 @@ public:
         streams[current_buffer]);
 
     // accumulate_visibilities (CPU wrapper)
-    cpu_start = clock::now();
     accumulate_visibilities((float *)d_visibilities_trimmed[current_buffer],
                             (float *)d_visibilities_accumulator,
                             2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for accumulate_visibilities: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)d_samples_half[current_buffer],
                              (__half *)d_samples_consolidated[current_buffer],
                              streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation packetToPlanar: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "consToColMajCons", alpha,
         (__half *)d_samples_consolidated[current_buffer],
         (__half *)d_samples_consolidated_col_maj[current_buffer],
         streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_16.runPermutation consToColMajCons: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "weightsInputToCCGLIB", alpha, (__half *)d_weights[current_buffer],
         (__half *)d_weights_permuted[current_buffer], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG(
-        "CPU time for tensor_16.runPermutation weightsInputToCCGLIB: {} us",
-        std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                              cpu_start)
-            .count());
-
-    cpu_start = clock::now();
     (*gemm_handles[current_buffer])
         .Run((CUdeviceptr)d_weights_permuted[current_buffer],
              (CUdeviceptr)d_samples_consolidated_col_maj[current_buffer],
              (CUdeviceptr)d_beamformer_output[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for GEMM run: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
-    cpu_start = clock::now();
     tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
                              (float *)d_beamformer_output[current_buffer],
                              (float *)d_beamformer_data_output[current_buffer],
                              streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for tensor_32.runPermutation beamCCGLIBToOutput: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     convert_float_to_half(
         (float *)d_beamformer_data_output[current_buffer],
@@ -3212,17 +2950,10 @@ public:
             NR_TIME_STEPS_FOR_CORRELATION,
         streams[current_buffer]);
 
-    cpu_start = clock::now();
     cudaEventRecord(stop_run[benchmark_runs_done], streams[current_buffer]);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU time for cudaEventRecord stop_run: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
 
     // Output handling
     if (output_ != nullptr && !dummy_run) {
-      cpu_start = clock::now();
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
@@ -3230,34 +2961,17 @@ public:
                       d_beamformer_data_output_half[current_buffer],
                       sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
                       streams[current_buffer]);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for output registration + copying: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
-      cpu_start = clock::now();
       auto *output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = block_num};
       cudaLaunchHostFunc(streams[current_buffer],
                          output_transfer_complete_host_func, output_ctx);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for host function launch: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
 
       // memcpy arrivals
-      cpu_start = clock::now();
       bool *arrivals_output_pointer =
           (bool *)output_->get_arrivals_data_landing_pointer(block_num);
       std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(block_num);
-      cpu_end = clock::now();
-      LOG_DEBUG("CPU time for memcpy arrivals + register completion: {} us",
-                std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                      cpu_start)
-                    .count());
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=
           NR_CORRELATED_BLOCKS_TO_ACCUMULATE) {
@@ -3270,11 +2984,6 @@ public:
       current_buffer = (current_buffer + 1) % num_buffers;
       benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
     }
-    auto cpu_end_total = clock::now();
-    LOG_DEBUG("Total CPU time for execute_pipeline: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  cpu_end_total - cpu_start_total)
-                  .count());
   }
   LambdaCorrBeamOnlyGPUPipeline(const int num_buffers,
                                 BeamWeightsT<T> *h_weights)
@@ -3456,7 +3165,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
+    execute_pipeline(&warmup_packet, nullptr, true);
     cudaDeviceSynchronize();
     // these need to be set after the dummy run.
     visibilities_start_seq_num = -1;
@@ -3882,9 +3591,8 @@ private:
 public:
   // -------------------------------------------------------------------------
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
-    using clock = std::chrono::high_resolution_clock;
-    auto cpu_start_total = clock::now();
 
     if (!dummy_run && state_ == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
@@ -3900,44 +3608,27 @@ public:
     // ------------------------------------------------------------------
     // 1. Transfer raw samples and scales to device
     // ------------------------------------------------------------------
-    auto cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(
         b.samples_entry.get(), packet_data->get_samples_ptr(),
         packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream));
-    LOG_DEBUG("CPU overhead for samples cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(b.scales.get(), packet_data->get_scales_ptr(),
                                packet_data->get_scales_element_size(),
                                cudaMemcpyDefault, b.stream));
-    LOG_DEBUG("CPU overhead for scales cudaMemcpyAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
     // ------------------------------------------------------------------
     // 2. Release the input buffer asynchronously on the host stream so
     //    the GPU pipeline stream is not stalled.
     // ------------------------------------------------------------------
-    cpu_start = clock::now();
     auto *ctx =
         new BufferReleaseContext{.state = this->state_,
                                  .buffer_index = packet_data->buffer_index,
                                  .dummy_run = dummy_run};
     CUDA_CHECK(
         cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
-    LOG_DEBUG("CPU time for BufferReleaseContext + cudaLaunchHostFunc: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
     // ------------------------------------------------------------------
     // 3. Scale integer samples to fp16
     // ------------------------------------------------------------------
-    cpu_start = clock::now();
     scale_and_convert_to_half<
         typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
         typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
@@ -3949,28 +3640,15 @@ public:
         reinterpret_cast<typename T::HalfInputPacketSamplesPlanarType *>(
             b.samples_half.get()),
         b.stream);
-    LOG_DEBUG("CPU time for scale_and_convert_to_half launch: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
     // ------------------------------------------------------------------
     // 4. Permute packet → padding layout
     // ------------------------------------------------------------------
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "packetToPadding", alpha_16,
         reinterpret_cast<__half *>(b.samples_half.get()),
         reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
-    LOG_DEBUG("CPU time for tensor packetToPadding: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
-    // ------------------------------------------------------------------
-    // 5. Copy unpadded → padded buffer then zero-fill the padding region
-    // ------------------------------------------------------------------
-    cpu_start = clock::now();
     CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, b.stream));
@@ -3981,40 +3659,16 @@ public:
                         sizeof(typename T::PaddedPacketSamplesType) -
                             sizeof(typename T::HalfPacketSamplesType),
                         b.stream));
-    LOG_DEBUG("CPU overhead for padding memcpy + memset: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
-    // ------------------------------------------------------------------
-    // 6. Permute padded → correlator input layout
-    // ------------------------------------------------------------------
-    cpu_start = clock::now();
     tensor_16.runPermutation(
         "paddedToCorrInput", alpha_16,
         reinterpret_cast<__half *>(b.samples_padded.get()),
         reinterpret_cast<__half *>(b.correlator_input.get()), b.stream);
-    LOG_DEBUG("CPU time for tensor paddedToCorrInput: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
-
-    // ------------------------------------------------------------------
-    // 7. Cross-correlate with tcc::Correlator
-    // ------------------------------------------------------------------
-    cpu_start = clock::now();
     correlator.launchAsync(
         static_cast<CUstream>(b.stream),
         reinterpret_cast<CUdeviceptr>(b.correlator_output.get()),
         reinterpret_cast<CUdeviceptr>(b.correlator_input.get()));
-    LOG_DEBUG("CPU time for correlator.launchAsync: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
-    // ------------------------------------------------------------------
-    // 8. Rearrange correlator output to baseline-major, then trim padding
-    // ------------------------------------------------------------------
     tensor_32.runPermutation(
         "visCorrToBaseline", alpha_32,
         reinterpret_cast<float *>(b.correlator_output.get()),
@@ -4033,15 +3687,10 @@ public:
     // 9. Expand triangular baselines → full NR_RECEIVERS × NR_RECEIVERS
     //    Hermitian matrices (one per channel × pol × pol).
     // ------------------------------------------------------------------
-    cpu_start = clock::now();
     tensor_32.runPermutation(
         "visCorrToDecomp", alpha_32,
         reinterpret_cast<float *>(b.visibilities_trimmed.get()),
         reinterpret_cast<float *>(b.decomp_visibilities.get()), b.stream);
-    LOG_DEBUG("CPU time for tensor visCorrToDecomp: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
     unpack_triangular_baseline_batch_launch<cuComplex>(
         reinterpret_cast<cuComplex *>(b.decomp_visibilities.get()),
@@ -4053,7 +3702,6 @@ public:
     //     cuSOLVER overwrites decomp_visibilities with eigenvectors
     //     (columns, ascending eigenvalue order).
     // ------------------------------------------------------------------
-    cpu_start = clock::now();
     CUSOLVER_CHECK(cusolverDnXsyevBatched(
         b.cusolver_handle, b.cusolver_params, cusolver_jobz, cusolver_uplo,
         T::NR_RECEIVERS, CUDA_C_32F,
@@ -4062,34 +3710,7 @@ public:
         b.cusolver_work_device.get(), b.cusolver_work_device_size,
         b.cusolver_work_host, b.cusolver_work_host_size, b.cusolver_info.get(),
         CUSOLVER_BATCH_SIZE));
-    LOG_DEBUG("CPU time for cusolverDnXsyevBatched launch: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
-    // ------------------------------------------------------------------
-    // 11. Form P_block = U U^H via batched cuBLAS cherk.
-    //
-    //     After cuSOLVER, decomp_visibilities holds the full eigenvector
-    //     matrix V (NR_RECEIVERS × NR_RECEIVERS, column = eigenvector,
-    //     ascending order).  The signal subspace U consists of the last
-    //     NR_SIGNAL_EIGENVECTORS columns, i.e. the sub-matrix starting at
-    //     column offset (NR_RECEIVERS - NR_SIGNAL_EIGENVECTORS).
-    //
-    //     cuSOLVER stores column-major (Fortran order), so column j starts
-    //     at row-offset 0 and the pointer to column j is:
-    //       V_ptr + j * NR_RECEIVERS    (in cuComplex elements)
-    //
-    //     cherk computes:  C ← alpha * A * A^H + beta * C
-    //       A = U  (NR_RECEIVERS × NR_SIGNAL_EIGENVECTORS, col-major)
-    //       C = P  (NR_RECEIVERS × NR_RECEIVERS, col-major)
-    //
-    //     We call it once per batch element in a simple loop.  A batched
-    //     cherk variant is not available in cuBLAS; the loop is over
-    //     CUSOLVER_BATCH_SIZE elements and is negligible CPU overhead
-    //     compared with the GPU kernels.
-    // ------------------------------------------------------------------
-    cpu_start = clock::now();
     {
       constexpr int N = T::NR_RECEIVERS;
       constexpr int K = NR_SIGNAL_EIGENVECTORS;
@@ -4115,26 +3736,17 @@ public:
                         N, K, &herk_alpha, U, N, &herk_beta, P_batch, N));
       }
     }
-    LOG_DEBUG("CPU time for batched cublasCherk (UU^H): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
     // ------------------------------------------------------------------
     // 12. Add P_block to the shared accumulator.
     //     accumulate_visibilities adds src into dst element-wise on the
     //     stream (matching usage in LambdaGPUPipeline).
     // ------------------------------------------------------------------
-    cpu_start = clock::now();
     accumulate_visibilities(
         reinterpret_cast<float *>(b.projection_block.get()),
         reinterpret_cast<float *>(d_projection_accumulator),
         // Factor of 2 for complex (real + imag); full square matrix.
         2 * CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS * T::NR_RECEIVERS, b.stream);
-    LOG_DEBUG("CPU time for accumulate_visibilities (projection): {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start)
-                  .count());
 
     // ------------------------------------------------------------------
     // 13. After NR_RUNS_TO_AVERAGE blocks, average, decompose and export.
@@ -4152,11 +3764,6 @@ public:
     if (!dummy_run) {
       current_buffer = (current_buffer + 1) % num_buffers;
     }
-
-    LOG_DEBUG("Total CPU time for execute_pipeline: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  clock::now() - cpu_start_total)
-                  .count());
   }
 
   // -------------------------------------------------------------------------
@@ -4251,7 +3858,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, /*dummy_run=*/true);
+    execute_pipeline(&warmup_packet, nullptr, /*dummy_run=*/true);
     cudaDeviceSynchronize();
 
     // Reset accumulator after warm-up (dummy run may have polluted it with
@@ -4593,6 +4200,7 @@ private:
 
 public:
   void execute_pipeline(FinalPacketData *packet_data,
+                        int64_t *delays_subpacket = nullptr,
                         const bool dummy_run = false) override {
 
     if (!dummy_run && state_ == nullptr)
@@ -4766,7 +4374,7 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, /*dummy_run=*/true);
+    execute_pipeline(&warmup_packet, nullptr, /*dummy_run=*/true);
     cudaDeviceSynchronize();
 
     CUDA_CHECK(cudaMemset(d_fold_accumulator_, 0,

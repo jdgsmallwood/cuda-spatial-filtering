@@ -11,6 +11,7 @@ public:
   void set_state(ProcessorStateBase *state) { state_ = state; };
   void set_output(std::shared_ptr<Output> output) { output_ = output; };
   virtual void execute_pipeline(FinalPacketData *packet_data,
+                                int64_t *delays_subpacket = nullptr,
                                 const bool dummy_run = false) = 0;
   virtual void dump_visibilities(const uint64_t end_seq_num = 0) = 0;
 

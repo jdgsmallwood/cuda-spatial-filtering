@@ -41,6 +41,22 @@ template <size_t NR_CHANNELS, size_t NR_FPGA_SOURCES> struct BufferState {
   std::bitset<NR_CHANNELS> is_populated;
 };
 
+struct Result {
+  int64_t closest;
+  int64_t remainder;
+};
+
+inline Result nearest_multiple(int64_t x, int64_t k) {
+  // compute nearest integer multiple index
+  int64_t m =
+      static_cast<int64_t>(std::llround(static_cast<long double>(x) / k));
+
+  int64_t closest = m * k;
+  int64_t remainder = x - closest;
+
+  return {closest, remainder};
+}
+
 // forward declaration of GPUPipeline.
 class GPUPipeline;
 
@@ -88,11 +104,11 @@ public:
   ProcessorState(
       size_t nr_packets_for_correlation, size_t nr_between_samples,
       size_t min_freq_channel,
-      std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays,
+      std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
       std::unique_ptr<std::unordered_map<uint32_t, int>> *fpga_ids_ = nullptr)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
-        MIN_FREQ_CHANNEL(min_freq_channel) {
+        MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
 
     if (fpga_ids_ && !(*fpga_ids_)->empty()) {
       fpga_ids = **fpga_ids_;
@@ -122,6 +138,18 @@ public:
     } catch (...) {
       cleanup();
       throw;
+    }
+
+    for (auto i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+      if (i == 0) {
+        fpga_delays_packet_aligned[i] = 0;
+        fpga_delays_subpacket[i] = 0;
+      } else {
+        auto r = nearest_multiple(fpga_delays[i],
+                                  static_cast<int64_t>(nr_between_samples));
+        fpga_delays_packet_aligned[i] = r.closest;
+        fpga_delays_subpacket[i] = r.remainder;
+      }
     }
   };
   ~ProcessorState() { cleanup(); };
@@ -185,14 +213,19 @@ public:
       future_packet_queue[fpga_index].push({current_read_index, sample_count});
       return;
     }
+
+    bool is_extended = false;
+    int num_copied = 0;
     // copy to correct place or leave it.
-    for (int buffer = 0; buffer < NR_INPUT_BUFFERS; ++buffer) {
-      const int buffer_index = (current_buf + buffer) % NR_INPUT_BUFFERS;
+    for (int buffer_num = 0; buffer_num < NR_INPUT_BUFFERS; ++buffer_num) {
+      const int buffer_index = (current_buf + buffer_num) % NR_INPUT_BUFFERS;
       const uint64_t buffer_start = buffers[buffer_index].start_seq[fpga_index];
       const int packet_index =
           (sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
 
-      if (buffer == 0 && packet_index < 0) [[unlikely]] {
+      // should be < -1 as the -1th packet is useful for us due to inter-FPGA
+      // drift.
+      if (buffer_num == 0 && packet_index < -1) [[unlikely]] {
         // This means that this packet is less than the lowest possible
         // start token. Maybe an out-of-order packet that's coming in?
         // Regardless we can't do anything with this.
@@ -204,32 +237,50 @@ public:
         return;
       }
 
-      if (packet_index >= 0 && packet_index < NR_PACKETS_FOR_CORRELATION) {
+      // we extend here to allow for buffer packets
+      if (packet_index >= -1 &&
+          packet_index < static_cast<int>(NR_PACKETS_FOR_CORRELATION) + 1) {
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
-        //           "receiver_index {} of buffer {}",
-        //           packet_index, freq_channel, receiver_index, buffer_index);
+        LOG_INFO("Copying data to packet_index {} and channel index {} and "
+                 "receiver_index {} of buffer {}",
+                 packet_index, freq_channel, receiver_index, buffer_index);
 
         auto &buffer = d_samples[buffer_index];
+        // we need to add 1 to the packet index to allow for the
+        // packet at the front which is technically not part of the
+        // correlation block.
         auto &samples =
-            (*buffer->samples)[freq_channel][packet_index][fpga_index];
+            (*buffer->samples)[freq_channel][packet_index + 1][fpga_index];
         auto &scales =
-            (*buffer->scales)[freq_channel][packet_index][receiver_index];
+            (*buffer->scales)[freq_channel][packet_index + 1][receiver_index];
         auto &arrival =
-            buffer->arrivals[0][freq_channel][packet_index][fpga_index];
+            buffer->arrivals[0][freq_channel][packet_index + 1][fpga_index];
         std::memcpy(&samples, pkt.payload->data,
                     sizeof(typename T::PacketDataStructure));
         std::memcpy(&scales, pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
         arrival = true;
+        num_copied += 1;
+
+        if (((packet_index == -1) && (buffer_num > 0)) ||
+            ((packet_index == 0) && (buffer_num > 0)) ||
+            packet_index == NR_PACKETS_FOR_CORRELATION - 1 ||
+            packet_index == NR_PACKETS_FOR_CORRELATION) {
+          is_extended = true;
+          LOG_INFO("Setting packet {} as is_extended", packet_index);
+        }
         // LOG_DEBUG("Setting original_packet_processed as true...");
         // LOG_DEBUG("original_packet_processed_before={}",
         //           *pkt.original_packet_processed);
-        *(pkt.original_packet_processed) = true;
-        // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
-        //           *pkt.original_packet_processed);
 
-        return;
+        if (num_copied >= 1 + is_extended) {
+          LOG_INFO("Setting as processed");
+          *(pkt.original_packet_processed) = true;
+          // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
+          //           *pkt.original_packet_processed);
+
+          return;
+        }
       }
     }
     // LOG_DEBUG(
@@ -258,27 +309,35 @@ public:
     LOG_INFO("[BufferInitialization] First count for FPGA ID {} was {}...",
              fpga_id, first_count);
     std::lock_guard lock(buffer_index_mutex);
+
     const int fpga_index = fpga_ids[fpga_id];
+    const int64_t fpga_delay = fpga_delays_packet_aligned[fpga_index];
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-      buffers[i].start_seq[fpga_index] =
-          first_count + i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
-      buffers[i].end_seq[fpga_index] =
-          first_count +
-          ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-      buffers[i].is_ready = true;
-      LOG_INFO("[BufferInitialization] Buffer {} goes from {} to {}", i,
-               buffers[i].start_seq[fpga_index],
-               buffers[i].end_seq[fpga_index]);
-      // we know 0 will be the first one - so no need to add zero
-      if (i != 0 && fpga_index == 0) {
-        // can just use the first FPGA for checking which buffer should
-        // come next.
-        buffer_ordering_queue.push({i, buffers[i].start_seq[0]});
-      };
+      for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
+        // need to minus the delay for whichever FPGA the reference is, then add
+        // the delay for the alveo this is.
+        buffers[i].start_seq[j] =
+            first_count - fpga_delay + fpga_delays_packet_aligned[j] +
+            i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
+        buffers[i].end_seq[j] =
+            first_count - fpga_delay + fpga_delays_packet_aligned[j] +
+            ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+        buffers[i].is_ready = true;
+        LOG_INFO(
+            "[BufferInitialization] Buffer {} for FPGA {} goes from {} to {}",
+            i, j, buffers[i].start_seq[j], buffers[i].end_seq[j]);
+        // we know 0 will be the first one - so no need to add zero
+        if (i != 0 && j == 0) {
+          // can just use the first FPGA for checking which buffer should
+          // come next.
+          buffer_ordering_queue.push({i, buffers[i].start_seq[0]});
+        };
+      }
     }
-    global_max_end_seq[fpga_index].store(
-        buffers[NR_INPUT_BUFFERS - 1].end_seq[fpga_index],
-        std::memory_order_release);
+    for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
+      global_max_end_seq[j].store(buffers[NR_INPUT_BUFFERS - 1].end_seq[j],
+                                  std::memory_order_release);
+    }
   };
 
   __attribute__((hot)) void process_packet_data(
@@ -307,7 +366,7 @@ public:
           "parsed sample count was zero - something has gone wrong!");
     }
 
-    std::call_once(buffer_init_flag[fpga_ids[parsed.fpga_id]], [&]() {
+    std::call_once(buffer_init_flag, [&]() {
       LOG_INFO("Initializing buffers for FPGA {} / {} as this is the first "
                "packet...",
                fpga_ids[parsed.fpga_id], parsed.fpga_id);
@@ -368,7 +427,7 @@ public:
       //           "buffer {}...",
       //           buffer_index);
       std::memset(d_samples[buf_idx]->arrivals, 0,
-                  T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION *
+                  T::NR_CHANNELS * (T::NR_PACKETS_FOR_CORRELATION + 2) *
                       T::NR_FPGA_SOURCES * sizeof(bool));
 
       buffer.is_populated.reset();
@@ -715,7 +774,8 @@ public:
           }
           buffer_ready_for_pipeline.notify_one();
         } else [[unlikely]] {
-          pipeline_->execute_pipeline(d_samples[current_buf]);
+          pipeline_->execute_pipeline(d_samples[current_buf],
+                                      fpga_delays_subpacket.data());
           pipeline_runs_queued += 1;
         }
       }
@@ -757,7 +817,8 @@ public:
       buffers_ready_for_pipeline.pop();
       lock.unlock();
       LOG_INFO("Buffer index {} picked up by pipeline feeder...", buffer_index);
-      pipeline_->execute_pipeline(d_samples[buffer_index]);
+      pipeline_->execute_pipeline(d_samples[buffer_index],
+                                  fpga_delays_subpacket.data());
       pipeline_runs_queued += 1;
     }
     std::cout << "Pipeline feeder exiting!\n";
@@ -839,7 +900,8 @@ private:
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
   std::once_flag buffer_init_flag;
-  std::array<size_t, T::NR_FPGA_SOURCES> fpga_delays;
+  std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
+      fpga_delays_packet_aligned, fpga_delays_subpacket;
 
   std::mutex latest_packet_mutex;
   static constexpr int WORKER_COUNT = 3;
