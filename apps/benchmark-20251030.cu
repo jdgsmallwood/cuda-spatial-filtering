@@ -278,6 +278,7 @@ int main(int argc, char *argv[]) {
   for (auto i = 0; i < nr_fpga_sources; ++i) {
     fpga_delays[i] = 0;
   }
+
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       min_freq_channel, fpga_delays, &fpga_ids);
