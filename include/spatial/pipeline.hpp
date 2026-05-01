@@ -2419,17 +2419,17 @@ public:
                   packet_data->get_arrivals_size());
       output_->register_arrivals_transfer_complete(beam_block_num);
 
-      // size_t fft_block_num =
-      //     output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
-      // auto *fft_output_pointer =
-      //     (void *)output_->get_fft_landing_pointer(fft_block_num);
-      // cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
-      //                 sizeof(FFTOutputType), cudaMemcpyDefault, b.stream);
-      //
-      // auto *fft_output_ctx = new OutputTransferCompleteContext{
-      //     .output = this->output_, .block_index = fft_block_num};
-      // cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
-      //                    fft_output_ctx);
+      size_t fft_block_num =
+          output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
+      auto *fft_output_pointer =
+          (void *)output_->get_fft_landing_pointer(fft_block_num);
+      cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
+                      sizeof(FFTOutputType), cudaMemcpyDefault, b.stream);
+
+      auto *fft_output_ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = fft_block_num};
+      cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
+                         fft_output_ctx);
 
       size_t eig_block_num = output_->register_eigendecomposition_data_block(
           start_seq_num, end_seq_num);
