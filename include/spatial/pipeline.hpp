@@ -2174,14 +2174,14 @@ public:
     // 5. Copy unpadded → padded buffer then zero-fill the padding region
     // ------------------------------------------------------------------
     CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
-                               sizeof(typename T::HalfPacketSamplesType),
+                               sizeof(typename T::HalfPacketAlignedSamplesType),
                                cudaMemcpyDefault, b.stream));
     CUDA_CHECK(
         cudaMemsetAsync(reinterpret_cast<char *>(b.samples_padded.get()) +
-                            sizeof(typename T::HalfPacketSamplesType),
+                            sizeof(typename T::HalfPacketAlignedSamplesType),
                         0,
                         sizeof(typename T::PaddedPacketSamplesType) -
-                            sizeof(typename T::HalfPacketSamplesType),
+                            sizeof(typename T::HalfPacketAlignedSamplesType),
                         b.stream));
 
     // ------------------------------------------------------------------
