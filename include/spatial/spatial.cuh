@@ -757,9 +757,8 @@ sum_fft_over_packets(const float2 *__restrict__ d_input,
   const size_t channel_idx = blockIdx.y % nr_channels;
   const size_t pol_idx = blockIdx.y / nr_channels;
   const size_t beam_idx = blockIdx.z;
-  const size_t packet_idx = threadIdx.y;
+  const size_t packet_idx = blockIdx.x * blockDim.y + threadIdx.y;
 
-  const size_t block_start_packet_id = blockDim.x * blockIdx.x;
   const int input_base_pointer =
       channel_idx * nr_polarizations * nr_beams * nr_packets * nr_fft_freqs +
       pol_idx * nr_beams * nr_packets * nr_fft_freqs +
