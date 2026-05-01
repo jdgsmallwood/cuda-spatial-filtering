@@ -38,8 +38,7 @@ int main(int argc, char *argv[]) {
   // 2x as there will be original & RFI mitigated beams.
   using FFTOutputType =
       float[NR_OBSERVING_CHANNELS][nr_lambda_polarizations][2 * nr_lambda_beams]
-           [nr_lambda_time_steps_per_packet *
-            NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
+           [nr_lambda_time_steps_per_packet - 10];
 
   using BeamOutputType =
       __half[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
