@@ -487,8 +487,10 @@ private:
 
       const auto &block = beam_blocks_[beam_read_idx_];
 
-      beam_writer_->write_beam_block(&block.beam_data, &block.arrival_data,
-                                     block.start_seq_num, block.end_seq_num);
+      if (beam_writer_ != nullptr) {
+        beam_writer_->write_beam_block(&block.beam_data, &block.arrival_data,
+                                       block.start_seq_num, block.end_seq_num);
+      }
       auto block_num = beam_read_idx_;
       beam_read_idx_ = (beam_read_idx_ + 1) % beam_blocks_.size();
       LOG_INFO("Output block {} written. Next read index is {}.", block_num,
@@ -502,10 +504,11 @@ private:
 
       const auto &block = vis_blocks_[vis_read_idx_];
 
-      vis_writer_->write_visibilities_block(
-          &block.data, block.start_seq_num, block.end_seq_num,
-          block.num_missing_packets, block.num_total_packets);
-
+      if (vis_writer_ != nullptr) {
+        vis_writer_->write_visibilities_block(
+            &block.data, block.start_seq_num, block.end_seq_num,
+            block.num_missing_packets, block.num_total_packets);
+      }
       vis_read_idx_ = (vis_read_idx_ + 1) % vis_blocks_.size();
     }
   }
@@ -515,11 +518,11 @@ private:
            eigen_blocks_[eigen_read_idx_].transfer_complete && running_) {
 
       const auto &block = eigen_blocks_[eigen_read_idx_];
-
-      eigen_writer_->write_eigendata_block(
-          &block.eigenvalues, &block.eigenvectors, block.start_seq_num,
-          block.end_seq_num);
-
+      if (eigen_writer_ != nullptr) {
+        eigen_writer_->write_eigendata_block(
+            &block.eigenvalues, &block.eigenvectors, block.start_seq_num,
+            block.end_seq_num);
+      }
       eigen_read_idx_ = (eigen_read_idx_ + 1) % eigen_blocks_.size();
     }
   }
@@ -531,10 +534,11 @@ private:
 
       const auto &block = fft_blocks_[fft_read_idx_];
 
-      fft_writer_->write_fft_block(&block.fft_output, block.start_seq_num,
-                                   block.end_seq_num, block.channel_idx,
-                                   block.pol_idx);
-
+      if (fft_writer_ != nullptr) {
+        fft_writer_->write_fft_block(&block.fft_output, block.start_seq_num,
+                                     block.end_seq_num, block.channel_idx,
+                                     block.pol_idx);
+      }
       fft_read_idx_ = (fft_read_idx_ + 1) % fft_blocks_.size();
     }
   };
@@ -547,9 +551,10 @@ private:
 
       const auto &block = pulsar_fold_blocks_[pulsar_fold_read_idx_];
 
-      pulsar_fold_writer_->write_pulsar_fold_block(
-          &block.pulsar_fold_output, block.start_seq_num, block.end_seq_num);
-
+      if (pulsar_fold_writer_ != nullptr) {
+        pulsar_fold_writer_->write_pulsar_fold_block(
+            &block.pulsar_fold_output, block.start_seq_num, block.end_seq_num);
+      }
       pulsar_fold_read_idx_ =
           (pulsar_fold_read_idx_ + 1) % pulsar_fold_blocks_.size();
     }

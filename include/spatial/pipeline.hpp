@@ -1813,6 +1813,8 @@ private:
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_padding(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
           beam_shape(make_device_ptr<FineChannelRemovedType>()),
           beam_output(make_device_ptr<BeamOutput>()),
@@ -1828,8 +1830,6 @@ private:
           weights_rfi_mitigated(make_device_ptr<RFIMitigatedBeamWeights>()),
           weights_beamformer(make_device_ptr<RFIMitigatedBeamWeights>()),
           beamformer_output(make_device_ptr<BeamformerOutput>()),
-          samples_padding(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_padded(
               make_device_ptr<typename T::PaddedPacketSamplesType>()),
           correlator_input(make_device_ptr<CorrelatorInput>()),
