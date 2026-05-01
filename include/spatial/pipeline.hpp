@@ -2384,12 +2384,12 @@ public:
                              (float *)b.samples_fine_channel_removed.get(),
                              (float *)b.beam_shape.get(), b.stream);
 
-    // detect_and_downsample_fft_launch(
-    //     (float2 *)b.samples_cufft_output.get(),
-    //     (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
-    //     T::NR_POLARIZATIONS,
-    //     T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
-    //     2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+    detect_and_downsample_fft_launch(
+        (float2 *)b.samples_cufft_output.get(),
+        (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
+        T::NR_POLARIZATIONS,
+        T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
+        2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
 
     detect_and_convert_to_half_launch(
         (float4 *)b.beam_shape.get(), (__half *)b.beam_output.get(),
