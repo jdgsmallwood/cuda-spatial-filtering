@@ -92,13 +92,10 @@ int main(int argc, char *argv[]) {
     fpga_delays[i] = 0;
   }
 
-<<<<<<< HEAD
-=======
   if (nr_fpga_sources == 2) {
     fpga_delays[1] = args.fpga_delay;
   }
 
->>>>>>> 28be827173643643fdb72483b6e0ccfdd44c576c
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       args.min_freq_channel, fpga_delays, &fpga_ids);
