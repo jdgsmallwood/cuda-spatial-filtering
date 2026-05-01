@@ -177,12 +177,9 @@ int main(int argc, char *argv[]) {
     channel_freqs_hz[i] = (args.min_freq_channel + i) * CHANNEL_WIDTH_HZ;
 
   auto vis_writer =
-      std::make_unique<HDF5UVXWriter<Config::VisibilitiesOutputType>>(
-          vis_file, channel_freqs_hz, antenna_enu, antenna_ecef,
-          array_origin_geocentric, array_origin_geodetic, antenna_ids,
-          /* ra_j2000  = */ std::numeric_limits<double>::quiet_NaN(),
-          /* dec_j2000 = */ std::numeric_limits<double>::quiet_NaN(),
-          &antenna_mapping);
+      std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
+          vis_file, args.min_freq_channel,
+          args.min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
 
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
