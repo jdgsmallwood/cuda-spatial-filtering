@@ -504,7 +504,7 @@ public:
             !modified_since_last_completion_check[channel]) {
           continue;
         }
-         LOG_INFO("Check if buffers are complete for channel {}", channel);
+         //LOG_INFO("Check if buffers are complete for channel {}", channel);
         bool all_fpgas_complete = true;
         for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
           // we wait for halfway through the next buffer to be complete to avoid
@@ -521,14 +521,14 @@ public:
         if (all_fpgas_complete) {
           buffer.is_populated[channel] = true;
         
-         LOG_INFO("Buffer is complete for channel {}", channel);
+        // LOG_INFO("Buffer is complete for channel {}", channel);
 	} else {
-          LOG_INFO("Buffer is not complete for channel {} as end_seqs are is {}, {}  and latest_packet_receives are:",
-                 channel, buffers[buf_idx].end_seq[0], buffers[buf_idx].end_seq[1]);
-         for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
-           LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
-                    latest_packet_received[channel][check]);
-         }
+         // LOG_INFO("Buffer is not complete for channel {} as end_seqs are is {}, {}  and latest_packet_receives are:",
+           //      channel, buffers[buf_idx].end_seq[0], buffers[buf_idx].end_seq[1]);
+       //  for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
+       //    LOG_INFO("FPGA ID {} / Channel {}: {},", check, channel,
+         //           latest_packet_received[channel][check]);
+       //  }
          }
       }
       
