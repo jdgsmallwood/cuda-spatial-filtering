@@ -1720,8 +1720,8 @@ private:
              NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE];
   using FFTOutputType =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
-           [T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION /
-            T::FFT_DOWNSAMPLE_FACTOR];
+           [T::NR_TIME_STEPS_PER_PACKET -
+            2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE];
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
@@ -1761,7 +1761,8 @@ private:
     DevicePtr<BeamOutput> beam_output;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output,
         samples_cufft_output_fine_channel;
-    DevicePtr<FineChannelRemovedType> samples_fine_channel_removed, beam_shape;
+    DevicePtr<FineChannelRemovedType> samples_fine_channel_removed, beam_shape,
+        cufft_downsampled_input;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
     DevicePtr<BeamWeights> weights;
     DevicePtr<BeamWeights> weights_permuted, weights_updated;
@@ -1824,6 +1825,7 @@ private:
           samples_fine_channel_removed(
               make_device_ptr<FineChannelRemovedType>()),
           cufft_downsampled_output(make_device_ptr<FFTOutputType>()),
+          cufft_downsampled_input(make_device_ptr<FineChannelRemovedType>()),
           weights(make_device_ptr<BeamWeights>()),
           weights_permuted(make_device_ptr<BeamWeights>()),
           weights_updated(make_device_ptr<BeamWeights>()),
@@ -2034,6 +2036,8 @@ private:
                                                              'e', 'o', 'z'};
   inline static const std::vector<int> modeFineChannelRemoved{'g', 'c', 'p',
                                                               'e', 'o', 'z'};
+  inline static const std::vector<int> modeBeamFFTDownsample{'c', 'p', 'e',
+                                                             'o', 'g', 'z'};
   // We need the planar samples matrix to be in column-major memory layout
   // which is equivalent to transposing time and receiver structure here.
   // We also squash the b,t axes into s = block * time
@@ -2313,15 +2317,6 @@ public:
       size_t CUBLAS_STRIDE_B = T::NR_RECEIVERS * T::NR_BEAMS;
       size_t CUBLAS_STRIDE_C = T::NR_RECEIVERS * T::NR_BEAMS;
 
-      // cublasGemmStridedBatchedEx(
-      //     b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_T, T::NR_BEAMS, N, N,
-      //     &herk_alpha, b.weights.get(), CUDA_C_16F, T::NR_BEAMS,
-      //     CUBLAS_STRIDE_B, b.projection_matrix.get(), CUDA_C_16F, N,
-      //     CUBLAS_STRIDE_A, &herk_beta, b.weights_updated.get(), CUDA_C_16F,
-      //     T::NR_BEAMS, CUBLAS_STRIDE_C, CUBLAS_NUM_BATCHES,
-      //     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-      //
-      //
       b.gemm_weight_projection_handle->Run(
           (CUdeviceptr)b.weights.get(), (CUdeviceptr)b.projection_matrix.get(),
           (CUdeviceptr)b.weights_updated.get());
@@ -2384,12 +2379,17 @@ public:
                              (float *)b.samples_fine_channel_removed.get(),
                              (float *)b.beam_shape.get(), b.stream);
 
-    detect_and_downsample_fft_launch(
-        (float2 *)b.samples_cufft_output.get(),
-        (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
-        T::NR_POLARIZATIONS,
-        T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
-        2 * T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+    tensor_32.runPermutation("fineChannelRemovedToBeamFFTDownsample", alpha_32,
+                             (float *)b.samples_fine_channel_removed.get(),
+                             (float *)b.cufft_downsampled_input.get(),
+                             b.stream);
+
+    sum_fft_over_packets_launch(
+        (float2 *)b.cufft_downsampled_input.get(),
+        (float *)b.cufft_downsampled_output.get(), 2 * T::NR_BEAMS,
+        T::NR_CHANNELS, T::NR_POLARIZATIONS,
+        T::NR_TIME_STEPS_PER_PACKET - 2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE,
+        T::NR_PACKETS_FOR_CORRELATION, b.stream);
 
     detect_and_convert_to_half_launch(
         (float4 *)b.beam_shape.get(), (__half *)b.beam_output.get(),
@@ -2521,6 +2521,7 @@ public:
     tensor_32.addTensor(modeCUFFTOutput, "cufftOutput");
     tensor_32.addTensor(modeFineChannelRemove, "fineChannelRemove");
     tensor_32.addTensor(modeFineChannelRemoved, "fineChannelRemoved");
+    tensor_32.addTensor(modeBeamFFTDownsample, "beamFFTDownsample");
 
     // Permutation descriptors
     tensor_16.addPermutation("packet_padded", "corr_input",
@@ -2554,6 +2555,9 @@ public:
     tensor_32.addPermutation("fineChannelRemoved", "beamOutput",
                              CUTENSOR_COMPUTE_DESC_32F,
                              "fineChannelRemovedToBeamOutput");
+    tensor_32.addPermutation("fineChannelRemoved", "beamFFTDownsample",
+                             CUTENSOR_COMPUTE_DESC_32F,
+                             "fineChannelRemovedToBeamFFTDownsample");
 
     CUDA_CHECK(cudaMalloc((void **)&d_subpacket_delays,
                           sizeof(int) * T::NR_FPGA_SOURCES));

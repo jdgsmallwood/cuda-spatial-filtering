@@ -743,3 +743,64 @@ apply_delays_launch(const __half *d_input, __half *d_output,
       nr_time_samples_per_packet, total_to_copy_per_fpga,
       total_to_copy_per_time_step);
 };
+
+__global__ void
+sum_fft_over_packets(const float2 *__restrict__ d_input,
+                     float *__restrict__ d_output, const size_t nr_channels,
+                     const size_t nr_beams, const size_t nr_polarizations,
+                     const size_t nr_packets, const size_t nr_fft_freqs) {
+
+  __shared__ float final_sum[128];
+
+  const size_t thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
+  const size_t linear_thread_idx = blockDim.x * threadIdx.y + threadIdx.x;
+  const size_t channel_idx = blockIdx.y % nr_channels;
+  const size_t pol_idx = blockIdx.y / nr_channels;
+  const size_t beam_idx = blockIdx.z;
+  const size_t packet_idx = threadIdx.y;
+
+  const size_t block_start_packet_id = blockDim.x * blockIdx.x;
+  const int input_base_pointer =
+      channel_idx * nr_polarizations * nr_beams * nr_packets * nr_fft_freqs +
+      pol_idx * nr_beams * nr_packets * nr_fft_freqs +
+      beam_idx * nr_packets * nr_fft_freqs + packet_idx * nr_fft_freqs +
+      threadIdx.x;
+  const int output_pointer =
+      channel_idx * nr_polarizations * nr_beams * nr_fft_freqs +
+      pol_idx * nr_beams * nr_fft_freqs + beam_idx * nr_fft_freqs + threadIdx.x;
+
+  if (linear_thread_idx < 128) {
+    final_sum[linear_thread_idx] = 0;
+  }
+
+  if (packet_idx < nr_packets) {
+    float2 val = d_input[input_base_pointer];
+    float mag = sqrtf(val.x * val.x + val.y * val.y);
+    atomicAdd(&final_sum[threadIdx.x], mag);
+  }
+  __syncthreads();
+
+  if (threadIdx.y == 0) {
+    atomicAdd(&d_output[output_pointer], final_sum[threadIdx.x]);
+  }
+};
+
+inline void sum_fft_over_packets_launch(const float2 *d_input, float *d_output,
+                                        const size_t nr_beams,
+                                        const size_t nr_channels,
+                                        const size_t nr_polarizations,
+                                        const size_t nr_fft_freqs,
+                                        const size_t nr_packets_to_sum,
+                                        cudaStream_t stream
+
+) {
+  const size_t packets_per_block = 1024 / nr_fft_freqs;
+  const size_t number_blocks_required =
+      (nr_packets_to_sum + packets_per_block - 1) / packets_per_block;
+
+  dim3 grid(number_blocks_required, nr_channels * nr_polarizations, nr_beams);
+  dim3 threads(nr_fft_freqs, packets_per_block, 1);
+  sum_fft_over_packets<<<grid, threads, 0, stream>>>(
+      d_input, d_output, nr_channels, nr_beams, nr_polarizations,
+      nr_packets_to_sum, nr_fft_freqs);
+};
