@@ -149,8 +149,9 @@ int main(int argc, char *argv[]) {
     for (auto j = 0; j < nr_lambda_receivers; ++j) {
       for (auto k = 0; k < nr_lambda_beams; ++k) {
         for (auto l = 0; l < nr_lambda_polarizations; ++l) {
-          h_weights.weights[i][l][k][j] =
-              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+          h_weights.weights[i][l][k][j] = std::complex<__half>(
+              __float2half(1.0f / static_cast<float>(Config::NR_RECEIVERS)),
+              __float2half(0.0f / static_cast<float>(Config::NR_RECEIVERS)));
         }
       }
     }
