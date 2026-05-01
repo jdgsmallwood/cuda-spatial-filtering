@@ -1999,8 +1999,8 @@ private:
 
   inline static const __half alpha = __float2half(1.0f);
 
-  inline static const std::vector<size_t> NR_SIGNAL_EIGENVECTORS{1, 1, 1, 1,
-                                                                 6, 1, 5, 5};
+  inline static const std::vector<size_t> NR_SIGNAL_EIGENVECTORS{1, 9, 1, 2,
+                                                                 6, 3, 6, 5};
 
   static constexpr float alpha_32 = 1.0f;
   // a = unpadded baselines
