@@ -2384,6 +2384,9 @@ public:
                              (float *)b.cufft_downsampled_input.get(),
                              b.stream);
 
+    cudaMemsetAsync((float *)b.cufft_downsampled_output.get(), 0,
+                    sizeof(FFTOutputType), b.stream);
+
     sum_fft_over_packets_launch(
         (float2 *)b.cufft_downsampled_input.get(),
         (float *)b.cufft_downsampled_output.get(), 2 * T::NR_BEAMS,
