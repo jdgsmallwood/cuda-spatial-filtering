@@ -772,6 +772,8 @@ sum_fft_over_packets(const float2 *__restrict__ d_input,
     final_sum[linear_thread_idx] = 0;
   }
 
+  __syncthreads();
+
   if (packet_idx < nr_packets) {
     float2 val = d_input[input_base_pointer];
     float mag = sqrtf(val.x * val.x + val.y * val.y);
