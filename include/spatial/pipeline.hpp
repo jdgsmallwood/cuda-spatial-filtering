@@ -1753,6 +1753,8 @@ private:
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
     DevicePtr<typename T::PacketScalesType> scales;
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
+        samples_pre_align;
+    DevicePtr<typename T::HalfPacketAlignedSamplesType> samples_aligned,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
     DevicePtr<FFTCUFFTInputType> samples_cufft_input;
@@ -1803,10 +1805,14 @@ private:
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_pre_align(
+              make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_aligned(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_consolidated(
-              make_device_ptr<typename T::HalfPacketSamplesType>()),
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_consolidated_col_maj(
-              make_device_ptr<typename T::HalfPacketSamplesType>()),
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
           beam_shape(make_device_ptr<FineChannelRemovedType>()),
           beam_output(make_device_ptr<BeamOutput>()),
@@ -1822,7 +1828,8 @@ private:
           weights_rfi_mitigated(make_device_ptr<RFIMitigatedBeamWeights>()),
           weights_beamformer(make_device_ptr<RFIMitigatedBeamWeights>()),
           beamformer_output(make_device_ptr<BeamformerOutput>()),
-          samples_padding(make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_padding(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_padded(
               make_device_ptr<typename T::PaddedPacketSamplesType>()),
           correlator_input(make_device_ptr<CorrelatorInput>()),
@@ -2011,10 +2018,15 @@ private:
   // u = time steps per packet
   // z = complex
 
-  inline static const std::vector<int> modePacket{'c', 'o', 'f', 'u',
+  inline static const std::vector<int> modePacket{'c', 'y', 'f', 'u',
                                                   'n', 'p', 'z'};
   inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'f',
                                                   'n', 'o', 'u'};
+
+  inline static const std::vector<int> modePacketPreAlign{'f', 'y', 'u', 'c',
+                                                          'n', 'p', 'z'};
+  inline static const std::vector<int> modePacketAligned{'f', 'o', 'u', 'c',
+                                                         'n', 'p', 'z'};
   inline static const std::vector<int> modeCUFFTInput{'c', 'p', 'e', 's', 'z'};
   inline static const std::vector<int> modeCUFFTOutput{'c', 'p', 'e',
                                                        'o', 'u', 'z'};
@@ -2076,6 +2088,7 @@ private:
       {'s', NR_BLOCKS_FOR_CORRELATION *NR_TIMES_PER_BLOCK},
       {'t', NR_TIMES_PER_BLOCK},
       {'u', T::NR_TIME_STEPS_PER_PACKET},
+      {'y', T::NR_PACKETS_FOR_CORRELATION + 2},
       {'z', 2}, // real, imaginary
   };
 
@@ -2086,6 +2099,7 @@ private:
   std::atomic<int> last_frame_processed;
 
   BeamWeights *h_weights;
+  int *d_subpacket_delays;
 
   static constexpr int fft_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
@@ -2127,14 +2141,24 @@ public:
         typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
         typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
         T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
+        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION + 2>(
         (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
         b.scales.get(),
         (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
         b.stream);
 
-    tensor_16.runPermutation("packetToPlanar", alpha,
+    tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
+                             (__half *)b.samples_pre_align.get(), b.stream);
+
+    apply_delays_launch((__half *)b.samples_pre_align.get(),
+                        (__half *)b.samples_aligned.get(), d_subpacket_delays,
+                        T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
+                        T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
+                        T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+
+    tensor_16.runPermutation("alignedToPlanar", alpha,
+                             (__half *)b.samples_aligned.get(),
                              (__half *)b.samples_consolidated.get(), b.stream);
 
     tensor_16.runPermutation(
@@ -2142,8 +2166,8 @@ public:
         (__half *)b.samples_consolidated_col_maj.get(), b.stream);
 
     tensor_16.runPermutation(
-        "packetToPadding", alpha,
-        reinterpret_cast<__half *>(b.samples_half.get()),
+        "alignedToPadding", alpha,
+        reinterpret_cast<__half *>(b.samples_aligned.get()),
         reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
 
     // ------------------------------------------------------------------
@@ -2472,7 +2496,9 @@ public:
     }
 
     tensor_16.addTensor(modePacket, "packet");
+    tensor_16.addTensor(modePacketPreAlign, "prealign");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
+    tensor_16.addTensor(modePacketAligned, "aligned");
     tensor_16.addTensor(modePacketPadded, "packet_padded");
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
@@ -2497,11 +2523,17 @@ public:
     tensor_32.addTensor(modeFineChannelRemoved, "fineChannelRemoved");
 
     // Permutation descriptors
-    tensor_16.addPermutation("packet", "packet_padding",
-                             CUTENSOR_COMPUTE_DESC_16F, "packetToPadding");
     tensor_16.addPermutation("packet_padded", "corr_input",
                              CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
 
+    tensor_16.addPermutation("aligned", "packet_padding",
+                             CUTENSOR_COMPUTE_DESC_16F, "alignedToPadding");
+    tensor_16.addPermutation("packet", "prealign", CUTENSOR_COMPUTE_DESC_16F,
+                             "packetToPreAlign");
+    tensor_16.addPermutation("aligned", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
+                             "alignedToCUFFTInput");
+    tensor_16.addPermutation("aligned", "planar", CUTENSOR_COMPUTE_DESC_16F,
+                             "alignedToPlanar");
     tensor_32.addPermutation("visCorr", "visBaseline",
                              CUTENSOR_COMPUTE_DESC_32F, "visCorrToBaseline");
     tensor_32.addPermutation("visBaselineTrimmed", "visDecomp",
@@ -2526,6 +2558,11 @@ public:
     tensor_32.addPermutation("fineChannelRemoved", "beamOutput",
                              CUTENSOR_COMPUTE_DESC_32F,
                              "fineChannelRemovedToBeamOutput");
+
+    CUDA_CHECK(cudaMalloc((void **)&d_subpacket_delays,
+                          sizeof(int) * T::NR_FPGA_SOURCES));
+    CUDA_CHECK(
+        cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
     buffers.reserve(num_buffers);
@@ -2568,6 +2605,12 @@ public:
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
     // nothing to do.
+  }
+
+  virtual void set_subpacket_delays(int *delays_subpacket) {
+    subpacket_delays_ = delays_subpacket;
+    CUDA_CHECK(cudaMemcpy(d_subpacket_delays, subpacket_delays_,
+                          sizeof(int) * T::NR_FPGA_SOURCES, cudaMemcpyDefault));
   }
 };
 
