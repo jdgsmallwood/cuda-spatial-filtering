@@ -752,7 +752,6 @@ sum_fft_over_packets(const float2 *__restrict__ d_input,
 
   __shared__ float final_sum[128];
 
-  const size_t thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
   const size_t linear_thread_idx = blockDim.x * threadIdx.y + threadIdx.x;
   const size_t channel_idx = blockIdx.y % nr_channels;
   const size_t pol_idx = blockIdx.y / nr_channels;
