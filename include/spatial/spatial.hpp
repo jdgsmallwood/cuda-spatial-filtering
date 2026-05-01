@@ -244,9 +244,9 @@ public:
       if (packet_index >= -1 &&
           packet_index < static_cast<int>(NR_PACKETS_FOR_CORRELATION) + 1) {
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        LOG_INFO("Copying data to packet_index {} and channel index {} and "
-                 "receiver_index {} of buffer {}",
-                 packet_index, freq_channel, receiver_index, buffer_index);
+        LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
+                  "receiver_index {} of buffer {}",
+                  packet_index, freq_channel, receiver_index, buffer_index);
 
         auto &buffer = d_samples[buffer_index];
         // we need to add 1 to the packet index to allow for the
@@ -270,14 +270,12 @@ public:
             packet_index == NR_PACKETS_FOR_CORRELATION - 1 ||
             packet_index == NR_PACKETS_FOR_CORRELATION) {
           is_extended = true;
-          LOG_INFO("Setting packet {} as is_extended", packet_index);
         }
         // LOG_DEBUG("Setting original_packet_processed as true...");
         // LOG_DEBUG("original_packet_processed_before={}",
         //           *pkt.original_packet_processed);
 
         if (num_copied >= 1 + is_extended) {
-          LOG_INFO("Setting as processed");
           *(pkt.original_packet_processed) = true;
           // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
           //           *pkt.original_packet_processed);
