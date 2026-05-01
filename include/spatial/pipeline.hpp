@@ -2530,8 +2530,6 @@ public:
                              CUTENSOR_COMPUTE_DESC_16F, "alignedToPadding");
     tensor_16.addPermutation("packet", "prealign", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToPreAlign");
-    tensor_16.addPermutation("aligned", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
-                             "alignedToCUFFTInput");
     tensor_16.addPermutation("aligned", "planar", CUTENSOR_COMPUTE_DESC_16F,
                              "alignedToPlanar");
     tensor_32.addPermutation("visCorr", "visBaseline",
