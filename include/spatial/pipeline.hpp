@@ -2538,8 +2538,6 @@ public:
                              CUTENSOR_COMPUTE_DESC_32F,
                              "visBaselineTrimmedToDecomp");
 
-    tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
-                             "packetToPlanar");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsBeamMajor",
