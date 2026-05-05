@@ -228,7 +228,57 @@ public:
         // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
         //           *pkt.original_packet_processed);
 
-        return;
+        start_packet_done = true;
+        if (start_packet_done && end_packet_done) {
+          if (allow_overwrite) {
+            *(pkt.original_packet_processed) = true;
+          }
+          return;
+        }
+      }
+
+      if (!end_packet_done && packet_index_end >= 0 &&
+          packet_index_end < NR_PACKETS_FOR_CORRELATION) {
+
+        // this will be some number from the beginning that should
+        // be copied to the end of this packet.
+        const int num_to_copy = packet_index_start_remainder;
+        const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
+        // LOG_DEBUG("Copying data to packet_index {} and channel index {} and "
+        //           "receiver_index {} of buffer {}",
+        //           packet_index, freq_channel, receiver_index, buffer_index);
+
+        auto &buffer = d_samples[buffer_index];
+        auto &samples =
+            (*buffer->samples)[freq_channel][packet_index_start][fpga_index];
+        auto &arrival =
+            buffer->arrivals[0][freq_channel][packet_index][fpga_index];
+
+        // we want to only copy the last part of this. We need to seek forward
+        // from the beginning by the number that would have been copied
+        // from the previous if statement, then only copy the remaining
+        // number.
+        std::memcpy(&samples,
+                    (char *)pkt.payload +
+                        sizeof(typename T::OutputPacketDataStructure) *
+                            (T::NR_TIME_STEPS_PER_PACKET - num_to_copy),
+                    sizeof(typename T::OutputPacketDataStructure) *
+                        num_to_copy / T::NR_TIME_STEPS_PER_PACKET);
+        arrival += num_to_copy;
+        // LOG_DEBUG("Setting original_packet_processed as true...");
+        // LOG_DEBUG("original_packet_processed_before={}",
+        //           *pkt.original_packet_processed);
+        // LOG_DEBUG("DEBUG: original_packet_processed_after={}",
+        //           *pkt.original_packet_processed);
+
+        end_packet_done = true;
+        if (start_packet_done && end_packet_done) {
+          // we don't need the allow_overwrite gate here as there are no
+          // situations where we need to keep the packet around anymore - can be
+          // overwritten.
+          *(pkt.original_packet_processed) = true;
+          return;
+        }
       }
     }
     // LOG_DEBUG(
