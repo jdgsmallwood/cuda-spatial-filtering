@@ -1,7 +1,7 @@
 set(NUMBER_BEAMS 1 CACHE STRING "Number of beams to correlate while benchmarking")
 add_executable(
   observe
-  ${PROJECT_SOURCE_DIR}/apps/benchmark-20251030.cu
+  ${PROJECT_SOURCE_DIR}/apps/observe.cu
 )
 target_link_libraries(observe PRIVATE spatial CUDA::cudart cuda cutensor  HighFive::HighFive spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft CUDA::cusolver nlohmann_json::nlohmann_json)
 target_compile_definitions(observe PRIVATE NUMBER_BEAMS=${NUMBER_BEAMS})

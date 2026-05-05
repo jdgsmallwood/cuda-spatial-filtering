@@ -204,6 +204,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     program.parse_args(argc, argv);
     std::ifstream f(args.config_filename);
     args.config = json::parse(f);
+    std::cout << args.config.dump(4) << std::endl;
   } catch (const std::exception &err) {
     std::cerr << err.what() << "\n" << program;
     std::exit(1);
