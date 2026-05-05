@@ -56,7 +56,8 @@ message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
 # FetchContent added in CMake 3.11, downloads during the configure step
 # FetchContent_MakeAvailable was added in CMake 3.14; simpler usage
 include(FetchContent)
-
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+FetchContent_MakeAvailable(json)
 # Accumulator library
 # This is header only, so could be replaced with git submodules or FetchContent
 
