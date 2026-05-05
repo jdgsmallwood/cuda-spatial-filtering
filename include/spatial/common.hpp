@@ -17,9 +17,11 @@
 #include <cuComplex.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <fstream>
 #include <highfive/highfive.hpp>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <sstream>
@@ -36,6 +38,7 @@
 #define NUMBER_BEAMS 1
 #endif
 
+using json = nlohmann::json;
 inline std::atomic<bool> running{true};
 
 inline void signal_handler(int signal) {
@@ -127,6 +130,7 @@ private:
 struct CommonArgs {
   std::string pcap_filename;
   std::string output_filename; // may be empty → caller picks a default
+  std::string config_filename;
   std::string ifname;
   bool loop_pcap = false;
   bool debug_logging = false;
@@ -134,6 +138,7 @@ struct CommonArgs {
   int port = 36001;
   int packets_to_receive = 0;
   int fpga_delay = 0;
+  json config;
 };
 
 // Registers and parses the arguments that are common to every pipeline binary.
@@ -145,6 +150,11 @@ struct CommonArgs {
 inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
                                     char *argv[]) {
   CommonArgs args;
+
+  program.add_argument("-c", "--config-file")
+      .help("specify a configuration file")
+      .default_value(std::string("config.json"))
+      .store_into(args.config_filename);
 
   program.add_argument("-p", "--pcap_file")
       .help("specify a PCAP file to replay")
@@ -192,6 +202,8 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
   try {
     program.parse_args(argc, argv);
+    std::ifstream f(args.config_filename);
+    args.config = json::parse(f);
   } catch (const std::exception &err) {
     std::cerr << err.what() << "\n" << program;
     std::exit(1);
