@@ -95,11 +95,12 @@ public:
   SimpleMockPipeline *mock_pipeline;
 
   void SetUp() override {
+    std::array<int64_t, 1> delays = {0};
     processor_state = new ProcessorState<TestConfig, NR_BUFFERS>(
         10,                                   // nr_packets_for_correlation
         TestConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
-        0                                     // min_freq_channel
-    );
+        0,                                    // min_freq_channel
+        delays);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -191,7 +192,7 @@ public:
     for (int t = 0; t < TestConfig::NR_TIME_STEPS_PER_PACKET; t++) {
       for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++) {
         for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++) {
-          EXPECT_EQ(packet_samples[0][channel][packet_number][0][t][r]
+          EXPECT_EQ(packet_samples[0][channel][packet_number + 1][0][t][r]
                                   [p], // [0] is for FPGA and there is only one
                                        // in the config.
                     std::complex<int8_t>(static_cast<int8_t>(val),
@@ -212,11 +213,13 @@ public:
 class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
 
   void SetUp() override {
+    std::array<int64_t, TestMultipleFPGAConfig::NR_FPGA_SOURCES> delays = {0,
+                                                                           13};
     processor_state = new ProcessorState<TestMultipleFPGAConfig, NR_BUFFERS>(
         10, // nr_packets_for_correlation
         TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
-        0                                                 // min_freq_channel
-    );
+        0,                                                // min_freq_channel
+        delays);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -316,12 +319,15 @@ class ProcessorStateMultipleFPGAWithOctetTest
     std::unique_ptr<MapType> fpga_ids =
         std::make_unique<MapType>(std::initializer_list<MapType::value_type>{
             {10, 0}, {11, 1}, {12, 2}, {13, 3}});
+
+    std::array<int64_t, TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES>
+        delays = {0, 13, 26, 4};
     processor_state = new ProcessorState<TestMultipleFPGAWithOctetConfig,
                                          NR_BUFFERS>(
         10, // nr_packets_for_correlation
         TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
         0,                                                // min_freq_channel
-        &fpga_ids);
+        delays, &fpga_ids);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -437,11 +443,20 @@ TEST_F(ProcessorStateTest, FillOneBufferTest) {
   // Total packets = NR_CHANNELS * NR_FPGA_SOURCES *
   // NR_PACKETS_FOR_CORRELATION
   int total_packets = TestConfig::NR_CHANNELS * TestConfig::NR_FPGA_SOURCES *
-                      TestConfig::NR_PACKETS_FOR_CORRELATION;
+                      (TestConfig::NR_PACKETS_FOR_CORRELATION + 2);
 
   for (int channel = 0; channel < TestConfig::NR_CHANNELS; channel++) {
     for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
-      for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
+      for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION + 1;
+           pkt++) {
+        uint64_t sample =
+            start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
+        add_packet(sample, fpga, channel);
+      }
+
+      // do this afterwards so it actually is right. Sample num initialization
+      // is done off the first packet received.
+      for (int pkt = -1; pkt < 0; pkt++) {
         uint64_t sample =
             start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
         add_packet(sample, fpga, channel);
@@ -523,18 +538,19 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
         }
       }
     }
-    processor_state->process_all_available_packets();
-    processor_state->handle_buffer_completion();
   }
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion();
+
+  LOG_INFO("Finished initial.");
   // add two packets that are way further along, this will cause
   // the pipeline to run w/ missing packets.
   add_packet(20000, 0, 0);
   add_packet(20000, 0, 1);
+  LOG_INFO("Packets added");
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion();
-  // there will be two buffers worth missing. The third buffer from above was
-  // full but hadn't yet run because it waits until halfway through the next
-  // buffer.
+  LOG_INFO("Firing again...");
   EXPECT_EQ(processor_state->packets_missing, 2 * 20);
 
   int16_t *scales_last_packet =
@@ -596,7 +612,7 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
 
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion(true);
-  EXPECT_EQ(processor_state->packets_missing, 0);
+  EXPECT_EQ(processor_state->packets_missing, 4);
 
   typename TestMultipleFPGAConfig::InputPacketSamplesType *samples =
       (typename TestMultipleFPGAConfig::InputPacketSamplesType *)
@@ -607,8 +623,11 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
     for (int receiver = 0;
          receiver < TestMultipleFPGAConfig::NR_RECEIVERS_PER_PACKET;
          receiver++) {
-      for (int pkt = 0;
-           pkt < TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION; pkt++) {
+      for (int pkt = -1;
+           pkt < static_cast<int>(
+                     TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION) +
+                     1;
+           pkt++) {
         for (int fpga = 0; fpga < TestMultipleFPGAConfig::NR_FPGA_SOURCES;
              fpga++) {
           for (int t = 0; t < TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET;
@@ -616,10 +635,26 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
             for (int pol = 0; pol < TestMultipleFPGAConfig::NR_POLARIZATIONS;
                  pol++) {
               std::complex<int8_t> expected_value;
-              expected_value = {static_cast<int8_t>(fpga + 1),
-                                static_cast<int8_t>(fpga + 1)};
-              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol],
-                        expected_value);
+              if ((fpga == 0 &&
+                   (pkt == -1 ||
+                    pkt == static_cast<int>(TestMultipleFPGAConfig::
+                                                NR_PACKETS_FOR_CORRELATION))) ||
+                  (fpga == 1 &&
+                   pkt >=
+                       static_cast<int>(
+                           TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION) -
+                           2)) {
+                expected_value = {static_cast<int8_t>(0),
+                                  static_cast<int8_t>(0)};
+              } else {
+                expected_value = {static_cast<int8_t>(fpga + 1),
+                                  static_cast<int8_t>(fpga + 1)};
+              }
+              EXPECT_EQ(samples[0][channel][pkt + 1][fpga][t][receiver][pol],
+                        expected_value)
+                  << "Mismatch at channel " << channel << " pkt " << pkt
+                  << " fpga " << fpga << " t " << t << " receiver " << receiver
+                  << " pol" << pol << std::endl;
             }
           }
         }
@@ -652,7 +687,7 @@ TEST_F(ProcessorStateMultipleFPGAWithOctetTest,
 
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion(true);
-  EXPECT_EQ(processor_state->packets_missing, 0);
+  EXPECT_EQ(processor_state->packets_missing, 12);
 
   typename TestMultipleFPGAWithOctetConfig::InputPacketSamplesType *samples =
       (typename TestMultipleFPGAWithOctetConfig::InputPacketSamplesType *)
@@ -663,8 +698,10 @@ TEST_F(ProcessorStateMultipleFPGAWithOctetTest,
     for (int receiver = 0;
          receiver < TestMultipleFPGAWithOctetConfig::NR_RECEIVERS_PER_PACKET;
          receiver++) {
-      for (int pkt = 0;
-           pkt < TestMultipleFPGAWithOctetConfig::NR_PACKETS_FOR_CORRELATION;
+      for (int pkt = -1;
+           pkt <
+           static_cast<int>(
+               TestMultipleFPGAWithOctetConfig::NR_PACKETS_FOR_CORRELATION + 1);
            pkt++) {
         for (int fpga = 0;
              fpga < TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES; fpga++) {
@@ -675,10 +712,35 @@ TEST_F(ProcessorStateMultipleFPGAWithOctetTest,
                  pol < TestMultipleFPGAWithOctetConfig::NR_POLARIZATIONS;
                  pol++) {
               std::complex<int8_t> expected_value;
-              expected_value = {static_cast<int8_t>(fpga + 1),
-                                static_cast<int8_t>(fpga + 1)};
-              EXPECT_EQ(samples[0][channel][pkt][fpga][t][receiver][pol],
-                        expected_value);
+
+              if ((fpga == 0 &&
+                   (pkt == -1 ||
+                    pkt == static_cast<int>(TestMultipleFPGAConfig::
+                                                NR_PACKETS_FOR_CORRELATION))) ||
+                  (fpga == 1 &&
+                   pkt >=
+                       static_cast<int>(
+                           TestMultipleFPGAConfig::NR_PACKETS_FOR_CORRELATION) -
+                           2) ||
+
+                  (fpga == 2 && pkt >= 7) ||
+
+                  (fpga == 3 && pkt >= 9)
+
+              ) {
+                expected_value = {static_cast<int8_t>(0),
+                                  static_cast<int8_t>(0)};
+              } else {
+                expected_value = {static_cast<int8_t>(fpga + 1),
+                                  static_cast<int8_t>(fpga + 1)};
+              }
+
+              EXPECT_EQ(samples[0][channel][pkt + 1][fpga][t][receiver][pol],
+                        expected_value)
+
+                  << "Mismatch at channel " << channel << " pkt " << pkt
+                  << " fpga " << fpga << " t " << t << " receiver " << receiver
+                  << " pol" << pol << std::endl;
             }
           }
         }

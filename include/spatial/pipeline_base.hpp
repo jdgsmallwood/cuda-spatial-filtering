@@ -10,6 +10,12 @@ class GPUPipeline {
 public:
   void set_state(ProcessorStateBase *state) { state_ = state; };
   void set_output(std::shared_ptr<Output> output) { output_ = output; };
+  virtual void set_subpacket_delays(int *delays_subpacket) {
+    subpacket_delays_ = delays_subpacket;
+  };
+  virtual void set_antenna_gains(std::complex<float> *gains) {
+    gains_ = gains;
+  };
   virtual void execute_pipeline(FinalPacketData *packet_data,
                                 const bool dummy_run = false) = 0;
   virtual void dump_visibilities(const uint64_t end_seq_num = 0) = 0;
@@ -17,4 +23,6 @@ public:
 protected:
   ProcessorStateBase *state_;
   std::shared_ptr<Output> output_;
+  int *subpacket_delays_;
+  std::complex<float> *gains_;
 };

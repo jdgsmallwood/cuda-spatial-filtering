@@ -71,7 +71,8 @@ template <typename PacketSamplesType, typename PacketScalesType,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_POLARIZATIONS,
           size_t NR_FPGAS>
 struct LambdaFinalPacketData : public FinalPacketData {
-  using ArrivalsType = bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGAS];
+  using ArrivalsType =
+      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGAS];
   PacketSamplesType *samples = nullptr;
   PacketScalesType *scales = nullptr;
   ArrivalsType *arrivals = nullptr;
@@ -90,13 +91,17 @@ struct LambdaFinalPacketData : public FinalPacketData {
   size_t get_arrivals_size() override { return sizeof(ArrivalsType); };
 
   void zero_missing_packets() override {
+    // we want to zero out missing packets including the extended ones.
     for (auto i = 0; i < NR_CHANNELS; ++i) {
-      for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
+      // be careful - need to convert the size_t to int otherwise signed ->
+      // unsigned conversion takes place.
+      for (auto j = -1; j < static_cast<int>(NR_PACKETS_FOR_CORRELATION) + 1;
+           ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
-          if (arrivals[0][i][j][k] == 0) {
+          if (arrivals[0][i][j + 1][k] == 0) {
             for (auto m = 0; m < NR_RECEIVERS_PER_PACKET; ++m) {
               for (auto n = 0; n < NR_POLARIZATIONS; ++n) {
-                scales[0][i][j][k * NR_RECEIVERS_PER_PACKET + m][n] = 0;
+                scales[0][i][j + 1][k * NR_RECEIVERS_PER_PACKET + m][n] = 0;
               }
             }
           }
@@ -105,11 +110,13 @@ struct LambdaFinalPacketData : public FinalPacketData {
     }
   };
   int get_num_missing_packets() override {
+    // we don't want to double-count missing packets so only include
+    // from 0 -> NR_PACKETS_FOR_CORRELATION
     int sum = 0;
     for (auto i = 0; i < NR_CHANNELS; ++i) {
       for (auto j = 0; j < NR_PACKETS_FOR_CORRELATION; ++j) {
         for (auto k = 0; k < NR_FPGAS; ++k) {
-          if (arrivals[0][i][j][k] == 0) {
+          if (arrivals[0][i][j + 1][k] == 0) {
             sum++;
           }
         }
@@ -130,9 +137,9 @@ struct LambdaFinalPacketData : public FinalPacketData {
                              cudaHostAllocDefault));
   };
   ~LambdaFinalPacketData() {
-    cudaFreeHost(samples);
-    cudaFreeHost(scales);
-    cudaFreeHost(arrivals);
+    CUDA_CHECK(cudaFreeHost(samples));
+    CUDA_CHECK(cudaFreeHost(scales));
+    CUDA_CHECK(cudaFreeHost(arrivals));
   };
 };
 
@@ -251,38 +258,38 @@ struct LambdaConfig {
 
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesT =
+      std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
+                     [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
+
+  template <typename T, int RECEIVERS = NR_RECEIVERS>
+  using LambdaPacketAlignedSamplesT =
       std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
 
-  template <typename T>
-  using LambdaInputPacketSamplesPlanarT =
-      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES]
-       [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS][2];
-  template <typename T, int RECEIVERS = NR_RECEIVERS>
-  using LambdaPacketSamplesPlanarT =
-      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_TIME_STEPS_PER_PACKET]
-       [RECEIVERS][NR_POLARIZATIONS][2]; // for complex
-
-  using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+  using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                                   [NR_RECEIVERS][NR_POLARIZATIONS];
 
   using Sample = std::complex<int8_t>;
   using InputPacketSamplesType =
-      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
-  using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<int8_t>;
+  using InputPacketSamplesPlanarType =
+      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
+                          [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
+                          [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
+
+  using HalfInputPacketSamplesPlanarType =
+      __half2[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES]
+             [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
+             [NR_POLARIZATIONS];
+
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
-  using HalfInputPacketSamplesPlanarType =
-      LambdaInputPacketSamplesPlanarT<__half>;
+  using HalfPacketAlignedSamplesType = LambdaPacketAlignedSamplesT<__half>;
 
   using PaddedPacketSamplesType =
-      LambdaPacketSamplesT<__half, NR_PADDED_RECEIVERS>;
-  using PacketSamplesPlanarType = LambdaPacketSamplesPlanarT<int8_t>;
-  using HalfPacketSamplesPlanarType = LambdaPacketSamplesPlanarT<__half>;
-  using PaddedPacketSamplesPlanarType =
-      LambdaPacketSamplesPlanarT<__half, NR_PADDED_RECEIVERS>;
+      LambdaPacketAlignedSamplesT<__half, NR_PADDED_RECEIVERS>;
   using PacketScaleStructure =
       int16_t[NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
   using PacketDataStructure =
@@ -304,7 +311,7 @@ struct LambdaConfig {
       __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
             [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
   using ArrivalsOutputType =
-      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION][NR_FPGA_SOURCES];
+      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
       float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
            [NR_POLARIZATIONS][COMPLEX];
@@ -339,4 +346,6 @@ struct LambdaConfig {
            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
   using PulsarFoldOutputType = float[NR_CHANNELS][16][NR_POLARIZATIONS][256];
+  using AntennaGains =
+      std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS];
 };

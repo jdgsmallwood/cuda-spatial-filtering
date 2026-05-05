@@ -1,43 +1,8 @@
-#include "hdf5.h"
-#include "spatial/logging.hpp"
-#include "spatial/output.hpp"
-#include "spatial/packet_formats.hpp"
-#include "spatial/pipeline.hpp"
-#include "spatial/spatial.hpp"
-#include "spatial/writers.hpp"
-#include <algorithm>
-#include <argparse/argparse.hpp>
-#include <arpa/inet.h>
-#include <atomic>
-#include <chrono>
-#include <complex>
-#include <csignal>
-#include <cuComplex.h>
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <highfive/highfive.hpp>
-#include <iostream>
-#include <spdlog/async.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <thread>
-#include <unistd.h>
-#include <unordered_map>
+#include "spatial/common.hpp"
 
 #ifndef NUMBER_BEAMS
 #define NUMBER_BEAMS 1
 #endif
-
-std::atomic<bool> running{true};
-
-void signal_handler(int signal) {
-  LOG_INFO("Caught CTRL+C, shutting down...");
-  running = false;
-}
 
 void writeVectorToCSV(const std::vector<float> &times,
                       const std::string &filename) {
@@ -59,164 +24,14 @@ void writeVectorToCSV(const std::vector<float> &times,
   std::cout << "Data successfully written to " << filename << "\n";
 }
 
-std::string
-make_default_visibilities_filename(const int min_freq_channel,
-                                   const int num_channels,
-                                   const std::vector<int> fpga_ids) {
-  // timestamp
-  auto now = std::chrono::system_clock::now();
-  std::time_t t = std::chrono::system_clock::to_time_t(now);
-  std::tm tm = *std::localtime(&t);
-
-  std::ostringstream oss;
-  oss << std::put_time(&tm, "%Y%m%d-%H%M") << "_" << min_freq_channel << "_"
-      << min_freq_channel + num_channels - 1;
-  for (auto id : fpga_ids) {
-    oss << "_ALVEO" << id;
-  }
-  oss << ".hdf5";
-  return oss.str();
-}
-
-std::vector<std::string> split_ifnames(const std::string &ifname) {
-  std::vector<std::string> result;
-  std::stringstream ss(ifname);
-  std::string token;
-
-  while (std::getline(ss, token, ',')) {
-    if (!token.empty()) {
-      result.push_back(token);
-    }
-  }
-  return result;
-}
-
-class AntennaMapRegistry {
-public:
-  AntennaMapRegistry() {
-    // Initialize your 4 base maps here
-    // FPGA 0
-    base_maps[0] = {{0, -100}, {1, 35},   {2, -100}, {3, 1},  {4, -100},
-                    {5, 14},   {6, -100}, {7, 36},   {8, 18}, {9, 25}};
-
-    base_maps[1] = {{0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
-                    {5, 32}, {6, 17}, {7, 33}, {8, 11}, {9, 13}};
-
-    base_maps[2] = {
-
-        {0, 4}, {1, 6}, {2, 5}, {3, 29}, {4, 10}, {5, 20},
-        {6, 7}, {7, 9}, {8, 2}, {9, 3}
-
-    };
-
-    base_maps[3] = {
-
-        {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-        {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
-  }
-
-  std::unordered_map<int, int>
-  get_combined_map(const std::vector<int> &selected_fpgas) {
-    std::unordered_map<int, int> combined;
-
-    for (size_t i = 0; i < selected_fpgas.size(); ++i) {
-      int fpga_id = selected_fpgas[i];
-      int stream_offset = i * 10; // 0 for 1st, 10 for 2nd, 20 for 3rd...
-
-      if (base_maps.find(fpga_id) == base_maps.end()) {
-        throw std::runtime_error("Unknown FPGA ID: " + std::to_string(fpga_id));
-      }
-
-      const auto &source_map = base_maps[fpga_id];
-      for (const auto &[stream, antenna] : source_map) {
-        // Key: New Offset Stream, Value: Antenna ID
-        combined[stream + stream_offset] = antenna;
-      }
-    }
-    return combined;
-  }
-
-private:
-  std::unordered_map<int, std::unordered_map<int, int>> base_maps;
-};
-
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
-  std::string pcap_filename;
-  std::string vis_filename;
-  std::string ifname;
-  bool loop_pcap, debug_logging;
-  int min_freq_channel;
-  int port;
-  int packets_to_receive;
-  program.add_argument("-p", "--pcap_file")
-      .help("specify a PCAP file to replay")
-      .store_into(pcap_filename);
-
-  program.add_argument("-l", "--loop")
-      .help("loop the specified PCAP file")
-      .default_value(false)
-      .implicit_value(true)
-      .store_into(loop_pcap);
-  program.add_argument("-v", "--vis_output_file")
-      .help("specify a file name for the output visibilities")
-      .store_into(vis_filename);
-
-  program.add_argument("-f", "--min_freq_channel")
-      .help("specify the lowest frequency channel.")
-      .store_into(min_freq_channel);
-
-  program.add_argument("-i", "--network-interface")
-      .help("Network interface to bind on")
-      .default_value("enp216s0np0")
-      .store_into(ifname);
-
-  program.add_argument("-L", "--port")
-      .help("Port to bind on")
-      .default_value(36001)
-      .store_into(port);
-
-  program.add_argument("-d", "--debug-logging")
-      .help("Enable debug logging")
-      .default_value(false)
-      .implicit_value(true)
-      .store_into(debug_logging);
-
-  program.add_argument("-n", "--num-packets")
-      .help("How many packets to receive before exiting.")
-      .default_value(0)
-      .store_into(packets_to_receive);
-
-  try {
-    program.parse_args(argc, argv);
-  } catch (const std::exception &err) {
-    std::cerr << err.what() << std::endl;
-    std::cerr << program;
-    std::exit(1);
-  }
+  CommonArgs args = parse_common_args(program, argc, argv);
 
   std::signal(SIGINT, signal_handler);
-  static auto tp = std::make_shared<spdlog::details::thread_pool>(4 * 8192, 2);
-  auto app_logger = std::make_shared<spdlog::async_logger>(
-      "async_logger",
-      std::make_shared<spdlog::sinks::basic_file_sink_mt>("app.log", true), tp,
-      spdlog::async_overflow_policy::overrun_oldest);
 
-  // auto app_logger = spdlog::basic_logger_mt<spdlog::async_factory>(
-  //   "async_logger", "app.log", true);
-
-  // auto app_logger = spdlog::basic_logger_mt("packet_processor_live_logger",
-  //                                         "app.log", /*truncate*/ true);
-  if (debug_logging) {
-    app_logger->set_level(spdlog::level::debug);
-  } else {
-    app_logger->set_level(spdlog::level::info);
-  }
-  app_logger->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
-
-  spatial::Logger::set(app_logger);
-
+  auto logger = setup_logger(args.debug_logging);
   constexpr int num_buffers = NR_OBSERVING_BUFFERS;
   constexpr int nr_fpga_sources = NR_OBSERVING_FPGA_SOURCES;
   constexpr size_t num_packet_buffers = 24;
@@ -248,7 +63,7 @@ int main(int argc, char *argv[]) {
   using MapType = std::unordered_map<uint32_t, int>;
   auto fpga_ids = std::make_unique<MapType>();
   std::vector<int> fpga_id_vec;
-  auto fpga_names = split_ifnames(ifname);
+  auto fpga_names = split_ifnames(args.ifname);
 
   {
     // use scope here to deallocate i at the end.
@@ -272,9 +87,18 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
 
+  std::array<int64_t, nr_fpga_sources> fpga_delays;
+  for (auto i = 0; i < nr_fpga_sources; ++i) {
+    fpga_delays[i] = 0;
+  }
+
+  if (nr_fpga_sources == 2) {
+    fpga_delays[1] = args.fpga_delay;
+  }
+
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      min_freq_channel, &fpga_ids);
+      args.min_freq_channel, fpga_delays, &fpga_ids);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
@@ -284,10 +108,11 @@ int main(int argc, char *argv[]) {
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
 
   if (!program.is_used("-v")) {
-    vis_filename = make_default_visibilities_filename(
-        min_freq_channel, num_lambda_channels, fpga_id_vec);
+    args.output_filename =
+        make_default_filename("visibilities", args.min_freq_channel,
+                              num_lambda_channels, fpga_id_vec);
   }
-  HighFive::File vis_file(vis_filename, HighFive::File::Truncate);
+  HighFive::File vis_file(args.output_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -349,15 +174,12 @@ int main(int argc, char *argv[]) {
   constexpr double CHANNEL_WIDTH_HZ = 781.25e3;
   std::vector<double> channel_freqs_hz(num_lambda_channels);
   for (int i = 0; i < num_lambda_channels; ++i)
-    channel_freqs_hz[i] = (min_freq_channel + i) * CHANNEL_WIDTH_HZ;
+    channel_freqs_hz[i] = (args.min_freq_channel + i) * CHANNEL_WIDTH_HZ;
 
   auto vis_writer =
-      std::make_unique<HDF5UVXWriter<Config::VisibilitiesOutputType>>(
-          vis_file, channel_freqs_hz, antenna_enu, antenna_ecef,
-          array_origin_geocentric, array_origin_geodetic, antenna_ids,
-          /* ra_j2000  = */ std::numeric_limits<double>::quiet_NaN(),
-          /* dec_j2000 = */ std::numeric_limits<double>::quiet_NaN(),
-          &antenna_mapping);
+      std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
+          vis_file, args.min_freq_channel,
+          args.min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
 
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
@@ -391,13 +213,13 @@ int main(int argc, char *argv[]) {
 
   std::vector<std::unique_ptr<PacketInput>> capture;
 
-  if (!pcap_filename.empty()) {
-    capture.push_back(
-        std::make_unique<PCAPPacketCapture>(pcap_filename, loop_pcap));
+  if (!args.pcap_filename.empty()) {
+    capture.push_back(std::make_unique<PCAPPacketCapture>(args.pcap_filename,
+                                                          args.loop_pcap));
   } else {
     for (auto nic : fpga_names) {
       capture.push_back(std::make_unique<KernelSocketPacketCapture>(
-          nic, port, BUFFER_SIZE, 256 * 1024 * 1024));
+          nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
     }
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
@@ -448,7 +270,8 @@ int main(int argc, char *argv[]) {
     }
     packets_received = state.packets_received;
 
-    if (packets_to_receive > 0 && packets_received >= packets_to_receive) {
+    if (args.packets_to_receive > 0 &&
+        packets_received >= args.packets_to_receive) {
       std::cout << "Number of packets to observe reached...shutting down\n";
       state.running.store(0, std::memory_order_release);
       running = false;
