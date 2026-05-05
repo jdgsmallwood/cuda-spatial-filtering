@@ -125,6 +125,48 @@ static void pulsar_fold_output_transfer_complete_host_func(void *data) {
   delete ctx;
 }
 
+template <size_t NR_CHANNELS, size_t NR_RECEIVERS, size_t NR_POLARIZATIONS>
+auto get_default_gains() {
+  std::array<std::complex<float>, NR_CHANNELS * NR_RECEIVERS * NR_POLARIZATIONS>
+      output;
+  output.fill({1.0f, 0.0f});
+  return output;
+};
+
+template <typename T> struct LambdaPipelineIngest {
+
+  static void ingest_and_scale(ProcessorStateBase *state,
+                               FinalPacketData *packet_data,
+                               cudaStream_t stream, cudaStream_t host_stream,
+                               void *d_samples_entry, void *d_scales,
+                               void *d_gains, void *d_samples_half,
+                               bool dummy_run) {
+    if (!dummy_run && state == nullptr) {
+      throw std::logic_error("State has not been set on GPUPipeline object!");
+    }
+
+    cudaMemcpyAsync(d_samples_entry, (void *)packet_data->get_samples_ptr(),
+                    packet_data->get_samples_elements_size(), cudaMemcpyDefault,
+                    stream);
+    cudaMemcpyAsync(d_scales, (void *)packet_data->get_scales_ptr(),
+                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
+                    stream);
+
+    auto *ctx =
+        new BufferReleaseContext{.state = state,
+                                 .buffer_index = packet_data->buffer_index,
+                                 .dummy_run = dummy_run};
+    CUDA_CHECK(cudaLaunchHostFunc(host_stream, release_buffer_host_func, ctx));
+
+    scale_and_convert_to_half<T::NR_CHANNELS, T::NR_POLARIZATIONS,
+                              T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                              T::NR_TIME_STEPS_PER_PACKET,
+                              T::NR_PACKETS_FOR_CORRELATION + 2>(
+        (char2 *)d_samples_entry, (int16_t *)d_scales, (float2 *)d_gains,
+        (__half2 *)d_samples_half, stream);
+  }
+};
+
 template <typename T> class LambdaGPUPipeline : public GPUPipeline {
 
 private:
@@ -473,6 +515,8 @@ private:
 
   BeamWeights *h_weights;
   TrimmedVisibilities *d_visibilities_accumulator;
+
+  typename T::AntennaGains *d_gains;
   std::vector<PipelineResources> buffers;
   int *d_subpacket_delays;
   int visibilities_start_seq_num;
@@ -493,10 +537,6 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    if (!dummy_run && state_ == nullptr) {
-      throw std::logic_error("State has not been set on GPUPipeline object!");
-    }
-
     auto &b = buffers[current_buffer];
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
@@ -507,31 +547,11 @@ public:
 
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], b.stream);
-    cudaMemcpyAsync(
-        b.samples_entry.get(), (void *)packet_data->get_samples_ptr(),
-        packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream);
 
-    cudaMemcpyAsync(b.scales.get(), (void *)packet_data->get_scales_ptr(),
-                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
-                    b.stream);
-
-    auto *ctx =
-        new BufferReleaseContext{.state = this->state_,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    // do in separate thread - no need to tie up GPU pipeline.
-    CUDA_CHECK(
-        cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
-
-    scale_and_convert_to_half<
-        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION + 2>(
-        (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
-        b.scales.get(),
-        (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
-        b.stream);
+    LambdaPipelineIngest<T>::ingest_and_scale(
+        this->state_, packet_data, b.stream, b.host_stream,
+        b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
+        dummy_run);
 
     tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
@@ -770,6 +790,13 @@ public:
                           sizeof(int) * T::NR_FPGA_SOURCES));
     CUDA_CHECK(
         cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
+
+    CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
+    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+                                           T::NR_POLARIZATIONS>();
+    CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
+                          sizeof(typename T::AntennaGains), cudaMemcpyDefault));
+
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
@@ -888,10 +915,16 @@ public:
     // which is not fully ideal.
 
   };
-  virtual void set_subpacket_delays(int *delays_subpacket) {
+  virtual void set_subpacket_delays(int *delays_subpacket) override {
     subpacket_delays_ = delays_subpacket;
     CUDA_CHECK(cudaMemcpy(d_subpacket_delays, subpacket_delays_,
                           sizeof(int) * T::NR_FPGA_SOURCES, cudaMemcpyDefault));
+  }
+
+  virtual void set_antenna_gains(std::complex<float> *gains) override {
+    gains_ = gains;
+    CUDA_CHECK(cudaMemcpy(d_gains, gains_, sizeof(typename T::AntennaGains),
+                          cudaMemcpyDefault));
   }
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
@@ -934,6 +967,7 @@ private:
   int num_buffers;
   std::vector<cudaStream_t> streams;
 
+  typename T::AntennaGains *d_gains;
   // We are converting it to fp16 so this should not be changable anymore.
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // NR_BITS;
 
@@ -1015,49 +1049,16 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    if (!dummy_run && state_ == nullptr) {
-      throw std::logic_error("State has not been set on GPUPipeline object!");
-    }
-
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
     LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
-    // visibilities_missing_packets += packet_data->get_num_missing_packets();
 
-    // d_samples_entry memcpy
-    cudaMemcpyAsync(d_samples_entry[current_buffer],
-                    (void *)packet_data->get_samples_ptr(),
-                    packet_data->get_samples_elements_size(), cudaMemcpyDefault,
-                    streams[current_buffer]);
-
-    // d_scales memcpy
-    cudaMemcpyAsync(d_scales[current_buffer],
-                    (void *)packet_data->get_scales_ptr(),
-                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
-                    streams[current_buffer]);
-
-    // BufferReleaseContext + host function
-    auto *ctx =
-        new BufferReleaseContext{.state = this->state_,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    // do in separate thread - no need to tie up GPU pipeline.
-    CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
-                                  release_buffer_host_func, ctx));
-
-    // scale_and_convert_to_half kernel
-    scale_and_convert_to_half<
-        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
-        (typename T::InputPacketSamplesPlanarType *)
-            d_samples_entry[current_buffer],
-        d_scales[current_buffer],
-        (typename T::HalfInputPacketSamplesPlanarType *)
-            d_samples_half[current_buffer],
-        streams[current_buffer]);
+    LambdaPipelineIngest<T>::ingest_and_scale(
+        this->state_, packet_data, streams[current_buffer],
+        streams[current_buffer], d_samples_entry[current_buffer],
+        d_scales[current_buffer], d_gains, d_samples_half[current_buffer],
+        false);
 
     tensor_16.runPermutation(
         "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
@@ -1386,6 +1387,7 @@ private:
   int num_buffers;
   std::vector<PipelineResources> buffers;
 
+  typename T::AntennaGains *d_gains;
   // We are converting it to fp16 so this should not be changable anymore.
 
   inline static const __half alpha = __float2half(1.0f);
@@ -1462,9 +1464,6 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    if (!dummy_run && state_ == nullptr) {
-      throw std::logic_error("State has not been set on GPUPipeline object!");
-    }
     auto &b = buffers[current_buffer];
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
@@ -1472,33 +1471,10 @@ public:
     LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
-    cudaMemcpyAsync(
-        b.samples_entry.get(), (void *)packet_data->get_samples_ptr(),
-        packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream);
-
-    cudaMemcpyAsync(b.scales.get(), (void *)packet_data->get_scales_ptr(),
-                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
-                    b.stream);
-
-    // BufferReleaseContext + host function
-    auto *ctx =
-        new BufferReleaseContext{.state = this->state_,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    // do in separate thread - no need to tie up GPU pipeline.
-    CUDA_CHECK(
-        cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
-
-    // scale_and_convert_to_half kernel
-    scale_and_convert_to_half<
-        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
-        (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
-        b.scales.get(),
-        (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
-        b.stream);
+    LambdaPipelineIngest<T>::ingest_and_scale(
+        this->state_, packet_data, b.stream, b.host_stream,
+        b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
+        dummy_run);
 
     tensor_16.runPermutation("packetToPlanar", alpha,
                              (__half *)b.samples_half.get(),
@@ -1573,6 +1549,12 @@ public:
     long long N[] = {CUFFT_FFT_SIZE};
     const size_t NUM_TOTAL_BATCHES =
         T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
+
+    CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
+    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+                                           T::NR_POLARIZATIONS>();
+    CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
+                          sizeof(typename T::AntennaGains), cudaMemcpyDefault));
 
     size_t work_size = 0;
     {
@@ -1735,6 +1717,7 @@ private:
   using FloatProjectionMatrix =
       std::complex<float>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                          [T::NR_RECEIVERS];
+
   using BeamWeights = BeamWeightsT<T>;
   struct RFIMitigatedT {
     static constexpr size_t NR_CHANNELS = T::NR_CHANNELS;
@@ -2104,6 +2087,7 @@ private:
 
   BeamWeights *h_weights;
   int *d_subpacket_delays;
+  typename T::AntennaGains *d_gains;
 
   static constexpr int fft_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
@@ -2113,9 +2097,6 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    if (!dummy_run && state_ == nullptr) {
-      throw std::logic_error("State has not been set on GPUPipeline object!");
-    }
     auto &b = buffers[current_buffer];
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
@@ -2123,33 +2104,10 @@ public:
     LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
-    cudaMemcpyAsync(
-        b.samples_entry.get(), (void *)packet_data->get_samples_ptr(),
-        packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream);
-
-    cudaMemcpyAsync(b.scales.get(), (void *)packet_data->get_scales_ptr(),
-                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
-                    b.stream);
-
-    // BufferReleaseContext + host function
-    auto *ctx =
-        new BufferReleaseContext{.state = this->state_,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    // do in separate thread - no need to tie up GPU pipeline.
-    CUDA_CHECK(
-        cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
-
-    // scale_and_convert_to_half kernel
-    scale_and_convert_to_half<
-        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION + 2>(
-        (typename T::InputPacketSamplesPlanarType *)b.samples_entry.get(),
-        b.scales.get(),
-        (typename T::HalfInputPacketSamplesPlanarType *)b.samples_half.get(),
-        b.stream);
+    LambdaPipelineIngest<T>::ingest_and_scale(
+        this->state_, packet_data, b.stream, b.host_stream,
+        b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
+        dummy_run);
 
     tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
@@ -2564,8 +2522,16 @@ public:
 
     CUDA_CHECK(cudaMalloc((void **)&d_subpacket_delays,
                           sizeof(int) * T::NR_FPGA_SOURCES));
+    CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
+
     CUDA_CHECK(
         cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
+
+    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+                                           T::NR_POLARIZATIONS>();
+    CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
+                          sizeof(typename T::AntennaGains), cudaMemcpyDefault));
+
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
     buffers.reserve(num_buffers);
@@ -2672,6 +2638,7 @@ private:
 
   using BeamWeights = BeamWeightsT<T>;
 
+  typename T::AntennaGains *d_gains;
   // a = unpadded baselines
   // b = block
   // c = channel
@@ -2795,10 +2762,6 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    if (!dummy_run && state_ == nullptr) {
-      throw std::logic_error("State has not been set on GPUPipeline object!");
-    }
-
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
     if (visibilities_start_seq_num == -1) {
@@ -2809,36 +2772,11 @@ public:
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
 
-    cudaMemcpyAsync(d_samples_entry[current_buffer],
-                    (void *)packet_data->get_samples_ptr(),
-                    packet_data->get_samples_elements_size(), cudaMemcpyDefault,
-                    streams[current_buffer]);
-
-    cudaMemcpyAsync(d_scales[current_buffer],
-                    (void *)packet_data->get_scales_ptr(),
-                    packet_data->get_scales_element_size(), cudaMemcpyDefault,
-                    streams[current_buffer]);
-
-    auto *ctx =
-        new BufferReleaseContext{.state = this->state_,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    // do in separate thread - no need to tie up GPU pipeline.
-    CUDA_CHECK(cudaLaunchHostFunc(streams[num_buffers + current_buffer],
-                                  release_buffer_host_func, ctx));
-
-    // scale_and_convert_to_half kernel
-    scale_and_convert_to_half<
-        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
-        (typename T::InputPacketSamplesPlanarType *)
-            d_samples_entry[current_buffer],
-        d_scales[current_buffer],
-        (typename T::HalfInputPacketSamplesPlanarType *)
-            d_samples_half[current_buffer],
-        streams[current_buffer]);
+    LambdaPipelineIngest<T>::ingest_and_scale(
+        this->state_, packet_data, streams[current_buffer],
+        streams[current_buffer], d_samples_entry[current_buffer],
+        d_scales[current_buffer], d_gains, d_samples_half[current_buffer],
+        false);
 
     tensor_16.runPermutation(
         "packetToPadding", alpha, (__half *)d_samples_half[current_buffer],
@@ -2997,6 +2935,12 @@ public:
     d_visibilities_baseline.resize(num_buffers);
     d_visibilities_trimmed_baseline.resize(num_buffers);
     d_visibilities_trimmed.resize(num_buffers);
+
+    CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
+    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+                                           T::NR_POLARIZATIONS>();
+    CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
+                          sizeof(typename T::AntennaGains), cudaMemcpyDefault));
 
     for (auto i = 0; i < num_buffers; ++i) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking));
@@ -3544,6 +3488,7 @@ private:
 
   std::atomic<int> num_runs_integrated{0};
 
+  typename T::AntennaGains *d_gains;
   cusolverEigMode_t cusolver_jobz = CUSOLVER_EIG_MODE_VECTOR;
   cublasFillMode_t cusolver_uplo = CUBLAS_FILL_MODE_UPPER;
 
@@ -3563,45 +3508,10 @@ public:
 
     auto &b = buffers[current_buffer];
 
-    // ------------------------------------------------------------------
-    // 1. Transfer raw samples and scales to device
-    // ------------------------------------------------------------------
-    CUDA_CHECK(cudaMemcpyAsync(
-        b.samples_entry.get(), packet_data->get_samples_ptr(),
-        packet_data->get_samples_elements_size(), cudaMemcpyDefault, b.stream));
-    CUDA_CHECK(cudaMemcpyAsync(b.scales.get(), packet_data->get_scales_ptr(),
-                               packet_data->get_scales_element_size(),
-                               cudaMemcpyDefault, b.stream));
-
-    // ------------------------------------------------------------------
-    // 2. Release the input buffer asynchronously on the host stream so
-    //    the GPU pipeline stream is not stalled.
-    // ------------------------------------------------------------------
-    auto *ctx =
-        new BufferReleaseContext{.state = this->state_,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    CUDA_CHECK(
-        cudaLaunchHostFunc(b.host_stream, release_buffer_host_func, ctx));
-
-    // ------------------------------------------------------------------
-    // 3. Scale integer samples to fp16
-    // ------------------------------------------------------------------
-    scale_and_convert_to_half<
-        typename T::InputPacketSamplesPlanarType, typename T::PacketScalesType,
-        typename T::HalfInputPacketSamplesPlanarType, T::NR_CHANNELS,
-        T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-        T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION>(
-        reinterpret_cast<typename T::InputPacketSamplesPlanarType *>(
-            b.samples_entry.get()),
-        b.scales.get(),
-        reinterpret_cast<typename T::HalfInputPacketSamplesPlanarType *>(
-            b.samples_half.get()),
-        b.stream);
-
-    // ------------------------------------------------------------------
-    // 4. Permute packet → padding layout
-    // ------------------------------------------------------------------
+    LambdaPipelineIngest<T>::ingest_and_scale(
+        this->state_, packet_data, b.stream, b.host_stream,
+        b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
+        dummy_run);
     tensor_16.runPermutation(
         "packetToPadding", alpha_16,
         reinterpret_cast<__half *>(b.samples_half.get()),
@@ -3773,6 +3683,11 @@ public:
     CUDA_CHECK(cudaMemset(d_projection_averaged, 0,
                           sizeof(DecompositionVisibilities)));
 
+    CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
+    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+                                           T::NR_POLARIZATIONS>();
+    CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
+                          sizeof(typename T::AntennaGains), cudaMemcpyDefault));
     // We need a valid device pointer for the cuSOLVER workspace query inside
     // PipelineResources.  Use the (already allocated) accumulator pointer;
     // the query is read-only with respect to the matrix pointer.
@@ -3838,19 +3753,6 @@ public:
   }
 
 private:
-  // -------------------------------------------------------------------------
-  // dump_projection
-  //
-  // 1. Synchronise all streams to ensure all pending cherk / accumulate
-  //    work is complete.
-  // 2. Divide the accumulator by the number of runs (scale_visibilities)
-  //    to form the time-averaged projection matrix P_avg.
-  // 3. Eigen-decompose P_avg using the first buffer's cuSOLVER handle.
-  //    Eigenvectors are written in-place into d_projection_averaged;
-  //    eigenvalues go to d_projection_eigenvalues_scratch and are discarded.
-  // 4. Copy eigenvectors only to the Output landing pointer.
-  // 5. Reset the accumulator and run counter.
-  // -------------------------------------------------------------------------
   void dump_projection(const uint64_t start_seq_num,
                        const uint64_t end_seq_num) {
     LOG_INFO("LambdaProjectionPipeline: dumping averaged projection "
