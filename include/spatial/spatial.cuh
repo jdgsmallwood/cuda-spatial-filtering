@@ -34,13 +34,35 @@ __global__ void convert_float_to_half_kernel(const float *input, __half *output,
 void convert_float_to_half(const float *d_input, __half *d_output, const int n,
                            cudaStream_t stream);
 
-template <typename inputT, typename scaleT, typename outputT,
-          size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
-          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD = 1>
-__global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
-                                                 const scaleT *d_scale,
-                                                 outputT *d_output) {
+          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD>
+__global__ void scale_and_convert_to_half_kernel(
+    const char2 *__restrict__ d_input, const int16_t *__restrict__ d_scale,
+    const float2 *__restrict__ d_gains, __half2 *__restrict__ d_output,
+    const int n_per_pass, const int time_stride) {
+  // input format is
+  // int8_t[channel][packet][fpga][time][receiver_in_pkt][pol][complex]
+  //
+  // shared is [RECEIVER][POL]
+  __shared__ int scale_factors[NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS];
+  __shared__ float2 gain_factors[NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS];
+
+  int channel_idx = blockIdx.x % NR_CHANNELS;
+  int packet_idx = blockIdx.x / NR_CHANNELS;
+  int fpga_idx = blockIdx.y;
+
+  if (threadIdx.x < NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS) {
+    int scale_ptr = channel_idx * NR_PACKETS * NR_RECEIVERS * NR_POLARIZATIONS +
+                    packet_idx * NR_RECEIVERS * NR_POLARIZATIONS + threadIdx.x;
+    scale_factors[threadIdx.x] = static_cast<int>(d_scale[scale_ptr]);
+
+    int gain_ptr = channel_idx * NR_RECEIVERS * NR_POLARIZATIONS +
+                   fpga_idx * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
+                   threadIdx.x;
+    gain_factors[threadIdx.x] = __ldg(&d_gains[gain_ptr]);
+  }
+  __syncthreads();
 
   static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
                 "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
@@ -48,61 +70,77 @@ __global__ void scale_and_convert_to_half_kernel(const inputT *d_input,
       NR_TIME_STEPS_PER_PACKET % TIME_STEPS_PER_THREAD == 0,
       "TIME_STEPS_PER_THREAD must evenly divide NR_TIME_STEPS_PER_PACKET");
 
-  constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * 2;
+  constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET;
 
-  int channel_idx = blockIdx.x % NR_CHANNELS;
-  int packet_idx = blockIdx.x / NR_CHANNELS;
-  int fpga_idx = blockIdx.y;
+  int pol_idx = threadIdx.x % 2;
+  int recv_in_pkt =
+      (threadIdx.x % (NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS)) /
+      NR_POLARIZATIONS;
+  int time_base = (threadIdx.x / ELEMS_PER_TIME);
 
-  int complex_idx = threadIdx.x % 2;
-  int pol_idx = (threadIdx.x / 2) % NR_POLARIZATIONS;
-  int recv_in_pkt = blockIdx.z;
-  int time_base = (threadIdx.x / ELEMS_PER_TIME) * TIME_STEPS_PER_THREAD;
+  int scale_val_int = scale_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
+  float2 gain = gain_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
 
-  int receiver_idx = fpga_idx * NR_RECEIVERS_PER_PACKET + recv_in_pkt;
-  int16_t scale_val =
-      __ldg(&d_scale[0][channel_idx][packet_idx][receiver_idx][pol_idx]);
+  size_t nr_fpga = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+
+  int input_base = channel_idx * NR_PACKETS * nr_fpga *
+                       NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS_PER_PACKET *
+                       NR_POLARIZATIONS +
+                   packet_idx * nr_fpga * NR_TIME_STEPS_PER_PACKET *
+                       NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
+                   fpga_idx * NR_TIME_STEPS_PER_PACKET *
+                       NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
+                   time_base * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
+                   recv_in_pkt * NR_POLARIZATIONS + pol_idx;
 
 #pragma unroll
   for (int t = 0; t < TIME_STEPS_PER_THREAD; ++t) {
-    int8_t sample =
-        __ldg(&d_input[0][channel_idx][packet_idx][fpga_idx][time_base + t]
-                      [recv_in_pkt][pol_idx][complex_idx]);
+    int time_step = time_base + t * time_stride;
+    if (threadIdx.x < n_per_pass && time_step < NR_TIME_STEPS_PER_PACKET) {
+      int ptr = input_base +
+                (t * time_stride) * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
 
-    d_output[0][channel_idx][packet_idx][fpga_idx][time_base + t][recv_in_pkt]
-            [pol_idx][complex_idx] = __int2half_rn(static_cast<int>(sample) *
-                                                   static_cast<int>(scale_val));
+      char2 sample = d_input[ptr];
+      int val_real = static_cast<int>(sample.x) * scale_val_int;
+      int val_imag = static_cast<int>(sample.y) * scale_val_int;
+
+      float2 float_val{static_cast<float>(val_real),
+                       static_cast<float>(val_imag)};
+
+      float2 gain_applied_val{float_val.x * gain.x - float_val.y * gain.y,
+                              float_val.x * gain.y + float_val.y * gain.x};
+
+      d_output[ptr] = __float22half2_rn(gain_applied_val);
+    }
   }
 };
 
 template <int N> constexpr bool dependent_false = false;
 
-template <typename inputT, typename scaleT, typename outputT,
-          size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
-          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD = 1>
-void scale_and_convert_to_half(const inputT *d_input, const scaleT *d_scale,
-                               outputT *d_output, cudaStream_t stream) {
+          size_t NR_PACKETS>
+void scale_and_convert_to_half(const char2 *d_input, const int16_t *d_scale,
+                               const float2 *d_gains, __half2 *d_output,
+                               cudaStream_t stream) {
 
   constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
-  constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * 2;
-  constexpr size_t THREADS =
-      (NR_TIME_STEPS_PER_PACKET / TIME_STEPS_PER_THREAD) * ELEMS_PER_TIME;
+  constexpr size_t THREADS = 1024;
 
-  static_assert(
-      THREADS <= 1024 || dependent_false<THREADS>,
-      "Block size exceeds CUDA maximum — increase TIME_STEPS_PER_THREAD");
-  static_assert(
-      THREADS % 32 == 0,
-      "Block size must be a multiple of warp size — check dimension values");
+  constexpr size_t nr_time_step_threads =
+      THREADS / (NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET);
+  constexpr size_t nr_time_steps_per_thread =
+      (NR_TIME_STEPS_PER_PACKET + nr_time_step_threads - 1) /
+      nr_time_step_threads;
+  constexpr int n_per_pass =
+      nr_time_step_threads * NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET;
 
   scale_and_convert_to_half_kernel<
-      inputT, scaleT, outputT, NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
-      NR_RECEIVERS_PER_PACKET, NR_TIME_STEPS_PER_PACKET, NR_PACKETS,
-      TIME_STEPS_PER_THREAD>
-      <<<dim3(NR_CHANNELS * NR_PACKETS, NR_FPGA_SOURCES,
-              NR_RECEIVERS_PER_PACKET),
-         dim3(THREADS, 1, 1), 0, stream>>>(d_input, d_scale, d_output);
+      NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS, NR_RECEIVERS_PER_PACKET,
+      NR_TIME_STEPS_PER_PACKET, NR_PACKETS, nr_time_steps_per_thread>
+      <<<dim3(NR_CHANNELS * NR_PACKETS, NR_FPGA_SOURCES, 1),
+         dim3(THREADS, 1, 1), 0, stream>>>(d_input, d_scale, d_gains, d_output,
+                                           n_per_pass, nr_time_step_threads);
 }
 
 template <typename T>
@@ -723,6 +761,10 @@ apply_delays_launch(const __half *d_input, __half *d_output,
                     const int nr_fpgas, const int nr_packets_for_correlation,
                     const int nr_polarizations, const int nr_channels,
                     const int nr_time_samples_per_packet, cudaStream_t stream) {
+  /* input format of d_input is __half[FPGA][PACKET +
+   * 2][TIME][CHANNEL][RECEIVER][POL][COMPLEX] format of d_output is
+   * __half[FPGA][PACKET][TIME][CHANNEL][RECEIVER][POL][COMPLEX]
+   */
 
   const size_t total_to_copy_per_fpga =
       nr_receivers_per_packet * nr_channels * nr_time_samples_per_packet *

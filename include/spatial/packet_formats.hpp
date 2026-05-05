@@ -266,11 +266,6 @@ struct LambdaConfig {
       std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
 
-  template <typename T>
-  using LambdaInputPacketSamplesPlanarT =
-      T[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES]
-       [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS][2];
-
   using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                                   [NR_RECEIVERS][NR_POLARIZATIONS];
 
@@ -279,12 +274,19 @@ struct LambdaConfig {
       std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
-  using InputPacketSamplesPlanarType = LambdaInputPacketSamplesPlanarT<int8_t>;
+  using InputPacketSamplesPlanarType =
+      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
+                          [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
+                          [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
+
+  using HalfInputPacketSamplesPlanarType =
+      __half2[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES]
+             [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
+             [NR_POLARIZATIONS];
+
   using PacketSamplesType = LambdaPacketSamplesT<int8_t>;
   using HalfPacketSamplesType = LambdaPacketSamplesT<__half>;
   using HalfPacketAlignedSamplesType = LambdaPacketAlignedSamplesT<__half>;
-  using HalfInputPacketSamplesPlanarType =
-      LambdaInputPacketSamplesPlanarT<__half>;
 
   using PaddedPacketSamplesType =
       LambdaPacketAlignedSamplesT<__half, NR_PADDED_RECEIVERS>;
@@ -344,4 +346,6 @@ struct LambdaConfig {
            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
   using PulsarFoldOutputType = float[NR_CHANNELS][16][NR_POLARIZATIONS][256];
+  using AntennaGains =
+      std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS];
 };
