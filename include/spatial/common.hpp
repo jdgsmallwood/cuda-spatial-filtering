@@ -209,6 +209,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
   program.add_argument("-a", "--apply-gains-to-vis")
       .help("Apply the inverse of the gains to the raw data")
       .default_value(false)
+      .implicit_value(true)
       .store_into(args.apply_gains);
 
   try {
