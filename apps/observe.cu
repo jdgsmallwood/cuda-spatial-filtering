@@ -152,6 +152,8 @@ int main(int argc, char *argv[]) {
   if (args.apply_gains) {
     std::cout << "Applying gains as -a is selected!" << std::endl;
     pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+  } else {
+    std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
 
   std::vector<std::unique_ptr<PacketInput>> capture;
