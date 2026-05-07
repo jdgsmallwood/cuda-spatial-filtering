@@ -38,6 +38,7 @@ template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
           size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD>
 __global__ void scale_and_convert_to_half_kernel(
+    printf("Launching kernel\n");
     const char2 *__restrict__ d_input, const int16_t *__restrict__ d_scale,
     const float2 *__restrict__ d_gains, __half2 *__restrict__ d_output,
     const int n_per_pass, const int time_stride) {
@@ -80,6 +81,8 @@ __global__ void scale_and_convert_to_half_kernel(
 
   int scale_val_int = scale_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
   float2 gain = gain_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
+  printf("Gain for receiver %i and pol %i is %f + %f i", recv_in_pkt, pol_idx,
+         gain.x, gain.y);
 
   size_t nr_fpga = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
 
