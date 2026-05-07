@@ -346,6 +346,8 @@ struct LambdaConfig {
            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
   using PulsarFoldOutputType = float[NR_CHANNELS][16][NR_POLARIZATIONS][256];
-  using AntennaGains =
-      std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS];
+  using Complex = std::complex<float>;
+  using ReceiverArray = std::array<Complex, NR_RECEIVERS>;
+  using PolArray = std::array<ReceiverArray, NR_POLARIZATIONS>;
+  using AntennaGains = std::array<PolArray, NR_CHANNELS>;
 };

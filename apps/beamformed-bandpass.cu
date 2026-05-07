@@ -214,32 +214,8 @@ int main(int argc, char *argv[]) {
       float[NR_OBSERVING_CHANNELS][nr_lambda_polarizations][nr_lambda_beams]
            [nr_lambda_time_steps_per_packet *
             NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
-  const std::unordered_map<std::string, int> ifname_to_fpga{
-      {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
-
-  using MapType = std::unordered_map<uint32_t, int>;
-  auto fpga_ids = std::make_unique<MapType>();
-  std::vector<int> fpga_id_vec;
-  auto fpga_names = split_ifnames(args.ifname);
-
-  {
-    // use scope here to deallocate i at the end.
-    int i = 0;
-    for (const auto &name : fpga_names) {
-      int fpga_id = 0;
-
-      auto it = ifname_to_fpga.find(name);
-      if (it != ifname_to_fpga.end()) {
-        fpga_id = it->second;
-      }
-      (*fpga_ids)[fpga_id] = i;
-      fpga_id_vec.push_back(fpga_id);
-      i++;
-    }
-  }
-
-  if (fpga_id_vec.size() != nr_fpga_sources ||
-      fpga_ids->size() != nr_fpga_sources) {
+  if (args.fpga_id_vec.size() != nr_fpga_sources ||
+      args.fpga_ids.size() != nr_fpga_sources) {
     throw std::runtime_error("The number of network interfaces does not match "
                              "number of FPGA sources.");
   }
@@ -250,16 +226,7 @@ int main(int argc, char *argv[]) {
   }
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      args.min_freq_channel, fpga_delays, &fpga_ids);
-
-  AntennaMapRegistry registry;
-
-  std::unordered_map<int, int> antenna_mapping =
-      registry.get_combined_map(fpga_id_vec);
-  std::cout << "Antenna mapping is:\n";
-  for (const auto &[key, val] : antenna_mapping) {
-    std::cout << "Key: " << key << ", Val: " << val << std::endl;
-  };
+      args.min_freq_channel, fpga_delays, args.fpga_ids);
 
   std::cout << "Creating FFT Writer" << std::endl;
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
@@ -306,7 +273,7 @@ int main(int argc, char *argv[]) {
     capture.push_back(std::make_unique<PCAPPacketCapture>(args.pcap_filename,
                                                           args.loop_pcap));
   } else {
-    for (auto nic : fpga_names) {
+    for (auto nic : args.fpga_names) {
       capture.push_back(std::make_unique<KernelSocketPacketCapture>(
           nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
     }

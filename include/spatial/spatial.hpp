@@ -101,22 +101,14 @@ public:
   std::mutex receive_buffer_write_index_mutex;
   GPUPipeline *pipeline_;
   // Constructor / Destructor
-  ProcessorState(
-      size_t nr_packets_for_correlation, size_t nr_between_samples,
-      size_t min_freq_channel,
-      std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
-      std::unique_ptr<std::unordered_map<uint32_t, int>> *fpga_ids_ = nullptr)
+  ProcessorState(size_t nr_packets_for_correlation, size_t nr_between_samples,
+                 size_t min_freq_channel,
+                 std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
+                 std::unordered_map<uint32_t, int> fpga_ids_)
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
-
-    if (fpga_ids_ && !(*fpga_ids_)->empty()) {
-      fpga_ids = **fpga_ids_;
-    } else {
-      for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
-        fpga_ids[i] = i;
-      }
-    }
+    this->fpga_ids = fpga_ids_;
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     std::fill(modified_since_last_completion_check.begin(),

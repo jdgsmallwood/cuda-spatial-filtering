@@ -57,36 +57,11 @@ int main(int argc, char *argv[]) {
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
                    nr_correlation_blocks_to_integrate, true>;
 
-  const std::unordered_map<std::string, int> ifname_to_fpga{
-      {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
-
-  using MapType = std::unordered_map<uint32_t, int>;
-  auto fpga_ids = std::make_unique<MapType>();
-  std::vector<int> fpga_id_vec;
-  auto fpga_names = split_ifnames(args.ifname);
-
-  {
-    // use scope here to deallocate i at the end.
-    int i = 0;
-    for (const auto &name : fpga_names) {
-      int fpga_id = 0;
-
-      auto it = ifname_to_fpga.find(name);
-      if (it != ifname_to_fpga.end()) {
-        fpga_id = it->second;
-      }
-      (*fpga_ids)[fpga_id] = i;
-      fpga_id_vec.push_back(fpga_id);
-      i++;
-    }
-  }
-
-  if (fpga_id_vec.size() != nr_fpga_sources ||
-      fpga_ids->size() != nr_fpga_sources) {
+  if (args.fpga_id_vec.size() != nr_fpga_sources ||
+      args.fpga_ids.size() != nr_fpga_sources) {
     throw std::runtime_error("The number of network interfaces does not match "
                              "number of FPGA sources.");
   }
-
   std::array<int64_t, nr_fpga_sources> fpga_delays;
   for (auto i = 0; i < nr_fpga_sources; ++i) {
     fpga_delays[i] = 0;
@@ -96,9 +71,10 @@ int main(int argc, char *argv[]) {
     fpga_delays[1] = args.fpga_delay;
   }
 
+  auto gains = get_gains_structure<Config>(args);
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      args.min_freq_channel, fpga_delays, &fpga_ids);
+      args.min_freq_channel, fpga_delays, args.fpga_ids);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";
@@ -110,7 +86,7 @@ int main(int argc, char *argv[]) {
   if (!program.is_used("-v")) {
     args.output_filename =
         make_default_filename("visibilities", args.min_freq_channel,
-                              num_lambda_channels, fpga_id_vec);
+                              num_lambda_channels, args.fpga_id_vec);
   }
   HighFive::File vis_file(args.output_filename, HighFive::File::Truncate);
   // auto beam_writer = std::make_unique<
@@ -130,15 +106,6 @@ int main(int argc, char *argv[]) {
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
-  AntennaMapRegistry registry;
-
-  std::unordered_map<int, int> antenna_mapping =
-      registry.get_combined_map(fpga_id_vec);
-  std::cout << "Antenna mapping is:\n";
-  for (const auto &[key, val] : antenna_mapping) {
-    std::cout << "Key: " << key << ", Val: " << val << std::endl;
-  };
-
   // Array origin — geodetic: [longitude_deg, latitude_deg, height_m]
   std::array<double, 3> array_origin_geodetic = {116.6708, -26.7041, 330.0};
 
@@ -147,39 +114,11 @@ int main(int argc, char *argv[]) {
   std::array<double, 3> array_origin_geocentric = {-2559454.0, 5095372.0,
                                                    -2849057.0};
 
-  // Per-antenna ENU offsets from array origin [East, North, Up] in metres
-  // 10 antennas, all placed at the origin as placeholders
-  std::vector<std::array<double, 3>> antenna_enu = {
-      {0.0, 0.0, 0.0},  // ant 0
-      {10.0, 0.0, 0.0}, // ant 1
-      {20.0, 0.0, 0.0}, // ant 2
-      {30.0, 0.0, 0.0}, // ant 3
-      {40.0, 0.0, 0.0}, // ant 4
-      {0.0, 10.0, 0.0}, // ant 5
-      {0.0, 20.0, 0.0}, // ant 6
-      {0.0, 30.0, 0.0}, // ant 7
-      {0.0, 40.0, 0.0}, // ant 8
-      {0.0, 50.0, 0.0}, // ant 9
-  };
-  std::vector<std::string> antenna_ids = {
-      "SKA-MID-000", "SKA-MID-001", "SKA-MID-002", "SKA-MID-003", "SKA-MID-004",
-      "SKA-MID-005", "SKA-MID-006", "SKA-MID-007", "SKA-MID-008", "SKA-MID-009",
-  };
-  // Per-antenna ECEF positions — array origin already subtracted.
-  // Computed from ENU via the standard rotation for this lat/lon,
-  // but zeroed here as placeholders.
-  std::vector<std::array<double, 3>> antenna_ecef(antenna_enu.size(),
-                                                  {0.0, 0.0, 0.0});
-
-  constexpr double CHANNEL_WIDTH_HZ = 781.25e3;
-  std::vector<double> channel_freqs_hz(num_lambda_channels);
-  for (int i = 0; i < num_lambda_channels; ++i)
-    channel_freqs_hz[i] = (args.min_freq_channel + i) * CHANNEL_WIDTH_HZ;
-
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
-          args.min_freq_channel + num_lambda_channels - 1, &antenna_mapping);
+          args.min_freq_channel + num_lambda_channels - 1,
+          &args.antenna_mapping);
 
   auto eigen_writer =
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
@@ -210,6 +149,7 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  pipeline.set_antenna_gains((std::complex<float> *)gains.data());
 
   std::vector<std::unique_ptr<PacketInput>> capture;
 
@@ -217,7 +157,7 @@ int main(int argc, char *argv[]) {
     capture.push_back(std::make_unique<PCAPPacketCapture>(args.pcap_filename,
                                                           args.loop_pcap));
   } else {
-    for (auto nic : fpga_names) {
+    for (auto nic : args.fpga_names) {
       capture.push_back(std::make_unique<KernelSocketPacketCapture>(
           nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
     }
