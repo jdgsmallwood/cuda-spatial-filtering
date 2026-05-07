@@ -81,9 +81,10 @@ __global__ void scale_and_convert_to_half_kernel(
 
   int scale_val_int = scale_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
   float2 gain = gain_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
-  // printf("Gain for receiver %i and pol %i is %f + %f i", recv_in_pkt,
-  // pol_idx,
-  //        gain.x, gain.y);
+  if (gain.x != 1.0f) {
+    printf("Gain for receiver %i and pol %i is %f + %f i", recv_in_pkt, pol_idx,
+           gain.x, gain.y);
+  }
 
   size_t nr_fpga = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
 
