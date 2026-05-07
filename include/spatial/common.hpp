@@ -81,7 +81,6 @@ inline std::vector<std::string> split_ifnames(const std::string &ifname) {
 class AntennaMapRegistry {
 public:
   AntennaMapRegistry() {
-    // Initialize your 4 base maps here
     // FPGA 0
     base_maps[0] = {{0, -100}, {1, 35},   {2, -100}, {3, 1},  {4, -100},
                     {5, 14},   {6, -100}, {7, 36},   {8, 18}, {9, 25}};
@@ -89,17 +88,11 @@ public:
     base_maps[1] = {{0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
                     {5, 32}, {6, 17}, {7, 33}, {8, 11}, {9, 13}};
 
-    base_maps[2] = {
+    base_maps[2] = {{0, 4},  {1, 6}, {2, 5}, {3, 29}, {4, 10},
+                    {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3}};
 
-        {0, 4}, {1, 6}, {2, 5}, {3, 29}, {4, 10}, {5, 20},
-        {6, 7}, {7, 9}, {8, 2}, {9, 3}
-
-    };
-
-    base_maps[3] = {
-
-        {0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-        {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
+    base_maps[3] = {{0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
+                    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
   }
 
   std::unordered_map<int, int>
@@ -131,6 +124,7 @@ struct CommonArgs {
   std::string pcap_filename;
   std::string output_filename; // may be empty → caller picks a default
   std::string config_filename;
+  std::string gains_filename;
   std::string ifname;
   bool loop_pcap = false;
   bool debug_logging = false;
@@ -139,11 +133,17 @@ struct CommonArgs {
   int packets_to_receive = 0;
   int fpga_delay = 0;
   json config;
+  json gains;
+  std::vector<int> fpga_id_vec;
+  std::unordered_map<uint32_t, int> fpga_ids;
+  std::unordered_map<int, int> antenna_mapping;
+  std::vector<std::string> fpga_names;
 };
 
-// Registers and parses the arguments that are common to every pipeline binary.
-// Extra arguments (e.g. --pulsar-period-samples) can be added to `program`
-// before calling this function; they will be parsed in the same pass.
+// Registers and parses the arguments that are common to every pipeline
+// binary. Extra arguments (e.g. --pulsar-period-samples) can be added to
+// `program` before calling this function; they will be parsed in the same
+// pass.
 //
 // Returns true on success; on parse failure the function prints usage to
 // stderr and calls std::exit(1).
@@ -200,11 +200,50 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(0)
       .store_into(args.fpga_delay);
 
+  program.add_argument("-g", "--gains")
+      .help("JSON file with weights")
+      .default_value("weights.json")
+      .store_into(args.gains_filename);
+
   try {
     program.parse_args(argc, argv);
     std::ifstream f(args.config_filename);
     args.config = json::parse(f);
+
+    std::ifstream g(args.gains_filename);
+    args.gains = json::parse(g);
+
     std::cout << args.config.dump(4) << std::endl;
+
+    const std::unordered_map<std::string, int> ifname_to_fpga{
+        {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
+
+    args.fpga_names = split_ifnames(args.ifname);
+
+    {
+      // use scope here to deallocate i at the end.
+      int i = 0;
+      for (const auto &name : args.fpga_names) {
+        int fpga_id = 0;
+
+        auto it = ifname_to_fpga.find(name);
+        if (it != ifname_to_fpga.end()) {
+          fpga_id = it->second;
+        }
+        args.fpga_ids[fpga_id] = i;
+        args.fpga_id_vec.push_back(fpga_id);
+        i++;
+      }
+    }
+
+    AntennaMapRegistry registry;
+
+    args.antenna_mapping = registry.get_combined_map(args.fpga_id_vec);
+    std::cout << "Antenna mapping is:\n";
+    for (const auto &[key, val] : args.antenna_mapping) {
+      std::cout << "Key: " << key << ", Val: " << val << std::endl;
+    };
+
   } catch (const std::exception &err) {
     std::cerr << err.what() << "\n" << program;
     std::exit(1);
@@ -236,3 +275,42 @@ inline std::shared_ptr<spdlog::async_logger> setup_logger(bool debug_logging) {
   spatial::Logger::set(app_logger);
   return app_logger;
 }
+
+template <typename T>
+inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
+  // AntennaGains objects should be [Channel][Pol][Antenna]
+  typename T::AntennaGains output{};
+  for (auto i = 0; i < T::NR_CHANNELS; ++i) {
+    for (auto j = 0; j < T::NR_POLARIZATIONS; ++j) {
+      for (auto f = 0; f < T::NR_FPGA_SOURCES; ++f) {
+        int fpga_id = args.fpga_id_vec[f];
+        for (auto k = 0; k < T::NR_RECEIVERS_PER_PACKET; ++k) {
+          std::string pol_string;
+          if (j == 0) {
+            pol_string = "XX";
+          } else {
+            pol_string = "YY";
+          }
+          int receiver_idx = f * T::NR_RECEIVERS_PER_PACKET + k;
+
+          std::complex<float> val = {
+              args.gains["weights"][args.min_freq_channel + i][pol_string]
+                        [args.antenna_mapping[receiver_idx]]["real"],
+
+              args.gains["weights"][args.min_freq_channel + i][pol_string]
+                        [args.antenna_mapping[receiver_idx]]["imag"]};
+
+          float mag = sqrtf(val.real() * val.real() + val.imag() * val.imag());
+          // we take the conjugate and divide by the magnitude to
+          // correct for both the phase and the amplitude.
+          output[i][j][receiver_idx] = {val.real() / mag, -val.imag() / mag};
+          std::cout << "Gain for channel " << args.min_freq_channel + i
+                    << ", pol " << pol_string << " FPGA " << f << " receiver "
+                    << k << " is " << val.real() << " + " << val.imag()
+                    << "j.\n";
+        }
+      }
+    }
+  }
+  return output;
+};
