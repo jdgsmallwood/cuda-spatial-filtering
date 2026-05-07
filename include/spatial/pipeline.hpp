@@ -926,6 +926,24 @@ public:
     gains_ = gains;
     CUDA_CHECK(cudaMemcpy(d_gains, gains, sizeof(typename T::AntennaGains),
                           cudaMemcpyDefault));
+
+    std::cout << "Loaded gains are:\n";
+    for (auto i = 0; i < T::NR_CHANNELS; ++i) {
+      for (auto j = 0; j < T::NR_POLARIZATIONS; ++j) {
+        for (auto k = 0; k < T::NR_RECEIVERS; ++k) {
+          std::cout << "channel " << i << " pol " << j << " receiver " << k
+                    << " val "
+                    << gains[i * T::NR_POLARIZATIONS * T::NR_RECEIVERS +
+                             j * T::NR_RECEIVERS + k]
+                           .real()
+                    << " + "
+                    << gains[i * T::NR_POLARIZATIONS * T::NR_RECEIVERS +
+                             j * T::NR_RECEIVERS + k]
+                           .imag()
+                    << "j.\n";
+        }
+      }
+    }
     cudaDeviceSynchronize();
     std::cout << "gains uploaded successfully...\n";
   }
