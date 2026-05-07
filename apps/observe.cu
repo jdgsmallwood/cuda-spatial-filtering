@@ -150,6 +150,7 @@ int main(int argc, char *argv[]) {
   pipeline.set_state(&state);
   pipeline.set_output(output);
   if (args.apply_gains) {
+    std::cout << "Applying gains as -a is selected!" << std::endl;
     pipeline.set_antenna_gains((std::complex<float> *)gains.data());
   }
 
