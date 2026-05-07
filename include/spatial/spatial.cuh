@@ -38,6 +38,7 @@ template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
           size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD>
 __global__ void scale_and_convert_to_half_kernel(
+    printf("Launching kernel\n");
     const char2 *__restrict__ d_input, const int16_t *__restrict__ d_scale,
     const float2 *__restrict__ d_gains, __half2 *__restrict__ d_output,
     const int n_per_pass, const int time_stride) {
