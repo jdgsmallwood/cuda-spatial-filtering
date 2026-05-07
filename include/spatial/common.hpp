@@ -128,6 +128,7 @@ struct CommonArgs {
   std::string ifname;
   bool loop_pcap = false;
   bool debug_logging = false;
+  bool apply_gains = false;
   int min_freq_channel = 0;
   int port = 36001;
   int packets_to_receive = 0;
@@ -204,6 +205,11 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .help("JSON file with weights")
       .default_value("weights.json")
       .store_into(args.gains_filename);
+
+  program.add_argument("-a", "--apply-gains-to-vis")
+      .help("Apply the inverse of the gains to the raw data")
+      .default_value(false)
+      .store_into(args.apply_gains);
 
   try {
     program.parse_args(argc, argv);

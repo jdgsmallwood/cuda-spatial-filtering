@@ -149,7 +149,9 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
-  pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+  if (args.apply_gains) {
+    pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+  }
 
   std::vector<std::unique_ptr<PacketInput>> capture;
 
