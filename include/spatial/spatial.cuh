@@ -42,7 +42,6 @@ __global__ void scale_and_convert_to_half_kernel(
     const float2 *__restrict__ d_gains, __half2 *__restrict__ d_output,
     const int n_per_pass, const int time_stride) {
 
-  printf("Launching kernel\n");
   // input format is
   // int8_t[channel][packet][fpga][time][receiver_in_pkt][pol][complex]
   //
