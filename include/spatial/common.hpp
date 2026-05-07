@@ -302,7 +302,7 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
                         [pol_string][std::to_string(
                             args.antenna_mapping[receiver_idx])]["imag"]};
 
-          float mag = sqrtf(val.real() * val.real() + val.imag() * val.imag());
+          float mag = val.real() * val.real() + val.imag() * val.imag();
           // we take the conjugate and divide by the magnitude to
           // correct for both the phase and the amplitude.
           output[i][j][receiver_idx] = {val.real() / mag, -val.imag() / mag};
