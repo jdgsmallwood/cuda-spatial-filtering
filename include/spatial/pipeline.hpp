@@ -924,7 +924,7 @@ public:
   virtual void set_antenna_gains(std::complex<float> *gains) override {
     std::cout << "setting antenna gains on LambdaGPUPipeline...\n";
     gains_ = gains;
-    CUDA_CHECK(cudaMemcpy(d_gains, gains_, sizeof(typename T::AntennaGains),
+    CUDA_CHECK(cudaMemcpy(d_gains, gains, sizeof(typename T::AntennaGains),
                           cudaMemcpyDefault));
     cudaDeviceSynchronize();
     std::cout << "gains uploaded successfully...\n";
