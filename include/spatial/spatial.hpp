@@ -1014,7 +1014,7 @@ public:
 
 class KernelSocketPacketCapture : public PacketInput {
 public:
-  static constexpr int BATCH_SIZE = 256;
+  static constexpr int BATCH_SIZE = 64;
 
   KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
                             int recv_buffer_size = 128 * 1024 * 1024)
