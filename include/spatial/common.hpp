@@ -132,7 +132,7 @@ struct CommonArgs {
   int min_freq_channel = 0;
   int port = 36001;
   int packets_to_receive = 0;
-  long long fpga_delay = 0;
+  int64_t fpga_delay = 0;
   json config;
   json gains;
   std::vector<int> fpga_id_vec;
@@ -199,7 +199,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
   program.add_argument("-y", "--delay")
       .help("Delay from FPGA 1 to 0")
       .default_value(0)
-      .scan<'d', long long>()
+      .scan<'i', int64_t>()
       .store_into(args.fpga_delay);
 
   program.add_argument("-g", "--gains")
