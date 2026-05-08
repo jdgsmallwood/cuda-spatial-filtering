@@ -198,7 +198,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
   program.add_argument("-y", "--delay")
       .help("Delay from FPGA 1 to 0")
-      .default_value(0)
+      .default_value(int64_t{0})
       .scan<'i', int64_t>()
       .store_into(args.fpga_delay);
 
