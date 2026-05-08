@@ -300,14 +300,23 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
           }
           int receiver_idx = f * T::NR_RECEIVERS_PER_PACKET + k;
 
-          std::complex<float> val = {
-              args.gains["weights"][std::to_string(args.min_freq_channel + i)]
-                        [pol_string][std::to_string(
-                            args.antenna_mapping[receiver_idx])]["real"],
+          std::complex<float> val;
+          try {
+            val = {
+                args.gains["weights"][std::to_string(args.min_freq_channel + i)]
+                          [pol_string][std::to_string(
+                              args.antenna_mapping[receiver_idx])]["real"],
 
-              args.gains["weights"][std::to_string(args.min_freq_channel + i)]
-                        [pol_string][std::to_string(
-                            args.antenna_mapping[receiver_idx])]["imag"]};
+                args.gains["weights"][std::to_string(args.min_freq_channel + i)]
+                          [pol_string][std::to_string(
+                              args.antenna_mapping[receiver_idx])]["imag"]};
+          } catch (const std::exception &err) {
+            std::cout << "Gain not found for channel "
+                      << std::to_string(args.min_freq_channel + i) << " pol "
+                      << pol_string << " receiver_idx " << receiver_idx
+                      << std::endl;
+            val = {1.0f, 0.0f};
+          }
 
           float mag = val.real() * val.real() + val.imag() * val.imag();
           // we take the conjugate and divide by the magnitude to
