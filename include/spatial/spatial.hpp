@@ -1045,7 +1045,7 @@ public:
     }
 
     // ── Socket ───────────────────────────────────────────────────────────
-    sockfd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sockfd < 0)
       throw std::system_error(errno, std::generic_category(), "socket");
     // Must be set before bind.
