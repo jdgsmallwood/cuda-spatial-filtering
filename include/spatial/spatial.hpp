@@ -934,240 +934,79 @@ public:
   virtual ~PacketInput() = default;
 };
 
-// class KernelSocketPacketCapture : public PacketInput {
-// public:
-//   KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
-//                             int recv_buffer_size = 64 * 1024 * 1024);
-//   ~KernelSocketPacketCapture();
-//
-//   void get_packets(ProcessorStateBase &state) override {
-//     std::cout << "Starting packet capture on ifname " << ifname << std::endl;
-//
-//     struct sockaddr_in client_addr;
-//     socklen_t client_len = sizeof(client_addr);
-//     // adds a timeout here - otherwise the socket will block indefinitely
-//     // and get in the way of shutdown.
-//     struct timeval tv;
-//     tv.tv_sec = 1; // 1 second timeout
-//     tv.tv_usec = 0;
-//     const int BATCH_SIZE = 64;
-//     struct mmsghdr msgs[BATCH_SIZE];
-//     struct iovec iovecs[BATCH_SIZE];
-//
-//     std::vector<std::vector<uint8_t>> packet_buffers(
-//         BATCH_SIZE, std::vector<uint8_t>(buffer_size));
-//     struct sockaddr_in client_addrs[BATCH_SIZE];
-//
-//     for (int i = 0; i < BATCH_SIZE; ++i) {
-//       iovecs[i].iov_base = packet_buffers[i].data();
-//       iovecs[i].iov_len = buffer_size;
-//
-//       memset(&msgs[i], 0, sizeof(msgs[i]));
-//       msgs[i].msg_hdr.msg_iov = &iovecs[i];
-//       msgs[i].msg_hdr.msg_iovlen = 1;
-//       msgs[i].msg_hdr.msg_name = &client_addrs[i];
-//       msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
-//     }
-//
-//     // Make kernel receive buffer a bit larger to avoid dropping packets
-//     // during the timeout
-//     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
-//                sizeof(recv_buffer_size));
-//     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-//     std::cout << "Receiver thread started for ifname " << ifname <<
-//     std::endl; while (state.running) {
-//       int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
-//       if (ret_val < 0) {
-//         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-//           continue;
-//         // perror("recvfrom");
-//         break;
-//       }
-//       {
-//         std::lock_guard<std::mutex> lock(state.producer_mutex);
-//         void *next_write_pointer = state.get_current_write_pointer();
-//
-//         for (int i = 0; i < ret_val; ++i) {
-//           int len = msgs[i].msg_len;
-//           std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
-//           state.add_received_packet_metadata(len, client_addrs[i]);
-//           state.packets_received += 1;
-//           next_write_pointer = state.get_next_write_pointer();
-//           msgs[i].msg_len = 0;
-//         }
-//       }
-//     }
-//     std::cout << "Receiver thread exiting for ifname " << ifname <<
-//     std::endl;
-//   };
-//
-// private:
-//   int sockfd;
-//   struct sockaddr_in server_addr;
-//   int port;
-//   int buffer_size;
-//   int recv_buffer_size;
-//   std::string ifname;
-// };
-//
-//
-
 class KernelSocketPacketCapture : public PacketInput {
 public:
-  static constexpr int BATCH_SIZE = 64;
-
   KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
-                            int recv_buffer_size = 128 * 1024 * 1024)
-      : ifname(ifname), port(port), buffer_size(buffer_size),
-        recv_buffer_size(recv_buffer_size) {
-    // ── Packet buffer slab ───────────────────────────────────────────────
-    // One contiguous allocation; each slot padded to a cache-line boundary
-    // so prefetch strides are deterministic and there's no false sharing.
-    slot_stride_ = (buffer_size + 63) & ~63;
-    const size_t slab_bytes =
-        static_cast<size_t>(BATCH_SIZE) * slot_stride_ + 63;
-    slab_.reset(new uint8_t[slab_bytes]);
-    uint8_t *base = reinterpret_cast<uint8_t *>(
-        (reinterpret_cast<uintptr_t>(slab_.get()) + 63) & ~63ULL);
-
-    // Wire up mmsghdr / iovec arrays once; reused on every recvmmsg call.
-    memset(msgs_, 0, sizeof(msgs_));
-    memset(client_addrs_, 0, sizeof(client_addrs_));
-    for (int i = 0; i < BATCH_SIZE; ++i) {
-      pkt_[i] = base + static_cast<size_t>(i) * slot_stride_;
-      iovecs_[i].iov_base = pkt_[i];
-      iovecs_[i].iov_len = buffer_size;
-      auto &hdr = msgs_[i].msg_hdr;
-      hdr.msg_iov = &iovecs_[i];
-      hdr.msg_iovlen = 1;
-      hdr.msg_name = &client_addrs_[i];
-      hdr.msg_namelen = sizeof(client_addrs_[0]);
-    }
-
-    // ── Socket ───────────────────────────────────────────────────────────
-    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sockfd < 0)
-      throw std::system_error(errno, std::generic_category(), "socket");
-    // Must be set before bind.
-    int one = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-    // ── Kernel receive buffer ────────────────────────────────────────────
-    // SO_RCVBUFFORCE bypasses net.core.rmem_max (requires CAP_NET_ADMIN).
-    // Fall back to SO_RCVBUF if we don't have that capability.
-    // The kernel stores 2× the requested value internally, so ask for 2×
-    // to get what we actually want.
-    const int ask = recv_buffer_size * 2;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUFFORCE, &ask, sizeof(ask)) < 0)
-      setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &ask, sizeof(ask));
-
-    // Log what the kernel actually granted — it may be less than requested
-    // if rmem_max is small and we lack CAP_NET_ADMIN.
-    int actual = 0;
-    socklen_t opt_len = sizeof(actual);
-    getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &actual, &opt_len);
-    std::cout << "SO_RCVBUF: requested=" << ask << " granted=" << actual
-              << " (effective=" << actual / 2 << ")" << std::endl;
-
-    // ── Steer packets to this CPU's RX queue ────────────────────────────
-    int cpu = sched_getcpu();
-    setsockopt(sockfd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, sizeof(cpu));
-
-    if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
-                   ifname.size()) < 0) {
-      perror("SO_BINDTODEVICE");
-    }
-#ifdef UDP_GRO
-    // Coalesce same-flow datagrams in the kernel before delivery.
-    // Reduces recvmmsg call frequency at the cost of slight latency.
-    // Only beneficial if packets are small and same-flow.
-    int gro = 1;
-    setsockopt(sockfd, IPPROTO_UDP, UDP_GRO, &gro, sizeof(gro));
-#endif
-
-    // ── Bind ─────────────────────────────────────────────────────────────
-    memset(&server_addr_, 0, sizeof(server_addr_));
-    server_addr_.sin_family = AF_INET;
-    server_addr_.sin_addr.s_addr = INADDR_ANY;
-    server_addr_.sin_port = htons(port);
-    if (bind(sockfd, reinterpret_cast<struct sockaddr *>(&server_addr_),
-             sizeof(server_addr_)) < 0)
-      throw std::system_error(errno, std::generic_category(), "bind");
-
-    LOG_INFO("Server listening on 0.0.0.0:{}", port);
-    LOG_INFO("Press Ctrl+C to stop\n");
-  }
-
-  ~KernelSocketPacketCapture() {
-    if (sockfd >= 0)
-      close(sockfd);
-  }
+                            int recv_buffer_size = 64 * 1024 * 1024);
+  ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
-    std::cout << "Starting packet capture on ifname " << ifname
-              << "\nReceiver thread started for ifname " << ifname << std::endl;
+    std::cout << "Starting packet capture on ifname " << ifname << std::endl;
 
-    // Short timeout — stream is continuous so this is only ever hit during
-    // shutdown. 10 ms keeps shutdown snappy without busy-waiting.
-    struct timespec timeout{.tv_sec = 0, .tv_nsec = 10'000'000};
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    // adds a timeout here - otherwise the socket will block indefinitely
+    // and get in the way of shutdown.
+    struct timeval tv;
+    tv.tv_sec = 1; // 1 second timeout
+    tv.tv_usec = 0;
+    const int BATCH_SIZE = 64;
+    struct mmsghdr msgs[BATCH_SIZE];
+    struct iovec iovecs[BATCH_SIZE];
 
-    while (__builtin_expect(state.running, 1)) {
+    std::vector<std::vector<uint8_t>> packet_buffers(
+        BATCH_SIZE, std::vector<uint8_t>(buffer_size));
+    struct sockaddr_in client_addrs[BATCH_SIZE];
 
-      int n = recvmmsg(sockfd, msgs_, BATCH_SIZE, MSG_WAITFORONE, &timeout);
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+      iovecs[i].iov_base = packet_buffers[i].data();
+      iovecs[i].iov_len = buffer_size;
 
-      if (__builtin_expect(n <= 0, 0)) {
-        if (n < 0 &&
-            (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
-          continue;
-        break;
-      }
-
-      // Prefetch all packet data before acquiring the lock so the lines
-      // are warm in L1/L2 by the time memcpy runs.
-      for (int i = 0; i < n; ++i)
-        __builtin_prefetch(pkt_[i], 0, 0);
-
-      {
-        std::lock_guard<std::mutex> lock(state.producer_mutex);
-        void *wp = state.get_current_write_pointer();
-        for (int i = 0; i < n; ++i) {
-          // Pipeline: prefetch next slot while copying current.
-          if (i + 1 < n)
-            __builtin_prefetch(pkt_[i + 1], 0, 0);
-          std::memcpy(wp, pkt_[i], msgs_[i].msg_len);
-          state.add_received_packet_metadata(msgs_[i].msg_len,
-                                             client_addrs_[i]);
-          state.packets_received += 1;
-          wp = state.get_next_write_pointer();
-        }
-      }
-
-      // Reset only the fields recvmmsg overwrites; the rest of the header
-      // is stable and does not need to be touched.
-      for (int i = 0; i < n; ++i) {
-        msgs_[i].msg_len = 0;
-        msgs_[i].msg_hdr.msg_namelen = sizeof(client_addrs_[0]);
-      }
+      memset(&msgs[i], 0, sizeof(msgs[i]));
+      msgs[i].msg_hdr.msg_iov = &iovecs[i];
+      msgs[i].msg_hdr.msg_iovlen = 1;
+      msgs[i].msg_hdr.msg_name = &client_addrs[i];
+      msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
     }
 
+    // Make kernel receive buffer a bit larger to avoid dropping packets
+    // during the timeout
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
+               sizeof(recv_buffer_size));
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    std::cout << "Receiver thread started for ifname " << ifname << std::endl;
+    while (state.running) {
+      int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
+      if (ret_val < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+          continue;
+        // perror("recvfrom");
+        break;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state.producer_mutex);
+        void *next_write_pointer = state.get_current_write_pointer();
+
+        for (int i = 0; i < ret_val; ++i) {
+          int len = msgs[i].msg_len;
+          std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
+          state.add_received_packet_metadata(len, client_addrs[i]);
+          state.packets_received += 1;
+          next_write_pointer = state.get_next_write_pointer();
+          msgs[i].msg_len = 0;
+        }
+      }
+    }
     std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
-  }
+  };
 
 private:
-  int sockfd{-1};
-  struct sockaddr_in server_addr_{};
+  int sockfd;
+  struct sockaddr_in server_addr;
   int port;
   int buffer_size;
   int recv_buffer_size;
-  int slot_stride_{0};
   std::string ifname;
-
-  alignas(64) struct mmsghdr msgs_[BATCH_SIZE];
-  alignas(64) struct iovec iovecs_[BATCH_SIZE];
-  alignas(64) struct sockaddr_in client_addrs_[BATCH_SIZE];
-  uint8_t *pkt_[BATCH_SIZE];
-
-  std::unique_ptr<uint8_t[]> slab_;
 };
 
 class PCAPPacketCapture : public PacketInput {
