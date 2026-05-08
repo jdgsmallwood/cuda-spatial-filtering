@@ -323,45 +323,48 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
   CUDA_CHECK(cudaFree(d_C));
 }
 
-KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
-                                                     int port, int buffer_size,
-                                                     int recv_buffer_size)
-    : ifname(ifname), port(port), buffer_size(buffer_size),
-      recv_buffer_size(recv_buffer_size) {
-
-  LOG_INFO("UDP Server with concurrent processing starting on port {}...",
-           port);
-  // Create UDP socket
-  sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sockfd < 0) {
-    perror("socket");
-  }
-  // Allow address reuse
-  int reuse = 1;
-  if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-    perror("setsockopt");
-  }
-  if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
-                 ifname.size()) < 0) {
-    perror("SO_BINDTODEVICE");
-  }
-  // Setup server address
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(port);
-
-  // Bind socket
-  if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    perror("bind");
-    close(sockfd);
-  }
-
-  LOG_INFO("Server listening on 0.0.0.0:{}", port);
-  LOG_INFO("Press Ctrl+C to stop\n");
-}
-
-KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
+// KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
+//                                                      int port, int
+//                                                      buffer_size, int
+//                                                      recv_buffer_size)
+//     : ifname(ifname), port(port), buffer_size(buffer_size),
+//       recv_buffer_size(recv_buffer_size) {
+//
+//   LOG_INFO("UDP Server with concurrent processing starting on port {}...",
+//            port);
+//   // Create UDP socket
+//   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+//   if (sockfd < 0) {
+//     perror("socket");
+//   }
+//   // Allow address reuse
+//   int reuse = 1;
+//   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) <
+//   0) {
+//     perror("setsockopt");
+//   }
+//   if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
+//                  ifname.size()) < 0) {
+//     perror("SO_BINDTODEVICE");
+//   }
+//   // Setup server address
+//   memset(&server_addr, 0, sizeof(server_addr));
+//   server_addr.sin_family = AF_INET;
+//   server_addr.sin_addr.s_addr = INADDR_ANY;
+//   server_addr.sin_port = htons(port);
+//
+//   // Bind socket
+//   if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+//   {
+//     perror("bind");
+//     close(sockfd);
+//   }
+//
+//   LOG_INFO("Server listening on 0.0.0.0:{}", port);
+//   LOG_INFO("Press Ctrl+C to stop\n");
+// }
+//
+// KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
 
 PCAPPacketCapture::PCAPPacketCapture(const std::string &pcap_filename,
                                      bool loop, uint64_t seq_jump_per_packet)
