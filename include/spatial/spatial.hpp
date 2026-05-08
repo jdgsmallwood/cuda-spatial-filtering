@@ -1070,6 +1070,10 @@ public:
     int cpu = sched_getcpu();
     setsockopt(sockfd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, sizeof(cpu));
 
+    if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
+                   ifname.size()) < 0) {
+      perror("SO_BINDTODEVICE");
+    }
 #ifdef UDP_GRO
     // Coalesce same-flow datagrams in the kernel before delivery.
     // Reduces recvmmsg call frequency at the cost of slight latency.
