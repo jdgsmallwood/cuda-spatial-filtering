@@ -1048,7 +1048,10 @@ public:
     sockfd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
     if (sockfd < 0)
       throw std::system_error(errno, std::generic_category(), "socket");
-
+    // Must be set before bind.
+    int one = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
     // ── Kernel receive buffer ────────────────────────────────────────────
     // SO_RCVBUFFORCE bypasses net.core.rmem_max (requires CAP_NET_ADMIN).
     // Fall back to SO_RCVBUF if we don't have that capability.
