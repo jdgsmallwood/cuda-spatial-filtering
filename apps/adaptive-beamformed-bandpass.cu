@@ -58,7 +58,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (nr_fpga_sources == 2) {
-    fpga_delays[1] = static_cast<int64_t>(args.fpga_delay);
+    fpga_delays[1] = args.fpga_delay;
   }
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
