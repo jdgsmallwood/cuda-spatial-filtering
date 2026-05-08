@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
   } else {
     for (auto nic : args.fpga_names) {
       capture.push_back(std::make_unique<KernelSocketPacketCapture>(
-          nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
+          nic, args.port, BUFFER_SIZE, 512 * 1024 * 1024));
     }
   }
   LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
