@@ -132,7 +132,7 @@ struct CommonArgs {
   int min_freq_channel = 0;
   int port = 36001;
   int packets_to_receive = 0;
-  int fpga_delay = 0;
+  int64_t fpga_delay = 0;
   json config;
   json gains;
   std::vector<int> fpga_id_vec;
