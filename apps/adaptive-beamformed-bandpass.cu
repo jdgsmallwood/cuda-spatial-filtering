@@ -128,8 +128,9 @@ int main(int argc, char *argv[]) {
   }
 
   std::cout << "Initializing pipeline...\n";
-  LambdaAdaptiveBeamformedSpectraPipeline<Config> pipeline(num_buffers,
-                                                           &h_weights);
+  LambdaAdaptiveBeamformedSpectraPipeline<Config> pipeline(
+      num_buffers, &h_weights, args.nr_signal_eigenvectors,
+      args.min_freq_channel);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
