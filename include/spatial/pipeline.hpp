@@ -1988,7 +1988,6 @@ private:
       return *this;
     }
 
-    // 3. Explicitly Delete Copying
     PipelineResources(const PipelineResources &) = delete;
     PipelineResources &operator=(const PipelineResources &) = delete;
   };
@@ -2003,8 +2002,8 @@ private:
 
   inline static const __half alpha = __float2half(1.0f);
 
-  inline static const std::vector<size_t> NR_SIGNAL_EIGENVECTORS{1, 9, 1, 2,
-                                                                 6, 3, 6, 5};
+  std::unordered_map<int, int> NR_SIGNAL_EIGENVECTORS;
+  int min_freq_channel;
 
   static constexpr float alpha_32 = 1.0f;
   // a = unpadded baselines
@@ -2254,7 +2253,7 @@ public:
       const size_t CUBLAS_BATCH_SIZE_PER_CHANNEL = T::NR_POLARIZATIONS;
 
       for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
-        const int K = NR_SIGNAL_EIGENVECTORS[channel];
+        const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
         const int col_offset = N - K; // first signal-subspace column
         // Pointer to signal-subspace U = last K columns of V_batch.
         for (int batch = 0; batch < CUBLAS_BATCH_SIZE_PER_CHANNEL; batch++) {
@@ -2439,17 +2438,19 @@ public:
       current_buffer = (current_buffer + 1) % num_buffers;
     }
   }
-  LambdaAdaptiveBeamformedSpectraPipeline(const int num_buffers,
-                                          BeamWeightsT<T> *h_weights)
+  LambdaAdaptiveBeamformedSpectraPipeline(
+      const int num_buffers, BeamWeightsT<T> *h_weights,
+      const std::unordered_map<int, int> nr_signal_eigenvectors,
+      const int min_freq_channel)
 
       : num_buffers(num_buffers), h_weights(h_weights),
         correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
-        tensor_32(extent, CUTENSOR_R_32F, 128)
-
-  {
+        tensor_32(extent, CUTENSOR_R_32F, 128),
+        NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
+        min_freq_channel(min_freq_channel) {
     std::cout << "Beamformed Spectra instantiated with NR_CHANNELS: "
               << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS

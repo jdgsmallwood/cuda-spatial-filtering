@@ -125,6 +125,7 @@ struct CommonArgs {
   std::string output_filename; // may be empty → caller picks a default
   std::string config_filename;
   std::string gains_filename;
+  std::string nr_signal_eigenvectors_filename;
   std::string ifname;
   bool loop_pcap = false;
   bool debug_logging = false;
@@ -138,6 +139,7 @@ struct CommonArgs {
   std::vector<int> fpga_id_vec;
   std::unordered_map<uint32_t, int> fpga_ids;
   std::unordered_map<int, int> antenna_mapping;
+  std::unordered_map<int, int> nr_signal_eigenvectors;
   std::vector<std::string> fpga_names;
 };
 
@@ -207,6 +209,11 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value("weights.json")
       .store_into(args.gains_filename);
 
+  program.add_argument("-e", "--eigenvalue-num-filename")
+      .help("JSON file with number of eigenvalues to num per channel")
+      .default_value("nr-signal-eigenvalues.json")
+      .store_into(args.nr_signal_eigenvectors_filename);
+
   program.add_argument("-a", "--apply-gains-to-vis")
       .help("Apply the inverse of the gains to the raw data")
       .default_value(false)
@@ -220,6 +227,20 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
     std::ifstream g(args.gains_filename);
     args.gains = json::parse(g);
+
+    // default initialize the map
+    for (auto i = 0; i < 500; ++i) {
+      args.nr_signal_eigenvectors[i] = 1;
+    }
+
+    std::ifstream e(args.nr_signal_eigenvectors_filename);
+    json sig = json::parse(e);
+
+    for (const auto &[key, value] : sig.items()) {
+      args.nr_signal_eigenvectors[std::stoi(key)] = value;
+      std::cout << "setting nr_signal_eigenvectors for channel " << key
+                << " to " << value << std::endl;
+    }
 
     std::cout << args.config.dump(4) << std::endl;
 
