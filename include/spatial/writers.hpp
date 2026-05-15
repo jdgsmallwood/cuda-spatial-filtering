@@ -28,6 +28,10 @@
 #include <casacore/tables/Tables/TableDesc.h>
 #include <sw/redis++/redis++.h>
 
+extern "C" {
+#include "dada_def.h"
+}
+
 template <typename BeamT, typename ArrivalsT> class BeamWriter {
 public:
   virtual ~BeamWriter() = default;
