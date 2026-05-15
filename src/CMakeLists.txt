@@ -27,7 +27,7 @@ target_include_directories(
         ${PSRDADA_ROOT}/include
 )
 
-target_link_directories(pulsar_fold PRIVATE ${PSRDADA_ROOT}/lib)
+target_link_directories(spatial PRIVATE ${PSRDADA_ROOT}/lib)
 
 set_target_properties(spatial PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(spatial PROPERTIES CUDA_ARCHITECTURES "native")
