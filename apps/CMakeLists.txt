@@ -58,3 +58,15 @@ target_compile_definitions(adaptive_beamformed_bandpass PRIVATE NUMBER_BEAMS=${N
 
 set_target_properties(adaptive_beamformed_bandpass PROPERTIES CUDA_ARCHITECTURES "native")
 
+# for pulsar work later.
+#target_include_directories(myprog PRIVATE
+#    ${PSRDADA_ROOT}/include
+#)
+#
+#target_link_directories(myprog PRIVATE
+#    ${PSRDADA_ROOT}/lib
+#)
+#
+#target_link_libraries(myprog PRIVATE
+#    psrdada
+#)
