@@ -345,6 +345,12 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
                  ifname.size()) < 0) {
     perror("SO_BINDTODEVICE");
   }
+
+  int poll_us = 50; // Poll for 50 microseconds
+  if (setsockopt(sockfd, SOL_SOCKET, SO_BUSY_POLL, &poll_us, sizeof(poll_us)) <
+      0) {
+    perror("setsockopt SO_BUSY_POLL");
+  }
   // Setup server address
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
