@@ -27,6 +27,9 @@
 #include <casacore/tables/Tables/SetupNewTab.h>
 #include <casacore/tables/Tables/TableDesc.h>
 #include <sw/redis++/redis++.h>
+extern "C" {
+#include <dada_hdu.h>
+}
 
 template <typename BeamT, typename ArrivalsT> class BeamWriter {
 public:
