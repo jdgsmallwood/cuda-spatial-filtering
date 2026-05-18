@@ -188,30 +188,6 @@ void unpack_triangular_baseline_batch_launch(const T *packedData, T *denseData,
 }
 
 template <typename InputT, typename OutputT>
-__global__ void get_data_for_fft(
-    const InputT *__restrict__ input_data, OutputT *__restrict__ output_data,
-    const int NR_CHANNELS, const int NR_POLARIZATIONS, const int NR_FREQS,
-    const int NR_RECEIVERS, const int channel_to_fft, const int pol_to_fft) {
-
-  int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int stride = blockDim.x * gridDim.x;
-
-  int channel_to_fft_local = channel_to_fft;
-  int pol_to_fft_local = pol_to_fft;
-
-  while (tid < NR_FREQS * NR_RECEIVERS) {
-    int receiver_idx = tid % NR_RECEIVERS;
-    int time_idx = tid / NR_RECEIVERS;
-    float2 output = __half22float2(
-        (__half2)(input_data[0][channel_to_fft_local][pol_to_fft_local]
-                            [receiver_idx][time_idx]));
-
-    output_data[0][receiver_idx][time_idx] = output;
-    tid += stride;
-  };
-};
-
-template <typename InputT, typename OutputT>
 __global__ void
 get_data_for_multi_channel_fft(const InputT *__restrict__ input_data,
                                OutputT *__restrict__ output_data, const int n) {
@@ -228,21 +204,6 @@ get_data_for_multi_channel_fft(const InputT *__restrict__ input_data,
 };
 
 template <typename InputT, typename OutputT>
-void get_data_for_fft_launch(const InputT *input_data, OutputT *output_data,
-                             const int NR_CHANNELS, const int NR_POLARIZATIONS,
-                             const int NR_FREQS, const int NR_RECEIVERS,
-                             const int channel_to_fft, const int pol_to_fft,
-                             cudaStream_t stream) {
-
-  const int num_blocks = 16;
-  const int num_threads = 1024;
-
-  get_data_for_fft<InputT, OutputT><<<num_blocks, num_threads, 0, stream>>>(
-      input_data, output_data, NR_CHANNELS, NR_POLARIZATIONS, NR_FREQS,
-      NR_RECEIVERS, channel_to_fft, pol_to_fft);
-}
-
-template <typename InputT, typename OutputT>
 void get_data_for_multi_channel_fft_launch(
     const InputT *input_data, OutputT *output_data, const int NR_CHANNELS,
     const int NR_POLARIZATIONS, const int NR_FREQS, const int NR_RECEIVERS,
@@ -254,52 +215,6 @@ void get_data_for_multi_channel_fft_launch(
 
   get_data_for_multi_channel_fft<InputT, OutputT>
       <<<num_blocks, num_threads, 0, stream>>>(input_data, output_data, n);
-}
-
-template <typename InputT, typename OutputT>
-__global__ void
-detect_and_average_fft(const InputT *__restrict__ cufft_data,
-                       OutputT *__restrict__ output_data, const int NR_FREQS,
-                       const int NR_RECEIVERS, const int DOWNSAMPLE_FACTOR) {
-
-  int tid = threadIdx.x;
-  const int stride = blockDim.x;
-  const int num_output = NR_FREQS / DOWNSAMPLE_FACTOR;
-
-  while (tid < num_output) {
-    float output = 0.0f;
-    int start_freq = tid * DOWNSAMPLE_FACTOR;
-    int num_vals = 0;
-    for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
-      for (int i = 0; i < NR_RECEIVERS; ++i) {
-        float2 in = cufft_data[0][i][start_freq + j];
-        float val = sqrtf(in.x * in.x + in.y * in.y);
-
-        if (!isnan(val)) {
-          output += val;
-          num_vals++;
-        }
-      }
-    }
-    if (num_vals != 0) {
-      output /= (num_vals);
-    } else {
-      output = 0;
-    }
-    output_data[0][tid] = output;
-    tid += stride;
-  }
-};
-
-template <typename InputT, typename OutputT>
-void detect_and_average_fft_launch(const InputT *cufft_data,
-                                   OutputT *output_data, const int NR_FREQS,
-                                   const int NR_RECEIVERS,
-                                   const int DOWNSAMPLE_FACTOR,
-                                   cudaStream_t stream) {
-
-  detect_and_average_fft<InputT, OutputT><<<1, 1024, 0, stream>>>(
-      cufft_data, output_data, NR_FREQS, NR_RECEIVERS, DOWNSAMPLE_FACTOR);
 }
 
 template <typename InputT, typename OutputT>

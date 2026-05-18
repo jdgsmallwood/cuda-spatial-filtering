@@ -52,9 +52,16 @@ TEST(HDF5BeamWriterTest, WritesBeamAndArrivalsAndSeq) {
   MockT::BeamOutputType beam_data;
   MockT::ArrivalOutputType arrival_data;
 
-  writer.write_beam_block(&beam_data, &arrival_data,
-                          /*start_seq=*/100,
-                          /*end_seq=*/200);
+    size_t block_idx = writer.register_block(100, 200);
+    void* beam_ptr = writer.get_beam_data_landing_pointer(block_idx);
+    void * arrivals_ptr = writer.get_arrivals_data_landing_pointer(block_idx);
+
+    std::memcpy(beam_ptr, &beam_data, sizeof(MockT::BeamOutputType));
+    std::memcpy(arrivals_ptr, &arrival_data, sizeof(MockT::ArrivalOutputType));
+
+    writer.register_beam_data_transfer_complete(block_idx);
+    writer.register_arrivals_transfer_complete(block_idx);
+    writer.drain_ready_blocks();
   writer.flush();
 
   // Reopen and verify
@@ -96,9 +103,12 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   // Prepare dummy data
   MockT::VisibilitiesOutputType vis_data;
 
-  writer.write_visibilities_block(&vis_data,
-                                  /*start_seq=*/100,
-                                  /*end_seq=*/200, 0, 400);
+    size_t block_idx = writer.register_block(100, 200, 0 /* missing packets */, 400 /* total packets */);
+    void* vis_ptr = writer.get_visibilities_landing_pointer(block_idx);
+
+    std::memcpy(vis_ptr, &vis_data, sizeof(MockT::VisibilitiesOutputType));
+    writer.register_visibilities_transfer_complete(block_idx);
+    writer.drain_ready_blocks();
   writer.flush();
 
   // Reopen and verify

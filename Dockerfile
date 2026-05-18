@@ -19,6 +19,7 @@ RUN echo 'deb [trusted=yes] https://apt.kitware.com/ubuntu/ jammy main' > /etc/a
 
 # Install GCC, CMake, and common build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
     build-essential \
     gcc \
     g++ \
@@ -155,6 +156,26 @@ RUN  ln -s /lib/x86_64-linux-gnu/libm.so.6 /lib64/libm.so.6 && \
 
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu
 # Ensure subsequent RUN commands use the conda environment
+
+
+RUN git clone https://git.code.sf.net/p/psrdada/code psrdada-code
+
+# Install PSRDADA
+RUN apt-get install -y --no-install-recommends automake libltdl-dev \
+      autoconf-archive  \
+      libtool 
+WORKDIR psrdada-code
+RUN ./bootstrap
+RUN ./configure --prefix=/usr/local
+RUN make -j$(nproc)
+RUN make install
+
+
+ENV PATH="/usr/local/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
+
+WORKDIR /tmp
+
 SHELL ["/bin/bash", "--login", "-c"]
 
 CMD ["/bin/bash", "--login"]

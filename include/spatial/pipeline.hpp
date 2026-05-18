@@ -82,7 +82,7 @@ static void release_buffer_host_func(void *data) {
 
   auto *ctx = static_cast<BufferReleaseContext *>(data);
   if (!ctx->dummy_run) {
-    // LOG_DEBUG("Releasing buffer #{}", ctx->buffer_index);
+    // DEBUG_LOG("Releasing buffer #{}", ctx->buffer_index);
     ctx->state->release_buffer(ctx->buffer_index);
   }
   delete ctx;
@@ -90,7 +90,7 @@ static void release_buffer_host_func(void *data) {
 
 static void output_transfer_complete_host_func(void *data) {
   auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
-  LOG_DEBUG("Marking beam data output transfer for block #{} complete",
+  DEBUG_LOG("Marking beam data output transfer for block #{} complete",
             ctx->block_index);
   ctx->output->register_beam_data_transfer_complete(ctx->block_index);
   delete ctx;
@@ -98,7 +98,7 @@ static void output_transfer_complete_host_func(void *data) {
 
 static void output_visibilities_transfer_complete_host_func(void *data) {
   auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
-  LOG_INFO("Marking output transfer for block #{} complete", ctx->block_index);
+  INFO_LOG("Marking output transfer for block #{} complete", ctx->block_index);
   ctx->output->register_visibilities_transfer_complete(ctx->block_index);
   delete ctx;
 }
@@ -256,8 +256,8 @@ private:
                                                            'p', 't', 'z'};
   inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'f',
                                                   'n', 'o', 'u'};
-  inline static const std::vector<int> modeCUFFTInput{'c', 'p', 'f', 'n',
-                                                      'o', 'u', 'z'};
+  inline static const std::vector<int> modeCUFFTInput{'c', 'p','m', 
+                                                      's', 'z'};
   // We need the planar samples matrix to be in column-major memory layout
   // which is equivalent to transposing time and receiver structure here.
   // We also squash the b,t axes into s = block * time
@@ -332,8 +332,6 @@ private:
     DevicePtr<typename T::FFTCUFFTInputType> samples_cufft_input;   // y
     DevicePtr<typename T::FFTCUFFTOutputType> samples_cufft_output; // y
     DevicePtr<typename T::FFTOutputType> cufft_downsampled_output;  // y
-    DevicePtr<typename T::FFTCUFFTPreprocessingType>
-        samples_cufft_preprocessing;                                       // y
     DevicePtr<BeamWeights> weights, weights_permuted, weights_updated;     // y
     DevicePtr<BeamformerOutput> beamformer_output, beamformer_data_output; // y
     DevicePtr<HalfBeamformerOutput> beamformer_data_output_half;           // y
@@ -380,8 +378,6 @@ private:
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_cufft_input(make_device_ptr<typename T::FFTCUFFTInputType>()),
-          samples_cufft_preprocessing(
-              make_device_ptr<typename T::FFTCUFFTPreprocessingType>()),
           samples_cufft_output(
               make_device_ptr<typename T::FFTCUFFTOutputType>()),
           cufft_downsampled_output(
@@ -521,7 +517,6 @@ private:
   cublasFillMode_t cusolver_uplo;
   static constexpr int CUSOLVER_BATCH_SIZE =
       T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS;
-  int next_fft_channel_pol;
 
 public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
@@ -560,30 +555,7 @@ public:
                              (__half *)b.samples_aligned.get(),
                              (__half *)b.samples_padding.get(), b.stream);
 
-    tensor_16.runPermutation(
-        "alignedToCUFFTInput", alpha, (__half *)b.samples_aligned.get(),
-        (__half *)b.samples_cufft_preprocessing.get(), b.stream);
 
-    int channel_to_fft = (next_fft_channel_pol) % T::NR_CHANNELS;
-    int polarization_to_fft = (next_fft_channel_pol) / T::NR_CHANNELS;
-
-    get_data_for_fft_launch<typename T::FFTCUFFTPreprocessingType,
-                            typename T::FFTCUFFTInputType>(
-        (typename T::FFTCUFFTPreprocessingType *)
-            b.samples_cufft_preprocessing.get(),
-        b.samples_cufft_input.get(), T::NR_CHANNELS, T::NR_POLARIZATIONS,
-        NR_TIME_STEPS_FOR_CORRELATION, T::NR_RECEIVERS, channel_to_fft,
-        polarization_to_fft, b.stream);
-
-    CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
-                            (void *)b.samples_cufft_output.get(),
-                            CUFFT_FORWARD));
-
-    detect_and_average_fft_launch<typename T::FFTCUFFTOutputType,
-                                  typename T::FFTOutputType>(
-        b.samples_cufft_output.get(), b.cufft_downsampled_output.get(),
-        T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
-        T::NR_RECEIVERS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
     CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
                                sizeof(typename T::HalfPacketAlignedSamplesType),
                                cudaMemcpyDefault, b.stream));
@@ -668,6 +640,20 @@ public:
                               T::NR_BEAMS * NR_TIME_STEPS_FOR_CORRELATION,
                           b.stream);
 
+    tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
+                             (float *)b.beamformer_output.get(),
+                             (float *)b.samples_cufft_input.get(), b.stream);
+
+    CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
+                            (void *)b.samples_cufft_output.get(),
+                            CUFFT_FORWARD));
+
+    detect_and_downsample_fft_launch(
+        (float2 *)b.samples_cufft_output.get(),
+        (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
+        T::NR_POLARIZATIONS,
+        T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
+        T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
     cudaEventRecord(stop_run[benchmark_runs_done], b.stream);
 
     // Output handling
@@ -677,8 +663,8 @@ public:
       size_t eigenvalue_block_num =
           output_->register_eigendecomposition_data_block(start_seq_num,
                                                           end_seq_num);
-      size_t fft_block_num = output_->register_fft_block(
-          start_seq_num, end_seq_num, channel_to_fft, polarization_to_fft);
+      size_t fft_block_num =
+          output_->register_fft_block(start_seq_num, end_seq_num);
       void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
       cudaMemcpyAsync(landing_pointer, b.beamformer_data_output_half.get(),
                       sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
@@ -720,9 +706,6 @@ public:
                       sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
                       b.stream);
 
-      next_fft_channel_pol =
-          (next_fft_channel_pol + 1) % (T::NR_CHANNELS * T::NR_POLARIZATIONS);
-
       auto *fft_output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = fft_block_num};
       cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
@@ -762,19 +745,10 @@ public:
               << ", NR_RECEIVERS_PER_BLOCK: "
               << T::NR_PADDED_RECEIVERS_PER_BLOCK << std::endl;
 
-    next_fft_channel_pol = 0;
 
-    const int CUFFT_RANK = 1;
     const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
     long long N[] = {CUFFT_FFT_SIZE};
-    const long long CUFFT_ISTRIDE = 1;
-    const long long CUFFT_OSTRIDE = 1;
-    const long long CUFFT_IDIST = CUFFT_FFT_SIZE;
-    const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
-    const size_t NUM_TOTAL_BATCHES = T::NR_RECEIVERS;
-    cudaDataType input_type = CUDA_C_32F;
-    cudaDataType output_type = CUDA_C_32F;
-    cudaDataType compute_type = CUDA_C_32F;
+    const size_t NUM_TOTAL_BATCHES = T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
                           sizeof(TrimmedVisibilities)));
@@ -797,10 +771,6 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
 
-    const std::complex<float> alpha_ccglib = {1, 0};
-    const std::complex<float> beta_ccglib = {0, 0};
-    //    tcc::Format inputFormat = tcc::Format::fp16;
-
     size_t work_size = 0;
     {
       // Temporary plan to calculate work_size
@@ -822,7 +792,7 @@ public:
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
     tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
-    tensor_16.addTensor(modeCUFFTInput, "cufftInput");
+    tensor_32.addTensor(modeCUFFTInput, "cufftInput");
 
     tensor_16.addTensor(modeWeightsInput, "weightsInput");
     tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
@@ -839,8 +809,6 @@ public:
                              CUTENSOR_COMPUTE_DESC_16F, "alignedToPadding");
     tensor_16.addPermutation("packet", "prealign", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToPreAlign");
-    tensor_16.addPermutation("aligned", "cufftInput", CUTENSOR_COMPUTE_DESC_16F,
-                             "alignedToCUFFTInput");
     tensor_16.addPermutation("packet_padded", "corr_input",
                              CUTENSOR_COMPUTE_DESC_16F, "paddedToCorrInput");
     tensor_16.addPermutation("aligned", "planar", CUTENSOR_COMPUTE_DESC_16F,
@@ -858,6 +826,8 @@ public:
     tensor_32.addPermutation("visBaselineTrimmed", "visCorrTrimmed",
                              CUTENSOR_COMPUTE_DESC_32F,
                              "visBaselineTrimmedToTrimmed");
+    tensor_32.addPermutation("beamCCGLIB", "cufftInput", CUTENSOR_COMPUTE_DESC_32F,
+                             "beamToCUFFTInput");
 
     buffers.reserve(num_buffers);
     for (int i = 0; i < num_buffers; ++i) {
@@ -943,10 +913,10 @@ public:
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
 
-    LOG_INFO("Dumping correlations to host...");
+    INFO_LOG("Dumping correlations to host...");
     int current_num_integrated_units_processed =
         num_correlation_units_integrated;
-    LOG_INFO("Current num integrated units processed is {}",
+    INFO_LOG("Current num integrated units processed is {}",
              current_num_integrated_units_processed);
     cudaDeviceSynchronize();
     const int visibilities_total_packets =
@@ -1065,7 +1035,7 @@ public:
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
-    LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
+    INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
     LambdaPipelineIngest<T>::ingest_and_scale(
@@ -1106,7 +1076,7 @@ public:
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
       size_t fft_block_num =
-          output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
+          output_->register_fft_block(start_seq_num, end_seq_num);
       auto *fft_output_pointer =
           (void *)output_->get_fft_landing_pointer(fft_block_num);
       cudaMemcpyAsync(fft_output_pointer,
@@ -1193,7 +1163,7 @@ public:
     const long long CUFFT_ODIST = CUFFT_FFT_SIZE;
     const size_t NUM_TOTAL_BATCHES =
         T::NR_RECEIVERS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
-    LOG_INFO("FFT initialized with {} total batches with a {} FFT each run "
+    INFO_LOG("FFT initialized with {} total batches with a {} FFT each run "
              "(RECEIVERS x CHANNELS x POL)",
              NUM_TOTAL_BATCHES, CUFFT_FFT_SIZE);
     size_t work_size = 0;
@@ -1482,7 +1452,7 @@ public:
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
-    LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
+    INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
     LambdaPipelineIngest<T>::ingest_and_scale(
@@ -1525,7 +1495,7 @@ public:
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
       size_t fft_block_num =
-          output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
+          output_->register_fft_block(start_seq_num, end_seq_num);
       auto *fft_output_pointer =
           (void *)output_->get_fft_landing_pointer(fft_block_num);
       cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
@@ -2114,7 +2084,7 @@ public:
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
-    LOG_INFO("Pipeline run started with start_seq {} and end seq {}",
+    INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
     LambdaPipelineIngest<T>::ingest_and_scale(
@@ -2279,11 +2249,6 @@ public:
     //                 b.stream);
 
     {
-      const cuComplex herk_alpha{1.0f, 0.0f};
-      const cuComplex herk_beta{0.0f, 0.0f}; // overwrite projection_block
-      const int N = T::NR_RECEIVERS;
-      size_t CUBLAS_NUM_BATCHES =
-          CUSOLVER_BATCH_SIZE; // T::NR_POLARIZATIONS * T::NR_CHANNELS
       size_t CUBLAS_STRIDE_A = T::NR_RECEIVERS * T::NR_RECEIVERS;
       size_t CUBLAS_STRIDE_B = T::NR_RECEIVERS * T::NR_BEAMS;
       size_t CUBLAS_STRIDE_C = T::NR_RECEIVERS * T::NR_BEAMS;
@@ -2394,7 +2359,7 @@ public:
       output_->register_arrivals_transfer_complete(beam_block_num);
 
       size_t fft_block_num =
-          output_->register_fft_block(start_seq_num, end_seq_num, -1, -1);
+          output_->register_fft_block(start_seq_num, end_seq_num);
       auto *fft_output_pointer =
           (void *)output_->get_fft_landing_pointer(fft_block_num);
       cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
@@ -3021,7 +2986,7 @@ public:
           beta_ccglib));
     }
 
-    LOG_DEBUG("Copying weights...");
+    DEBUG_LOG("Copying weights...");
     for (auto i = 0; i < num_buffers; ++i) {
       cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights),
                  cudaMemcpyDefault);
@@ -3172,10 +3137,10 @@ public:
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
 
-    LOG_INFO("Dumping correlations to host...");
+    INFO_LOG("Dumping correlations to host...");
     int current_num_integrated_units_processed =
         num_correlation_units_integrated;
-    LOG_INFO("Current num integrated units processed is {}",
+    INFO_LOG("Current num integrated units processed is {}",
              current_num_integrated_units_processed);
     cudaDeviceSynchronize();
     const int visibilities_total_packets =
@@ -3518,7 +3483,7 @@ public:
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
-    LOG_INFO("LambdaProjectionPipeline run: start_seq={} end_seq={}",
+    INFO_LOG("LambdaProjectionPipeline run: start_seq={} end_seq={}",
              start_seq_num, end_seq_num);
 
     auto &b = buffers[current_buffer];
@@ -3770,7 +3735,7 @@ public:
 private:
   void dump_projection(const uint64_t start_seq_num,
                        const uint64_t end_seq_num) {
-    LOG_INFO("LambdaProjectionPipeline: dumping averaged projection "
+    INFO_LOG("LambdaProjectionPipeline: dumping averaged projection "
              "(num_runs={})",
              num_runs_integrated.load());
 
@@ -3840,6 +3805,6 @@ private:
     num_runs_integrated.store(0);
 
     cudaDeviceSynchronize();
-    LOG_INFO("LambdaProjectionPipeline: dump complete.");
+    INFO_LOG("LambdaProjectionPipeline: dump complete.");
   }
 };

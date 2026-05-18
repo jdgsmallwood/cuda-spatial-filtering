@@ -31,9 +31,7 @@ public:
                                          const size_t end_seq_num) = 0;
 
   virtual size_t register_fft_block(const size_t start_seq_num,
-                                    const size_t end_seq_num,
-                                    const int channel_idx,
-                                    const int pol_idx) = 0;
+                                    const size_t end_seq_num) = 0;
 
   virtual void *get_beam_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_visibilities_landing_pointer(const size_t block_num) = 0;
@@ -92,8 +90,7 @@ public:
     return 1;
   };
   size_t register_fft_block(const size_t start_seq_num,
-                            const size_t end_seq_num, const int channel_idx,
-                            const int pol_idx) override {
+                            const size_t end_seq_num) override {
     return 1;
   }
 
@@ -159,9 +156,7 @@ public:
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
       std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer,
-      std::unique_ptr<FFTWriter<FFTOutput>> fft_writer, size_t beam_buffer_size,
-      size_t vis_buffer_size, size_t eigen_buffer_size,
-      size_t fft_buffer_size, )
+      std::unique_ptr<FFTWriter<FFTOutput>> fft_writer)
       : beam_writer_(std::move(beam_writer)),
         vis_writer_(std::move(vis_writer)),
         eigen_writer_(std::move(eigen_writer)),
@@ -215,24 +210,11 @@ public:
   }
 
   size_t register_fft_block(const size_t start_seq_num,
-                            const size_t end_seq_num, const int channel_idx,
-                            const int pol_idx) override {
-    size_t block_num = fft_write_idx_;
-    auto &block = fft_blocks_[block_num];
-    block.start_seq_num = start_seq_num;
-    block.end_seq_num = end_seq_num;
-    block.channel_idx = channel_idx;
-    block.pol_idx = pol_idx;
-    block.transfer_complete = false;
-
-    fft_write_idx_ = (block_num + 1) % fft_blocks_.size();
-    LOG_INFO("Registered FFT block with start seq {} and end seq {}",
-             start_seq_num, end_seq_num);
-
-    if (fft_write_idx_ == fft_read_idx_) {
-      LOG_ERROR("FFT ring buffer is full");
+                            const size_t end_seq_num) override {
+    if (fft_writer_ != nullptr) {
+      return fft_writer_->register_block(start_seq_num, end_seq_num);
     }
-    return block_num;
+    return std::numeric_limits<size_t>::max();
   }
 
   void *get_beam_data_landing_pointer(const size_t block_num) override {
@@ -246,7 +228,7 @@ public:
     if (vis_writer_ == nullptr) {
       return nullptr;
     }
-    return vis_writer->get_visibilities_landing_pointer(block_num);
+    return vis_writer_->get_visibilities_landing_pointer(block_num);
   }
 
   void *get_arrivals_data_landing_pointer(const size_t block_num) override {
@@ -316,16 +298,23 @@ public:
   }
 
   void writer_loop() {
-
-    LOG_INFO("Writer loop is running!");
+    INFO_LOG("Writer loop is running!");
     while (running_) {
 
-      if (has_data_to_write()) {
-        LOG_INFO("There is data to write! Writing data...");
-        write_beam_data();
-        write_visibilities();
-        write_eigendata();
-        write_fft_data();
+      if (beam_writer_ && beam_writer_->has_data_to_write()) {
+        beam_writer_->drain_ready_blocks();
+      }
+
+      if (vis_writer_ && vis_writer_->has_data_to_write()) {
+        vis_writer_->drain_ready_blocks();
+      }
+
+      if (eigen_writer_ && eigen_writer_->has_data_to_write()) {
+        eigen_writer_->drain_ready_blocks();
+      }
+
+      if (fft_writer_ && fft_writer_->has_data_to_write()) {
+        fft_writer_->drain_ready_blocks();
       }
     }
   }
@@ -333,79 +322,6 @@ public:
   std::atomic<bool> running_{true};
 
 private:
-  bool has_data_to_write() {
-
-    return has_beam || has_vis || has_eigen || has_fft;
-  }
-
-  void write_beam_data() {
-    LOG_INFO("Beam info....beam_read_idx {}, beam_write_idx {} "
-             "transfer_complete: {} arrival transfercomplete {}",
-             beam_read_idx_, beam_write_idx_,
-             beam_blocks_[beam_read_idx_].beam_transfer_complete,
-             beam_blocks_[beam_read_idx_].arrival_transfer_complete);
-    while (beam_read_idx_ != beam_write_idx_ &&
-           beam_blocks_[beam_read_idx_].beam_transfer_complete &&
-           beam_blocks_[beam_read_idx_].arrival_transfer_complete && running_) {
-
-      const auto &block = beam_blocks_[beam_read_idx_];
-
-      if (beam_writer_ != nullptr) {
-        beam_writer_->write_beam_block(&block.beam_data, &block.arrival_data,
-                                       block.start_seq_num, block.end_seq_num);
-      }
-      auto block_num = beam_read_idx_;
-      beam_read_idx_ = (beam_read_idx_ + 1) % beam_blocks_.size();
-      LOG_INFO("Output block {} written. Next read index is {}.", block_num,
-               beam_read_idx_);
-    }
-  }
-
-  void write_visibilities() {
-    while (vis_read_idx_ != vis_write_idx_ &&
-           vis_blocks_[vis_read_idx_].transfer_complete && running_) {
-
-      const auto &block = vis_blocks_[vis_read_idx_];
-
-      if (vis_writer_ != nullptr) {
-        vis_writer_->write_visibilities_block(
-            &block.data, block.start_seq_num, block.end_seq_num,
-            block.num_missing_packets, block.num_total_packets);
-      }
-      vis_read_idx_ = (vis_read_idx_ + 1) % vis_blocks_.size();
-    }
-  }
-
-  void write_eigendata() {
-    while (eigen_read_idx_ != eigen_write_idx_ &&
-           eigen_blocks_[eigen_read_idx_].transfer_complete && running_) {
-
-      const auto &block = eigen_blocks_[eigen_read_idx_];
-      if (eigen_writer_ != nullptr) {
-        eigen_writer_->write_eigendata_block(
-            &block.eigenvalues, &block.eigenvectors, block.start_seq_num,
-            block.end_seq_num);
-      }
-      eigen_read_idx_ = (eigen_read_idx_ + 1) % eigen_blocks_.size();
-    }
-  }
-
-  void write_fft_data() {
-
-    while (fft_read_idx_ != fft_write_idx_ &&
-           fft_blocks_[fft_read_idx_].transfer_complete && running_) {
-
-      const auto &block = fft_blocks_[fft_read_idx_];
-
-      if (fft_writer_ != nullptr) {
-        fft_writer_->write_fft_block(&block.fft_output, block.start_seq_num,
-                                     block.end_seq_num, block.channel_idx,
-                                     block.pol_idx);
-      }
-      fft_read_idx_ = (fft_read_idx_ + 1) % fft_blocks_.size();
-    }
-  };
-
   std::unique_ptr<BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
