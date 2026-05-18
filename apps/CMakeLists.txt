@@ -11,8 +11,8 @@ target_include_directories(gpu_app_common INTERFACE
 )
 target_compile_options(gpu_app_common INTERFACE
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=128,2417>)
-target_compile_options(gpu_app_common INTERFACE
-    $<$<COMPILE_LANGUAGE:CUDA>:-w>)
+# target_compile_options(gpu_app_common INTERFACE
+#     $<$<COMPILE_LANGUAGE:CUDA>:-w>)
 target_link_directories(gpu_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 
 target_link_libraries(gpu_app_common INTERFACE 
