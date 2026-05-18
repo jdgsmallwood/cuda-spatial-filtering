@@ -106,11 +106,11 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Creating Output Handler\n";
 
-  auto output = std::make_shared<
-      BufferedOutput<Config, FFTOutputType, Eigenvalues, Eigenvectors,
-                     Config::PulsarFoldOutputType, BeamOutputType>>(
-      std::move(beam_writer), nullptr, std::move(eigen_writer),
-      std::move(fft_writer), nullptr, 100, 100, 100, 200, 100);
+  auto output =
+      std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
+                                      Eigenvectors, BeamOutputType>>(
+          std::move(beam_writer), nullptr, std::move(eigen_writer),
+          std::move(fft_writer), nullptr, 100, 100, 100, 200, 100);
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;

@@ -118,13 +118,6 @@ static void fft_output_transfer_complete_host_func(void *data) {
   delete ctx;
 }
 
-static void pulsar_fold_output_transfer_complete_host_func(void *data) {
-  auto *ctx = static_cast<OutputTransferCompleteContext *>(data);
-
-  ctx->output->register_pulsar_fold_transfer_complete(ctx->block_index);
-  delete ctx;
-}
-
 template <size_t NR_CHANNELS, size_t NR_RECEIVERS, size_t NR_POLARIZATIONS>
 auto get_default_gains() {
   std::array<std::complex<float>, NR_CHANNELS * NR_RECEIVERS * NR_POLARIZATIONS>

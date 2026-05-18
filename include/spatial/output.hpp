@@ -8,6 +8,7 @@
 #include <complex.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <limits>
 #include <unistd.h>
 
 // forward declarations
@@ -16,7 +17,6 @@ template <typename BeamT, typename ArrivalsT> class BeamWriter;
 template <typename T> class VisibilitiesWriter;
 template <typename TVal, typename TVec> class EigenWriter;
 template <typename T> class FFTWriter;
-template <typename T> class PulsarFoldWriter;
 
 class Output {
 public:
@@ -35,9 +35,6 @@ public:
                                     const int channel_idx,
                                     const int pol_idx) = 0;
 
-  virtual size_t register_pulsar_fold_block(const size_t start_seq_num,
-                                            const size_t end_seq_num) = 0;
-
   virtual void *get_beam_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_visibilities_landing_pointer(const size_t block_num) = 0;
   virtual void *get_arrivals_data_landing_pointer(const size_t block_num) = 0;
@@ -46,7 +43,6 @@ public:
   virtual void *
   get_eigenvectors_data_landing_pointer(const size_t block_num) = 0;
   virtual void *get_fft_landing_pointer(const size_t block_num) = 0;
-  virtual void *get_pulsar_fold_landing_pointer(const size_t block_num) = 0;
 
   virtual void register_beam_data_transfer_complete(const size_t block_num) = 0;
   virtual void
@@ -55,8 +51,6 @@ public:
   virtual void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) = 0;
   virtual void register_fft_transfer_complete(const size_t block_num) = 0;
-  virtual void
-  register_pulsar_fold_transfer_complete(const size_t block_num) = 0;
 };
 
 template <typename T> class SingleHostMemoryOutput : public Output {
@@ -74,14 +68,12 @@ public:
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
   using FFTOutput = typename T::FFTOutputType;
-  using PulsarFoldOutput = typename T::PulsarFoldOutputType;
   BeamOutput *beam_data;
   Visibilities *visibilities;
   Arrivals *arrivals;
   Eigenvalues *eigenvalues;
   Eigenvectors *eigenvectors;
   FFTOutput *fft_output;
-  PulsarFoldOutput *pulsar_fold_output;
 
   size_t register_beam_data_block(const size_t start_seq_num,
                                   const size_t end_seq_num) override {
@@ -102,10 +94,6 @@ public:
   size_t register_fft_block(const size_t start_seq_num,
                             const size_t end_seq_num, const int channel_idx,
                             const int pol_idx) override {
-    return 1;
-  }
-  size_t register_pulsar_fold_block(const size_t start_seq_num,
-                                    const size_t end_seq_num) override {
     return 1;
   }
 
@@ -131,10 +119,6 @@ public:
   void *get_fft_landing_pointer(const size_t block_num) override {
     return (void *)fft_output;
   }
-  void *get_pulsar_fold_landing_pointer(const size_t block_num) override {
-
-    return (void *)pulsar_fold_output;
-  }
 
   void register_beam_data_transfer_complete(const size_t block_num) override {};
   void
@@ -143,8 +127,6 @@ public:
   void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) override {};
   void register_fft_transfer_complete(const size_t block_num) override {};
-  void register_pulsar_fold_transfer_complete(const size_t block_num) override {
-  };
 
   SingleHostMemoryOutput() {
     CUDA_CHECK(cudaMallocHost((void **)&beam_data, sizeof(BeamOutput)));
@@ -153,8 +135,6 @@ public:
     CUDA_CHECK(cudaMallocHost((void **)&eigenvalues, sizeof(Eigenvalues)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvectors, sizeof(Eigenvectors)));
     CUDA_CHECK(cudaMallocHost((void **)&fft_output, sizeof(FFTOutput)));
-    CUDA_CHECK(
-        cudaMallocHost((void **)&pulsar_fold_output, sizeof(PulsarFoldOutput)));
   };
   ~SingleHostMemoryOutput() {
     CUDA_CHECK(cudaFreeHost(beam_data));
@@ -163,74 +143,15 @@ public:
     CUDA_CHECK(cudaFreeHost(eigenvalues));
     CUDA_CHECK(cudaFreeHost(eigenvectors));
     CUDA_CHECK(cudaFreeHost(fft_output));
-    CUDA_CHECK(cudaFreeHost(pulsar_fold_output));
   };
 };
 
 template <typename T, typename FFTOutput = typename T::FFTOutputType,
           typename Eigenvalues = typename T::EigenvalueOutputType,
           typename Eigenvectors = typename T::EigenvectorOutputType,
-          typename PulsarFold = typename T::PulsarFoldOutputType,
           typename BeamOutputType = typename T::BeamOutputType>
 class BufferedOutput : public Output {
 public:
-  struct BeamBlock {
-    BeamOutputType beam_data;
-    typename T::ArrivalsOutputType arrival_data;
-    size_t start_seq_num;
-    size_t end_seq_num;
-    bool beam_transfer_complete;
-    bool arrival_transfer_complete;
-
-    BeamBlock()
-        : start_seq_num(0), end_seq_num(0), beam_transfer_complete(false),
-          arrival_transfer_complete(false) {}
-  };
-
-  struct VisBlock {
-    typename T::VisibilitiesOutputType data;
-    size_t start_seq_num;
-    size_t end_seq_num;
-    int num_missing_packets;
-    int num_total_packets;
-    bool transfer_complete;
-
-    VisBlock()
-        : start_seq_num(0), end_seq_num(0), num_missing_packets(0),
-          num_total_packets(0), transfer_complete(false) {}
-  };
-
-  struct EigenBlock {
-    Eigenvalues eigenvalues;
-    Eigenvectors eigenvectors;
-    size_t start_seq_num;
-    size_t end_seq_num;
-    bool transfer_complete;
-
-    EigenBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {}
-  };
-
-  struct FFTBlock {
-    FFTOutput fft_output;
-    size_t start_seq_num;
-    size_t end_seq_num;
-    int channel_idx;
-    int pol_idx;
-    bool transfer_complete;
-
-    FFTBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {};
-  };
-
-  struct PulsarFoldBlock {
-    PulsarFold pulsar_fold_output;
-    size_t start_seq_num;
-    size_t end_seq_num;
-    bool transfer_complete;
-
-    PulsarFoldBlock()
-        : start_seq_num(0), end_seq_num(0), transfer_complete(false) {};
-  };
-
   BufferedOutput(
       std::unique_ptr<
           BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
@@ -238,26 +159,13 @@ public:
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
       std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer,
-      std::unique_ptr<FFTWriter<FFTOutput>> fft_writer,
-      std::unique_ptr<PulsarFoldWriter<PulsarFold>> pulsar_fold_writer,
-      size_t beam_buffer_size, size_t vis_buffer_size, size_t eigen_buffer_size,
-      size_t fft_buffer_size, size_t pulsar_fold_buffer_size)
+      std::unique_ptr<FFTWriter<FFTOutput>> fft_writer, size_t beam_buffer_size,
+      size_t vis_buffer_size, size_t eigen_buffer_size,
+      size_t fft_buffer_size, )
       : beam_writer_(std::move(beam_writer)),
         vis_writer_(std::move(vis_writer)),
         eigen_writer_(std::move(eigen_writer)),
-        fft_writer_(std::move(fft_writer)),
-        pulsar_fold_writer_(std::move(pulsar_fold_writer)), beam_write_idx_(0),
-        beam_read_idx_(0), vis_write_idx_(0), vis_read_idx_(0),
-        eigen_write_idx_(0), eigen_read_idx_(0), fft_write_idx_(0),
-        fft_read_idx_(0), pulsar_fold_read_idx_(0), pulsar_fold_write_idx_(0),
-        running_(true) {
-    // Allocate ring buffer blocks
-    beam_blocks_.resize(beam_buffer_size);
-    vis_blocks_.resize(vis_buffer_size);
-    eigen_blocks_.resize(eigen_buffer_size);
-    fft_blocks_.resize(fft_buffer_size);
-    pulsar_fold_blocks_.resize(pulsar_fold_buffer_size);
-  }
+        fft_writer_(std::move(fft_writer)), running_(true) {};
 
   ~BufferedOutput() {
     running_ = false;
@@ -274,72 +182,36 @@ public:
     if (fft_writer_ != nullptr) {
       fft_writer_->flush();
     };
-    if (pulsar_fold_writer_ != nullptr) {
-      pulsar_fold_writer_->flush();
-    };
   }
 
   size_t register_beam_data_block(const size_t start_seq_num,
                                   const size_t end_seq_num) override {
-    size_t block_num = beam_write_idx_;
-
-    auto &block = beam_blocks_[block_num];
-    block.start_seq_num = start_seq_num;
-    block.end_seq_num = end_seq_num;
-    block.beam_transfer_complete = false;
-    block.arrival_transfer_complete = false;
-
-    LOG_INFO("Beam write index is now {}", beam_write_idx_);
-    if (beam_write_idx_ + 1 == beam_read_idx_) {
-      LOG_ERROR("Output beam data ring buffer is full. Read Idx is {} and "
-                "Write Idx is {}",
-                beam_read_idx_, beam_write_idx_);
-      while (beam_write_idx_ + 1 == beam_read_idx_) {
-        LOG_INFO("Output beam data ring buffer is still full. Waiting....");
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-      }
+    if (beam_writer_ != nullptr) {
+      return beam_writer_->register_block(start_seq_num, end_seq_num);
     }
-    beam_write_idx_ = (block_num + 1) % beam_blocks_.size();
-    LOG_INFO("Updated Beam write idx is now {}", beam_write_idx_);
-    return block_num;
+    return std::numeric_limits<size_t>::max();
   }
 
   size_t register_visibilities_block(const size_t start_seq_num,
                                      const size_t end_seq_num,
                                      const int num_missing_packets,
                                      const int num_total_packets) override {
-    size_t block_num = vis_write_idx_;
 
-    auto &block = vis_blocks_[block_num];
-    block.start_seq_num = start_seq_num;
-    block.end_seq_num = end_seq_num;
-    block.num_missing_packets = num_missing_packets;
-    block.num_total_packets = num_total_packets;
-    block.transfer_complete = false;
-
-    vis_write_idx_ = (block_num + 1) % vis_blocks_.size();
-
-    if (vis_write_idx_ == vis_read_idx_) {
-      throw std::runtime_error("Visibilities ring buffer is full");
+    if (vis_writer_ != nullptr) {
+      return vis_writer_->register_block(
+          start_seq_num, end_seq_num, num_missing_packets, num_total_packets);
     }
-    return block_num;
+    return std::numeric_limits<size_t>::max();
   }
 
   size_t
   register_eigendecomposition_data_block(const size_t start_seq_num,
                                          const size_t end_seq_num) override {
-    size_t block_num = eigen_write_idx_;
-    auto &block = eigen_blocks_[block_num];
-    block.start_seq_num = start_seq_num;
-    block.end_seq_num = end_seq_num;
-    block.transfer_complete = false;
 
-    eigen_write_idx_ = (block_num + 1) % eigen_blocks_.size();
-
-    if (eigen_write_idx_ == eigen_read_idx_) {
-      LOG_ERROR("Eigendata ring buffer is full");
+    if (eigen_writer_ != nullptr) {
+      return eigen_writer_->register_block(start_seq_num, end_seq_num);
     }
-    return block_num;
+    return std::numeric_limits<size_t>::max();
   }
 
   size_t register_fft_block(const size_t start_seq_num,
@@ -363,78 +235,84 @@ public:
     return block_num;
   }
 
-  size_t register_pulsar_fold_block(const size_t start_seq_num,
-                                    const size_t end_seq_num) override {
-    size_t block_num = pulsar_fold_write_idx_;
-    auto &block = pulsar_fold_blocks_[block_num];
-    block.start_seq_num = start_seq_num;
-    block.end_seq_num = end_seq_num;
-    block.transfer_complete = false;
-
-    pulsar_fold_write_idx_ = (block_num + 1) % pulsar_fold_blocks_.size();
-    LOG_INFO("Registered Pulsar Fold block with start seq {} and end seq {}",
-             start_seq_num, end_seq_num);
-
-    if (pulsar_fold_write_idx_ == pulsar_fold_read_idx_) {
-      LOG_ERROR("Pulsar Fold ring buffer is full");
-    }
-    return block_num;
-  }
-
   void *get_beam_data_landing_pointer(const size_t block_num) override {
-    return &beam_blocks_[block_num].beam_data;
+    if (beam_writer_ == nullptr) {
+      return nullptr;
+    }
+    return beam_writer_->get_beam_data_landing_pointer(block_num);
   }
 
   void *get_visibilities_landing_pointer(const size_t block_num) override {
-    return &vis_blocks_[block_num].data;
+    if (vis_writer_ == nullptr) {
+      return nullptr;
+    }
+    return vis_writer->get_visibilities_landing_pointer(block_num);
   }
 
   void *get_arrivals_data_landing_pointer(const size_t block_num) override {
-    return &beam_blocks_[block_num].arrival_data;
+    if (beam_writer_ == nullptr) {
+      return nullptr;
+    }
+    return beam_writer_->get_arrivals_data_landing_pointer(block_num);
   }
 
   void *get_eigenvectors_data_landing_pointer(const size_t block_num) override {
-    return &eigen_blocks_[block_num].eigenvectors;
+    if (eigen_writer_ == nullptr) {
+      return nullptr;
+    }
+    return eigen_writer_->get_eigenvectors_landing_pointer(block_num);
   }
 
   void *get_eigenvalues_data_landing_pointer(const size_t block_num) override {
-    return &eigen_blocks_[block_num].eigenvalues;
+    if (eigen_writer_ == nullptr) {
+      return nullptr;
+    }
+    return eigen_writer_->get_eigenvalues_landing_pointer(block_num);
   }
 
   void *get_fft_landing_pointer(const size_t block_num) override {
-    return &fft_blocks_[block_num].fft_output;
-  }
-
-  void *get_pulsar_fold_landing_pointer(const size_t block_num) override {
-    return &pulsar_fold_blocks_[block_num].pulsar_fold_output;
+    if (fft_writer_ == nullptr) {
+      return nullptr;
+    }
+    return fft_writer_->get_fft_landing_pointer(block_num);
   }
 
   void register_beam_data_transfer_complete(const size_t block_num) override {
-    beam_blocks_[block_num].beam_transfer_complete = true;
+    if (beam_writer_ == nullptr) {
+      return;
+    }
+    beam_writer_->register_beam_data_transfer_complete(block_num);
   }
 
   void
   register_visibilities_transfer_complete(const size_t block_num) override {
-    vis_blocks_[block_num].transfer_complete = true;
+
+    if (vis_writer_ == nullptr) {
+      return;
+    }
+    vis_writer_->register_visibilities_transfer_complete(block_num);
   }
 
   void register_arrivals_transfer_complete(const size_t block_num) override {
-    LOG_INFO("Marking arrivals transfer complete for block {}", block_num);
-    beam_blocks_[block_num].arrival_transfer_complete = true;
-    LOG_INFO("arrivals transfer complete for block {} is now {}", block_num,
-             beam_blocks_[block_num].arrival_transfer_complete);
+    if (beam_writer_ == nullptr) {
+      return;
+    }
+    beam_writer_->register_arrivals_transfer_complete(block_num);
   }
 
   void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) override {
-    eigen_blocks_[block_num].transfer_complete = true;
+    if (eigen_writer_ == nullptr) {
+      return;
+    }
+    eigen_writer_->register_eigendecomposition_transfer_complete(block_num);
   }
 
   void register_fft_transfer_complete(const size_t block_num) override {
-    fft_blocks_[block_num].transfer_complete = true;
-  }
-  void register_pulsar_fold_transfer_complete(const size_t block_num) override {
-    pulsar_fold_blocks_[block_num].transfer_complete = true;
+    if (fft_writer_ == nullptr) {
+      return;
+    }
+    fft_writer_->register_fft_transfer_complete(block_num);
   }
 
   void writer_loop() {
@@ -448,7 +326,6 @@ public:
         write_visibilities();
         write_eigendata();
         write_fft_data();
-        write_pulsar_fold_data();
       }
     }
   }
@@ -457,22 +334,8 @@ public:
 
 private:
   bool has_data_to_write() {
-    bool has_beam = (beam_read_idx_ != beam_write_idx_) &&
-                    beam_blocks_[beam_read_idx_].beam_transfer_complete &&
-                    beam_blocks_[beam_read_idx_].arrival_transfer_complete;
-    bool has_vis = (vis_read_idx_ != vis_write_idx_) &&
-                   vis_blocks_[vis_read_idx_].transfer_complete;
 
-    bool has_eigen = (eigen_read_idx_ != eigen_write_idx_) &&
-                     eigen_blocks_[eigen_read_idx_].transfer_complete;
-
-    bool has_fft = (fft_read_idx_ != fft_write_idx_) &&
-                   fft_blocks_[fft_read_idx_].transfer_complete;
-
-    bool has_pulsar_fold =
-        (pulsar_fold_read_idx_ != pulsar_fold_write_idx_) &&
-        pulsar_fold_blocks_[pulsar_fold_read_idx_].transfer_complete;
-    return has_beam || has_vis || has_eigen || has_fft || has_pulsar_fold;
+    return has_beam || has_vis || has_eigen || has_fft;
   }
 
   void write_beam_data() {
@@ -543,45 +406,10 @@ private:
     }
   };
 
-  void write_pulsar_fold_data() {
-
-    while (pulsar_fold_read_idx_ != pulsar_fold_write_idx_ &&
-           pulsar_fold_blocks_[pulsar_fold_read_idx_].transfer_complete &&
-           running_) {
-
-      const auto &block = pulsar_fold_blocks_[pulsar_fold_read_idx_];
-
-      if (pulsar_fold_writer_ != nullptr) {
-        pulsar_fold_writer_->write_pulsar_fold_block(
-            &block.pulsar_fold_output, block.start_seq_num, block.end_seq_num);
-      }
-      pulsar_fold_read_idx_ =
-          (pulsar_fold_read_idx_ + 1) % pulsar_fold_blocks_.size();
-    }
-  };
-
   std::unique_ptr<BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;
   std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer_;
   std::unique_ptr<FFTWriter<FFTOutput>> fft_writer_;
-  std::unique_ptr<PulsarFoldWriter<PulsarFold>> pulsar_fold_writer_;
-
-  cuda_util::PinnedVector<BeamBlock> beam_blocks_;
-  cuda_util::PinnedVector<VisBlock> vis_blocks_;
-  cuda_util::PinnedVector<EigenBlock> eigen_blocks_;
-  cuda_util::PinnedVector<FFTBlock> fft_blocks_;
-  cuda_util::PinnedVector<PulsarFoldBlock> pulsar_fold_blocks_;
-
-  size_t beam_write_idx_;
-  size_t beam_read_idx_;
-  size_t vis_write_idx_;
-  size_t vis_read_idx_;
-  size_t eigen_write_idx_;
-  size_t eigen_read_idx_;
-  size_t fft_write_idx_;
-  size_t fft_read_idx_;
-  size_t pulsar_fold_write_idx_;
-  size_t pulsar_fold_read_idx_;
 };
