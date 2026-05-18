@@ -94,9 +94,7 @@ int main(int argc, char *argv[]) {
   //    beam_file);
   //  auto beam_writer = std::make_unique<BatchedHDF5BeamWriter<
   //    Config::BeamOutputType, Config::ArrivalsOutputType>>(beam_file, 100);
-  auto beam_writer = std::make_unique<
-      InMemoryBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
-      100);
+  auto beam_writer = nullptr;
   // auto beam_writer = std::make_unique<
   //     BinaryRawBeamWriter<Config::BeamOutputType,
   //     Config::ArrivalsOutputType>>(
@@ -106,13 +104,6 @@ int main(int argc, char *argv[]) {
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
-  // Array origin — geodetic: [longitude_deg, latitude_deg, height_m]
-  std::array<double, 3> array_origin_geodetic = {116.6708, -26.7041, 330.0};
-
-  // Array origin — geocentric ECEF [X, Y, Z] metres (origin for antenna
-  // offsets)
-  std::array<double, 3> array_origin_geocentric = {-2559454.0, 5095372.0,
-                                                   -2849057.0};
 
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
@@ -124,12 +115,12 @@ int main(int argc, char *argv[]) {
       std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
                                             Config::EigenvectorOutputType>>();
 
-  auto fft_writer = std::make_unique<RedisFFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_receivers, nr_lambda_polarizations);
+  auto fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
+      num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations);
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
-      std::move(fft_writer), nullptr, 100, 100, 100, 100, 100);
+      std::move(fft_writer));
 
   BeamWeightsT<Config> h_weights;
 
@@ -167,8 +158,8 @@ int main(int argc, char *argv[]) {
           nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
     }
   }
-  LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
-  LOG_INFO("Starting threads....");
+  INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
+  INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < capture.size(); ++i) {
     receiver_threads.emplace_back(
@@ -224,7 +215,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Cleanup
-  LOG_INFO("\nShutting down...\n");
+  INFO_LOG("\nShutting down...\n");
   std::cout << "Shutting down...\n";
   state.running.store(0, std::memory_order_release);
   state.shutdown();

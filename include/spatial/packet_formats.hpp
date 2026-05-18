@@ -182,7 +182,6 @@ struct LambdaPacketEntry
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() noexcept override {
 
-    // LOG_DEBUG("Entering parser...\n");
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
     uint32_t offset = 0;
@@ -321,22 +320,25 @@ struct LambdaConfig {
       std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_POLARIZATIONS]
                          [NR_RECEIVERS][NR_RECEIVERS];
   using FFTCUFFTPreprocessingType =
-      __half2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+      __half2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
              [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
-  using FFTCUFFTInputType = float2[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
-                                                 NR_PACKETS_FOR_CORRELATION];
-  using FFTCUFFTOutputType = float2[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
-                                                  NR_PACKETS_FOR_CORRELATION];
+  using FFTCUFFTInputType =
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
+  using FFTCUFFTOutputType =
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
 
   using MultiChannelFFTCUFFTInputType =
-      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
             [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
   using MultiChannelFFTCUFFTOutputType =
-      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
             [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
   constexpr static int FFT_DOWNSAMPLE_FACTOR = FFT_DOWNSAMPLE_FACTOR_T;
   using FFTOutputType =
-      float[NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
+      float[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+           [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
   using AntennaFFTOutputType =
       float[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
@@ -345,7 +347,6 @@ struct LambdaConfig {
       float[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
            [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
             FFT_DOWNSAMPLE_FACTOR];
-  using PulsarFoldOutputType = float[NR_CHANNELS][16][NR_POLARIZATIONS][256];
   using Complex = std::complex<float>;
   using ReceiverArray = std::array<Complex, NR_RECEIVERS>;
   using PolArray = std::array<ReceiverArray, NR_POLARIZATIONS>;

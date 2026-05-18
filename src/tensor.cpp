@@ -91,7 +91,7 @@ void CutensorSetup::addTensor(const std::vector<int> &modes,
                                    ? std::to_string(extentMap[b])
                                    : a + " " + std::to_string(extentMap[b]);
                       });
-  LOG_INFO("Tensor {} created with {} elements and size {} bytes. Modes {}",
+  INFO_LOG("Tensor {} created with {} elements and size {} bytes. Modes {}",
            name, meta->elements, meta->sizeBytes, modes_str);
 
   // Store the tensor
@@ -154,7 +154,7 @@ void CutensorSetup::addPermutation(const std::string &fromTensorName,
                                    : a + ", " + std::to_string(extentMap[b]);
                       });
 
-  LOG_INFO("Created permutation from {} to {} with {}, {} elements and shapes "
+  INFO_LOG("Created permutation from {} to {} with {}, {} elements and shapes "
            "({}) and ({}).",
            fromTensorName, toTensorName, fromIt->second->elements,
            toIt->second->elements, fromExtents, toExtents);

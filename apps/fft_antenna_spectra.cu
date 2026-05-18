@@ -66,8 +66,8 @@ int main(int argc, char *argv[]) {
 
   auto output = std::make_shared<
       BufferedOutput<Config, Config::MultiChannelAntennaFFTOutputType>>(
-      nullptr, nullptr, nullptr, std::move(fft_writer), nullptr, 100, 100, 100,
-      100, 100);
+      nullptr, nullptr, nullptr, std::move(fft_writer)
+);
 
   LambdaAntennaSpectraPipeline<Config> pipeline(num_buffers);
 
@@ -86,8 +86,8 @@ int main(int argc, char *argv[]) {
           nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
     }
   }
-  LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
-  LOG_INFO("Starting threads....");
+  INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
+  INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < capture.size(); ++i) {
     receiver_threads.emplace_back(
@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Cleanup
-  LOG_INFO("\nShutting down...\n");
+  INFO_LOG("\nShutting down...\n");
   std::cout << "Shutting down...\n";
   state.running.store(0, std::memory_order_release);
   state.shutdown();
