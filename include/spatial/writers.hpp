@@ -888,8 +888,25 @@ public:
               << ", NR_BEAMS:" << NR_BEAMS << ", NR_FREQS: " << NR_FREQS
               << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
     create_all_timeseries_keys();
-    madd_args.reserve(1 +
-                      NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
+    madd_args.resize(1 +
+                     NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
+    madd_args[0] = "TS.MADD";
+
+    // pre seed the key names as these will never change.
+    const int F = NR_FREQS;
+    int current_idx = 0;
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int beam = 0; beam < NR_BEAMS; ++beam) {
+          for (int f = 0; f < F; ++f) {
+
+            madd_args[1 + 3 * current_idx] =
+                precomputed_keys[get_key_index(ch, pol, beam, f)];
+            current_idx += 1;
+          }
+        }
+      }
+    }
   }
 
   void process_block(const FFTBlock<T> &block) override {
@@ -898,7 +915,6 @@ public:
                        .count();
     std::string ts_str = std::to_string(ts);
 
-    madd_args.push_back("TS.MADD");
     const int F = NR_FREQS;
     int current_idx = 0;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
@@ -906,8 +922,6 @@ public:
         for (int beam = 0; beam < NR_BEAMS; ++beam) {
           for (int f = 0; f < F; ++f) {
             const auto cval = block.fft_output[ch][pol][beam][f];
-            madd_args[1 + 3 * current_idx] =
-                precomputed_keys[get_key_index(ch, pol, beam, f)];
             madd_args[1 + 3 * current_idx + 1] = ts_str;
 
             std::string &val_str = madd_args[1 + 3 * current_idx + 2];
@@ -915,7 +929,6 @@ public:
             auto [ptr, ec] = std::to_chars(
                 val_str.data(), val_str.data() + val_str.size(), cval);
             val_str.resize(ptr - val_str.data());
-
             current_idx += 1;
           }
         }
