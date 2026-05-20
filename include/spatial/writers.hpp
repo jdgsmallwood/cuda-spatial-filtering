@@ -893,12 +893,11 @@ public:
   }
 
   void process_block(const FFTBlock<T> &block) override {
-
+    madd_args.clear();
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
     std::string ts_str = std::to_string(ts);
-    std::vector<std::string> madd_args;
 
     madd_args.push_back("TS.MADD");
     const int F = NR_FREQS;
@@ -929,6 +928,8 @@ private:
            static_cast<size_t>(beam) * NR_FREQS + static_cast<size_t>(f);
   }
   std::string prefix;
+
+  std::vector<std::string> madd_args;
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
