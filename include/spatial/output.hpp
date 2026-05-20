@@ -286,8 +286,6 @@ public:
     if (eigen_writer_ == nullptr) {
       return;
     }
-    DEBUG_LOG("Registering eigendecomposition transfer complete for block {}",
-              block_num);
     eigen_writer_->register_eigendecomposition_transfer_complete(block_num);
   }
 
@@ -295,7 +293,6 @@ public:
     if (fft_writer_ == nullptr) {
       return;
     }
-    DEBUG_LOG("Registering FFT transfer complete for block {}", block_num);
     fft_writer_->register_fft_transfer_complete(block_num);
   }
 
@@ -304,22 +301,18 @@ public:
     while (running_) {
 
       if (beam_writer_ != nullptr && beam_writer_->has_data_to_write()) {
-        DEBUG_LOG("Beam writer is being drained...");
         beam_writer_->drain_ready_blocks();
       }
 
       if (vis_writer_ != nullptr && vis_writer_->has_data_to_write()) {
-        DEBUG_LOG("Vis writer is being drained...");
         vis_writer_->drain_ready_blocks();
       }
 
       if (eigen_writer_ != nullptr && eigen_writer_->has_data_to_write()) {
-        DEBUG_LOG("Eigen writer is being drained...");
         eigen_writer_->drain_ready_blocks();
       }
 
       if (fft_writer_ != nullptr && fft_writer_->has_data_to_write()) {
-        DEBUG_LOG("FFT writer is being drained...");
         fft_writer_->drain_ready_blocks();
       }
     }
