@@ -134,6 +134,7 @@ class CMakeBuilder(App):
                 "cmake",
                 "--build",
                 ".",
+                "-j 5",
             ],
         ]
 
