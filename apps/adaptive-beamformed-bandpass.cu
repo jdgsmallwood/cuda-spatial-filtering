@@ -109,8 +109,7 @@ int main(int argc, char *argv[]) {
   auto output =
       std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
                                       Eigenvectors, BeamOutputType>>(
-          std::move(beam_writer), nullptr, std::move(eigen_writer),
-          std::move(fft_writer) );
+          nullptr, nullptr, std::move(eigen_writer), std::move(fft_writer));
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
