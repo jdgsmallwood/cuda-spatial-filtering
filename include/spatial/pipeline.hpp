@@ -2349,55 +2349,61 @@ public:
 
       size_t beam_block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
-      auto *beam_output_pointer =
-          (void *)output_->get_beam_data_landing_pointer(beam_block_num);
+      if (beam_block_num != std::numeric_limits<size_t>::max()) {
+        auto *beam_output_pointer =
+            (void *)output_->get_beam_data_landing_pointer(beam_block_num);
 
-      cudaMemcpyAsync(beam_output_pointer, b.beam_output.get(),
-                      sizeof(BeamOutput), cudaMemcpyDefault, b.stream);
+        cudaMemcpyAsync(beam_output_pointer, b.beam_output.get(),
+                        sizeof(BeamOutput), cudaMemcpyDefault, b.stream);
 
-      auto *beam_output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = beam_block_num};
+        auto *beam_output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = beam_block_num};
 
-      cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
-                         beam_output_ctx);
+        cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
+                           beam_output_ctx);
 
-      bool *arrivals_output_pointer =
-          (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
-      std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
-                  packet_data->get_arrivals_size());
-      output_->register_arrivals_transfer_complete(beam_block_num);
+        bool *arrivals_output_pointer =
+            (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
+        std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
+                    packet_data->get_arrivals_size());
+        output_->register_arrivals_transfer_complete(beam_block_num);
+      }
 
       size_t fft_block_num =
           output_->register_fft_block(start_seq_num, end_seq_num);
-      auto *fft_output_pointer =
-          (void *)output_->get_fft_landing_pointer(fft_block_num);
-      cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
-                      sizeof(FFTOutputType), cudaMemcpyDefault, b.stream);
+      if (fft_block_num != std::numeric_limits<size_t>::max()) {
+        auto *fft_output_pointer =
+            (void *)output_->get_fft_landing_pointer(fft_block_num);
+        cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
+                        sizeof(FFTOutputType), cudaMemcpyDefault, b.stream);
 
-      auto *fft_output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = fft_block_num};
-      cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
-                         fft_output_ctx);
+        auto *fft_output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = fft_block_num};
+        cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
+                           fft_output_ctx);
+      }
 
       size_t eig_block_num = output_->register_eigendecomposition_data_block(
           start_seq_num, end_seq_num);
 
-      void *eigval_ptr =
-          output_->get_eigenvalues_data_landing_pointer(eig_block_num);
-      void *eigvec_ptr =
-          output_->get_eigenvectors_data_landing_pointer(eig_block_num);
-      CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, b.decomp_visibilities.get(),
-                                 sizeof(DecompositionVisibilities),
-                                 cudaMemcpyDefault, b.stream));
+      if (eig_block_num != std::numeric_limits<size_t>::max()) {
+        void *eigval_ptr =
+            output_->get_eigenvalues_data_landing_pointer(eig_block_num);
+        void *eigvec_ptr =
+            output_->get_eigenvectors_data_landing_pointer(eig_block_num);
+        CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, b.decomp_visibilities.get(),
+                                   sizeof(DecompositionVisibilities),
+                                   cudaMemcpyDefault, b.stream));
 
-      CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, b.eigenvalues.get(),
-                                 sizeof(Eigenvalues), cudaMemcpyDefault,
-                                 b.stream));
+        CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, b.eigenvalues.get(),
+                                   sizeof(Eigenvalues), cudaMemcpyDefault,
+                                   b.stream));
 
-      auto *ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = eig_block_num};
-      CUDA_CHECK(cudaLaunchHostFunc(
-          b.stream, eigen_output_transfer_complete_host_func, ctx));
+        auto *ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = eig_block_num};
+        CUDA_CHECK(cudaLaunchHostFunc(
+            b.stream, eigen_output_transfer_complete_host_func, ctx));
+      }
     }
 
     // Rotate buffer indices
