@@ -241,8 +241,6 @@ int main(int argc, char *argv[]) {
   cudaDeviceSynchronize();
 
   output->running_ = false;
-  std::cout << "Waiting for writer thread to finish...\n";
-  writer_thread_.join();
   std::vector<float> run_timings;
   run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
   for (auto i = 0; i < pipeline.NR_BENCHMARKING_RUNS; ++i) {

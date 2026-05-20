@@ -357,8 +357,6 @@ int main(int argc, char *argv[]) {
   cudaDeviceSynchronize();
 
   output->running_ = false;
-  std::cout << "Waiting for writer thread to finish...\n";
-  writer_thread_.join();
   FLUSH_LOG();
   spdlog::shutdown();
   std::cout << "Shutdown complete.\n";
