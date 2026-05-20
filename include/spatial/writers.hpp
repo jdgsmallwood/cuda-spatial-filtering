@@ -132,7 +132,7 @@ public:
 
   void stop() {
     if (running_.exchange(false, std::memory_order_acq_rel)) {
-      cv.notify_all();
+      cv_.notify_all();
       if (drain_thread_.joinable()) {
         drain_thread_.join();
       }
