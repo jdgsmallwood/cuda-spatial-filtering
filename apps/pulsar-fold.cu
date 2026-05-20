@@ -111,6 +111,7 @@ int main(int argc, char *argv[]) {
                                       Eigenvectors, BeamOutputType>>(
           std::move(beam_writer), nullptr, std::move(eigen_writer),
           std::move(fft_writer));
+  output->start_writer_loop();
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
@@ -158,8 +159,6 @@ int main(int argc, char *argv[]) {
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
-  // Start writer thread
-  std::thread writer_thread_([&output] { output->writer_loop(); });
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   int packets_received = 0;

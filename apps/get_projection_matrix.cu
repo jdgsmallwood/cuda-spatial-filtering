@@ -55,8 +55,8 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Creating Output Handler\n";
   auto output = std::make_shared<BufferedOutput<Config>>(
-      nullptr, nullptr, std::move(projection_writer), nullptr
-      );
+      nullptr, nullptr, std::move(projection_writer), nullptr);
+  output->start_writer_loop();
 
   std::cout << "Initializing pipeline...\n";
   LambdaProjectionPipeline<Config, 3, 4> pipeline(num_buffers);
@@ -88,7 +88,6 @@ int main(int argc, char *argv[]) {
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
   // Start writer thread
-  std::thread writer_thread_([&output] { output->writer_loop(); });
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   int packets_received = 0;
