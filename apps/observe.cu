@@ -172,8 +172,7 @@ int main(int argc, char *argv[]) {
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
-  // Start writer thread
-  std::thread writer_thread_([&output] { output->writer_loop(); });
+  output->start_writer_loop();
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   int packets_received = 0;
