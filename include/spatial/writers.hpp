@@ -657,89 +657,81 @@ public:
             sizeof(TVec) /
             sizeof(typename std::remove_all_extents<TVec>::type)),
         redis("tcp://127.0.0.1:6379") {
+
     eigen_dims_ = get_array_dims<TVal>();
 
     NR_CHANNELS = eigen_dims_[0];
     NR_POLARIZATIONS = eigen_dims_[1];
     NR_RECEIVERS = eigen_dims_[3];
+
     std::cout << "RedisEigendataWriter initialized with NR_CHANNELS: "
               << NR_CHANNELS << ", NR_POL: " << NR_POLARIZATIONS
               << ", NR_RECEIVERS: " << NR_RECEIVERS << std::endl;
+
     create_all_timeseries_keys();
+    preallocate_madd_args();
   }
 
   void process_block(const EigenBlock<TVal, TVec> &block) override {
-    // NOTE: 'ts' (timestamp) needs to be passed or calculated here. Assuming
-    // 'ts' is available. Example:
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
-
-    std::vector<std::string> madd_args = {"TS.MADD"};
+    std::string ts_str = std::to_string(ts);
 
     const int N = NR_RECEIVERS;
-
-    // Reinterpret the template pointers to the underlying float/double types
-    // Since TVal is a float array, reinterpret_cast is fine.
     const float *val_ptr = reinterpret_cast<const float *>(&block.eigenvalues);
     const std::complex<float> *vec_ptr =
         reinterpret_cast<const std::complex<float> *>(&block.eigenvectors);
 
-    std::string ts_str = std::to_string(ts);
+    auto update_val = [](std::string &str, float val) {
+      str.resize(32);
+      auto [ptr, ec] = std::to_chars(str.data(), str.data() + str.size(), val);
+      str.resize(ptr - str.data());
+    };
 
-    for (int ch_idx = 0; ch_idx < 0; ++ch_idx) {
-      std::string channel_id = std::to_string(ch_idx);
+    size_t arg_idx = 0;
 
-      for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
-        for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
+    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+      // Loop only over auto-polarizations (0-0, 1-1, etc.)
+      for (int pol_idx = 0; pol_idx < NR_POLARIZATIONS; ++pol_idx) {
+        int pol_r_idx = pol_idx;
+        int pol_c_idx = pol_idx;
 
-          std::string pol_pair =
-              std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
+        // Offset math stays the same because the memory array still has
+        // the cross-polarization data in it, we are just skipping it.
+        size_t val_base_offset =
+            ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N) +
+            pol_r_idx * (NR_POLARIZATIONS * N) + pol_c_idx * N;
 
-          // === EIGENVALUE (val_data) ACCESS ===
-          // TVal layout: [CH][POL_R][POL_C][N] -> 4D array
-          size_t val_base_offset =
-              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N) +
-              pol_r_idx * (NR_POLARIZATIONS * N) + pol_c_idx * N;
+        size_t vec_base_offset =
+            ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
+            pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N);
 
-          size_t vec_base_offset =
-              ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
-              pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N);
+        for (int k_idx = 0; k_idx < N; ++k_idx) {
 
-          for (int k_idx = 0; k_idx < N; ++k_idx) {
-            // --- 1. Data Access ---
-            const float eigenvalue = val_ptr[val_base_offset + k_idx];
+          // --- Eigenvalue ---
+          const float eigenvalue = val_ptr[val_base_offset + k_idx];
+          madd_args[1 + arg_idx * 3 + 1] = ts_str;
+          update_val(madd_args[1 + arg_idx * 3 + 2], eigenvalue);
+          arg_idx++;
 
-            // --- 2. Build TS.MADD Arg ---
-            std::string k_id = std::to_string(k_idx);
-            std::string key_prefix =
-                "ts:ch:" + channel_id + ":p:" + pol_pair + ":k:" + k_id;
+          // --- Eigenvectors ---
+          size_t vec_k_offset = vec_base_offset + k_idx * N;
+          for (int j_idx = 0; j_idx < N; ++j_idx) {
+            const std::complex<float> &coeff = vec_ptr[vec_k_offset + j_idx];
 
-            madd_args.push_back(key_prefix + ":val");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(eigenvalue));
+            madd_args[1 + arg_idx * 3 + 1] = ts_str;
+            update_val(madd_args[1 + arg_idx * 3 + 2], coeff.real());
+            arg_idx++;
 
-            size_t vec_k_offset = vec_base_offset + k_idx * N;
-
-            for (int j_idx = 0; j_idx < N; ++j_idx) {
-              const std::complex<float> &coeff = vec_ptr[vec_k_offset + j_idx];
-              std::string j_id = std::to_string(j_idx);
-              std::string vec_key_prefix = key_prefix + ":vec:j:" + j_id;
-
-              madd_args.push_back(vec_key_prefix + ":re");
-              madd_args.push_back(ts_str);
-              madd_args.push_back(std::to_string(coeff.real()));
-
-              madd_args.push_back(vec_key_prefix + ":im");
-              madd_args.push_back(ts_str);
-              madd_args.push_back(std::to_string(coeff.imag()));
-            }
-          } // End EIGENVALUE k_idx loop
+            madd_args[1 + arg_idx * 3 + 1] = ts_str;
+            update_val(madd_args[1 + arg_idx * 3 + 2], coeff.imag());
+            arg_idx++;
+          }
         }
       }
     }
 
-    // --- 3. Execute TS.MADD ---
     if (madd_args.size() > 1) {
       redis.command(madd_args.begin(), madd_args.end());
     }
@@ -748,15 +740,69 @@ public:
   void flush() override {}
 
 private:
+  size_t val_element_count_;
+  size_t vec_element_count_;
+  std::vector<size_t> eigen_dims_;
+  sw::redis::Redis redis;
+  int NR_CHANNELS;
+  int NR_POLARIZATIONS;
+  int NR_RECEIVERS;
+
+  std::vector<std::string> madd_args;
+
+  void preallocate_madd_args() {
+    const int N = NR_RECEIVERS;
+
+    size_t data_points_per_k = 1 + (N * 2);
+    // Updated calculation: We only process NR_POLARIZATIONS pairs now
+    size_t total_data_points =
+        NR_CHANNELS * NR_POLARIZATIONS * N * data_points_per_k;
+
+    madd_args.resize(1 + total_data_points * 3);
+    madd_args[0] = "TS.MADD";
+
+    size_t arg_idx = 0;
+
+    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+      std::string channel_id = std::to_string(ch_idx);
+
+      // Loop only over auto-polarizations
+      for (int pol_idx = 0; pol_idx < NR_POLARIZATIONS; ++pol_idx) {
+        std::string pol_pair =
+            std::to_string(pol_idx) + "-" + std::to_string(pol_idx);
+
+        for (int k_idx = 0; k_idx < N; ++k_idx) {
+          std::string k_id = std::to_string(k_idx);
+          std::string key_prefix =
+              "ts:ch:" + channel_id + ":p:" + pol_pair + ":k:" + k_id;
+
+          madd_args[1 + arg_idx * 3] = key_prefix + ":val";
+          arg_idx++;
+
+          for (int j_idx = 0; j_idx < N; ++j_idx) {
+            std::string vec_key_prefix =
+                key_prefix + ":vec:j:" + std::to_string(j_idx);
+
+            madd_args[1 + arg_idx * 3] = vec_key_prefix + ":re";
+            arg_idx++;
+
+            madd_args[1 + arg_idx * 3] = vec_key_prefix + ":im";
+            arg_idx++;
+          }
+        }
+      }
+    }
+  }
+
   void create_all_timeseries_keys() {
-    const int N = NR_RECEIVERS; // Matrix dimension
-    // Track ALL N eigenvalues: "val"
+    const int N = NR_RECEIVERS;
     const std::vector<std::string> val_components = {"val"};
     const std::vector<std::string> vec_components = {"re", "im"};
+
     std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
 
-    // Calculate total keys to be created
-    int total_pol_pairs = NR_POLARIZATIONS * NR_POLARIZATIONS;
+    // We only create auto-polarization keys (total pairs = NR_POLARIZATIONS)
+    int total_pol_pairs = NR_POLARIZATIONS;
     int total_eigenvalue_keys =
         NR_CHANNELS * total_pol_pairs * N * val_components.size();
     int total_eigenvector_keys =
@@ -768,63 +814,55 @@ private:
     for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
       std::string channel_id = std::to_string(ch_idx);
 
-      for (int pol_r_idx = 0; pol_r_idx < NR_POLARIZATIONS; ++pol_r_idx) {
-        for (int pol_c_idx = 0; pol_c_idx < NR_POLARIZATIONS; ++pol_c_idx) {
-          std::string pol_pair =
-              std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
+      // Loop only over auto-polarizations
+      for (int pol_idx = 0; pol_idx < NR_POLARIZATIONS; ++pol_idx) {
+        std::string pol_pair =
+            std::to_string(pol_idx) + "-" + std::to_string(pol_idx);
 
-          // === 1. EIGENVALUE KEYS (All N components) ===
-          for (int k_idx = 0; k_idx < N; ++k_idx) {
-            std::string k_id = std::to_string(k_idx);
-            for (const auto &component : val_components) {
+        for (int k_idx = 0; k_idx < N; ++k_idx) {
+          std::string k_id = std::to_string(k_idx);
 
-              // Key: ts:ch:<CH>:p:<P-P>:k:<K>:val
+          for (const auto &component : val_components) {
+            std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
+                              ":k:" + k_id + ":" + component;
+            std::vector<std::string> args = {
+                "TS.CREATE",    key,      "LABELS",    "channel", channel_id,
+                "polarization", pol_pair, "eigen_idx", k_id,      "component",
+                component};
+            try {
+              redis.command(args.begin(), args.end());
+            } catch (const std::exception &e) {
+              // Assuming ERROR_LOG is defined elsewhere
+              std::cerr << "Error creating key " << key << ": " << e.what()
+                        << std::endl;
+            }
+          }
+
+          for (int j_idx = 0; j_idx < N; ++j_idx) {
+            std::string j_id = std::to_string(j_idx);
+            for (const auto &component : vec_components) {
               std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
-                                ":k:" + k_id + ":" + component;
-
+                                ":k:" + k_id + ":vec:j:" + j_id + ":" +
+                                component;
               std::vector<std::string> args = {
-                  "TS.CREATE",    key,      "LABELS",    "channel", channel_id,
-                  "polarization", pol_pair, "eigen_idx", k_id,      "component",
+                  "TS.CREATE", key,         "LABELS",
+                  "channel",   channel_id,  "polarization",
+                  pol_pair,    "eigen_idx", k_id,
+                  "vec_idx",   j_id,        "component",
                   component};
               try {
                 redis.command(args.begin(), args.end());
               } catch (const std::exception &e) {
-                ERROR_LOG("Error creating key {}: {}", key, e.what());
+                std::cerr << "Error creating key " << key << ": " << e.what()
+                          << std::endl;
               }
             }
-            for (int j_idx = 0; j_idx < N; ++j_idx) {
-              std::string j_id = std::to_string(j_idx);
-
-              for (const auto &component : vec_components) {
-                std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
-                                  ":k:" + k_id + ":vec:j:" + j_id + ":" +
-                                  component;
-                std::vector<std::string> args = {
-                    "TS.CREATE", key,         "LABELS",
-                    "channel",   channel_id,  "polarization",
-                    pol_pair,    "eigen_idx", k_id,
-                    "vec_idx",   j_id,        "component",
-                    component};
-                try {
-                  redis.command(args.begin(), args.end());
-                } catch (const std::exception &e) {
-                  ERROR_LOG("Error creating key {}: {}", key, e.what());
-                }
-              }
-            } // End Eigenvector j_idx loop
-          } // End EIGENVALUE k_idx loop
+          }
         }
       }
     }
     std::cout << "TimeSeries key pre-creation complete." << std::endl;
   }
-  size_t val_element_count_;
-  size_t vec_element_count_;
-  std::vector<size_t> eigen_dims_;
-  sw::redis::Redis redis;
-  int NR_CHANNELS;
-  int NR_POLARIZATIONS;
-  int NR_RECEIVERS;
 };
 
 template <typename T> class RedisBeamFFTWriter : public FFTWriter<T> {
