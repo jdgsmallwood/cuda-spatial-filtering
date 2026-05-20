@@ -1420,7 +1420,7 @@ public:
     std::vector<size_t> fft_count = {1};
     fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
 
-    fft_dataset_.select(fft_offset, fft_count).write_raw(&block.fft_output[0]);
+    fft_dataset_.select(fft_offset, fft_count).write_raw(block.fft_output[0]);
 
     auto seq_size = fft_seq_dataset_.getDimensions()[0];
     fft_seq_dataset_.resize({seq_size + 1, 2});
