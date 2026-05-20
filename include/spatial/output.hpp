@@ -304,18 +304,22 @@ public:
     while (running_) {
 
       if (beam_writer_ && beam_writer_->has_data_to_write()) {
+        DEBUG_LOG("Beam writer is being drained...");
         beam_writer_->drain_ready_blocks();
       }
 
       if (vis_writer_ && vis_writer_->has_data_to_write()) {
+        DEBUG_LOG("Vis writer is being drained...");
         vis_writer_->drain_ready_blocks();
       }
 
       if (eigen_writer_ && eigen_writer_->has_data_to_write()) {
+        DEBUG_LOG("Eigen writer is being drained...");
         eigen_writer_->drain_ready_blocks();
       }
 
       if (fft_writer_ && fft_writer_->has_data_to_write()) {
+        DEBUG_LOG("FFT writer is being drained...");
         fft_writer_->drain_ready_blocks();
       }
     }
