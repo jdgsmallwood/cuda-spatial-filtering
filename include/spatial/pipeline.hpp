@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cufftXt.h>
+#include <limits>
 #include <vector>
 
 #include "ccglib/common/precision.h"
@@ -256,8 +257,7 @@ private:
                                                            'p', 't', 'z'};
   inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'f',
                                                   'n', 'o', 'u'};
-  inline static const std::vector<int> modeCUFFTInput{'c', 'p','m', 
-                                                      's', 'z'};
+  inline static const std::vector<int> modeCUFFTInput{'c', 'p', 'm', 's', 'z'};
   // We need the planar samples matrix to be in column-major memory layout
   // which is equivalent to transposing time and receiver structure here.
   // We also squash the b,t axes into s = block * time
@@ -327,11 +327,11 @@ private:
         samples_pre_align; // y
     DevicePtr<typename T::HalfPacketAlignedSamplesType> samples_aligned,
         samples_padding, samples_consolidated,
-        samples_consolidated_col_maj;                               // y
-    DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;  // y
-    DevicePtr<typename T::FFTCUFFTInputType> samples_cufft_input;   // y
-    DevicePtr<typename T::FFTCUFFTOutputType> samples_cufft_output; // y
-    DevicePtr<typename T::FFTOutputType> cufft_downsampled_output;  // y
+        samples_consolidated_col_maj;                                      // y
+    DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;         // y
+    DevicePtr<typename T::FFTCUFFTInputType> samples_cufft_input;          // y
+    DevicePtr<typename T::FFTCUFFTOutputType> samples_cufft_output;        // y
+    DevicePtr<typename T::FFTOutputType> cufft_downsampled_output;         // y
     DevicePtr<BeamWeights> weights, weights_permuted, weights_updated;     // y
     DevicePtr<BeamformerOutput> beamformer_output, beamformer_data_output; // y
     DevicePtr<HalfBeamformerOutput> beamformer_data_output_half;           // y
@@ -555,7 +555,6 @@ public:
                              (__half *)b.samples_aligned.get(),
                              (__half *)b.samples_padding.get(), b.stream);
 
-
     CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
                                sizeof(typename T::HalfPacketAlignedSamplesType),
                                cudaMemcpyDefault, b.stream));
@@ -665,51 +664,59 @@ public:
                                                           end_seq_num);
       size_t fft_block_num =
           output_->register_fft_block(start_seq_num, end_seq_num);
-      void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
-      cudaMemcpyAsync(landing_pointer, b.beamformer_data_output_half.get(),
-                      sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
-                      b.stream);
-      auto *output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = block_num};
-      cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
-                         output_ctx);
 
-      bool *arrivals_output_pointer =
-          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
-      std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
-                  packet_data->get_arrivals_size());
-      output_->register_arrivals_transfer_complete(block_num);
+      if (block_num != std::numeric_limits<size_t>::max()) {
+        void *landing_pointer =
+            output_->get_beam_data_landing_pointer(block_num);
+        cudaMemcpyAsync(landing_pointer, b.beamformer_data_output_half.get(),
+                        sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
+                        b.stream);
+        auto *output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = block_num};
+        cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
+                           output_ctx);
+        bool *arrivals_output_pointer =
+            (bool *)output_->get_arrivals_data_landing_pointer(block_num);
+        std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
+                    packet_data->get_arrivals_size());
+        output_->register_arrivals_transfer_complete(block_num);
+      }
 
-      void *eigenvalues_output_pointer =
-          (void *)output_->get_eigenvalues_data_landing_pointer(
-              eigenvalue_block_num);
+      if (eigenvalue_block_num != std::numeric_limits<size_t>::max()) {
 
-      void *eigenvectors_output_pointer =
-          (void *)output_->get_eigenvectors_data_landing_pointer(
-              eigenvalue_block_num);
+        void *eigenvalues_output_pointer =
+            (void *)output_->get_eigenvalues_data_landing_pointer(
+                eigenvalue_block_num);
 
-      cudaMemcpyAsync(eigenvalues_output_pointer, b.eigenvalues.get(),
-                      sizeof(Eigenvalues), cudaMemcpyDefault, b.stream);
+        void *eigenvectors_output_pointer =
+            (void *)output_->get_eigenvectors_data_landing_pointer(
+                eigenvalue_block_num);
 
-      cudaMemcpyAsync(eigenvectors_output_pointer, b.decomp_visibilities.get(),
-                      sizeof(DecompositionVisibilities), cudaMemcpyDefault,
-                      b.stream);
+        cudaMemcpyAsync(eigenvalues_output_pointer, b.eigenvalues.get(),
+                        sizeof(Eigenvalues), cudaMemcpyDefault, b.stream);
 
-      auto *eig_output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = eigenvalue_block_num};
-      cudaLaunchHostFunc(b.stream, eigen_output_transfer_complete_host_func,
-                         eig_output_ctx);
+        cudaMemcpyAsync(
+            eigenvectors_output_pointer, b.decomp_visibilities.get(),
+            sizeof(DecompositionVisibilities), cudaMemcpyDefault, b.stream);
 
-      auto *fft_output_pointer =
-          (void *)output_->get_fft_landing_pointer(fft_block_num);
-      cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
-                      sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
-                      b.stream);
+        auto *eig_output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = eigenvalue_block_num};
+        cudaLaunchHostFunc(b.stream, eigen_output_transfer_complete_host_func,
+                           eig_output_ctx);
+      }
 
-      auto *fft_output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = fft_block_num};
-      cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
-                         fft_output_ctx);
+      if (fft_block_num != std::numeric_limits<size_t>::max()) {
+        auto *fft_output_pointer =
+            (void *)output_->get_fft_landing_pointer(fft_block_num);
+        cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
+                        sizeof(typename T::FFTOutputType), cudaMemcpyDefault,
+                        b.stream);
+
+        auto *fft_output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = fft_block_num};
+        cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
+                           fft_output_ctx);
+      }
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=
           NR_CORRELATED_BLOCKS_TO_ACCUMULATE) {
@@ -745,10 +752,10 @@ public:
               << ", NR_RECEIVERS_PER_BLOCK: "
               << T::NR_PADDED_RECEIVERS_PER_BLOCK << std::endl;
 
-
     const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
     long long N[] = {CUFFT_FFT_SIZE};
-    const size_t NUM_TOTAL_BATCHES = T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
+    const size_t NUM_TOTAL_BATCHES =
+        T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
                           sizeof(TrimmedVisibilities)));
@@ -826,8 +833,8 @@ public:
     tensor_32.addPermutation("visBaselineTrimmed", "visCorrTrimmed",
                              CUTENSOR_COMPUTE_DESC_32F,
                              "visBaselineTrimmedToTrimmed");
-    tensor_32.addPermutation("beamCCGLIB", "cufftInput", CUTENSOR_COMPUTE_DESC_32F,
-                             "beamToCUFFTInput");
+    tensor_32.addPermutation("beamCCGLIB", "cufftInput",
+                             CUTENSOR_COMPUTE_DESC_32F, "beamToCUFFTInput");
 
     buffers.reserve(num_buffers);
     for (int i = 0; i < num_buffers; ++i) {
@@ -927,17 +934,19 @@ public:
         visibilities_total_packets);
     visibilities_start_seq_num = -1;
     visibilities_missing_packets = 0;
-    void *landing_pointer =
-        output_->get_visibilities_landing_pointer(block_num);
-    cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
-                    sizeof(TrimmedVisibilities), cudaMemcpyDefault,
-                    buffers[0].stream);
-    auto *output_ctx = new OutputTransferCompleteContext{
-        .output = this->output_, .block_index = block_num};
+    if (block_num != std::numeric_limits<size_t>::max()) {
+      void *landing_pointer =
+          output_->get_visibilities_landing_pointer(block_num);
+      cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
+                      sizeof(TrimmedVisibilities), cudaMemcpyDefault,
+                      buffers[0].stream);
+      auto *output_ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = block_num};
 
-    cudaLaunchHostFunc(buffers[0].stream,
-                       output_visibilities_transfer_complete_host_func,
-                       output_ctx);
+      cudaLaunchHostFunc(buffers[0].stream,
+                         output_visibilities_transfer_complete_host_func,
+                         output_ctx);
+    }
     cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(TrimmedVisibilities),
                     buffers[0].stream);
     num_correlation_units_integrated.store(0);
