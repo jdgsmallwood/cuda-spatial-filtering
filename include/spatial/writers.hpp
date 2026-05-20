@@ -1528,7 +1528,8 @@ public:
       std::vector<size_t> count = {1};
       count.insert(count.end(), val_dims_.begin(), val_dims_.end());
 
-      val_dataset_.select(offset, count).write_raw(&block.eigenvalues[0]);
+      val_dataset_.select(offset, count)
+          .write_raw(reinterpret_cast<const float *>(&block.eigenvalues));
     }
     {
       const auto t = vec_dataset_.getDimensions()[0];
@@ -1544,7 +1545,8 @@ public:
 
       // complex<float> is two consecutive floats in memory, so
       // write_raw into a float dataset is correct here.
-      vec_dataset_.select(offset, count).write_raw(&block.eigenvectors[0]);
+      vec_dataset_.select(offset, count)
+          .write_raw(reinterpret_cast<const float *>(block.eigenvectors));
     }
     // ---- Sequence numbers --------------------------------------------
     {
