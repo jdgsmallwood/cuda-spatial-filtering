@@ -166,16 +166,16 @@ public:
     running_ = false;
 
     if (beam_writer_ != nullptr) {
-      beam_writer_->flush();
+      beam_writer_->stop();
     };
     if (vis_writer_ != nullptr) {
-      vis_writer_->flush();
+      vis_writer_->stop();
     };
     if (eigen_writer_ != nullptr) {
-      eigen_writer_->flush();
+      eigen_writer_->stop();
     };
     if (fft_writer_ != nullptr) {
-      fft_writer_->flush();
+      fft_writer_->stop();
     };
   }
 
@@ -264,6 +264,7 @@ public:
       return;
     }
     beam_writer_->register_beam_data_transfer_complete(block_num);
+    beam_writer_->notify();
   }
 
   void
@@ -272,6 +273,7 @@ public:
       return;
     }
     vis_writer_->register_visibilities_transfer_complete(block_num);
+    vis_writer_->notify();
   }
 
   void register_arrivals_transfer_complete(const size_t block_num) override {
@@ -279,6 +281,7 @@ public:
       return;
     }
     beam_writer_->register_arrivals_transfer_complete(block_num);
+    beam_writer_->notify();
   }
 
   void register_eigendecomposition_data_transfer_complete(
@@ -287,6 +290,7 @@ public:
       return;
     }
     eigen_writer_->register_eigendecomposition_transfer_complete(block_num);
+    eigen_writer_->notify();
   }
 
   void register_fft_transfer_complete(const size_t block_num) override {
@@ -294,27 +298,26 @@ public:
       return;
     }
     fft_writer_->register_fft_transfer_complete(block_num);
+    fft_writer_->notify();
   }
 
-  void writer_loop() {
+  void start_writer_loop() {
     INFO_LOG("Writer loop is running!");
-    while (running_) {
 
-      if (beam_writer_ != nullptr && beam_writer_->has_data_to_write()) {
-        beam_writer_->drain_ready_blocks();
-      }
+    if (beam_writer_ != nullptr) {
+      beam_writer_->start();
+    }
 
-      if (vis_writer_ != nullptr && vis_writer_->has_data_to_write()) {
-        vis_writer_->drain_ready_blocks();
-      }
+    if (vis_writer_ != nullptr) {
+      vis_writer_->start();
+    }
 
-      if (eigen_writer_ != nullptr && eigen_writer_->has_data_to_write()) {
-        eigen_writer_->drain_ready_blocks();
-      }
+    if (eigen_writer_ != nullptr) {
+      eigen_writer_->start();
+    }
 
-      if (fft_writer_ != nullptr && fft_writer_->has_data_to_write()) {
-        fft_writer_->drain_ready_blocks();
-      }
+    if (fft_writer_ != nullptr) {
+      fft_writer_->start();
     }
   }
 

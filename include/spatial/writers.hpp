@@ -3,6 +3,7 @@
 #include "spatial/logging.hpp"
 #include "spatial/pinned_vector.hpp"
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <condition_variable>
 #include <fitsio.h>
@@ -122,6 +123,25 @@ public:
     blocks_.resize(buffer_size);
   }
 
+  virtual ~Writer() { stop(); }
+
+  void start() {
+    running_.store(true, std::memory_order_release);
+    drain_thread_ = std::thread(&Writer::drain_loop, this);
+  }
+
+  void stop() {
+    if (running_.exchange(false, std::memory_order_acq_rel)) {
+      cv.notify_all();
+      if (drain_thread_.joinable()) {
+        drain_thread_.join();
+      }
+      flush();
+    }
+  }
+
+  void notify() { cv_.notify_one(); }
+
   virtual void process_block(const T &block) = 0;
   virtual void flush() = 0;
   virtual const char *writer_name() const = 0;
@@ -165,6 +185,31 @@ protected:
   std::atomic<size_t> read_idx_;
   std::atomic<size_t> write_idx_;
   cuda_util::PinnedVector<T> blocks_;
+
+private:
+  void drain_loop() {
+    while (true) {
+      {
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [this] {
+          return !running_.load(std::memory_order_acquire) ||
+                 has_data_to_write();
+        });
+      }
+      while (has_data_to_write()) {
+        drain_ready_blocks();
+      }
+
+      if (!running_.load(std::memory_order_acquire) && !has_data_to_write()) {
+        break;
+      }
+    }
+  }
+
+  std::atomic<bool> running_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::thread drain_thread_;
 };
 
 template <typename BeamT, typename ArrivalsT>
