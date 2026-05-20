@@ -232,7 +232,7 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T,
           size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false,
-          size_t FFT_DOWNSAMPLE_FACTOR_T = 64>
+          size_t FFT_DOWNSAMPLE_FACTOR_T = 128>
 struct LambdaConfig {
 
   static constexpr size_t NR_CHANNELS = NR_CHANNELS_T;
