@@ -110,9 +110,12 @@ int main(int argc, char *argv[]) {
           args.min_freq_channel + num_lambda_channels - 1,
           &args.antenna_mapping);
 
-  auto eigen_writer =
-      std::make_unique<RedisEigendataWriter<Config::EigenvalueOutputType,
-                                            Config::EigenvectorOutputType>>();
+  auto eigen_filename =
+      make_default_filename("eigendata", args.min_freq_channel,
+                            num_lambda_channels, args.fpga_id_vec);
+  HighFive::File eigen_file(eigen_filename, HighFive::File::Truncate);
+  auto eigen_writer = std::make_unique<HDF5EigenWriter<
+      Config::EigenvalueOutputType, Config::EigenvectorOutputType>>(eigen_file);
 
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
       num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations);

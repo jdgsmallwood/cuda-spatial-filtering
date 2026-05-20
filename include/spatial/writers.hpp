@@ -829,9 +829,7 @@ private:
             try {
               redis.command(args.begin(), args.end());
             } catch (const std::exception &e) {
-              // Assuming ERROR_LOG is defined elsewhere
-              std::cerr << "Error creating key " << key << ": " << e.what()
-                        << std::endl;
+              ERROR_LOG("Error creating key {}: {}", key, e.what());
             }
           }
 
@@ -850,8 +848,7 @@ private:
               try {
                 redis.command(args.begin(), args.end());
               } catch (const std::exception &e) {
-                std::cerr << "Error creating key " << key << ": " << e.what()
-                          << std::endl;
+                ERROR_LOG("Error creating key {}: {}", key, e.what());
               }
             }
           }
