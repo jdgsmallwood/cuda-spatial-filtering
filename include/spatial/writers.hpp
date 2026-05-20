@@ -117,7 +117,7 @@ template <typename FFTOutputType> struct FFTBlock {
 
 template <typename T> class Writer {
 public:
-  Writer(const int buffer_size)
+  Writer(const size_t buffer_size)
       : buffer_size_(buffer_size), read_idx_(0), write_idx_(0) {
     blocks_.resize(buffer_size);
   }
@@ -127,25 +127,28 @@ public:
   virtual const char *writer_name() const = 0;
 
   virtual size_t register_block() {
-    size_t block_num = write_idx_;
-    blocks_[block_num].reset_state();
 
-    if ((write_idx_ + 1) % buffer_size_ == read_idx_) {
+    size_t block_num = write_idx_.load(std::memory_order_relaxed);
+    blocks_[block_num].reset_state();
+    if ((write_idx_ + 1) % buffer_size_ ==
+        read_idx_.load(std::memory_order_acquire)) {
       handle_buffer_full();
     }
-
-    write_idx_ = (block_num + 1) % buffer_size_;
+    write_idx_.store((block_num + 1) % buffer_size_, std::memory_order_relaxed);
     return block_num;
   }
 
   T &get_block(size_t index) { return blocks_[index]; }
 
   void drain_ready_blocks() {
-    size_t current_write_idx_ = write_idx_;
-    while (read_idx_ != current_write_idx_ && blocks_[read_idx_].is_ready()) {
-      process_block(blocks_[read_idx_]);
-      read_idx_ = (read_idx_ + 1) % buffer_size_;
+    size_t current_write_idx_ = write_idx_.load(std::memory_order_acquire);
+    size_t read = read_idx_.load(std::memory_order_relaxed);
+
+    while (read != current_write_idx_ && blocks_[read_idx_].is_ready()) {
+      process_block(blocks_[read]);
+      read = (read + 1) % buffer_size_;
     }
+    read_idx_.store(read);
   }
 
   bool has_data_to_write() const {
@@ -163,8 +166,8 @@ protected:
   }
 
   size_t buffer_size_;
-  size_t read_idx_;
-  size_t write_idx_;
+  std::atomic<size_t> read_idx_;
+  std::atomic<size_t> write_idx_;
   cuda_util::PinnedVector<T> blocks_;
 };
 
@@ -881,10 +884,12 @@ public:
       }
     }
 
-    std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
+    std::cout << "RedisBeamFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_BEAMS:" << NR_BEAMS << ", NR_FREQS: " << NR_FREQS
               << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
     create_all_timeseries_keys();
+    madd_args.reserve(1 +
+                      NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
   }
 
   void process_block(const FFTBlock<T> &block) override {
@@ -894,17 +899,14 @@ public:
                        .count();
     std::string ts_str = std::to_string(ts);
     std::vector<std::string> madd_args;
-    madd_args.reserve(1 +
-                      NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
 
     madd_args.push_back("TS.MADD");
     const int F = NR_FREQS;
-    for (int f = 0; f < F; ++f) {
-      for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-          for (int beam = 0; beam < NR_BEAMS; ++beam) {
+    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+        for (int beam = 0; beam < NR_BEAMS; ++beam) {
+          for (int f = 0; f < F; ++f) {
             const auto cval = block.fft_output[ch][pol][beam][f];
-
             madd_args.push_back(
                 precomputed_keys[get_key_index(ch, pol, beam, f)]);
             madd_args.push_back(ts_str);
