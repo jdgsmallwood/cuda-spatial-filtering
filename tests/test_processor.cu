@@ -96,11 +96,14 @@ public:
 
   void SetUp() override {
     std::array<int64_t, 1> delays = {0};
+        std::unordered_map<uint32_t, int> map;
+        map[0] = 0;
     processor_state = new ProcessorState<TestConfig, NR_BUFFERS>(
         10,                                   // nr_packets_for_correlation
         TestConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
         0,                                    // min_freq_channel
-        delays);
+        delays,
+        map);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -215,11 +218,14 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
   void SetUp() override {
     std::array<int64_t, TestMultipleFPGAConfig::NR_FPGA_SOURCES> delays = {0,
                                                                            13};
+        std::unordered_map<uint32_t, int> map;
+        map[0] = 0;
+        map[1] = 1;
     processor_state = new ProcessorState<TestMultipleFPGAConfig, NR_BUFFERS>(
         10, // nr_packets_for_correlation
         TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
         0,                                                // min_freq_channel
-        delays);
+        delays, map);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -316,9 +322,12 @@ class ProcessorStateMultipleFPGAWithOctetTest
 
   void SetUp() override {
     using MapType = std::unordered_map<uint32_t, int>;
-    std::unique_ptr<MapType> fpga_ids =
-        std::make_unique<MapType>(std::initializer_list<MapType::value_type>{
-            {10, 0}, {11, 1}, {12, 2}, {13, 3}});
+ MapType fpga_ids{
+    {10, 0},
+    {11, 1},
+    {12, 2},
+    {13, 3}
+}; 
 
     std::array<int64_t, TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES>
         delays = {0, 13, 26, 4};
@@ -327,7 +336,7 @@ class ProcessorStateMultipleFPGAWithOctetTest
         10, // nr_packets_for_correlation
         TestMultipleFPGAConfig::NR_TIME_STEPS_PER_PACKET, // nr_between_samples
         0,                                                // min_freq_channel
-        delays, &fpga_ids);
+        delays, fpga_ids);
 
     mock_pipeline = new SimpleMockPipeline();
     mock_pipeline->set_state(processor_state);
@@ -542,15 +551,15 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion();
 
-  LOG_INFO("Finished initial.");
+  INFO_LOG("Finished initial.");
   // add two packets that are way further along, this will cause
   // the pipeline to run w/ missing packets.
   add_packet(20000, 0, 0);
   add_packet(20000, 0, 1);
-  LOG_INFO("Packets added");
+  INFO_LOG("Packets added");
   processor_state->process_all_available_packets();
   processor_state->handle_buffer_completion();
-  LOG_INFO("Firing again...");
+  INFO_LOG("Firing again...");
   EXPECT_EQ(processor_state->packets_missing, 2 * 20);
 
   int16_t *scales_last_packet =

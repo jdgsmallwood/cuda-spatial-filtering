@@ -106,11 +106,11 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Creating Output Handler\n";
 
-  auto output = std::make_shared<
-      BufferedOutput<Config, FFTOutputType, Eigenvalues, Eigenvectors,
-                     Config::PulsarFoldOutputType, BeamOutputType>>(
-      std::move(beam_writer), nullptr, std::move(eigen_writer),
-      std::move(fft_writer), nullptr, 100, 100, 100, 200, 100);
+  auto output =
+      std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
+                                      Eigenvectors, BeamOutputType>>(
+          std::move(beam_writer), nullptr, std::move(eigen_writer),
+          std::move(fft_writer));
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
@@ -147,7 +147,7 @@ int main(int argc, char *argv[]) {
           nic, args.port, BUFFER_SIZE, 512 * 1024 * 1024));
     }
   }
-  LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
+  INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   std::cout << "Starting threads...\n";
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < capture.size(); ++i) {
@@ -204,7 +204,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Cleanup
-  LOG_INFO("\nShutting down...\n");
+  INFO_LOG("\nShutting down...\n");
   std::cout << "Shutting down...\n";
   state.running.store(0, std::memory_order_release);
   state.shutdown();

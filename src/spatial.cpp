@@ -329,7 +329,7 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
     : ifname(ifname), port(port), buffer_size(buffer_size),
       recv_buffer_size(recv_buffer_size) {
 
-  LOG_INFO("UDP Server with concurrent processing starting on port {}...",
+  INFO_LOG("UDP Server with concurrent processing starting on port {}...",
            port);
   // Create UDP socket
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -363,8 +363,8 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
     close(sockfd);
   }
 
-  LOG_INFO("Server listening on 0.0.0.0:{}", port);
-  LOG_INFO("Press Ctrl+C to stop\n");
+  INFO_LOG("Server listening on 0.0.0.0:{}", port);
+  INFO_LOG("Press Ctrl+C to stop\n");
 }
 
 KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }
@@ -383,18 +383,18 @@ PCAPPacketCapture::PCAPPacketCapture(const std::string &pcap_filename,
   }
   pcap_close(test_handle);
 
-  LOG_INFO("PCAP file '{}' opened successfully", filename_);
+  INFO_LOG("PCAP file '{}' opened successfully", filename_);
   if (loop_) {
-    LOG_INFO("Looping enabled - will replay file continuously");
+    INFO_LOG("Looping enabled - will replay file continuously");
     if (seq_jump_per_packet_ > 0) {
-      LOG_INFO("Sequence numbers will be adjusted with jump of {} per packet",
+      INFO_LOG("Sequence numbers will be adjusted with jump of {} per packet",
                seq_jump_per_packet_);
     }
   }
 }
 
 PCAPPacketCapture::~PCAPPacketCapture() {
-  LOG_INFO("PCAPPacketCapture destructor called");
+  INFO_LOG("PCAPPacketCapture destructor called");
 }
 
 PCAPMultiFPGAPacketCapture::PCAPMultiFPGAPacketCapture(
@@ -412,16 +412,16 @@ PCAPMultiFPGAPacketCapture::PCAPMultiFPGAPacketCapture(
   }
   pcap_close(test_handle);
 
-  LOG_INFO("PCAP file '{}' opened successfully", filename_);
+  INFO_LOG("PCAP file '{}' opened successfully", filename_);
   if (loop_) {
-    LOG_INFO("Looping enabled - will replay file continuously");
+    INFO_LOG("Looping enabled - will replay file continuously");
     if (seq_jump_per_packet_ > 0) {
-      LOG_INFO("Sequence numbers will be adjusted with jump of {} per packet",
+      INFO_LOG("Sequence numbers will be adjusted with jump of {} per packet",
                seq_jump_per_packet_);
     }
   }
 }
 
 PCAPMultiFPGAPacketCapture::~PCAPMultiFPGAPacketCapture() {
-  LOG_INFO("PCAPMultiFPGAPacketCapture destructor called");
+  INFO_LOG("PCAPMultiFPGAPacketCapture destructor called");
 }

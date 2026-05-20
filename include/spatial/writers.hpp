@@ -1,6 +1,7 @@
 #pragma once
 
 #include "spatial/logging.hpp"
+#include "spatial/pinned_vector.hpp"
 #include <array>
 #include <charconv>
 #include <condition_variable>
@@ -28,53 +29,247 @@
 #include <casacore/tables/Tables/TableDesc.h>
 #include <sw/redis++/redis++.h>
 
+#include <getopt.h>
+#include <math.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <time.h>
+
 extern "C" {
+#include "ascii_header.h"
 #include "dada_def.h"
+#include "dada_hdu.h"
+#include "futils.h"
+#include "ipcio.h"
+#include "multilog.h"
 }
 
-template <typename BeamT, typename ArrivalsT> class BeamWriter {
+template <typename BeamOutputType, typename ArrivalsOutputType>
+struct BeamBlock {
+  BeamOutputType beam_data;
+  ArrivalsOutputType arrivals_data;
+  size_t start_seq_num = 0;
+  size_t end_seq_num = 0;
+
+  bool beam_transfer_complete = false;
+  bool arrival_transfer_complete = false;
+
+  // Standardized interface for the base Writer class
+  bool is_ready() const {
+    return beam_transfer_complete && arrival_transfer_complete;
+  }
+  void reset_state() {
+    beam_transfer_complete = false;
+    arrival_transfer_complete = false;
+  }
+};
+
+template <typename VisibilitiesOutputType> struct VisBlock {
+  VisibilitiesOutputType data;
+  size_t start_seq_num;
+  size_t end_seq_num;
+  int num_missing_packets;
+  int num_total_packets;
+  bool transfer_complete;
+
+  VisBlock()
+      : start_seq_num(0), end_seq_num(0), num_missing_packets(0),
+        num_total_packets(0), transfer_complete(false) {}
+
+  bool is_ready() const { return transfer_complete; }
+
+  void reset_state() { transfer_complete = false; }
+};
+
+template <typename Eigenvalues, typename Eigenvectors> struct EigenBlock {
+  Eigenvalues eigenvalues;
+  Eigenvectors eigenvectors;
+  size_t start_seq_num;
+  size_t end_seq_num;
+  bool transfer_complete;
+
+  EigenBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {};
+
+  bool is_ready() const { return transfer_complete; }
+  void reset_state() { transfer_complete = false; }
+};
+
+template <typename FFTOutputType> struct FFTBlock {
+
+  FFTOutputType fft_output;
+  size_t start_seq_num;
+  size_t end_seq_num;
+  bool transfer_complete;
+
+  FFTBlock() : start_seq_num(0), end_seq_num(0), transfer_complete(false) {};
+
+  void *data_landing_pointer() { return (void *)&fft_output; };
+
+  bool is_ready() const { return transfer_complete; };
+  void reset_state() { transfer_complete = false; };
+};
+
+template <typename T> class Writer {
 public:
+  Writer(const int buffer_size)
+      : buffer_size_(buffer_size), read_idx_(0), write_idx_(0) {
+    blocks_.resize(buffer_size);
+  }
+
+  virtual void process_block(const T &block) = 0;
+  virtual void flush() = 0;
+
+  virtual size_t register_block() {
+    size_t block_num = write_idx_;
+    blocks_[block_num].reset_state();
+
+    if ((write_idx_ + 1) % buffer_size_ == read_idx_) {
+      handle_buffer_full();
+    }
+
+    write_idx_ = (block_num + 1) % buffer_size_;
+    return block_num;
+  }
+
+  T &get_block(size_t index) { return blocks_[index]; }
+
+  void drain_ready_blocks() {
+    while (read_idx_ != write_idx_ && blocks_[read_idx_].is_ready()) {
+      process_block(blocks_[read_idx_]);
+      read_idx_ = (read_idx_ + 1) % buffer_size_;
+    }
+  }
+
+  bool has_data_to_write() const {
+    return read_idx_ != write_idx_ && blocks_[read_idx_].is_ready();
+  }
+
+protected:
+  virtual void handle_buffer_full() {
+    throw std::runtime_error("Ring buffer is full");
+  }
+
+  size_t buffer_size_;
+  size_t read_idx_;
+  size_t write_idx_;
+  cuda_util::PinnedVector<T> blocks_;
+};
+
+template <typename BeamT, typename ArrivalsT>
+class BeamWriter : public Writer<BeamBlock<BeamT, ArrivalsT>> {
+public:
+  using BlockType = BeamBlock<BeamT, ArrivalsT>;
+  BeamWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~BeamWriter() = default;
-  virtual void write_beam_block(const BeamT *beam_data,
-                                const ArrivalsT *arrivals_data,
-                                const int start_seq, const int end_seq) = 0;
+  virtual size_t register_block(const size_t start_seq_num,
+                                const size_t end_seq_num) {
+    size_t block_idx = Writer<BlockType>::register_block();
+    this->blocks_[block_idx].start_seq_num = start_seq_num;
+    this->blocks_[block_idx].end_seq_num = end_seq_num;
+    return block_idx;
+  }
+
+  void *get_beam_data_landing_pointer(const size_t block_idx) {
+    return (void *)&this->blocks_[block_idx].beam_data;
+  }
+  void *get_arrivals_data_landing_pointer(const size_t block_idx) {
+    return (void *)&this->blocks_[block_idx].arrivals_data;
+  }
+
+  void register_beam_data_transfer_complete(const size_t block_num) {
+    this->blocks_[block_num].beam_transfer_complete = true;
+  }
+
+  void register_arrivals_transfer_complete(const size_t block_num) {
+    this->blocks_[block_num].arrival_transfer_complete = true;
+  }
+
   virtual void flush() = 0;
 };
 
-template <typename T> class VisibilitiesWriter {
+template <typename VisibilitiesOutputType>
+class VisibilitiesWriter : public Writer<VisBlock<VisibilitiesOutputType>> {
 public:
+  using BlockType = VisBlock<VisibilitiesOutputType>;
+  VisibilitiesWriter(const int num_blocks = 100)
+      : Writer<BlockType>(num_blocks) {};
   virtual ~VisibilitiesWriter() = default;
-  virtual void write_visibilities_block(const T *data, const int start_seq,
-                                        const int end_seq,
-                                        const int num_missing_packets,
-                                        const int num_total_packets) = 0;
+  virtual size_t register_block(const size_t start_seq_num,
+                                const size_t end_seq_num,
+                                const int num_missing_packets,
+                                const int num_total_packets) {
+    size_t block_idx = Writer<BlockType>::register_block();
+    this->blocks_[block_idx].start_seq_num = start_seq_num;
+    this->blocks_[block_idx].end_seq_num = end_seq_num;
+    this->blocks_[block_idx].num_missing_packets = num_missing_packets;
+    this->blocks_[block_idx].num_total_packets = num_total_packets;
+    return block_idx;
+  }
+  virtual void *get_visibilities_landing_pointer(const size_t block_num) {
+    return (void *)&this->blocks_[block_num].data;
+  }
+  void register_visibilities_transfer_complete(const size_t block_num) {
+    this->blocks_[block_num].transfer_complete = true;
+  }
+
   virtual void flush() = 0;
 };
 
-template <typename TVal, typename TVec> class EigenWriter {
+template <typename TVal, typename TVec>
+class EigenWriter : public Writer<EigenBlock<TVal, TVec>> {
 public:
+  using BlockType = EigenBlock<TVal, TVec>;
+  EigenWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~EigenWriter() = default;
-  virtual void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
-                                     const int start_seq,
-                                     const int end_seq) = 0;
+  virtual size_t register_block(const size_t start_seq_num,
+                                const size_t end_seq_num) {
+    size_t block_idx = Writer<BlockType>::register_block();
+    this->blocks_[block_idx].start_seq_num = start_seq_num;
+    this->blocks_[block_idx].end_seq_num = end_seq_num;
+    return block_idx;
+  }
+
+  virtual void *get_eigenvectors_landing_pointer(const size_t block_num) {
+    return (void *)&this->blocks_[block_num].eigenvectors;
+  }
+
+  virtual void *get_eigenvalues_landing_pointer(const size_t block_num) {
+    return (void *)&this->blocks_[block_num].eigenvalues;
+  }
+
+  void register_eigendecomposition_transfer_complete(const size_t block_num) {
+    this->blocks_[block_num].transfer_complete = true;
+  }
+
   virtual void flush() = 0;
 };
 
-template <typename T> class FFTWriter {
+template <typename T> class FFTWriter : public Writer<FFTBlock<T>> {
 public:
+  using BlockType = FFTBlock<T>;
+  FFTWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~FFTWriter() = default;
-  virtual void write_fft_block(const T *fft_data, const int start_seq,
-                               const int end_seq, const int channel_idx,
-                               const int pol_idx) = 0;
-  virtual void flush() = 0;
-};
+  virtual size_t register_block(const size_t start_seq_num,
+                                const size_t end_seq_num) {
+    size_t block_idx = Writer<BlockType>::register_block();
+    this->blocks_[block_idx].start_seq_num = start_seq_num;
+    this->blocks_[block_idx].end_seq_num = end_seq_num;
+    return block_idx;
+  }
+  void register_fft_transfer_complete(const size_t block_num) {
+    this->blocks_[block_num].transfer_complete = true;
+  }
 
-template <typename T> class PulsarFoldWriter {
-public:
-  virtual ~PulsarFoldWriter() = default;
-  virtual void write_pulsar_fold_block(const T *pulsar_fold_data,
-                                       const int start_seq,
-                                       const int end_seq) = 0;
+    virtual void* get_fft_landing_pointer(const size_t block_num) {
+        return (void*)&this->blocks_[block_num].fft_output;
+    }
+
   virtual void flush() = 0;
 };
 
@@ -91,224 +286,11 @@ constexpr auto get_array_dims() {
 }
 
 template <typename BeamT, typename ArrivalsT>
-class BatchedHDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
-public:
-  BatchedHDF5BeamWriter(HighFive::File &file, size_t batch_size = 100)
-      : file_(file), batch_size_(batch_size), current_batch_count_(0) {
-    using namespace HighFive;
-    using beam_type = typename std::remove_all_extents<BeamT>::type;
-    using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
-
-    beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
-    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
-    beam_dims_ = get_array_dims<BeamT>();
-    arrivals_dims_ = get_array_dims<ArrivalsT>();
-
-    // Pre-allocate fixed-size buffers
-    beam_buffer_ =
-        static_cast<BeamT *>(std::malloc(batch_size_ * sizeof(BeamT)));
-    arrivals_buffer_ =
-        static_cast<ArrivalsT *>(std::malloc(batch_size_ * sizeof(ArrivalsT)));
-    seq_buffer_.resize(batch_size_);
-
-    // Setup datasets
-    std::vector<size_t> beam_dataset_dims = {0};
-    std::vector<size_t> beam_dataset_max_dims = {DataSpace::UNLIMITED};
-    beam_dataset_dims.insert(beam_dataset_dims.end(), beam_dims_.begin(),
-                             beam_dims_.end());
-    beam_dataset_max_dims.insert(beam_dataset_max_dims.end(),
-                                 beam_dims_.begin(), beam_dims_.end());
-
-    // Chunk size matches batch size for optimal I/O
-    std::vector<hsize_t> beam_chunk = {batch_size_};
-    beam_chunk.insert(beam_chunk.end(), beam_dims_.begin(), beam_dims_.end());
-
-    std::vector<size_t> arrivals_dataset_dims = {0};
-    std::vector<size_t> arrivals_dataset_max_dims = {DataSpace::UNLIMITED};
-    arrivals_dataset_dims.insert(arrivals_dataset_dims.end(),
-                                 arrivals_dims_.begin(), arrivals_dims_.end());
-    arrivals_dataset_max_dims.insert(arrivals_dataset_max_dims.end(),
-                                     arrivals_dims_.begin(),
-                                     arrivals_dims_.end());
-
-    std::vector<hsize_t> arrivals_chunk = {batch_size_};
-    arrivals_chunk.insert(arrivals_chunk.end(), arrivals_dims_.begin(),
-                          arrivals_dims_.end());
-
-    // Create beam dataset
-    DataSpace beam_space(beam_dataset_dims, beam_dataset_max_dims);
-    DataSetCreateProps beam_props;
-    beam_props.add(Chunking(beam_chunk));
-    // Optional: reduce compression for speed
-    beam_props.add(Deflate(4)); // Light compression
-    beam_dataset_ =
-        file_.createDataSet<beam_type>("beam_data", beam_space, beam_props);
-
-    // Create arrivals dataset
-    DataSpace arrivals_space(arrivals_dataset_dims, arrivals_dataset_max_dims);
-    DataSetCreateProps arrivals_props;
-    arrivals_props.add(Chunking(arrivals_chunk));
-    arrivals_props.add(Deflate(4)); // Light compression
-    arrivals_dataset_ = file_.createDataSet<arrival_type>(
-        "arrivals", arrivals_space, arrivals_props);
-
-    // Create sequence number dataset
-    DataSetCreateProps beam_seq_props;
-    beam_seq_props.add(Chunking(std::vector<hsize_t>{batch_size_, 2}));
-    beam_seq_dataset_ = file_.createDataSet<int>(
-        "beam_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
-        beam_seq_props);
-  }
-
-  ~BatchedHDF5BeamWriter() {
-    // Ensure any remaining buffered data is written
-    flush_batch();
-    free(beam_buffer_);
-    free(arrivals_buffer_);
-  }
-
-  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
-                        const int start_seq, const int end_seq) override {
-    // Explicit memcpy for maximum performance
-    std::memcpy(&beam_buffer_[current_batch_count_], beam_data, sizeof(BeamT));
-    std::memcpy(&arrivals_buffer_[current_batch_count_], arrivals_data,
-                sizeof(ArrivalsT));
-
-    seq_buffer_[current_batch_count_][0] = start_seq;
-    seq_buffer_[current_batch_count_][1] = end_seq;
-
-    current_batch_count_++;
-
-    // Flush when batch is full
-    if (current_batch_count_ >= batch_size_) {
-      flush_batch();
-    }
-  }
-
-  void flush() override {
-    flush_batch();
-    file_.flush();
-  }
-
-private:
-  void flush_batch() {
-    if (current_batch_count_ == 0)
-      return;
-
-    using clock = std::chrono::high_resolution_clock;
-    auto batch_start = clock::now();
-
-    // Write beam data
-    auto cpu_start = clock::now();
-    auto current_size = beam_dataset_.getDimensions()[0];
-    auto cpu_end = clock::now();
-    LOG_DEBUG("Batch flush: getDimensions() took {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    std::vector<size_t> new_dims = {current_size + current_batch_count_};
-    new_dims.insert(new_dims.end(), beam_dims_.begin(), beam_dims_.end());
-    beam_dataset_.resize(new_dims);
-    cpu_end = clock::now();
-    LOG_DEBUG("Batch flush: beam resize({}) took {} us", current_batch_count_,
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    std::vector<size_t> beam_offset = {current_size};
-    beam_offset.insert(beam_offset.end(), beam_dims_.size(), 0);
-    std::vector<size_t> beam_count = {current_batch_count_};
-    beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
-    beam_dataset_.select(beam_offset, beam_count).write_raw(beam_buffer_);
-    cpu_end = clock::now();
-    LOG_DEBUG("Batch flush: beam write({}) took {} us", current_batch_count_,
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    // Write arrivals data
-    cpu_start = clock::now();
-    auto arrivals_size = arrivals_dataset_.getDimensions()[0];
-    std::vector<size_t> arrivals_new_dims = {arrivals_size +
-                                             current_batch_count_};
-    arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
-                             arrivals_dims_.end());
-    arrivals_dataset_.resize(arrivals_new_dims);
-    cpu_end = clock::now();
-    LOG_DEBUG("Batch flush: arrivals resize({}) took {} us",
-              current_batch_count_,
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    std::vector<size_t> arrivals_offset = {arrivals_size};
-    arrivals_offset.insert(arrivals_offset.end(), arrivals_dims_.size(), 0);
-    std::vector<size_t> arrivals_count = {current_batch_count_};
-    arrivals_count.insert(arrivals_count.end(), arrivals_dims_.begin(),
-                          arrivals_dims_.end());
-    arrivals_dataset_.select(arrivals_offset, arrivals_count)
-        .write_raw(arrivals_buffer_);
-    cpu_end = clock::now();
-    LOG_DEBUG("Batch flush: arrivals write({}) took {} us",
-              current_batch_count_,
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    // Write sequence numbers
-    cpu_start = clock::now();
-    auto seq_size = beam_seq_dataset_.getDimensions()[0];
-    beam_seq_dataset_.resize({seq_size + current_batch_count_, 2});
-
-    beam_seq_dataset_.select({seq_size, 0}, {current_batch_count_, 2})
-        .write_raw(seq_buffer_.data());
-    cpu_end = clock::now();
-    LOG_DEBUG("Batch flush: seq write({}) took {} us", current_batch_count_,
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    auto batch_end = clock::now();
-    LOG_DEBUG("Batch flush complete: {} blocks in {} us (avg {} us/block)",
-              current_batch_count_,
-              std::chrono::duration_cast<std::chrono::microseconds>(batch_end -
-                                                                    batch_start)
-                  .count(),
-              std::chrono::duration_cast<std::chrono::microseconds>(batch_end -
-                                                                    batch_start)
-                      .count() /
-                  current_batch_count_);
-
-    // Reset counter (no need to clear vectors - we'll overwrite)
-    current_batch_count_ = 0;
-  }
-
-  HighFive::File &file_;
-  size_t batch_size_;
-  size_t current_batch_count_;
-  size_t beam_element_count_;
-  size_t arrivals_element_count_;
-  std::vector<size_t> beam_dims_;
-  std::vector<size_t> arrivals_dims_;
-  HighFive::DataSet beam_dataset_;
-  HighFive::DataSet arrivals_dataset_;
-  HighFive::DataSet beam_seq_dataset_;
-
-  // Batching buffers - store complete structures
-  BeamT *beam_buffer_;
-  ArrivalsT *arrivals_buffer_;
-  std::vector<std::array<int, 2>> seq_buffer_;
-};
-
-template <typename BeamT, typename ArrivalsT>
 class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 
 public:
-  HDF5BeamWriter(HighFive::File &file) : file_(file) {
+  HDF5BeamWriter(HighFive::File &file, const int num_blocks = 100)
+      : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file) {
     using namespace HighFive;
     using beam_type = typename std::remove_all_extents<BeamT>::type;
     using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
@@ -355,14 +337,14 @@ public:
     DataSetCreateProps beam_seq_props;
     beam_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
     // Create sequence number dataset
-    beam_seq_dataset_ = file_.createDataSet<int>(
+    beam_seq_dataset_ = file_.createDataSet<size_t>(
         "beam_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
         beam_seq_props);
   }
 
-  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
-                        const int start_seq, const int end_seq) override {
-    LOG_INFO("Writing beam block...");
+  void
+  process_block(const typename BeamWriter<BeamT, ArrivalsT>::BlockType &block) override {
+    INFO_LOG("Writing beam block...");
     auto current_size = beam_dataset_.getDimensions()[0];
 
     std::vector<size_t> new_dims = {current_size + 1};
@@ -376,7 +358,8 @@ public:
     beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
 
     using beam_type = typename std::remove_all_extents<BeamT>::type;
-    beam_dataset_.select(beam_offset, beam_count).write_raw(beam_data);
+    beam_dataset_.select(beam_offset, beam_count)
+        .write_raw(&block.beam_data[0]);
 
     // Write arrivals data
     auto arrivals_size = arrivals_dataset_.getDimensions()[0];
@@ -393,14 +376,14 @@ public:
     arrivals_dataset_.resize(arrivals_new_dims);
 
     arrivals_dataset_.select(arrivals_offset, arrivals_count)
-        .write_raw(arrivals_data);
+        .write_raw(&block.arrivals_data[0]);
 
     // Write sequence numbers
     auto seq_size = beam_seq_dataset_.getDimensions()[0];
 
     beam_seq_dataset_.resize({seq_size + 1, 2});
 
-    std::vector<int> seq_nums = {start_seq, end_seq};
+    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
     beam_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
   }
 
@@ -421,8 +404,9 @@ template <typename T> class HDF5FFTWriter : public FFTWriter<T> {
 public:
   HDF5FFTWriter(HighFive::File &file, const int min_channel,
                 const int max_channel,
-                const std::unordered_map<int, int> *antenna_map = nullptr)
-      : file_(file),
+                const std::unordered_map<int, int> *antenna_map = nullptr,
+                const int num_blocks = 100)
+      : FFTWriter<T>(num_blocks), file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
     using namespace HighFive;
@@ -454,7 +438,7 @@ public:
 
     DataSetCreateProps fft_seq_props;
     fft_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
-    fft_seq_dataset_ = file_.createDataSet<int>(
+    fft_seq_dataset_ = file_.createDataSet<size_t>(
         "fft_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
         fft_seq_props);
 
@@ -466,10 +450,7 @@ public:
     //     fft_missing_props);
   }
 
-  void write_fft_block(const T *fft_data, const int start_seq,
-                       const int end_seq, const int channel_idx,
-                       const int pol_idx) override {
-    LOG_INFO("writing fft block {} to {}", start_seq, end_seq);
+  void process_block(const FFTBlock<T> &block) override {
     auto current_size = fft_dataset_.getDimensions()[0];
     std::vector<size_t> new_dims = {current_size + 1};
     new_dims.insert(new_dims.end(), fft_dims_.begin(), fft_dims_.end());
@@ -480,11 +461,11 @@ public:
     std::vector<size_t> fft_count = {1};
     fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
 
-    fft_dataset_.select(fft_offset, fft_count).write(fft_data);
+    fft_dataset_.select(fft_offset, fft_count).write(block.fft_output);
 
     auto seq_size = fft_seq_dataset_.getDimensions()[0];
     fft_seq_dataset_.resize({seq_size + 1, 2});
-    std::vector<int> seq_nums = {start_seq, end_seq};
+    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
     fft_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
 
     // auto missing_size = fft_missing_dataset_.getDimensions()[0];
@@ -513,8 +494,9 @@ class HDF5VisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
   HDF5VisibilitiesWriter(
       HighFive::File &file, const int min_channel, const int max_channel,
-      const std::unordered_map<int, int> *antenna_map = nullptr)
-      : file_(file),
+      const std::unordered_map<int, int> *antenna_map = nullptr,
+      const int num_blocks = 100)
+      : VisibilitiesWriter<T>(num_blocks), file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
     using namespace HighFive;
@@ -546,7 +528,7 @@ public:
 
     DataSetCreateProps vis_seq_props;
     vis_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
-    vis_seq_dataset_ = file_.createDataSet<int>(
+    vis_seq_dataset_ = file_.createDataSet<size_t>(
         "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
         vis_seq_props);
 
@@ -566,11 +548,7 @@ public:
     write_baseline_ids();
   }
 
-  void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq,
-                                const int num_missing_packets,
-                                const int num_total_packets) override {
-    LOG_INFO("writing visibilities block {} to {}", start_seq, end_seq);
+  void process_block(const VisBlock<T> &block) override {
     auto current_size = vis_dataset_.getDimensions()[0];
     std::vector<size_t> new_dims = {current_size + 1};
     new_dims.insert(new_dims.end(), vis_dims_.begin(), vis_dims_.end());
@@ -581,17 +559,18 @@ public:
     std::vector<size_t> vis_count = {1};
     vis_count.insert(vis_count.end(), vis_dims_.begin(), vis_dims_.end());
 
-    vis_dataset_.select(vis_offset, vis_count).write(data);
+    vis_dataset_.select(vis_offset, vis_count).write_raw(block.data[0]);
 
     auto seq_size = vis_seq_dataset_.getDimensions()[0];
     vis_seq_dataset_.resize({seq_size + 1, 2});
-    std::vector<int> seq_nums = {start_seq, end_seq};
+    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
     vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
 
     auto missing_size = vis_missing_dataset_.getDimensions()[0];
     vis_missing_dataset_.resize({missing_size + 1, 3});
-    float num_missing_packets_fl = static_cast<float>(num_missing_packets);
-    float num_total_packets_fl = static_cast<float>(num_total_packets);
+    float num_missing_packets_fl =
+        static_cast<float>(block.num_missing_packets);
+    float num_total_packets_fl = static_cast<float>(block.num_total_packets);
     std::vector<float> missing_nums = {
         num_missing_packets_fl, num_total_packets_fl,
         100 * num_missing_packets_fl / num_total_packets_fl};
@@ -650,296 +629,14 @@ private:
   HighFive::DataSet vis_missing_dataset_;
   std::vector<size_t> vis_dims_;
   std::unordered_map<int, int> antenna_map_;
-};
-
-template <typename T>
-class HDF5AndRedisVisibilitiesWriter : public VisibilitiesWriter<T> {
-public:
-  HDF5AndRedisVisibilitiesWriter(
-      HighFive::File &file, const int NR_BASELINES, const int min_channel,
-      const int max_channel,
-      const std::unordered_map<int, int> *antenna_map = nullptr)
-      : file_(file),
-        element_count_(sizeof(T) /
-                       sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://127.0.0.1:6379"), NR_BASELINES(NR_BASELINES) {
-    using namespace HighFive;
-
-    double start_time = std::chrono::duration<double>(
-                            std::chrono::system_clock::now().time_since_epoch())
-                                .count() /
-                            86400.0 +
-                        40587.0;
-    file_.createAttribute<double>("mjd_start", start_time);
-    file_.createAttribute<int>("min_channel", min_channel);
-    file_.createAttribute<int>("max_channel", max_channel);
-    vis_dims_ = get_array_dims<T>();
-    std::vector<size_t> vis_dataset_dims = {0};
-    std::vector<size_t> vis_dataset_max_dims = {DataSpace::UNLIMITED};
-
-    vis_dataset_dims.insert(vis_dataset_dims.end(), vis_dims_.begin(),
-                            vis_dims_.end());
-    vis_dataset_max_dims.insert(vis_dataset_max_dims.end(), vis_dims_.begin(),
-                                vis_dims_.end());
-    std::vector<hsize_t> vis_chunk = {1};
-    vis_chunk.insert(vis_chunk.end(), vis_dims_.begin(), vis_dims_.end());
-    DataSpace vis_space(vis_dataset_dims, vis_dataset_max_dims);
-    DataSetCreateProps props;
-    props.add(HighFive::Chunking(vis_chunk));
-    // I imagine createDataSet needs a primitive type
-    vis_dataset_ = file_.createDataSet<float>("visibilities", vis_space, props);
-
-    DataSetCreateProps vis_seq_props;
-    vis_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
-    vis_seq_dataset_ = file_.createDataSet<int>(
-        "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
-        vis_seq_props);
-
-    DataSetCreateProps vis_missing_props;
-    vis_missing_props.add(Chunking(std::vector<hsize_t>{1, 3}));
-    vis_missing_dataset_ = file_.createDataSet<float>(
-        "vis_missing_nums",
-        DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
-        vis_missing_props);
-
-    if (antenna_map && !antenna_map->empty()) {
-      this->antenna_map_ = *antenna_map;
-    } else {
-      generate_identity_map();
-    }
-
-    NR_CHANNELS = vis_dims_[0];
-    NR_POLARIZATIONS = vis_dims_[2];
-    write_baseline_ids();
-    create_all_timeseries_keys();
-  }
-
-  void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq,
-                                const int num_missing_packets,
-                                const int num_total_packets) override {
-    LOG_INFO("writing visibilities block {} to {}", start_seq, end_seq);
-    auto current_size = vis_dataset_.getDimensions()[0];
-    std::vector<size_t> new_dims = {current_size + 1};
-    new_dims.insert(new_dims.end(), vis_dims_.begin(), vis_dims_.end());
-    vis_dataset_.resize(new_dims);
-
-    std::vector<size_t> vis_offset = {current_size};
-    vis_offset.insert(vis_offset.end(), vis_dims_.size(), 0);
-    std::vector<size_t> vis_count = {1};
-    vis_count.insert(vis_count.end(), vis_dims_.begin(), vis_dims_.end());
-
-    vis_dataset_.select(vis_offset, vis_count).write(data);
-
-    auto seq_size = vis_seq_dataset_.getDimensions()[0];
-    vis_seq_dataset_.resize({seq_size + 1, 2});
-    std::vector<int> seq_nums = {start_seq, end_seq};
-    vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
-
-    auto missing_size = vis_missing_dataset_.getDimensions()[0];
-    vis_missing_dataset_.resize({missing_size + 1, 3});
-    float num_missing_packets_fl = static_cast<float>(num_missing_packets);
-    float num_total_packets_fl = static_cast<float>(num_total_packets);
-    std::vector<float> missing_nums = {
-        num_missing_packets_fl, num_total_packets_fl,
-        100 * num_missing_packets_fl / num_total_packets_fl};
-    vis_missing_dataset_.select({missing_size, 0}, {1, 3})
-        .write_raw(missing_nums.data());
-    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::system_clock::now().time_since_epoch())
-                  .count();
-
-    std::vector<std::string> madd_args = {"TS.MADD"};
-
-    // Reserve space for efficiency: 4 metrics * 3 arguments (Key, TS, Value)
-    madd_args.reserve(1 + NR_CHANNELS * NR_BASELINES * 1 * 1 * 4 * 3);
-
-    // Iterate over all dimensions
-    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
-      for (int bl_idx = 0; bl_idx < NR_BASELINES; ++bl_idx) {
-        for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
-          for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
-
-            // --- 1. Data Access & Calculation ---
-            const float real_val =
-                data[0][ch_idx][bl_idx][pol_r_idx][pol_c_idx][0];
-            const float imag_val =
-                data[0][ch_idx][bl_idx][pol_r_idx][pol_c_idx][1];
-
-            const float amplitude =
-                std::sqrt(real_val * real_val + imag_val * imag_val);
-            const float phase = std::atan2(imag_val, real_val);
-
-            // --- 2. Create Descriptive Strings ---
-            std::string channel_id = std::to_string(ch_idx);
-            std::string baseline_pair = std::to_string(bl_idx);
-            std::string pol_pair =
-                std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
-
-            // --- 3. Key Prefix: ts:ch:<ID>:bl:<A-B>:p:<R-C> ---
-            std::string key_prefix = "ts:ch:" + channel_id +
-                                     ":bl:" + baseline_pair + ":p:" + pol_pair;
-
-            // Convert timestamp to string once
-            std::string ts_str = std::to_string(ts);
-
-            // --- 4. Build TS.MADD Arguments (4 metrics per data point) ---
-
-            // Metric 1: Real
-            // madd_args.push_back(key_prefix + ":real");
-            // madd_args.push_back(ts_str);
-            // madd_args.push_back(std::to_string(real_val));
-
-            //// Metric 2: Imaginary
-            // madd_args.push_back(key_prefix + ":imag");
-            // madd_args.push_back(ts_str);
-            // madd_args.push_back(std::to_string(imag_val));
-
-            // Metric 3: Amplitude
-            madd_args.push_back(key_prefix + ":amp");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(amplitude));
-
-            // Metric 4: Phase
-            madd_args.push_back(key_prefix + ":phase");
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(phase));
-          }
-        }
-      }
-    }
-
-    // --- 5. Execute TS.MADD using redis-plus-plus ---
-    if (madd_args.size() > 1) { // Check if we have arguments beyond "TS.MADD"
-      // This is the correct call signature for redis-plus-plus command with a
-      // list of arguments The return type can often be void or a future/reply
-      // type depending on sync/async usage
-      redis.command(madd_args.begin(), madd_args.end());
-    }
-  }
-
-  void flush() override { file_.flush(); }
-
-private:
-  void write_baseline_ids() {
-    // Extract NR_BASELINES from T.
-    // T is float[CH][BL][POL][POL][CPLX].
-    // extent<T, 0> is Channels, extent<T, 1> is Baselines.
-    constexpr size_t nr_baselines = std::extent<T, 1>::value;
-
-    // Calculate number of antennas from triangular number formula:
-    // B = A(A+1)/2  =>  A^2 + A - 2B = 0
-    // A = (-1 + sqrt(1 + 8B)) / 2
-    size_t nr_antennas =
-        static_cast<size_t>((std::sqrt(1 + 8 * nr_baselines) - 1) / 2);
-
-    std::vector<int> baseline_ids;
-    baseline_ids.reserve(nr_baselines);
-
-    // Generate FITS IDs (256 * ant1 + ant2) based on triangular order
-    // Order: 0-0, 0-1, 1-1, 0-2, 1-2, 2-2 ...
-    for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
-      for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
-        baseline_ids.push_back(256 * antenna_map_[ant1] + antenna_map_[ant2]);
-        LOG_DEBUG("ant1: {}, ant2: {}, antenna_map[ant1]: {} "
-                  "antenna_map[ant2]: {}, baseline: {}",
-                  ant1, ant2, antenna_map_[ant1], antenna_map_[ant2],
-                  256 * antenna_map_[ant1] + antenna_map_[ant2]);
-      }
-    }
-
-    // Sanity check
-    if (baseline_ids.size() != nr_baselines) {
-      std::cout << "Baseline IDs do not match size of NR_BASELINES"
-                << std::endl;
-      // Handle error/log warning here if dimensions don't match expectation
-    }
-
-    // Write to HDF5 (Static dataset, no need for Unlimited/Chunking)
-    file_
-        .createDataSet<int>("baseline_ids",
-                            HighFive::DataSpace::From(baseline_ids))
-        .write(baseline_ids);
-  }
-
-  void generate_identity_map() {
-    for (int i = 0; i < 256; i++) {
-      antenna_map_[i] = i;
-    }
-  }
-  void create_all_timeseries_keys() {
-
-    std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
-    std::cout << "Total keys to create: "
-              << NR_CHANNELS * NR_BASELINES * 4 * NR_POLARIZATIONS *
-                     NR_POLARIZATIONS
-              << std::endl;
-
-    //    const std::vector<std::string> components = {"real", "imag", "amp",
-    //                                                 "phase"};
-
-    const std::vector<std::string> components = {"amp", "phase"};
-    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
-      std::string channel_id = std::to_string(ch_idx);
-
-      for (int bl_idx = 0; bl_idx < NR_BASELINES; ++bl_idx) {
-        int ant1, ant2;
-        std::string baseline_pair = std::to_string(bl_idx);
-
-        for (int pol_r_idx = 0; pol_r_idx < 1; ++pol_r_idx) {
-          for (int pol_c_idx = 0; pol_c_idx < 1; ++pol_c_idx) {
-            std::string pol_pair =
-                std::to_string(pol_r_idx) + "-" + std::to_string(pol_c_idx);
-
-            for (const auto &component : components) {
-              // --- 1. Construct the Key ---
-              std::string key = "ts:ch:" + channel_id + ":bl:" + baseline_pair +
-                                ":p:" + pol_pair + ":" + component;
-
-              // --- 2. Build the TS.CREATE Command Arguments ---
-              std::vector<std::string> args = {
-                  "TS.CREATE", key,         "LABELS",      "channel",
-                  channel_id,  "baseline",  baseline_pair, "polarization",
-                  pol_pair,    "component", component // Add the final unique
-                                                      // label
-              };
-
-              // --- 3. Execute the Command ---
-              // Use the `command` method which accepts iterators for arguments
-              try {
-                redis.command(args.begin(), args.end());
-                // std::cout << "Created key: " << key << std::endl; //
-                // Uncomment for debugging
-              } catch (const std::exception &e) {
-                LOG_ERROR("Error creating key {}: {}", key, e.what());
-                // Handle error (e.g., key already exists, server down)
-              }
-            } // end component loop
-          } // end pol_c_idx loop
-        } // end pol_r_idx loop
-      } // end bl_idx loop
-    } // end ch_idx loop
-
-    std::cout << "TimeSeries key pre-creation complete." << std::endl;
-  }
-  HighFive::File &file_;
-  size_t element_count_;
-  HighFive::DataSet vis_dataset_;
-  HighFive::DataSet vis_seq_dataset_;
-  HighFive::DataSet vis_missing_dataset_;
-  std::vector<size_t> vis_dims_;
-  std::unordered_map<int, int> antenna_map_;
-  sw::redis::Redis redis;
-  int NR_CHANNELS;
-  int NR_BASELINES;
-  int NR_POLARIZATIONS;
 };
 
 template <typename TVal, typename TVec>
 class RedisEigendataWriter : public EigenWriter<TVal, TVec> {
 public:
-  RedisEigendataWriter()
-      : val_element_count_(
+  RedisEigendataWriter(const int num_blocks = 100)
+      : EigenWriter<TVal, TVec>(num_blocks),
+        val_element_count_(
             sizeof(TVal) /
             sizeof(typename std::remove_all_extents<TVal>::type)),
         vec_element_count_(
@@ -957,16 +654,12 @@ public:
     create_all_timeseries_keys();
   }
 
-  void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
-                             const int start_seq, const int end_seq) override {
-
+  void process_block(const EigenBlock<TVal, TVec> &block) override {
     // NOTE: 'ts' (timestamp) needs to be passed or calculated here. Assuming
     // 'ts' is available. Example:
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
-
-    LOG_INFO("writing eigendata block {} to {}", start_seq, end_seq);
 
     std::vector<std::string> madd_args = {"TS.MADD"};
 
@@ -974,9 +667,9 @@ public:
 
     // Reinterpret the template pointers to the underlying float/double types
     // Since TVal is a float array, reinterpret_cast is fine.
-    const float *val_ptr = reinterpret_cast<const float *>(val_data);
+    const float *val_ptr = reinterpret_cast<const float *>(&block.eigenvalues);
     const std::complex<float> *vec_ptr =
-        reinterpret_cast<const std::complex<float> *>(vec_data);
+        reinterpret_cast<const std::complex<float> *>(&block.eigenvectors);
 
     std::string ts_str = std::to_string(ts);
 
@@ -1082,7 +775,7 @@ private:
               try {
                 redis.command(args.begin(), args.end());
               } catch (const std::exception &e) {
-                LOG_ERROR("Error creating key {}: {}", key, e.what());
+                ERROR_LOG("Error creating key {}: {}", key, e.what());
               }
             }
             for (int j_idx = 0; j_idx < N; ++j_idx) {
@@ -1101,7 +794,7 @@ private:
                 try {
                   redis.command(args.begin(), args.end());
                 } catch (const std::exception &e) {
-                  LOG_ERROR("Error creating key {}: {}", key, e.what());
+                  ERROR_LOG("Error creating key {}: {}", key, e.what());
                 }
               }
             } // End Eigenvector j_idx loop
@@ -1120,153 +813,12 @@ private:
   int NR_RECEIVERS;
 };
 
-template <typename T> class RedisFFTWriter : public FFTWriter<T> {
-public:
-  RedisFFTWriter(int num_channels, int num_receivers, int num_polarizations,
-                 std::string prefix = "")
-      : element_count_(sizeof(T) /
-                       sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
-        NR_RECEIVERS(num_receivers), NR_POLARIZATIONS(num_polarizations),
-        prefix(prefix) {
-    fft_dims_ = get_array_dims<T>();
-    NR_FREQS = fft_dims_[fft_dims_.size() - 1];
-    precomputed_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS);
-    precomputed_max_keys.resize(NR_CHANNELS * NR_POLARIZATIONS * NR_FREQS);
-
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-        for (int f = 0; f < NR_FREQS; ++f) {
-          // Apply the frequency shift (F/2) during pre-caching
-          // so we don't calculate it during the hot loop.
-          int f_shifted = (f + NR_FREQS / 2) % NR_FREQS;
-
-          std::string key = prefix + "ts:fft:ch:" + std::to_string(ch) +
-                            ":p:" + std::to_string(pol) +
-                            ":f:" + std::to_string(f_shifted);
-
-          std::string max_key = "ts:fft_max1s:ch:" + std::to_string(ch) +
-                                ":p:" + std::to_string(pol) +
-                                ":f:" + std::to_string(f_shifted);
-          precomputed_keys[get_key_index(ch, pol, f)] = key;
-          precomputed_max_keys[get_key_index(ch, pol, f)] = max_key;
-        }
-      }
-    }
-
-    std::cout << "RedisFFTWriter has NR_CHANNELS: " << NR_CHANNELS
-              << ", NR_RECEIVERS:" << NR_RECEIVERS << ", NR_FREQS: " << NR_FREQS
-              << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
-    create_all_timeseries_keys();
-  }
-
-  void write_fft_block(const T *fft_data, const int start_seq,
-                       const int end_seq, const int channel_idx,
-                       const int pol_idx) override {
-
-    long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                       .count();
-    std::string ts_str = std::to_string(ts);
-
-    std::vector<std::string> madd_args = {"TS.MADD"};
-
-    int ch = channel_idx;
-    int pol = pol_idx;
-    const int F = NR_FREQS;
-    for (int f = 0; f < F; ++f) {
-      const auto &cval = fft_data[0][f];
-
-      madd_args.push_back(precomputed_keys[get_key_index(ch, pol, f)]);
-      madd_args.push_back(ts_str);
-      madd_args.push_back(std::to_string(cval));
-    }
-
-    if (madd_args.size() > 1) {
-      redis.command(madd_args.begin(), madd_args.end());
-    }
-  }
-
-  void flush() override {}
-
-private:
-  inline size_t get_key_index(int ch, int pol, int f) const {
-    return static_cast<size_t>(ch) * (NR_POLARIZATIONS * NR_FREQS) +
-           static_cast<size_t>(pol) * NR_FREQS + static_cast<size_t>(f);
-  }
-  std::string prefix;
-  void create_all_timeseries_keys() {
-    std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-        for (int f = 0; f < NR_FREQS; ++f) {
-          auto key = precomputed_keys[get_key_index(ch, pol, f)];
-          auto max_key = precomputed_max_keys[get_key_index(ch, pol, f)];
-
-          int f_shifted = (f + NR_FREQS / 2) % NR_FREQS;
-          std::vector<std::string> args = {"TS.CREATE",
-                                           key,
-                                           "RETENTION",
-                                           "60000",
-                                           "LABELS",
-                                           "type",
-                                           "raw",
-                                           "channel",
-                                           std::to_string(ch),
-                                           "polarization",
-                                           std::to_string(pol),
-                                           "freq",
-                                           std::to_string(f_shifted),
-                                           "component",
-                                           "bandpass"};
-
-          std::vector<std::string> max_args = {"TS.CREATE",
-                                               max_key,
-                                               "RETENTION",
-                                               "0",
-                                               "LABELS",
-                                               "type",
-                                               "aggregated",
-                                               "channel",
-                                               std::to_string(ch),
-                                               "polarization",
-                                               std::to_string(pol),
-                                               "freq",
-                                               std::to_string(f_shifted),
-                                               "component",
-                                               "bandpass_max1s"};
-
-          std::vector<std::string> rule_args = {"TS.CREATERULE", key,   max_key,
-                                                "AGGREGATION",   "max", "1000"};
-          try {
-            redis.command(args.begin(), args.end());
-            redis.command(max_args.begin(), max_args.end());
-            redis.command(rule_args.begin(), rule_args.end());
-          } catch (const std::exception &e) {
-            LOG_ERROR("Error creating key {}: {}", key, e.what());
-          }
-        }
-      }
-    }
-
-    std::cout << "FFT TimeSeries key creation complete." << std::endl;
-  };
-  size_t element_count_;
-  std::vector<size_t> fft_dims_;
-  sw::redis::Redis redis;
-  int NR_CHANNELS;
-  int NR_POLARIZATIONS;
-  int NR_RECEIVERS;
-  int NR_FREQS;
-  std::vector<std::string> precomputed_keys;
-  std::vector<std::string> precomputed_max_keys;
-};
-
 template <typename T> class RedisBeamFFTWriter : public FFTWriter<T> {
 public:
   RedisBeamFFTWriter(int num_channels, int num_beams, int num_polarizations,
-                     std::string prefix = "")
-      : element_count_(sizeof(T) /
+                     std::string prefix = "", const int num_blocks = 100)
+      : FFTWriter<T>(num_blocks),
+        element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
         redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
         NR_BEAMS(num_beams), NR_POLARIZATIONS(num_polarizations),
@@ -1324,9 +876,7 @@ public:
     create_all_timeseries_keys();
   }
 
-  void write_fft_block(const T *fft_data, const int start_seq,
-                       const int end_seq, const int channel_idx,
-                       const int pol_idx) override {
+  void process_block(const FFTBlock<T> &block) override {
 
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
@@ -1342,7 +892,7 @@ public:
       for (int ch = 0; ch < NR_CHANNELS; ++ch) {
         for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
           for (int beam = 0; beam < NR_BEAMS; ++beam) {
-            const auto &cval = fft_data[0][ch][pol][beam][f];
+            const auto cval = block.fft_output[ch][pol][beam][f];
 
             madd_args.push_back(
                 precomputed_keys[get_key_index(ch, pol, beam, f)]);
@@ -1445,7 +995,7 @@ private:
               redis.command(rule_args.begin(), rule_args.end());
               redis.command(rule_100ms_args.begin(), rule_100ms_args.end());
             } catch (const std::exception &e) {
-              LOG_ERROR("Error creating key {}: {}", key, e.what());
+              ERROR_LOG("Error creating key {}: {}", key, e.what());
             }
           }
         }
@@ -1492,835 +1042,130 @@ template <typename T> hid_t get_hdf5_type() {
 }
 
 template <typename BeamT, typename ArrivalsT>
-class HDF5RawBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
+class PSRDADABeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 public:
-  HDF5RawBeamWriter(hid_t file_id) : file_id_(file_id) {
-    using beam_type = typename std::remove_all_extents_t<BeamT>;
-    using arrival_type = typename std::remove_all_extents_t<ArrivalsT>;
+  PSRDADABeamWriter(std::string header_filename, const int num_blocks = 100)
+      : BeamWriter<BeamT, ArrivalsT>(num_blocks) {
 
-    beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
-    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
-    beam_dims_ = get_array_dims<BeamT, hsize_t>();
-    arrivals_dims_ = get_array_dims<ArrivalsT, hsize_t>();
+    log = 0;
 
-    // Create beam dataset
-    beam_dataset_id_ = create_dataset<beam_type>("beam_data", beam_dims_);
+    // default shared memory key
+    key_t dada_key = DADA_DEFAULT_BLOCK_KEY;
 
-    // Create arrivals dataset
-    arrivals_dataset_id_ =
-        create_dataset<arrival_type>("arrivals", arrivals_dims_);
+    // DADA Header + Data unit
+    hdu = 0;
 
-    // Create sequence number dataset (2D: Nx2)
-    std::vector<hsize_t> seq_dims = {2}; // columns: start_seq, end_seq
-    beam_seq_dataset_id_ = create_dataset<int>("beam_seq_nums", seq_dims);
+    header_file = strdup(header_filename.c_str());
+    obs_header = (char *)malloc(sizeof(char) * DADA_DEFAULT_HEADER_SIZE);
+    if (!obs_header) {
+      fprintf(stderr, "ERROR: could not allocate memory\n");
+      throw std::runtime_error();
+    }
+
+    // read the ASCII DADA header from the file
+    if (fileread(header_file, obs_header, DADA_DEFAULT_HEADER_SIZE) < 0) {
+      free(obs_header);
+      fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
+              header_file);
+      throw std::runtime_error();
+    }
+
+    // create a multilogger
+    log = multilog_open("PSRDADABeamWriter", 0);
+
+    // set the destination for multilog to stderr
+    multilog_add(log, stderr);
+
+    // create the HDU struct
+    hdu = dada_hdu_create(log);
+
+    // set the key to connecting to the HDU
+    dada_hdu_set_key(hdu, dada_key);
+
+    // connect to HDU
+    if (dada_hdu_connect(hdu) < 0) {
+      multilog(log, LOG_ERR, "could not connect to HDU\n");
+
+      throw std::runtime_error();
+    }
+
+    if (dada_hdu_lock_write(hdu) < 0) {
+      multilog(log, LOG_ERR, "could not lock write on HDU\n");
+      throw std::runtime_error();
+    }
   }
 
-  ~HDF5RawBeamWriter() {
-    if (beam_dataset_id_ >= 0)
-      H5Dclose(beam_dataset_id_);
-    if (arrivals_dataset_id_ >= 0)
-      H5Dclose(arrivals_dataset_id_);
-    if (beam_seq_dataset_id_ >= 0)
-      H5Dclose(beam_seq_dataset_id_);
+  ~PSRDADABeamWriter() {
+
+    if (dada_hdu_unlock_write(hdu) < 0) {
+      multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
+      throw std::runtime_error();
+    }
+
+    // disconnect from HDU
+    if (dada_hdu_disconnect(hdu) < 0)
+      multilog(log, LOG_ERR, "could not unlock write on hdu\n");
   }
 
-  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
-                        const int start_seq, const int end_seq) override {
-    using clock = std::chrono::high_resolution_clock;
-    auto cpu_start = clock::now();
-    auto cpu_end = clock::now();
+  void process_block(const BeamBlock<BeamT, ArrivalsT> &block) {
 
-    // Write beam data
-    cpu_start = clock::now();
-    hsize_t current_size = get_dataset_size(beam_dataset_id_);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam dataset size query: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+    {
+      uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
+      char *header = ipcbuf_get_next_write(hdu->header_block);
+      memcpy(header, obs_header, header_size);
 
-    cpu_start = clock::now();
-    std::vector<hsize_t> new_dims = {current_size + 1};
-    new_dims.insert(new_dims.end(), beam_dims_.begin(), beam_dims_.end());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam new_dims construction: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+      // Enable EOD so that subsequent transfers will move to the next buffer in
+      // the header block
+      if (ipcbuf_enable_eod(hdu->header_block) < 0) {
+        multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
+                throw std::runtime_error();
+      }
 
-    cpu_start = clock::now();
-    resize_dataset(beam_dataset_id_, new_dims);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam dataset resize: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+      // flag the header block for this "observation" as filled
+      if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
+        multilog(log, LOG_ERR, "could not mark filled Header Block\n");
+                throw std::runtime_error();
+      }
+    }
 
-    cpu_start = clock::now();
-    std::vector<hsize_t> offset = {current_size};
-    offset.insert(offset.end(), beam_dims_.size(), 0);
-    std::vector<hsize_t> count = {1};
-    count.insert(count.end(), beam_dims_.begin(), beam_dims_.end());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam offset/count construction: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+    // the size of 1 block (buffer element) in the data block
+    uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
 
-    cpu_start = clock::now();
-    using beam_type = typename std::remove_all_extents_t<BeamT>;
-    write_hyperslab<beam_type>(beam_dataset_id_, (beam_type *)beam_data, offset,
-                               count, beam_dims_);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for beam dataset write: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+    // write 1 block worth of data block via the "block" method
+    {
+      uint64_t block_id;
+      char *ring_block = ipcio_open_block_write(hdu->data_block, &block_id);
+      if (!block) {
+        multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
+                throw std::runtime_error();
+      }
 
-    // Write arrivals data
-    cpu_start = clock::now();
-    hsize_t arrivals_size = get_dataset_size(arrivals_dataset_id_);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals dataset size query: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+      // this is where I should copy in the data
+      memset(ring_block, 0, block_size);
 
-    cpu_start = clock::now();
-    std::vector<hsize_t> arrivals_new_dims = {arrivals_size + 1};
-    arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
-                             arrivals_dims_.end());
-    std::vector<hsize_t> arrivals_offset = {arrivals_size};
-    arrivals_offset.insert(arrivals_offset.end(), arrivals_dims_.size(), 0);
-    std::vector<hsize_t> arrivals_count = {1};
-    arrivals_count.insert(arrivals_count.end(), arrivals_dims_.begin(),
-                          arrivals_dims_.end());
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals dims/offset/count construction: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    resize_dataset(arrivals_dataset_id_, arrivals_new_dims);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals dataset resize: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    using arrival_type = typename std::remove_all_extents_t<ArrivalsT>;
-    write_hyperslab<arrival_type>(
-        arrivals_dataset_id_, (arrival_type *)arrivals_data, arrivals_offset,
-        arrivals_count, arrivals_dims_);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for arrivals dataset write: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    // Write sequence numbers
-    cpu_start = clock::now();
-    hsize_t seq_size = get_dataset_size(beam_seq_dataset_id_);
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for seq dataset size query: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    resize_dataset(beam_seq_dataset_id_, {seq_size + 1, 2});
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for seq dataset resize: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
-
-    cpu_start = clock::now();
-    int seq_nums[2] = {start_seq, end_seq};
-    write_hyperslab<int>(beam_seq_dataset_id_, seq_nums, {seq_size, 0}, {1, 2},
-                         {2});
-    cpu_end = clock::now();
-    LOG_DEBUG("CPU overhead for seq dataset write: {} us",
-              std::chrono::duration_cast<std::chrono::microseconds>(cpu_end -
-                                                                    cpu_start)
-                  .count());
+      if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
+        multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
+                throw std::runtime_error();
+      }
+    }
   }
 
-  void flush() override { H5Fflush(file_id_, H5F_SCOPE_GLOBAL); }
+  void flush() {}
 
 private:
-  template <typename T>
-  hid_t create_dataset(const char *name,
-                       const std::vector<hsize_t> &data_dims) {
-    // Initial dimensions: 0 in first dimension, rest from data_dims
-    std::vector<hsize_t> dims = {0};
-    dims.insert(dims.end(), data_dims.begin(), data_dims.end());
-
-    // Max dimensions: unlimited in first, rest from data_dims
-    std::vector<hsize_t> max_dims = {H5S_UNLIMITED};
-    max_dims.insert(max_dims.end(), data_dims.begin(), data_dims.end());
-
-    // Chunk dimensions: 1 in first, rest from data_dims
-    std::vector<hsize_t> chunk_dims = {1};
-    chunk_dims.insert(chunk_dims.end(), data_dims.begin(), data_dims.end());
-
-    // Create dataspace
-    hid_t space_id =
-        H5Screate_simple(dims.size(), dims.data(), max_dims.data());
-
-    // Create chunked dataset creation property list
-    hid_t plist_id = H5Pcreate(H5P_DATASET_CREATE);
-    H5Pset_chunk(plist_id, chunk_dims.size(), chunk_dims.data());
-
-    // Create dataset
-    hid_t dataset_id = H5Dcreate2(file_id_, name, get_hdf5_type<T>(), space_id,
-                                  H5P_DEFAULT, plist_id, H5P_DEFAULT);
-
-    H5Pclose(plist_id);
-    H5Sclose(space_id);
-
-    return dataset_id;
-  }
-
-  hsize_t get_dataset_size(hid_t dataset_id) {
-    hid_t space_id = H5Dget_space(dataset_id);
-    int ndims = H5Sget_simple_extent_ndims(space_id);
-    std::vector<hsize_t> dims(ndims);
-    H5Sget_simple_extent_dims(space_id, dims.data(), nullptr);
-    H5Sclose(space_id);
-    return dims[0];
-  }
-
-  void resize_dataset(hid_t dataset_id, const std::vector<hsize_t> &new_dims) {
-    H5Dset_extent(dataset_id, new_dims.data());
-  }
-
-  template <typename T>
-  void write_hyperslab(hid_t dataset_id, const T *data,
-                       const std::vector<hsize_t> &offset,
-                       const std::vector<hsize_t> &count,
-                       const std::vector<hsize_t> &data_dims) {
-    // Get file dataspace and select hyperslab
-    hid_t file_space_id = H5Dget_space(dataset_id);
-    H5Sselect_hyperslab(file_space_id, H5S_SELECT_SET, offset.data(), nullptr,
-                        count.data(), nullptr);
-
-    // Create memory dataspace
-    hid_t mem_space_id = H5Screate_simple(count.size(), count.data(), nullptr);
-
-    // Write data
-    H5Dwrite(dataset_id, get_hdf5_type<T>(), mem_space_id, file_space_id,
-             H5P_DEFAULT, data);
-
-    H5Sclose(mem_space_id);
-    H5Sclose(file_space_id);
-  }
-
-  hid_t file_id_;
-  hid_t beam_dataset_id_;
-  hid_t arrivals_dataset_id_;
-  hid_t beam_seq_dataset_id_;
-
-  size_t beam_element_count_;
-  std::vector<hsize_t> beam_dims_;
-  size_t arrivals_element_count_;
-  std::vector<hsize_t> arrivals_dims_;
-};
-
-template <typename BeamT, typename ArrivalsT>
-class BinaryRawBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
-public:
-  BinaryRawBeamWriter(const std::string &filename,
-                      const bool write_arrivals = false)
-      : filename_(filename),
-        file_stream_(filename, std::ios::binary | std::ios::out),
-        write_arrivals(write_arrivals) {
-    if (!file_stream_) {
-      throw std::runtime_error("Failed to open binary file: " + filename);
-    }
-
-    using beam_type = typename std::remove_all_extents_t<BeamT>;
-    using arrival_type = typename std::remove_all_extents_t<ArrivalsT>;
-
-    beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
-    arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(arrival_type);
-
-    std::cout << "[BinaryRawBeamWriter] Opened " << filename
-              << " for writing.\n";
-  }
-
-  ~BinaryRawBeamWriter() {
-    if (file_stream_.is_open()) {
-      file_stream_.close();
-      std::cout << "[BinaryRawBeamWriter] Closed " << filename_ << ".\n";
-    }
-  }
-
-  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
-                        const int start_seq, const int end_seq) {
-    // file_stream_.write(reinterpret_cast<const char *>(&start_seq),
-    // sizeof(int)); file_stream_.write(reinterpret_cast<const char
-    // *>(&end_seq), sizeof(int));
-
-    // Write beam data
-    file_stream_.write(reinterpret_cast<const char *>(beam_data),
-                       sizeof(BeamT));
-
-    // Write arrivals data
-    if (write_arrivals) {
-      file_stream_.write(reinterpret_cast<const char *>(arrivals_data),
-                         sizeof(ArrivalsT));
-    }
-  }
-
-  void flush() {
-    file_stream_.flush();
-    std::cout << "[BinaryRawBeamWriter] Flushed file buffer.\n";
-  }
-
-private:
-  std::string filename_;
-  std::ofstream file_stream_;
-
-  bool write_arrivals;
-  size_t beam_element_count_;
-  size_t arrivals_element_count_;
-};
-
-template <typename BeamT, typename ArrivalsT>
-class InMemoryBeamWriter : public BeamWriter<BeamT, ArrivalsT> {
-public:
-  struct Meta {
-    int start_seq;
-    int end_seq;
-  };
-
-  explicit InMemoryBeamWriter(size_t capacity)
-      : capacity_(capacity), start_index_(0), count_(0) {
-    beam_buffer_ = static_cast<BeamT *>(std::malloc(capacity * sizeof(BeamT)));
-    arrivals_buffer_ =
-        static_cast<ArrivalsT *>(std::malloc(capacity * sizeof(ArrivalsT)));
-    meta_buffer_ = static_cast<Meta *>(std::malloc(capacity * sizeof(Meta)));
-
-    if (!beam_buffer_ || !arrivals_buffer_ || !meta_buffer_) {
-      throw std::bad_alloc();
-    }
-
-    LOG_INFO("[InMemoryRawBeamWriter] Allocated space for {} blocks ({} + {} "
-             "bytes each)",
-             capacity, sizeof(BeamT), sizeof(ArrivalsT));
-  }
-
-  ~InMemoryBeamWriter() override {
-    std::free(beam_buffer_);
-    std::free(arrivals_buffer_);
-    std::free(meta_buffer_);
-    LOG_INFO("[InMemoryRawBeamWriter] Freed buffers.");
-  }
-
-  void write_beam_block(const BeamT *beam_data, const ArrivalsT *arrivals_data,
-                        int start_seq, int end_seq) override {
-    using clock = std::chrono::high_resolution_clock;
-    auto start = clock::now();
-
-    size_t write_index = (start_index_ + count_) % capacity_;
-    if (count_ == capacity_) {
-      // Overwrite oldest
-      start_index_ = (start_index_ + 1) % capacity_;
-      LOG_INFO("[InMemoryRawBeamWriter] Buffer full, overwriting oldest "
-               "block.");
-    } else {
-      ++count_;
-    }
-
-    meta_buffer_[write_index].start_seq = start_seq;
-    meta_buffer_[write_index].end_seq = end_seq;
-
-    std::memcpy(&beam_buffer_[write_index], beam_data, sizeof(BeamT));
-    std::memcpy(&arrivals_buffer_[write_index], arrivals_data,
-                sizeof(ArrivalsT));
-
-    auto end = clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start)
-                  .count();
-
-    LOG_DEBUG("[InMemoryRawBeamWriter] Copied block {} in {} us.", write_index,
-              us);
-  }
-
-  void flush() override { LOG_INFO("[InMemoryRawBeamWriter] Flush (no-op)."); }
-
-  size_t size() const { return count_; }
-  size_t capacity() const { return capacity_; }
-
-  void clear() {
-    start_index_ = 0;
-    count_ = 0;
-  }
-
-  // Retrieve a copy of a block by index (0 = oldest)
-  void get_block(size_t i, int &start_seq, int &end_seq, BeamT &beam,
-                 ArrivalsT &arrivals) const {
-    if (i >= count_)
-      throw std::out_of_range("get_block index out of range");
-
-    size_t idx = (start_index_ + i) % capacity_;
-    start_seq = meta_buffer_[idx].start_seq;
-    end_seq = meta_buffer_[idx].end_seq;
-
-    std::memcpy(&beam, &beam_buffer_[idx], sizeof(BeamT));
-    std::memcpy(&arrivals, &arrivals_buffer_[idx], sizeof(ArrivalsT));
-  }
-
-private:
-  size_t capacity_;
-  size_t start_index_;
-  size_t count_;
-
-  BeamT *beam_buffer_;
-  ArrivalsT *arrivals_buffer_;
-  Meta *meta_buffer_;
-};
-
-template <typename T>
-class UVFITSVisibilitiesWriter : public VisibilitiesWriter<T> {
-public:
-  using value_type = float;
-
-  UVFITSVisibilitiesWriter(const std::string &filename, size_t n_chan,
-                           size_t n_pol, size_t n_receivers, double ref_freq_hz,
-                           double chan_width_hz, double integration_time_sec,
-                           double ref_jd
-                           // const std::vector<double> &antenna_xyz
-                           )
-      : filename_(filename), nant_(n_receivers), nchan_(n_chan), npol_(n_pol),
-        nstokes_(4), // XX, YY, XY, YX
-        ref_freq_(ref_freq_hz), dfreq_(chan_width_hz),
-        int_time_sec_(integration_time_sec), ref_jd_(ref_jd), fptr_(nullptr),
-        row_counter_(0) {
-    //    if (antenna_xyz.size() != size_t(3 * nant))
-    //    throw std::runtime_error("antenna_xyz size must be 3*nant");
-
-    // antpos_ = antenna_xyz;
-
-    // ------- Build baseline list -------
-    for (int i = 0; i < nant_; i++)
-      for (int j = i; j < nant_; j++) {
-        bl1_.push_back(i);
-        bl2_.push_back(j);
-      }
-    nbl_ = bl1_.size();
-
-    // ------- Open FITS file -------
-    int status = 0;
-    if (fits_create_file(&fptr_, ("!" + filename_).c_str(), &status))
-      error(status, "fits_create_file");
-
-    if (fits_create_img(fptr_, FLOAT_IMG, 0, nullptr, &status))
-      error(status, "fits_create_img");
-
-    // ------- Primary HDU keywords -------
-    fits_update_key(fptr_, TSTRING, "ORIGIN", (void *)"SIM", nullptr, &status);
-    fits_update_key(fptr_, TDOUBLE, "CRVAL3", &ref_freq_, nullptr, &status);
-    fits_update_key(fptr_, TDOUBLE, "CDELT3", &dfreq_, nullptr, &status);
-    fits_update_key(fptr_, TINT, "NAXIS3", &nchan_, nullptr, &status);
-
-    int stokes_start = -5; // XX
-    int stokes_step = -1;
-    fits_update_key(fptr_, TSTRING, "CTYPE4", (void *)"STOKES", nullptr,
-                    &status);
-    fits_update_key(fptr_, TINT, "CRVAL4", &stokes_start, nullptr, &status);
-    fits_update_key(fptr_, TINT, "CDELT4", &stokes_step, nullptr, &status);
-    fits_update_key(fptr_, TINT, "NAXIS4", &nstokes_, nullptr, &status);
-
-    // --- UV_DATA table with new columns for start/end sequence ---
-    const int NCOLS = 9; // Increased from 7 to 9
-    char *ttype[NCOLS] = {
-        (char *)"UU",   (char *)"VV",        (char *)"WW",
-        (char *)"DATE", (char *)"TIME",      (char *)"BASELINE",
-        (char *)"DATA", (char *)"START_SEQ", (char *)"END_SEQ"};
-
-    int nvis = nstokes_ * nchan_;
-    tform_data_ = std::to_string(nvis) + "C";
-
-    char *tform[NCOLS] = {(char *)"1D",
-                          (char *)"1D",
-                          (char *)"1D",
-                          (char *)"1D",
-                          (char *)"1D",
-                          (char *)"1J",
-                          (char *)tform_data_.c_str(),
-                          (char *)"1J",  // New: START_SEQ
-                          (char *)"1J"}; // New: END_SEQ
-
-    char *tunit[NCOLS] = {
-        (char *)"SECONDS", (char *)"SECONDS", (char *)"SECONDS",
-        (char *)"DAY",     (char *)"DAY",     (char *)"",
-        (char *)"JY",      (char *)"",        (char *)""};
-
-    if (fits_create_tbl(fptr_, BINARY_TBL, 0, NCOLS, ttype, tform, tunit,
-                        "UV_DATA", &status))
-      error(status, "fits_create_tbl");
-  }
-
-  void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq,
-                                const int num_missing_packets,
-                                const int num_total_packets) override {
-    double center_seq = 0.5 * (start_seq + end_seq);
-    double time_jd = ref_jd_ + center_seq * (int_time_sec_ / 86400.0);
-
-    write_block_internal(data, time_jd, start_seq, end_seq);
-  }
-
-  ~UVFITSVisibilitiesWriter() { flush(); }
-  void flush() override {
-    int status = 0;
-    fits_flush_file(fptr_, &status);
-  }
-
-private:
-  void write_block_internal(const T *data, double time_jd, const int start_seq,
-                            const int end_seq) {
-    int status = 0;
-    fits_movnam_hdu(fptr_, BINARY_TBL, (char *)"UV_DATA", 0, &status);
-
-    std::vector<float> vis(2 * nstokes_ * nchan_);
-
-    double jd_int = floor(time_jd);
-    double jd_frac = time_jd - jd_int;
-
-    // mapping of stokes index → (p1,p2)
-    static const int s_p1[4] = {0, 1, 0, 1};
-    static const int s_p2[4] = {0, 1, 1, 0};
-
-    // per baseline
-    for (int b = 0; b < nbl_; b++) {
-      row_counter_++;
-      fits_insert_rows(fptr_, row_counter_ - 1, 1, &status);
-
-      int a1 = bl1_[b];
-      int a2 = bl2_[b];
-
-      // NOTE: antpos_ must be defined/filled for this to compile/work
-      // correctly double uu = antpos_[3 * a2] - antpos_[3 * a1]; double
-      // vv = antpos_[3 * a2 + 1] - antpos_[3 * a1 + 1]; double ww =
-      // antpos_[3 * a2
-      // + 2] - antpos_[3 * a1 + 2]; Using dummy values for demonstration
-      // since antpos_ is commented out
-      double uu = 0.0, vv = 0.0, ww = 0.0;
-
-      fits_write_col(fptr_, TDOUBLE, 1, row_counter_, 1, 1, &uu, &status);
-      fits_write_col(fptr_, TDOUBLE, 2, row_counter_, 1, 1, &vv, &status);
-      fits_write_col(fptr_, TDOUBLE, 3, row_counter_, 1, 1, &ww, &status);
-      fits_write_col(fptr_, TDOUBLE, 4, row_counter_, 1, 1, &jd_int, &status);
-      fits_write_col(fptr_, TDOUBLE, 5, row_counter_, 1, 1, &jd_frac, &status);
-
-      int blcode = 256 * (a1 + 1) + (a2 + 1);
-      fits_write_col(fptr_, TINT, 6, row_counter_, 1, 1, &blcode, &status);
-
-      // New columns (8 and 9)
-      fits_write_col(fptr_, TINT, 8, row_counter_, 1, 1, (void *)&start_seq,
-                     &status);
-      fits_write_col(fptr_, TINT, 9, row_counter_, 1, 1, (void *)&end_seq,
-                     &status);
-
-      // reorder visibilities into AIPS stokes order
-      for (int s = 0; s < nstokes_; s++) {
-        int p1 = s_p1[s];
-        int p2 = s_p2[s];
-
-        for (int c = 0; c < nchan_; c++) {
-
-          size_t out_idx = (s * nchan_ + c) * 2;
-          vis[out_idx + 0] = data[0][c][b][p1][p2][0];
-          vis[out_idx + 1] = data[0][c][b][p1][p2][1];
-        }
-      }
-
-      fits_write_col(fptr_, TFLOAT, 7, row_counter_, 1, vis.size(), vis.data(),
-                     &status);
-      if (status)
-        error(status, "fits_write_col(DATA)");
-    }
-  }
-
-  void error(int status, const char *msg) {
-    // fits_report_error(stderr, status); // Disabled for cleaner output
-    // here
-    throw std::runtime_error("CFITSIO: " + std::string(msg));
-  }
-
-  // state
-  std::string filename_;
-  fitsfile *fptr_;
-  std::string tform_data_;
-
-  int nant_, nchan_, npol_, nstokes_, nbl_;
-  double ref_freq_, dfreq_;
-  double int_time_sec_, ref_jd_;
-
-  std::vector<double> antpos_;
-  std::vector<int> bl1_, bl2_;
-  long row_counter_;
-};
-
-template <typename T>
-class MSVisibilitiesWriter : public VisibilitiesWriter<T> {
-public:
-  // T is expected to be float[CH][BL][POL][POL][CPLX]
-  // We derive dimensions from T at compile time/runtime
-  static constexpr size_t NUM_CHANNELS = std::extent<T, 0>::value;
-  static constexpr size_t NUM_BASELINES = std::extent<T, 1>::value;
-  // Assuming [POL][POL][CPLX] flattens to 4 complex numbers
-  static constexpr size_t NUM_CORRELATIONS = 4;
-
-  MSVisibilitiesWriter(
-      const std::string &filename,
-      const std::unordered_map<int, int> *antenna_map = nullptr)
-      : current_row_(0) {
-    // 1. Setup the MS Definition
-    casacore::TableDesc td = casacore::MS::requiredTableDesc();
-    casacore::MS::addColumnToDesc(
-        td, casacore::MS::DATA); // Add DATA column (Standard MS doesn't
-                                 // imply DATA/CORRECTED_DATA by default)
-
-    casacore::SetupNewTable newTab(filename, td, casacore::Table::New);
-
-    // 2. Create the MeasurementSet
-    ms_ = std::make_unique<casacore::MeasurementSet>(newTab);
-    ms_->createDefaultSubtables(casacore::Table::New);
-    // 3. Initialize Subtables (Antenna, Field, SpectralWindow, etc.)
-    setup_subtables();
-
-    // 4. Initialize Columns accessors
-    // We use MSMainColumns for convenience, or individual column
-    // accessors
-    msc_ = std::make_unique<casacore::MSColumns>(*ms_);
-
-    // Handle Antenna Map
-    if (antenna_map && !antenna_map->empty()) {
-      this->antenna_map_ = *antenna_map;
-    } else {
-      generate_identity_map();
-    }
-
-    // Pre-calculate baseline pairs (Ant1, Ant2) to save time in the loop
-    calculate_baseline_pairs();
-  }
-
-  ~MSVisibilitiesWriter() {
-    if (ms_) {
-      ms_->flush();
-    }
-  }
-
-  void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq,
-                                const int num_missing_packets,
-                                const int num_total_packets) override {
-    // Add rows for this block (1 timestamp * NR_BASELINES)
-    size_t start_row = current_row_;
-    ms_->addRow(NUM_BASELINES);
-
-    // Pointers/Refs for raw data
-    // T is float[CH][BL][POL][POL][2] (Real/Imag)
-    // We cast the raw pointer to complex<float> for easier iteration
-    // Shape becomes: [CH][BL][4] complex elements
-    const auto *complex_data =
-        reinterpret_cast<const std::complex<float> *>(data);
-
-    // Placeholder time: using sequence number as seconds for now.
-    // In reality, this should be MJD Seconds.
-    //    double timestamp = static_cast<double>(start_seq);
-    constexpr double UNIX_TO_MJD_SECONDS = 40587.0 * 86400.0;
-    double unix_timestamp =
-        std::chrono::duration<double>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    for (size_t bl = 0; bl < NUM_BASELINES; ++bl) {
-      size_t row_idx = start_row + bl;
-      auto &pair = baseline_pairs_[bl];
-
-      // 1. Metadata Columns
-      msc_->antenna1().put(row_idx, pair.first);
-      msc_->antenna2().put(row_idx, pair.second);
-      msc_->time().put(row_idx, unix_timestamp + UNIX_TO_MJD_SECONDS);
-      msc_->interval().put(row_idx,
-                           1.0); // 1 second integration placeholder
-      msc_->scanNumber().put(row_idx, 1);
-      msc_->fieldId().put(row_idx,
-                          0); // Pointing to index 0 in Field table
-      msc_->dataDescId().put(row_idx,
-                             0); // Pointing to index 0 in DataDesc table
-
-      // 2. UVW (Placeholder: Blank/Zero)
-      casacore::Vector<double> uvw(3, 0.0);
-      msc_->uvw().put(row_idx, uvw);
-
-      // 3. Data
-      // Casacore expects Matrix<Complex> of shape (NumPol, NumChan)
-      casacore::Matrix<casacore::Complex> vis_matrix(NUM_CORRELATIONS,
-                                                     NUM_CHANNELS);
-
-      for (size_t ch = 0; ch < NUM_CHANNELS; ++ch) {
-        // Input data layout calculation:
-        // Global Index = ch * (NUM_BASELINES * 4) + bl * 4 + pol
-        size_t base_idx =
-            ch * (NUM_BASELINES * NUM_CORRELATIONS) + bl * NUM_CORRELATIONS;
-
-        for (size_t pol = 0; pol < NUM_CORRELATIONS; ++pol) {
-          std::complex<float> val = complex_data[base_idx + pol];
-          vis_matrix(pol, ch) = casacore::Complex(val.real(), val.imag());
-        }
-      }
-
-      msc_->data().put(row_idx, vis_matrix);
-
-      // Flags/Sigmas (Standard defaults)
-      msc_->flagRow().put(row_idx, false);
-      // Initialize weights to 1.0
-      casacore::Vector<float> weight(NUM_CORRELATIONS, 1.0f);
-      msc_->weight().put(row_idx, weight);
-      msc_->sigma().put(row_idx, weight);
-    }
-
-    current_row_ += NUM_BASELINES;
-  }
-
-  void flush() override {
-    if (ms_)
-      ms_->flush();
-  }
-
-private:
-  std::unique_ptr<casacore::MeasurementSet> ms_;
-  std::unique_ptr<casacore::MSColumns> msc_;
-  size_t current_row_;
-  std::unordered_map<int, int> antenna_map_;
-  std::vector<std::pair<int, int>> baseline_pairs_;
-
-  void calculate_baseline_pairs() {
-    size_t nr_antennas =
-        static_cast<size_t>((std::sqrt(1 + 8 * NUM_BASELINES) - 1) / 2);
-    baseline_pairs_.reserve(NUM_BASELINES);
-
-    // Same triangular logic as HDF5 writer
-    for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
-      for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
-        baseline_pairs_.emplace_back(antenna_map_[ant1], antenna_map_[ant2]);
-      }
-    }
-  }
-
-  void generate_identity_map() {
-    for (int i = 0; i < 256; i++) {
-      antenna_map_[i] = i;
-    }
-  }
-
-  void setup_subtables() {
-    // --- 1. POLARIZATION ---
-    // Setup 4 correlations (XX, XY, YX, YY)
-    {
-      casacore::MSPolarization &polTable = ms_->polarization();
-      polTable.addRow(1);
-      casacore::MSPolarizationColumns polCols(polTable);
-
-      casacore::Vector<int> corrType(4);
-      corrType[0] = 9;  // XX
-      corrType[1] = 10; // XY
-      corrType[2] = 11; // YX
-      corrType[3] = 12; // YY
-
-      casacore::Matrix<int> corrProduct(2, 4);
-      // Map receptor pairs to correlations (placeholder logic)
-      corrProduct = 0;
-
-      polCols.numCorr().put(0, 4);
-      polCols.corrType().put(0, corrType);
-      polCols.corrProduct().put(0, corrProduct);
-    }
-
-    // --- 2. SPECTRAL WINDOW ---
-    {
-      casacore::MSSpectralWindow &spwTable = ms_->spectralWindow();
-      spwTable.addRow(1);
-      casacore::MSSpWindowColumns spwCols(spwTable);
-
-      spwCols.numChan().put(0, NUM_CHANNELS);
-      spwCols.name().put(0, "Subband_0");
-
-      // Frequencies (Placeholder: 1GHz + 1MHz channels)
-      casacore::Vector<double> chanFreqs(NUM_CHANNELS);
-      casacore::Vector<double> chanWidths(NUM_CHANNELS);
-      double start_freq = 1.0e9;
-      double width = 1.0e6;
-
-      for (size_t i = 0; i < NUM_CHANNELS; ++i) {
-        chanFreqs[i] = start_freq + i * width;
-        chanWidths[i] = width;
-      }
-
-      spwCols.chanFreq().put(0, chanFreqs);
-      spwCols.chanWidth().put(0, chanWidths);
-      spwCols.resolution().put(0, chanWidths);
-      spwCols.refFrequency().put(0, start_freq);
-      spwCols.totalBandwidth().put(0, width * NUM_CHANNELS);
-    }
-
-    // --- 3. DATA DESCRIPTION ---
-    // Links Pol and SpW
-    {
-      casacore::MSDataDescription &ddTable = ms_->dataDescription();
-      ddTable.addRow(1);
-      casacore::MSDataDescColumns ddCols(ddTable);
-      ddCols.spectralWindowId().put(0, 0);
-      ddCols.polarizationId().put(0, 0);
-    }
-
-    // --- 4. ANTENNA ---
-    {
-      size_t nr_antennas =
-          static_cast<size_t>((std::sqrt(1 + 8 * NUM_BASELINES) - 1) / 2);
-      casacore::MSAntenna &antTable = ms_->antenna();
-      antTable.addRow(nr_antennas);
-      casacore::MSAntennaColumns antCols(antTable);
-
-      for (size_t i = 0; i < nr_antennas; ++i) {
-        antCols.name().put(i, "ANT" + std::to_string(antenna_map_[i]));
-        antCols.station().put(i, "STATION" + std::to_string(antenna_map_[i]));
-        antCols.mount().put(i, "ALT-AZ");
-        // Placeholder Position (ITRF)
-        casacore::Vector<double> pos(3, 0.0);
-        antCols.position().put(i, pos);
-      }
-    }
-
-    // --- 5. FIELD (Placeholder) ---
-    {
-      casacore::MSField &fieldTable = ms_->field();
-      fieldTable.addRow(1);
-      casacore::MSFieldColumns fieldCols(fieldTable);
-
-      fieldCols.name().put(0, "PLACEHOLDER_SOURCE");
-      fieldCols.code().put(0, "NONE");
-
-      // Direction (RA/DEC) - Zero for now
-      casacore::Matrix<double> dir(2, 1, 0.0);
-      fieldCols.delayDir().put(0, dir);
-      fieldCols.phaseDir().put(0, dir);
-      fieldCols.referenceDir().put(0, dir);
-    }
-  }
+  multilog_t *log;
+  key_t data_key;
+  dada_hdu_t *hdu;
+  char *obs_header;
+  char *header_file;
 };
 
 template <typename TVal, typename TVec>
 class HDF5ProjectionEigenWriter : public EigenWriter<TVal, TVec> {
 public:
-  explicit HDF5ProjectionEigenWriter(HighFive::File &file) : file_(file) {
+  explicit HDF5ProjectionEigenWriter(HighFive::File &file,
+                                     const int num_blocks = 100)
+      : EigenWriter<TVal, TVec>(num_blocks), file_(file) {
     using namespace HighFive;
 
     vec_dims_ = get_array_dims<TVec>();
@@ -2375,7 +1220,7 @@ public:
     // Sequence number dataset: [N_blocks, 2].
     DataSetCreateProps seq_props;
     seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
-    seq_dataset_ = file_.createDataSet<int>(
+    seq_dataset_ = file_.createDataSet<size_t>(
         "projection_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
         seq_props);
   }
@@ -2386,11 +1231,7 @@ public:
   // val_data — always nullptr for this pipeline, ignored.
   // vec_data — pointer to one TVec worth of eigenvector data.
   // -------------------------------------------------------------------------
-  void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
-                             const int start_seq, const int end_seq) override {
-    LOG_INFO("HDF5ProjectionEigenWriter: writing block {} -> {}", start_seq,
-             end_seq);
-
+  void process_block(const EigenBlock<TVal, TVec> &block) override {
     // ---- eigenvalues -------------------------------------------------------
     {
       const auto current_size = val_dataset_.getDimensions()[0];
@@ -2408,7 +1249,7 @@ public:
       // element type (float), which is exactly what interleaved complex<float>
       // gives us.
       val_dataset_.select(offset, count)
-          .write_raw(reinterpret_cast<const float *>(val_data));
+          .write_raw(&block.eigenvalues[0]);
     }
     // ---- eigenvectors -------------------------------------------------------
     const auto current_size = vec_dataset_.getDimensions()[0];
@@ -2426,12 +1267,12 @@ public:
     // element type (float), which is exactly what interleaved complex<float>
     // gives us.
     vec_dataset_.select(offset, count)
-        .write_raw(reinterpret_cast<const float *>(vec_data));
+        .write_raw(&block.eigenvectors[0]);
 
     // ---- sequence numbers ---------------------------------------------------
     const auto seq_size = seq_dataset_.getDimensions()[0];
     seq_dataset_.resize({seq_size + 1, 2});
-    const std::vector<int> seq_nums = {start_seq, end_seq};
+    const std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
     seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
   }
 
@@ -2446,599 +1287,13 @@ private:
   std::vector<size_t> val_dims_;
 };
 
-// ---------------------------------------------------------------------------
-// HDF5UVXWriter
-//
-// Implements VisibilitiesWriter<T> and writes cross-correlation data to the
-// UVX (AA_UV) HDF5 format.
-//
-// Template parameter T is the same flat C array type used by
-// HDF5VisibilitiesWriter, e.g.:
-//   float[NUM_CHANNELS][NUM_BASELINES][NUM_POL][NUM_POL][2]   (complex as pair)
-//
-// Dimension extraction (compile-time):
-//   extent<T,0> → channels (frequency)
-//   extent<T,1> → baselines
-//   extent<T,2> → NUM_POL  (polarisation products = NUM_POL * NUM_POL)
-//   extent<T,3> → NUM_POL
-//   extent<T,4> → 2 (real/imag)
-//
-// Data written to uvx/visibilities/data as [time, frequency, baseline, pol]
-// complex floats interleaved (real, imag).
-//
-// Timestamps are derived from the system clock at the moment
-// write_visibilities_block() is called — no caller-supplied time needed.
-// LST is stored as NaN because it cannot be computed without sidereal
-// reduction; fill it in post-hoc if required.
-//
-// Sequence and packet-loss metadata from the VisibilitiesWriter interface
-// are stored under uvx/visibilities/attrs as chunked datasets.
-//
-// Usage:
-//   HDF5UVXWriter<DataType> writer(
-//       file,
-//       {freq_hz_ch0, freq_hz_ch1, ...},   // per-channel centre frequencies
-//       antenna_enu,                        // [N_ANT][3] ENU metres
-//       antenna_ecef,                       // [N_ANT][3] ECEF metres (origin
-//       subtracted) array_origin_geocentric,            // [3] ECEF of array
-//       centre array_origin_geodetic,              // [3] lon(deg), lat(deg),
-//       height(m) antenna_ids,                        // string name per
-//       antenna ra_j2000,  dec_j2000,              // phase centre (degrees)
-//       antenna_map                         // optional physical→logical index
-//       map
-//   );
-//   writer.write_visibilities_block(data_ptr, start_seq, end_seq,
-//                                   num_missing_packets, num_total_packets);
-// ---------------------------------------------------------------------------
-
-template <typename T> class HDF5UVXWriter : public VisibilitiesWriter<T> {
-public:
-  // ------------------------------------------------------------------
-  // Types
-  // ------------------------------------------------------------------
-  using ElementType = typename std::remove_all_extents<T>::type;
-
-  static constexpr size_t NUM_CHANNELS = std::extent<T, 0>::value;
-  static constexpr size_t NUM_BASELINES = std::extent<T, 1>::value;
-  static constexpr size_t NUM_POL = std::extent<T, 2>::value; // e.g. 2
-  static constexpr size_t NUM_POL_PRODS = NUM_POL * NUM_POL;  // e.g. 4
-  static constexpr size_t CPLX = std::extent<T, 4>::value;    // must be 2
-
-  static_assert(CPLX == 2, "T must have innermost extent == 2 (real/imag)");
-
-  // ------------------------------------------------------------------
-  // Constructor
-  // ------------------------------------------------------------------
-  HDF5UVXWriter(HighFive::File &file,
-                // Frequency axis
-                const std::vector<double> &channel_frequencies_hz,
-                // Antenna geometry  (size: n_antennas × 3)
-                const std::vector<std::array<double, 3>> &antenna_enu,
-                const std::vector<std::array<double, 3>> &antenna_ecef,
-                // Array origin
-                const std::array<double, 3> &array_origin_geocentric,
-                const std::array<double, 3> &array_origin_geodetic,
-                // Antenna names
-                const std::vector<std::string> &antenna_identifiers,
-                // Phase centre (J2000, degrees). Pass NaN for either to
-                // auto-compute the zenith pointing (RA = LST, Dec = latitude)
-                // at the first integration.
-                double ra_j2000 = std::numeric_limits<double>::quiet_NaN(),
-                double dec_j2000 = std::numeric_limits<double>::quiet_NaN(),
-                // Optional physical→logical antenna index remap
-                const std::unordered_map<int, int> *antenna_map = nullptr)
-      : file_(file), longitude_deg_(array_origin_geodetic[0]),
-        latitude_deg_(array_origin_geodetic[1]), ra_j2000_(ra_j2000),
-        dec_j2000_(dec_j2000) {
-    using namespace HighFive;
-
-    // --- Validate inputs ------------------------------------------------
-    const size_t n_ant = antenna_enu.size();
-    if (antenna_ecef.size() != n_ant || antenna_identifiers.size() != n_ant)
-      throw std::invalid_argument(
-          "Antenna arrays must all have the same length");
-
-    if (channel_frequencies_hz.size() != NUM_CHANNELS)
-      throw std::invalid_argument(
-          "channel_frequencies_hz length must equal T's channel extent");
-
-    // --- Build antenna map ----------------------------------------------
-    if (antenna_map && !antenna_map->empty())
-      antenna_map_ = *antenna_map;
-    else
-      for (int i = 0; i < 256; ++i)
-        antenna_map_[i] = i;
-
-    // --- Root group / class attributes ----------------------------------
-    // auto uvx = file_.createGroup("uvx");
-    // uvx.createAttribute<std::string>("CLASS", std::string("AA_UV"));
-    // uvx.createAttribute<std::string>("VERSION", std::string("1.0.0"));
-
-    // --- uvx/context (placeholder) --------------------------------------
-    file_.createGroup("context");
-
-    // ====================================================================
-    // uvx/antennas
-    // ====================================================================
-    auto grp_ant = file_.createGroup("antennas");
-    auto grp_ant_attrs = grp_ant.createGroup("attrs");
-    auto grp_ant_coord = grp_ant.createGroup("coords");
-
-    // -- coords/antenna (0-based index) --
-    {
-      std::vector<int> ant_idx(n_ant);
-      std::iota(ant_idx.begin(), ant_idx.end(), 0);
-      grp_ant_coord.createDataSet<int>("antenna", DataSpace::From(ant_idx))
-          .write(ant_idx);
-    }
-
-    // -- coords/spatial --
-    {
-      const std::vector<std::string> spatial_labels = {"X", "Y", "Z"};
-      grp_ant_coord
-          .createDataSet<std::string>("spatial",
-                                      DataSpace::From(spatial_labels))
-          .write(spatial_labels);
-    }
-
-    // -- attrs/array_origin_geocentric --
-    {
-      std::vector<double> origin(array_origin_geocentric.begin(),
-                                 array_origin_geocentric.end());
-      grp_ant_attrs
-          .createDataSet<double>("array_origin_geocentric",
-                                 DataSpace::From(origin))
-          .write(origin);
-    }
-
-    // -- attrs/array_origin_geodetic --
-    {
-      std::vector<double> geodetic(array_origin_geodetic.begin(),
-                                   array_origin_geodetic.end());
-      auto ds = grp_ant_attrs.createDataSet<double>("array_origin_geodetic",
-                                                    DataSpace::From(geodetic));
-
-      ds.createAttribute<std::string>("units", std::string("lat,long,height"));
-      ds.write(geodetic);
-    }
-
-    // -- attrs/identifier --
-    {
-      grp_ant_attrs
-          .createDataSet<std::string>("identifier",
-                                      DataSpace::From(antenna_identifiers))
-          .write(antenna_identifiers);
-    }
-
-    // -- attrs/flags (all zero = no known issues) --
-    {
-      std::vector<int> flags(n_ant, 0);
-      grp_ant_attrs.createDataSet<int>("flags", DataSpace::From(flags))
-          .write(flags);
-    }
-
-    // -- ecef [antenna, spatial] --
-    {
-      std::vector<std::vector<double>> ecef_2d(n_ant, std::vector<double>(3));
-      for (size_t i = 0; i < n_ant; ++i)
-        for (int j = 0; j < 3; ++j)
-          ecef_2d[i][j] = antenna_ecef[i][j];
-
-      auto ds = grp_ant.createDataSet<double>("ecef", DataSpace({n_ant, 3}));
-      ds.write(ecef_2d);
-      ds.createAttribute<std::string>("units", std::string("m"));
-      ds.createAttribute<std::string>("dims", std::string("antenna, spatial"));
-    }
-
-    // -- enu [antenna, spatial] --
-    {
-      std::vector<std::vector<double>> enu_2d(n_ant, std::vector<double>(3));
-      for (size_t i = 0; i < n_ant; ++i)
-        for (int j = 0; j < 3; ++j)
-          enu_2d[i][j] = antenna_enu[i][j];
-
-      auto ds = grp_ant.createDataSet<double>("enu", DataSpace({n_ant, 3}));
-      ds.write(enu_2d);
-      ds.createAttribute<std::string>("units", std::string("m"));
-      ds.createAttribute<std::string>("dims", std::string("antenna, spatial"));
-    }
-
-    // ====================================================================
-    // uvx/visibilities
-    // ====================================================================
-    auto grp_vis = file_.createGroup("visibilities");
-    auto grp_vis_attrs = grp_vis.createGroup("attrs");
-    auto grp_vis_coord = grp_vis.createGroup("coords");
-
-    // -- coords/frequency [frequency] --
-    {
-      auto ds = grp_vis_coord.createDataSet<double>(
-          "frequency", DataSpace::From(channel_frequencies_hz));
-      ds.write(channel_frequencies_hz);
-      ds.createAttribute<std::string>("units", std::string("Hz"));
-    }
-
-    // -- coords/polarization [polarization] --
-    {
-      // Build polarisation labels: XX, XY, YX, YY (for 2-pol systems)
-      // Generalises to any NUM_POL value.
-      const std::vector<char> pol_chars = {'X', 'Y', 'R', 'L'};
-      std::vector<std::string> pol_labels;
-      pol_labels.reserve(NUM_POL_PRODS);
-      for (size_t i = 0; i < NUM_POL; ++i)
-        for (size_t j = 0; j < NUM_POL; ++j) {
-          std::string lbl;
-          lbl += (i < pol_chars.size()) ? pol_chars[i] : ('A' + i);
-          lbl += (j < pol_chars.size()) ? pol_chars[j] : ('A' + j);
-          pol_labels.push_back(lbl);
-        }
-      grp_vis_coord
-          .createDataSet<std::string>("polarization",
-                                      DataSpace::From(pol_labels))
-          .write(pol_labels);
-    }
-
-    // -- coords/baseline/ant1 and ant2 --
-    write_baseline_coords(grp_vis_coord, n_ant);
-
-    // -- coords/time (chunked, unlimited on time axis) --
-    {
-      auto grp_time = grp_vis_coord.createGroup("time");
-
-      DataSetCreateProps props_1d;
-      props_1d.add(HighFive::Chunking(std::vector<hsize_t>{1}));
-
-      ds_time_mjd_ = grp_time.createDataSet<double>(
-          "mjd", DataSpace({0}, {DataSpace::UNLIMITED}), props_1d);
-      ds_time_mjd_.createAttribute<std::string>("format", std::string("mjd"));
-
-      ds_time_unix_ = grp_time.createDataSet<double>(
-          "unix", DataSpace({0}, {DataSpace::UNLIMITED}), props_1d);
-      ds_time_unix_.createAttribute<std::string>("format", std::string("unix"));
-      ds_time_unix_.createAttribute<std::string>(
-          "description",
-          std::string(
-              "Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)"));
-
-      ds_time_lst_ = grp_time.createDataSet<double>(
-          "lst", DataSpace({0}, {DataSpace::UNLIMITED}), props_1d);
-      ds_time_lst_.createAttribute<std::string>("units", std::string("hr"));
-    }
-
-    // -- visibilities/data [time, frequency, baseline, polarization] --
-    // Stored as pairs of float (real, imag) → innermost dim size = 2
-    {
-      std::vector<hsize_t> chunk = {1, NUM_CHANNELS, NUM_BASELINES,
-                                    NUM_POL_PRODS, 2};
-      DataSetCreateProps vis_props;
-      vis_props.add(HighFive::Chunking(chunk));
-
-      ds_vis_ = grp_vis.createDataSet<float>(
-          "data",
-          DataSpace({0, NUM_CHANNELS, NUM_BASELINES, NUM_POL_PRODS, 2},
-                    {DataSpace::UNLIMITED, NUM_CHANNELS, NUM_BASELINES,
-                     NUM_POL_PRODS, 2}),
-          vis_props);
-      // Dimension labels as attribute (optional but useful)
-      ds_vis_.createAttribute<std::string>(
-          "DIMENSION_LABELS",
-          std::string("time,frequency,baseline,polarization,complex"));
-    }
-
-    // ====================================================================
-    // uvx/phase_center — written now if explicit values were supplied,
-    // otherwise deferred to the first write_visibilities_block() call
-    // (where the actual LST and zenith pointing are known).
-    // ====================================================================
-    grp_pc_ = file_.createGroup("phase_center");
-    grp_pc_.createAttribute<std::string>("frame", std::string("J2000"));
-    grp_pc_.createAttribute<std::string>("units", std::string("degrees"));
-    if (!std::isnan(ra_j2000_) && !std::isnan(dec_j2000_)) {
-      write_phase_center(ra_j2000_, dec_j2000_);
-      phase_center_written_ = true;
-    }
-
-    // -- visibilities/attrs: per-integration sequence and packet metadata --
-    // Mirrors the old vis_seq_nums / vis_missing_nums datasets but stored
-    // under the correct UVX group.
-    {
-      DataSetCreateProps props_seq;
-      props_seq.add(HighFive::Chunking(std::vector<hsize_t>{1, 2}));
-      ds_seq_ = grp_vis_attrs.createDataSet<int>(
-          "sequence_numbers", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
-          props_seq);
-      ds_seq_.createAttribute<std::string>(
-          "description", std::string("start_seq and end_seq per integration"));
-
-      DataSetCreateProps props_miss;
-      props_miss.add(HighFive::Chunking(std::vector<hsize_t>{1, 3}));
-      ds_missing_ = grp_vis_attrs.createDataSet<float>(
-          "missing_packets", DataSpace({0, 3}, {DataSpace::UNLIMITED, 3}),
-          props_miss);
-      ds_missing_.createAttribute<std::string>(
-          "description",
-          std::string(
-              "num_missing, num_total, percent_missing per integration"));
-    }
-
-    // ====================================================================
-    // uvx/provenance
-    // ====================================================================
-    {
-      auto grp_prov = file_.createGroup("provenance");
-      grp_prov.createGroup("ska_ost_low_uv_config");
-      grp_prov.createGroup("input_files");
-      grp_prov.createGroup("input_metadata");
-      grp_prov.createGroup("station_config");
-
-      // Record creation timestamp as a Unix epoch double
-      double creation_time = static_cast<double>(
-          std::chrono::duration_cast<std::chrono::seconds>(
-              std::chrono::system_clock::now().time_since_epoch())
-              .count());
-      grp_prov.createAttribute<double>("creation_unix_time", creation_time);
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // write_visibilities_block  (implements VisibilitiesWriter<T>)
-  //
-  // Appends one integration to the file. Timestamps are taken from the
-  // system clock at the time of the call. LST is stored as NaN because
-  // it requires sidereal reduction beyond the scope of this writer.
-  // ------------------------------------------------------------------
-  void write_visibilities_block(const T *data, const int start_seq,
-                                const int end_seq,
-                                const int num_missing_packets,
-                                const int num_total_packets) override {
-    const size_t t = current_time_index_;
-
-    // ---- Capture timestamps now ----------------------------------------
-    const double unix_now =
-        static_cast<double>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count()) /
-        1000.0;
-
-    // MJD = Unix seconds / 86400 + 40587 (offset from 1858-11-17 to 1970-01-01)
-    const double mjd_now = unix_now / 86400.0 + 40587.0;
-
-    // LST from system clock + array longitude
-    const double lst_now = compute_lst_hours(unix_now);
-
-    // ---- Deferred phase center (zenith pointing) -----------------------
-    // Written once at the first integration when no explicit RA/Dec was given.
-    if (!phase_center_written_) {
-      const double ra = lst_now * 15.0; // LST hours → degrees
-      const double dec = latitude_deg_;
-      write_phase_center(ra, dec);
-      phase_center_written_ = true;
-    }
-
-    // ---- Time coordinates ----------------------------------------------
-    append_scalar(ds_time_mjd_, t, mjd_now);
-    append_scalar(ds_time_unix_, t, unix_now);
-    append_scalar(ds_time_lst_, t, lst_now);
-
-    // ---- Visibility data -----------------------------------------------
-    ds_vis_.resize({t + 1, NUM_CHANNELS, NUM_BASELINES, NUM_POL_PRODS, 2});
-    ds_vis_
-        .select({t, 0, 0, 0, 0},
-                {1, NUM_CHANNELS, NUM_BASELINES, NUM_POL_PRODS, 2})
-        .write_raw(reinterpret_cast<const float *>(data));
-
-    // ---- Sequence numbers ----------------------------------------------
-    {
-      const auto sz = ds_seq_.getDimensions()[0];
-      ds_seq_.resize({sz + 1, 2});
-      std::array<int, 2> seq = {start_seq, end_seq};
-      ds_seq_.select({sz, 0}, {1, 2}).write_raw(seq.data());
-    }
-
-    // ---- Packet-loss metadata ------------------------------------------
-    {
-      const auto sz = ds_missing_.getDimensions()[0];
-      ds_missing_.resize({sz + 1, 3});
-      const float miss = static_cast<float>(num_missing_packets);
-      const float total = static_cast<float>(num_total_packets);
-      std::array<float, 3> miss_row = {
-          miss, total, (total > 0.f ? 100.f * miss / total : 0.f)};
-      ds_missing_.select({sz, 0}, {1, 3}).write_raw(miss_row.data());
-    }
-
-    ++current_time_index_;
-  }
-
-  void flush() override { file_.flush(); }
-
-  size_t num_time_steps() const { return current_time_index_; }
-
-private:
-  // ------------------------------------------------------------------
-  // compute_lst_hours
-  //
-  // Local Apparent Sidereal Time in hours [0, 24) from a Unix timestamp
-  // and the stored array longitude.
-  //
-  // Uses the IAU 1982 GMST formula (good to ~0.1s over several decades):
-  //   JD    = unix / 86400 + 2440587.5
-  //   D     = JD - 2451545.0           (days from J2000.0)
-  //   GMST  = 280.46061837
-  //           + 360.98564736629 * D    (Earth's rotation)
-  //           + 0.000387933 * T²       (T = D/36525, secular drift)
-  //           - T³/38710000            (higher-order)
-  //   LST   = (GMST + longitude_deg) mod 360, then / 15 → hours
-  // ------------------------------------------------------------------
-  double compute_lst_hours(double unix_time) const {
-    const double jd = unix_time / 86400.0 + 2440587.5;
-    const double D = jd - 2451545.0;
-    const double Time = D / 36525.0;
-
-    double gmst_deg = 280.46061837 + 360.98564736629 * D +
-                      0.000387933 * Time * Time -
-                      (Time * Time * Time) / 38710000.0;
-
-    // Normalise to [0, 360)
-    double lst_deg = std::fmod(gmst_deg + longitude_deg_, 360.0);
-    if (lst_deg < 0.0)
-      lst_deg += 360.0;
-
-    return lst_deg / 15.0; // degrees → hours
-  }
-
-  // ------------------------------------------------------------------
-  // write_phase_center — creates ra/dec scalar datasets in grp_pc_
-  // ------------------------------------------------------------------
-  void write_phase_center(double ra_deg, double dec_deg) {
-    grp_pc_.createDataSet<double>("ra", HighFive::DataSpace::From(ra_deg))
-        .write(ra_deg);
-    grp_pc_.createDataSet<double>("dec", HighFive::DataSpace::From(dec_deg))
-        .write(dec_deg);
-  }
-
-  // ------------------------------------------------------------------
-  // write_baseline_coords — populate ant1/ant2 index arrays
-  // ------------------------------------------------------------------
-  void write_baseline_coords(HighFive::Group &grp_coord, size_t n_ant) {
-    // Derive number of antennas from NUM_BASELINES (triangular number)
-    // B = A*(A+1)/2  →  A = (-1 + sqrt(1 + 8B)) / 2
-    const size_t n_ant_from_bl =
-        static_cast<size_t>((std::sqrt(1.0 + 8.0 * NUM_BASELINES) - 1.0) / 2.0);
-
-    if (n_ant_from_bl != n_ant) {
-      // If there's a mismatch, fall back to using the triangular derivation.
-      // Log a warning here if your logging facility is available.
-    }
-
-    std::vector<int> ant1_ids, ant2_ids;
-    ant1_ids.reserve(NUM_BASELINES);
-    ant2_ids.reserve(NUM_BASELINES);
-
-    // Lower-triangular order: (0,0),(0,1),(1,1),(0,2),(1,2),(2,2),...
-    for (size_t a2 = 0; a2 < n_ant_from_bl; ++a2) {
-      for (size_t a1 = 0; a1 <= a2; ++a1) {
-        ant1_ids.push_back(static_cast<int>(antenna_map_[a1]));
-        ant2_ids.push_back(static_cast<int>(antenna_map_[a2]));
-      }
-    }
-
-    auto grp_bl = grp_coord.createGroup("baseline");
-
-    auto ds =
-        grp_bl.createDataSet<int>("ant1", HighFive::DataSpace::From(ant1_ids));
-    ds.createAttribute<std::string>("dims", "antenna");
-    ds.write(ant1_ids);
-    ds = grp_bl.createDataSet<int>("ant2", HighFive::DataSpace::From(ant2_ids));
-    ds.createAttribute<std::string>("dims", "antenna");
-    ds.write(ant2_ids);
-  }
-
-  // ------------------------------------------------------------------
-  // append_scalar — grows a 1-D unlimited dataset by one element
-  // ------------------------------------------------------------------
-  static void append_scalar(HighFive::DataSet &ds, size_t idx, double value) {
-    ds.resize({idx + 1});
-    ds.select({idx}, {1}).write_raw(&value);
-  }
-
-  // ------------------------------------------------------------------
-  // Members
-  // ------------------------------------------------------------------
-  HighFive::File &file_;
-  HighFive::Group grp_pc_;
-  HighFive::DataSet ds_vis_;
-  HighFive::DataSet ds_time_mjd_;
-  HighFive::DataSet ds_time_unix_;
-  HighFive::DataSet ds_time_lst_;
-  HighFive::DataSet ds_seq_;
-  HighFive::DataSet ds_missing_;
-  std::unordered_map<int, int> antenna_map_;
-  double longitude_deg_ = 0.0;
-  double latitude_deg_ = 0.0;
-  double ra_j2000_ = std::numeric_limits<double>::quiet_NaN();
-  double dec_j2000_ = std::numeric_limits<double>::quiet_NaN();
-  bool phase_center_written_ = false;
-  size_t current_time_index_ = 0;
-};
-
-template <typename T> class RedisPulsarFoldWriter : public PulsarFoldWriter<T> {
-public:
-  RedisPulsarFoldWriter(int num_bins, std::string prefix = "")
-      : redis("tcp://127.0.0.1:6379"), NR_BINS(num_bins), prefix(prefix) {
-
-    precomputed_keys.resize(NR_BINS);
-
-    for (int bin = 0; bin < NR_BINS; ++bin) {
-      precomputed_keys[bin] = prefix + "ts:fold:bin:" + std::to_string(bin);
-    }
-
-    std::cout << "RedisPulsarFoldWriter instantiated:"
-              << " NR_BINS=" << NR_BINS
-              << " total_keys=" << precomputed_keys.size() << std::endl;
-
-    create_all_timeseries_keys();
-  }
-
-  void write_pulsar_fold_block(const T *pulsar_fold_data, const int start_seq,
-                               const int end_seq) override {
-    long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::system_clock::now().time_since_epoch())
-                       .count();
-    std::string ts_str = std::to_string(ts);
-
-    std::vector<std::string> madd_args;
-    madd_args.reserve(1 + NR_BINS * 3);
-    madd_args.push_back("TS.MADD");
-
-    // Input layout: [NR_CHANNELS][NR_FINE_CHANNELS][NR_POLARIZATIONS][NR_BINS]
-    // flat index: ((ch * NR_FINE_CHANNELS + f) * NR_POLARIZATIONS + pol) *
-    // NR_BINS + bin
-    const float *data = reinterpret_cast<const float *>(pulsar_fold_data);
-    for (int bin = 0; bin < NR_BINS; ++bin) {
-      int flat = bin;
-      madd_args.push_back(precomputed_keys[bin]);
-      madd_args.push_back(ts_str);
-      madd_args.push_back(std::to_string(data[flat]));
-    }
-
-    if (madd_args.size() > 1)
-      redis.command(madd_args.begin(), madd_args.end());
-  }
-
-  void flush() override {}
-
-private:
-  void create_all_timeseries_keys() {
-    std::cout << "Pre-creating pulsar fold TimeSeries keys..." << std::endl;
-
-    for (int bin = 0; bin < NR_BINS; ++bin) {
-      const auto &key = precomputed_keys[bin];
-      std::vector<std::string> args = {
-          "TS.CREATE",         key,         "LABELS",    "phase_bin",
-          std::to_string(bin), "component", "fold_power"};
-      try {
-        redis.command(args.begin(), args.end());
-      } catch (const std::exception &e) {
-        LOG_ERROR("Error creating key {}: {}", key, e.what());
-      }
-    }
-
-    std::cout << "Pulsar fold TimeSeries key creation complete." << std::endl;
-  }
-
-  sw::redis::Redis redis;
-  int NR_BINS;
-  std::string prefix;
-  std::vector<std::string> precomputed_keys;
-};
-
 template <typename T> class HDF5BeamFFTWriter : public FFTWriter<T> {
 public:
   HDF5BeamFFTWriter(HighFive::File &file, const int min_channel,
                     const int max_channel,
-                    const std::unordered_map<int, int> *antenna_map = nullptr)
-      : file_(file),
+                    const std::unordered_map<int, int> *antenna_map = nullptr,
+                    const int num_blocks = 100)
+      : FFTWriter<T>(num_blocks), file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
     using namespace HighFive;
@@ -3079,25 +1334,12 @@ public:
     // Sequence number dataset: [N, 2] (start_seq, end_seq)
     DataSetCreateProps fft_seq_props;
     fft_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
-    fft_seq_dataset_ = file_.createDataSet<int>(
+    fft_seq_dataset_ = file_.createDataSet<size_t>(
         "beam_fft_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
         fft_seq_props);
-
-    // Channel/polarisation index dataset: [N, 2] (channel_idx, pol_idx)
-    DataSetCreateProps fft_idx_props;
-    fft_idx_props.add(Chunking(std::vector<hsize_t>{1, 2}));
-    fft_idx_dataset_ = file_.createDataSet<int>(
-        "beam_fft_idx", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
-        fft_idx_props);
   }
 
-  void write_fft_block(const T *fft_data, const int start_seq,
-                       const int end_seq, const int channel_idx,
-                       const int pol_idx) override {
-    LOG_INFO("writing beam fft block {} to {} (ch={}, pol={})", start_seq,
-             end_seq, channel_idx, pol_idx);
-
-    // --- FFT data ---
+  void process_block(const FFTBlock<T> &block) override {
     auto current_size = fft_dataset_.getDimensions()[0];
 
     std::vector<size_t> new_dims = {current_size + 1};
@@ -3109,19 +1351,13 @@ public:
     std::vector<size_t> fft_count = {1};
     fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
 
-    fft_dataset_.select(fft_offset, fft_count).write_raw(fft_data);
+    fft_dataset_.select(fft_offset, fft_count)
+        .write_raw(&block.fft_output[0]);
 
-    // --- Sequence numbers ---
     auto seq_size = fft_seq_dataset_.getDimensions()[0];
     fft_seq_dataset_.resize({seq_size + 1, 2});
-    std::vector<int> seq_nums = {start_seq, end_seq};
+    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
     fft_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
-
-    // --- Channel / polarisation indices ---
-    auto idx_size = fft_idx_dataset_.getDimensions()[0];
-    fft_idx_dataset_.resize({idx_size + 1, 2});
-    std::vector<int> idx_nums = {channel_idx, pol_idx};
-    fft_idx_dataset_.select({idx_size, 0}, {1, 2}).write_raw(idx_nums.data());
   }
 
   void flush() override { file_.flush(); }
@@ -3135,43 +1371,19 @@ private:
   std::vector<size_t> fft_dims_;
 };
 
-// ---------------------------------------------------------------------------
-// HDF5EigenWriter
-//
-// Writes eigenvalue and eigenvector data to HDF5, following the same
-// template conventions as HDF5ProjectionEigenWriter but for the full
-// general case (all channels, polarisations, and eigenvector components).
-//
-// Template parameters:
-//   TVal — C array type for eigenvalues,  e.g. float[CH][POL][POL][N]
-//   TVec — C array type for eigenvectors, e.g.
-//   std::complex<float>[CH][POL][POL][N][N]
-//
-// Datasets created:
-//   eigenvalues        [time, CH, POL_R, POL_C, N]       float32
-//   eigenvectors       [time, CH, POL_R, POL_C, N, N, 2] float32  (re/im)
-//   eigendata_seq_nums [time, 2]                          int32    (start,end)
-// ---------------------------------------------------------------------------
-
 template <typename TVal, typename TVec>
 class HDF5EigenWriter : public EigenWriter<TVal, TVec> {
 public:
-  explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 4)
-      : file_(file) {
+  explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 4,
+                           const int num_blocks = 100)
+      : EigenWriter<TVal, TVec>(num_blocks), file_(file) {
     using namespace HighFive;
 
-    // ---- Derive inner dimensions from TVal ---------------------------
-    // Expected layout: float[CH][POL_R][POL_C][N]
     val_dims_ = get_array_dims<TVal>();
 
-    // ---- Derive inner dimensions from TVec ---------------------------
-    // Expected layout: complex<float>[CH][POL_R][POL_C][N][N]
-    // We append a trailing '2' so HDF5 stores interleaved float pairs.
     vec_dims_ = get_array_dims<TVec>();
     vec_dims_.push_back(2); // real / imag
 
-    // ---- Eigenvalue dataset ------------------------------------------
-    // Shape: [0, *val_dims_], unlimited on axis-0 (time)
     {
       std::vector<size_t> dims = {0};
       std::vector<size_t> max_dims = {DataSpace::UNLIMITED};
@@ -3193,8 +1405,6 @@ public:
           std::string("time,channel,polarization,eigenvalue_index"));
     }
 
-    // ---- Eigenvector dataset -----------------------------------------
-    // Shape: [0, *vec_dims_], unlimited on axis-0 (time)
     {
       std::vector<size_t> dims = {0};
       std::vector<size_t> max_dims = {DataSpace::UNLIMITED};
@@ -3217,13 +1427,11 @@ public:
                       "eigenvalue_index,component_index,complex"));
     }
 
-    // ---- Sequence number dataset -------------------------------------
-    // Shape: [0, 2], unlimited on axis-0 (time)
     {
       DataSetCreateProps props;
       props.add(Chunking(std::vector<hsize_t>{1, 2}));
 
-      seq_dataset_ = file_.createDataSet<int>(
+      seq_dataset_ = file_.createDataSet<size_t>(
           "eigendata_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
           props);
 
@@ -3238,21 +1446,10 @@ public:
                                static_cast<int>(val_dims_.back()));
   }
 
-  // -----------------------------------------------------------------------
-  // write_eigendata_block
-  //
-  // val_data — pointer to one TVal block of eigenvalues.
-  // vec_data — pointer to one TVec block of eigenvectors (complex<float>).
-  //            Pass nullptr to skip writing eigenvectors for that block.
-  // -----------------------------------------------------------------------
-  void write_eigendata_block(const TVal *val_data, const TVec *vec_data,
-                             const int start_seq, const int end_seq) override {
-    LOG_INFO("HDF5EigenWriter: writing block {} -> {}", start_seq, end_seq);
+  void process_block(const EigenBlock<TVal, TVec> &block) override {
+    const auto t = val_dataset_.getDimensions()[0];
 
-    // ---- Eigenvalues -------------------------------------------------
-    if (val_data != nullptr) {
-      const auto t = val_dataset_.getDimensions()[0];
-
+    {
       std::vector<size_t> new_dims = {t + 1};
       new_dims.insert(new_dims.end(), val_dims_.begin(), val_dims_.end());
       val_dataset_.resize(new_dims);
@@ -3263,11 +1460,9 @@ public:
       count.insert(count.end(), val_dims_.begin(), val_dims_.end());
 
       val_dataset_.select(offset, count)
-          .write_raw(reinterpret_cast<const float *>(val_data));
+          .write_raw(&block.eigenvalues[0]);
     }
-
-    // ---- Eigenvectors ------------------------------------------------
-    if (vec_data != nullptr) {
+    {
       const auto t = vec_dataset_.getDimensions()[0];
 
       std::vector<size_t> new_dims = {t + 1};
@@ -3282,14 +1477,13 @@ public:
       // complex<float> is two consecutive floats in memory, so
       // write_raw into a float dataset is correct here.
       vec_dataset_.select(offset, count)
-          .write_raw(reinterpret_cast<const float *>(vec_data));
+          .write_raw(&block.eigenvectors[0]);
     }
-
     // ---- Sequence numbers --------------------------------------------
     {
       const auto sz = seq_dataset_.getDimensions()[0];
       seq_dataset_.resize({sz + 1, 2});
-      const std::array<int, 2> seq = {start_seq, end_seq};
+      const std::array<size_t, 2> seq = {block.start_seq_num, block.end_seq_num};
       seq_dataset_.select({sz, 0}, {1, 2}).write_raw(seq.data());
     }
   }

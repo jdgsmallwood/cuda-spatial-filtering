@@ -42,7 +42,7 @@ using json = nlohmann::json;
 inline std::atomic<bool> running{true};
 
 inline void signal_handler(int signal) {
-  LOG_INFO("Caught CTRL+C, shutting down...");
+  INFO_LOG("Caught CTRL+C, shutting down...");
   running = false;
 }
 

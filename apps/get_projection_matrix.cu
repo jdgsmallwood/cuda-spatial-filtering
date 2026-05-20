@@ -55,8 +55,8 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Creating Output Handler\n";
   auto output = std::make_shared<BufferedOutput<Config>>(
-      nullptr, nullptr, std::move(projection_writer), nullptr, nullptr, 100,
-      100, 100, 100, 100);
+      nullptr, nullptr, std::move(projection_writer), nullptr
+      );
 
   std::cout << "Initializing pipeline...\n";
   LambdaProjectionPipeline<Config, 3, 4> pipeline(num_buffers);
@@ -76,7 +76,7 @@ int main(int argc, char *argv[]) {
           nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
     }
   }
-  LOG_INFO("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
+  INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   std::cout << "Starting threads...\n";
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < capture.size(); ++i) {
@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Cleanup
-  LOG_INFO("\nShutting down...\n");
+  INFO_LOG("\nShutting down...\n");
   std::cout << "Shutting down...\n";
   state.running.store(0, std::memory_order_release);
   state.shutdown();
