@@ -149,6 +149,10 @@ public:
   }
 
   bool has_data_to_write() const {
+    DEBUG_LOG("{} writer read_idx_ is {} and write_idx_ is {} and read_block "
+              "is ready?...",
+              std::string(writer_name()), read_idx_, write_idx_,
+              blocks_[read_idx_].is_ready());
     return read_idx_ != write_idx_ && blocks_[read_idx_].is_ready();
   }
 
