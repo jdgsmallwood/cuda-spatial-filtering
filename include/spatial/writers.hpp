@@ -124,6 +124,7 @@ public:
 
   virtual void process_block(const T &block) = 0;
   virtual void flush() = 0;
+  virtual const char *writer_name() const = 0;
 
   virtual size_t register_block() {
     size_t block_num = write_idx_;
@@ -153,7 +154,8 @@ public:
 
 protected:
   virtual void handle_buffer_full() {
-    throw std::runtime_error("Ring buffer is full");
+    throw std::runtime_error(std::string(writer_name()) +
+                             " ring buffer is full");
   }
 
   size_t buffer_size_;
@@ -168,6 +170,7 @@ public:
   using BlockType = BeamBlock<BeamT, ArrivalsT>;
   BeamWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~BeamWriter() = default;
+  virtual const char *writer_name() const override { return "BeamWriter"; };
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num) {
     size_t block_idx = Writer<BlockType>::register_block();
@@ -201,6 +204,7 @@ public:
   VisibilitiesWriter(const int num_blocks = 100)
       : Writer<BlockType>(num_blocks) {};
   virtual ~VisibilitiesWriter() = default;
+  virtual const char *writer_name() const override { return "VisWriter"; };
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num,
                                 const int num_missing_packets,
@@ -228,6 +232,7 @@ public:
   using BlockType = EigenBlock<TVal, TVec>;
   EigenWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~EigenWriter() = default;
+  virtual const char *writer_name() const override { return "EigenWriter"; };
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num) {
     size_t block_idx = Writer<BlockType>::register_block();
@@ -256,6 +261,7 @@ public:
   using BlockType = FFTBlock<T>;
   FFTWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~FFTWriter() = default;
+  virtual const char *writer_name() const override { return "FFTWriter"; };
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num) {
     size_t block_idx = Writer<BlockType>::register_block();
