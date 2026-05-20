@@ -175,7 +175,7 @@ public:
       }
     }
     write_index.store(next_write_index, std::memory_order_release);
-    DEBUG_LOG("Next write index is...{}", next_write_index);
+    //  DEBUG_LOG("Next write index is...{}", next_write_index);
     return true;
   };
 
@@ -236,9 +236,9 @@ public:
       if (packet_index >= -1 &&
           packet_index < static_cast<int>(NR_PACKETS_FOR_CORRELATION) + 1) {
         const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
-        DEBUG_LOG("Copying data to packet_index {} and channel index {} and "
-                  "receiver_index {} of buffer {}",
-                  packet_index, freq_channel, receiver_index, buffer_index);
+        // DEBUG_LOG("Copying data to packet_index {} and channel index {} and "
+        //           "receiver_index {} of buffer {}",
+        //           packet_index, freq_channel, receiver_index, buffer_index);
 
         auto &buffer = d_samples[buffer_index];
         // we need to add 1 to the packet index to allow for the
