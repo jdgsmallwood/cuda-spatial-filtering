@@ -140,7 +140,8 @@ public:
   T &get_block(size_t index) { return blocks_[index]; }
 
   void drain_ready_blocks() {
-    while (read_idx_ != write_idx_ && blocks_[read_idx_].is_ready()) {
+    size_t current_write_idx_ = write_idx;
+    while (read_idx_ != current_write_idx_ && blocks_[read_idx_].is_ready()) {
       process_block(blocks_[read_idx_]);
       read_idx_ = (read_idx_ + 1) % buffer_size_;
     }
@@ -266,9 +267,9 @@ public:
     this->blocks_[block_num].transfer_complete = true;
   }
 
-    virtual void* get_fft_landing_pointer(const size_t block_num) {
-        return (void*)&this->blocks_[block_num].fft_output;
-    }
+  virtual void *get_fft_landing_pointer(const size_t block_num) {
+    return (void *)&this->blocks_[block_num].fft_output;
+  }
 
   virtual void flush() = 0;
 };
@@ -342,8 +343,8 @@ public:
         beam_seq_props);
   }
 
-  void
-  process_block(const typename BeamWriter<BeamT, ArrivalsT>::BlockType &block) override {
+  void process_block(
+      const typename BeamWriter<BeamT, ArrivalsT>::BlockType &block) override {
     INFO_LOG("Writing beam block...");
     auto current_size = beam_dataset_.getDimensions()[0];
 
@@ -1118,13 +1119,13 @@ public:
       // the header block
       if (ipcbuf_enable_eod(hdu->header_block) < 0) {
         multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
-                throw std::runtime_error();
+        throw std::runtime_error();
       }
 
       // flag the header block for this "observation" as filled
       if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
         multilog(log, LOG_ERR, "could not mark filled Header Block\n");
-                throw std::runtime_error();
+        throw std::runtime_error();
       }
     }
 
@@ -1137,7 +1138,7 @@ public:
       char *ring_block = ipcio_open_block_write(hdu->data_block, &block_id);
       if (!block) {
         multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
-                throw std::runtime_error();
+        throw std::runtime_error();
       }
 
       // this is where I should copy in the data
@@ -1145,7 +1146,7 @@ public:
 
       if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
         multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
-                throw std::runtime_error();
+        throw std::runtime_error();
       }
     }
   }
@@ -1248,8 +1249,7 @@ public:
       // write_raw interprets the memory as a flat array of the dataset's
       // element type (float), which is exactly what interleaved complex<float>
       // gives us.
-      val_dataset_.select(offset, count)
-          .write_raw(&block.eigenvalues[0]);
+      val_dataset_.select(offset, count).write_raw(&block.eigenvalues[0]);
     }
     // ---- eigenvectors -------------------------------------------------------
     const auto current_size = vec_dataset_.getDimensions()[0];
@@ -1266,13 +1266,13 @@ public:
     // write_raw interprets the memory as a flat array of the dataset's
     // element type (float), which is exactly what interleaved complex<float>
     // gives us.
-    vec_dataset_.select(offset, count)
-        .write_raw(&block.eigenvectors[0]);
+    vec_dataset_.select(offset, count).write_raw(&block.eigenvectors[0]);
 
     // ---- sequence numbers ---------------------------------------------------
     const auto seq_size = seq_dataset_.getDimensions()[0];
     seq_dataset_.resize({seq_size + 1, 2});
-    const std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
+    const std::vector<size_t> seq_nums = {block.start_seq_num,
+                                          block.end_seq_num};
     seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
   }
 
@@ -1351,8 +1351,7 @@ public:
     std::vector<size_t> fft_count = {1};
     fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
 
-    fft_dataset_.select(fft_offset, fft_count)
-        .write_raw(&block.fft_output[0]);
+    fft_dataset_.select(fft_offset, fft_count).write_raw(&block.fft_output[0]);
 
     auto seq_size = fft_seq_dataset_.getDimensions()[0];
     fft_seq_dataset_.resize({seq_size + 1, 2});
@@ -1459,8 +1458,7 @@ public:
       std::vector<size_t> count = {1};
       count.insert(count.end(), val_dims_.begin(), val_dims_.end());
 
-      val_dataset_.select(offset, count)
-          .write_raw(&block.eigenvalues[0]);
+      val_dataset_.select(offset, count).write_raw(&block.eigenvalues[0]);
     }
     {
       const auto t = vec_dataset_.getDimensions()[0];
@@ -1476,14 +1474,14 @@ public:
 
       // complex<float> is two consecutive floats in memory, so
       // write_raw into a float dataset is correct here.
-      vec_dataset_.select(offset, count)
-          .write_raw(&block.eigenvectors[0]);
+      vec_dataset_.select(offset, count).write_raw(&block.eigenvectors[0]);
     }
     // ---- Sequence numbers --------------------------------------------
     {
       const auto sz = seq_dataset_.getDimensions()[0];
       seq_dataset_.resize({sz + 1, 2});
-      const std::array<size_t, 2> seq = {block.start_seq_num, block.end_seq_num};
+      const std::array<size_t, 2> seq = {block.start_seq_num,
+                                         block.end_seq_num};
       seq_dataset_.select({sz, 0}, {1, 2}).write_raw(seq.data());
     }
   }

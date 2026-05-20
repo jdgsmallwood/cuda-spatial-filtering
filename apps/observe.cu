@@ -104,7 +104,6 @@ int main(int argc, char *argv[]) {
   //      vis_filename, Config::NR_CHANNELS, Config::NR_POLARIZATIONS,
   //      Config::NR_PADDED_RECEIVERS, 1.0, 1.0, 1.0, 1.0);
 
-
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
