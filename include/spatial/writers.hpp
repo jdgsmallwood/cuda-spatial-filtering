@@ -893,7 +893,6 @@ public:
   }
 
   void process_block(const FFTBlock<T> &block) override {
-    madd_args.clear();
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
@@ -901,22 +900,28 @@ public:
 
     madd_args.push_back("TS.MADD");
     const int F = NR_FREQS;
+    int current_idx = 0;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int beam = 0; beam < NR_BEAMS; ++beam) {
           for (int f = 0; f < F; ++f) {
             const auto cval = block.fft_output[ch][pol][beam][f];
-            madd_args.push_back(
-                precomputed_keys[get_key_index(ch, pol, beam, f)]);
-            madd_args.push_back(ts_str);
-            madd_args.push_back(std::to_string(cval));
+            madd_args[1 + 3 * current_idx] =
+                precomputed_keys[get_key_index(ch, pol, beam, f)];
+            madd_args[1 + 3 * current_idx + 1] = ts_str;
+
+            std::string &val_str = madd_args[1 + 3 * current_idx + 2];
+            val_str.resize(32);
+            auto [ptr, ec] = std::to_chars(
+                val_str.data(), val_str.data() + val_str.size(), cval);
+            val_str.resize(ptr - val_str.data());
+
+            current_idx += 1;
           }
         }
       }
     }
-    if (madd_args.size() > 1) {
-      redis.command(madd_args.begin(), madd_args.end());
-    }
+    redis.command(madd_args.begin(), madd_args.end());
   }
 
   void flush() override {}
