@@ -268,7 +268,6 @@ public:
 
   void
   register_visibilities_transfer_complete(const size_t block_num) override {
-
     if (vis_writer_ == nullptr) {
       return;
     }
@@ -287,6 +286,8 @@ public:
     if (eigen_writer_ == nullptr) {
       return;
     }
+    DEBUG_LOG("Registering eigendecomposition transfer complete for block {}",
+              block_num);
     eigen_writer_->register_eigendecomposition_transfer_complete(block_num);
   }
 
@@ -294,6 +295,7 @@ public:
     if (fft_writer_ == nullptr) {
       return;
     }
+    DEBUG_LOG("Registering FFT transfer complete for block {}", block_num);
     fft_writer_->register_fft_transfer_complete(block_num);
   }
 
