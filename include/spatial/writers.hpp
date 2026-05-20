@@ -140,7 +140,7 @@ public:
   T &get_block(size_t index) { return blocks_[index]; }
 
   void drain_ready_blocks() {
-    size_t current_write_idx_ = write_idx;
+    size_t current_write_idx_ = write_idx_;
     while (read_idx_ != current_write_idx_ && blocks_[read_idx_].is_ready()) {
       process_block(blocks_[read_idx_]);
       read_idx_ = (read_idx_ + 1) % buffer_size_;
