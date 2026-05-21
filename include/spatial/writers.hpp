@@ -177,8 +177,11 @@ public:
 
 protected:
   virtual void handle_buffer_full() {
-    throw std::runtime_error(std::string(writer_name()) +
-                             " ring buffer is full");
+    ERROR_LOG("{} ring buffer is full. Waiting...", std::string(writer_name()));
+    while ((write_idx_.load(std::memory_order_acquire) + 1) % buffer_size_ ==
+           read_idx_.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
   }
 
   size_t buffer_size_;
@@ -543,6 +546,13 @@ private:
   HighFive::DataSet fft_dataset_;
   HighFive::DataSet fft_seq_dataset_;
   std::vector<size_t> fft_dims_;
+
+  size_t batch_size_;
+  size_t buffer_count_ = 0;
+  size_t fft_elements_ = 1;
+
+  std::vector<float> fft_buffer_;
+  std::vector<size_t> seq_buffer_;
 };
 
 template <typename T>
@@ -555,6 +565,11 @@ public:
       : VisibilitiesWriter<T>(num_blocks), file_(file),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
+
+    vis_buffer_.reserve(batch_size_ * element_count_);
+    missing_buffer_.reserve(batch_size_ * 3);
+    seq_buffer_.reserve(batch_size_ * 2);
+
     using namespace HighFive;
 
     double start_time = std::chrono::duration<double>(
@@ -574,7 +589,7 @@ public:
                             vis_dims_.end());
     vis_dataset_max_dims.insert(vis_dataset_max_dims.end(), vis_dims_.begin(),
                                 vis_dims_.end());
-    std::vector<hsize_t> vis_chunk = {1};
+    std::vector<hsize_t> vis_chunk = {static_cast<hsize_t>(batch_size_)};
     vis_chunk.insert(vis_chunk.end(), vis_dims_.begin(), vis_dims_.end());
     DataSpace vis_space(vis_dataset_dims, vis_dataset_max_dims);
     DataSetCreateProps props;
@@ -583,13 +598,13 @@ public:
     vis_dataset_ = file_.createDataSet<float>("visibilities", vis_space, props);
 
     DataSetCreateProps vis_seq_props;
-    vis_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    vis_seq_props.add(Chunking(std::vector<hsize_t>{batch_size_, 2}));
     vis_seq_dataset_ = file_.createDataSet<size_t>(
         "vis_seq_nums", DataSpace({0, 2}, {HighFive::DataSpace::UNLIMITED, 2}),
         vis_seq_props);
 
     DataSetCreateProps vis_missing_props;
-    vis_missing_props.add(Chunking(std::vector<hsize_t>{1, 3}));
+    vis_missing_props.add(Chunking(std::vector<hsize_t>{batch_size_, 3}));
     vis_missing_dataset_ = file_.createDataSet<float>(
         "vis_missing_nums",
         DataSpace({0, 3}, {HighFive::DataSpace::UNLIMITED, 3}),
@@ -605,36 +620,53 @@ public:
   }
 
   void process_block(const VisBlock<T> &block) override {
+    const float *vis_ptr = reinterpret_cast<const float *>(&block.data);
+    vis_buffer_.insert(vis_buffer_.end(), vis_ptr, vis_ptr + element_count_);
+
+    seq_buffer_.push_back(block.start_seq_num);
+    seq_buffer_.push_back(block.end_seq_num);
+
+    float num_missing_packets_fl =
+        static_cast<float>(block.num_missing_packets);
+    float num_total_packets_fl = static_cast<float>(block.num_total_packets);
+
+    missing_buffer_.push_back(num_missing_packets_fl);
+    missing_buffer_.push_back(num_total_packets_fl);
+    missing_buffer_.push_back(100 * num_missing_packets_fl /
+                              num_total_packets_fl);
+
+    buffer_count_++;
+
+    if (buffer_count_ >= batch_size_) {
+      flush();
+    }
+  }
+
+  void flush() override {
     auto current_size = vis_dataset_.getDimensions()[0];
-    std::vector<size_t> new_dims = {current_size + 1};
+    std::vector<size_t> new_dims = {current_size + buffer_count_};
     new_dims.insert(new_dims.end(), vis_dims_.begin(), vis_dims_.end());
     vis_dataset_.resize(new_dims);
 
     std::vector<size_t> vis_offset = {current_size};
     vis_offset.insert(vis_offset.end(), vis_dims_.size(), 0);
-    std::vector<size_t> vis_count = {1};
+    std::vector<size_t> vis_count = {buffer_count_};
     vis_count.insert(vis_count.end(), vis_dims_.begin(), vis_dims_.end());
 
-    vis_dataset_.select(vis_offset, vis_count).write_raw(block.data[0]);
+    vis_dataset_.select(vis_offset, vis_count).write_raw(vis_buffer_.data());
 
     auto seq_size = vis_seq_dataset_.getDimensions()[0];
-    vis_seq_dataset_.resize({seq_size + 1, 2});
-    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
-    vis_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+    vis_seq_dataset_.resize({seq_size + buffer_count_, 2});
+    vis_seq_dataset_.select({seq_size, 0}, {buffer_count_, 2})
+        .write_raw(seq_buffer_.data());
 
     auto missing_size = vis_missing_dataset_.getDimensions()[0];
-    vis_missing_dataset_.resize({missing_size + 1, 3});
-    float num_missing_packets_fl =
-        static_cast<float>(block.num_missing_packets);
-    float num_total_packets_fl = static_cast<float>(block.num_total_packets);
-    std::vector<float> missing_nums = {
-        num_missing_packets_fl, num_total_packets_fl,
-        100 * num_missing_packets_fl / num_total_packets_fl};
-    vis_missing_dataset_.select({missing_size, 0}, {1, 3})
-        .write_raw(missing_nums.data());
-  }
+    vis_missing_dataset_.resize({missing_size + buffer_count_, 3});
+    vis_missing_dataset_.select({missing_size, 0}, {buffer_count_, 3})
+        .write_raw(missing_buffer_.data());
 
-  void flush() override { file_.flush(); }
+    file_.flush();
+  }
 
 private:
   void write_baseline_ids() {
@@ -685,6 +717,14 @@ private:
   HighFive::DataSet vis_missing_dataset_;
   std::vector<size_t> vis_dims_;
   std::unordered_map<int, int> antenna_map_;
+
+  size_t batch_size_;
+  size_t buffer_count_ = 0;
+  size_t vis_elements_ = 1;
+
+  std::vector<float> vis_buffer_;
+  std::vector<float> missing_buffer_;
+  std::vector<size_t> seq_buffer_;
 };
 
 template <typename TVal, typename TVec>
@@ -1217,7 +1257,6 @@ public:
   }
 
   void process_block(const BeamBlock<BeamT, ArrivalsT> &block) {
-
     {
       uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
       char *header = ipcbuf_get_next_write(hdu->header_block);
@@ -1401,10 +1440,13 @@ public:
                     const int max_channel,
                     const std::unordered_map<int, int> *antenna_map = nullptr,
                     const int num_blocks = 100)
-      : FFTWriter<T>(num_blocks), file_(file),
+      : FFTWriter<T>(num_blocks), file_(file), batch_size_(num_blocks),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
     using namespace HighFive;
+
+    fft_buffer_.reserve(batch_size_ * element_count_);
+    seq_buffer_.reserve(batch_size_ * 2);
 
     double start_time = std::chrono::duration<double>(
                             std::chrono::system_clock::now().time_since_epoch())
@@ -1431,7 +1473,7 @@ public:
                                 fft_dims_.end());
 
     // Chunk: 1 block at a time
-    std::vector<hsize_t> fft_chunk = {1};
+    std::vector<hsize_t> fft_chunk = {static_cast<hsize_t>(batch_size_)};
     fft_chunk.insert(fft_chunk.end(), fft_dims_.begin(), fft_dims_.end());
 
     DataSpace fft_space(fft_dataset_dims, fft_dataset_max_dims);
@@ -1441,33 +1483,53 @@ public:
 
     // Sequence number dataset: [N, 2] (start_seq, end_seq)
     DataSetCreateProps fft_seq_props;
-    fft_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    fft_seq_props.add(
+        Chunking(std::vector<hsize_t>{static_cast<hsize_t>(batch_size_), 2}));
     fft_seq_dataset_ = file_.createDataSet<size_t>(
         "beam_fft_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
         fft_seq_props);
   }
 
   void process_block(const FFTBlock<T> &block) override {
+
+    const float *fft_ptr = reinterpret_cast<const float *>(&block.fft_output);
+    fft_buffer_.insert(fft_buffer_.end(), fft_ptr, fft_ptr + element_count_);
+
+    seq_buffer_.push_back(block.start_seq_num);
+    seq_buffer_.push_back(block.end_seq_num);
+    buffer_count_++;
+
+    if (buffer_count_ >= batch_size_) {
+      flush();
+    }
+  }
+
+  void flush() override {
+
     auto current_size = fft_dataset_.getDimensions()[0];
 
-    std::vector<size_t> new_dims = {current_size + 1};
+    std::vector<size_t> new_dims = {current_size + buffer_count_};
     new_dims.insert(new_dims.end(), fft_dims_.begin(), fft_dims_.end());
     fft_dataset_.resize(new_dims);
 
     std::vector<size_t> fft_offset = {current_size};
     fft_offset.insert(fft_offset.end(), fft_dims_.size(), 0);
-    std::vector<size_t> fft_count = {1};
+    std::vector<size_t> fft_count = {buffer_count_};
     fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
 
-    fft_dataset_.select(fft_offset, fft_count).write_raw(block.fft_output[0]);
+    fft_dataset_.select(fft_offset, fft_count).write_raw(fft_buffer_.data());
 
     auto seq_size = fft_seq_dataset_.getDimensions()[0];
-    fft_seq_dataset_.resize({seq_size + 1, 2});
-    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
-    fft_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
-  }
+    fft_seq_dataset_.resize({seq_size + buffer_count_, 2});
+    fft_seq_dataset_.select({seq_size, 0}, {buffer_count_, 2})
+        .write_raw(seq_buffer_.data());
 
-  void flush() override { file_.flush(); }
+    fft_buffer_.clear();
+    seq_buffer_.clear();
+    buffer_count_ = 0;
+
+    file_.flush();
+  }
 
 private:
   HighFive::File &file_;
@@ -1476,6 +1538,14 @@ private:
   HighFive::DataSet fft_seq_dataset_;
   HighFive::DataSet fft_idx_dataset_;
   std::vector<size_t> fft_dims_;
+
+  size_t batch_size_;
+  size_t buffer_count_ = 0;
+  size_t val_elements_ = 1;
+  size_t vec_elements_ = 1;
+
+  std::vector<float> fft_buffer_;
+  std::vector<size_t> seq_buffer_;
 };
 
 template <typename TVal, typename TVec>
@@ -1483,13 +1553,23 @@ class HDF5EigenWriter : public EigenWriter<TVal, TVec> {
 public:
   explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 4,
                            const int num_blocks = 100)
-      : EigenWriter<TVal, TVec>(num_blocks), file_(file) {
+      : EigenWriter<TVal, TVec>(num_blocks), file_(file),
+        batch_size_(num_blocks) {
     using namespace HighFive;
 
     val_dims_ = get_array_dims<TVal>();
-
     vec_dims_ = get_array_dims<TVec>();
     vec_dims_.push_back(2); // real / imag
+                            //
+
+    for (auto d : val_dims_)
+      val_elements_ *= d;
+    for (auto d : vec_dims_)
+      vec_elements_ *= d;
+
+    val_buffer_.reserve(batch_size_ * val_elements_);
+    vec_buffer_.reserve(batch_size_ * vec_elements_);
+    seq_buffer_.reserve(batch_size_ * 2);
 
     {
       std::vector<size_t> dims = {0};
@@ -1497,7 +1577,7 @@ public:
       dims.insert(dims.end(), val_dims_.begin(), val_dims_.end());
       max_dims.insert(max_dims.end(), val_dims_.begin(), val_dims_.end());
 
-      std::vector<hsize_t> chunk = {1};
+      std::vector<hsize_t> chunk = {static_cast<hsize_t>(batch_size_)};
       chunk.insert(chunk.end(), val_dims_.begin(), val_dims_.end());
 
       DataSetCreateProps props;
@@ -1518,7 +1598,7 @@ public:
       dims.insert(dims.end(), vec_dims_.begin(), vec_dims_.end());
       max_dims.insert(max_dims.end(), vec_dims_.begin(), vec_dims_.end());
 
-      std::vector<hsize_t> chunk = {1};
+      std::vector<hsize_t> chunk = {static_cast<hsize_t>(batch_size_)};
       chunk.insert(chunk.end(), vec_dims_.begin(), vec_dims_.end());
 
       DataSetCreateProps props;
@@ -1536,7 +1616,8 @@ public:
 
     {
       DataSetCreateProps props;
-      props.add(Chunking(std::vector<hsize_t>{1, 2}));
+      props.add(
+          Chunking(std::vector<hsize_t>{static_cast<hsize_t>(batch_size_), 2}));
 
       seq_dataset_ = file_.createDataSet<size_t>(
           "eigendata_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
@@ -1554,49 +1635,64 @@ public:
   }
 
   void process_block(const EigenBlock<TVal, TVec> &block) override {
-    const auto t = val_dataset_.getDimensions()[0];
+    const float *val_ptr = reinterpret_cast<const float *>(&block.eigenvalues);
+    val_buffer_.insert(val_buffer_.end(), val_ptr, val_ptr + val_elements_);
 
-    {
-      std::vector<size_t> new_dims = {t + 1};
-      new_dims.insert(new_dims.end(), val_dims_.begin(), val_dims_.end());
-      val_dataset_.resize(new_dims);
+    const float *vec_ptr = reinterpret_cast<const float *>(block.eigenvectors);
+    vec_buffer_.insert(vec_buffer_.end(), vec_ptr, vec_ptr + vec_elements_);
 
-      std::vector<size_t> offset = {t};
-      offset.insert(offset.end(), val_dims_.size(), 0);
-      std::vector<size_t> count = {1};
-      count.insert(count.end(), val_dims_.begin(), val_dims_.end());
+    seq_buffer_.push_back(block.start_seq_num);
+    seq_buffer_.push_back(block.end_seq_num);
 
-      val_dataset_.select(offset, count)
-          .write_raw(reinterpret_cast<const float *>(&block.eigenvalues));
-    }
-    {
-      const auto t = vec_dataset_.getDimensions()[0];
+    buffer_count_++;
 
-      std::vector<size_t> new_dims = {t + 1};
-      new_dims.insert(new_dims.end(), vec_dims_.begin(), vec_dims_.end());
-      vec_dataset_.resize(new_dims);
-
-      std::vector<size_t> offset = {t};
-      offset.insert(offset.end(), vec_dims_.size(), 0);
-      std::vector<size_t> count = {1};
-      count.insert(count.end(), vec_dims_.begin(), vec_dims_.end());
-
-      // complex<float> is two consecutive floats in memory, so
-      // write_raw into a float dataset is correct here.
-      vec_dataset_.select(offset, count)
-          .write_raw(reinterpret_cast<const float *>(block.eigenvectors));
-    }
-    // ---- Sequence numbers --------------------------------------------
-    {
-      const auto sz = seq_dataset_.getDimensions()[0];
-      seq_dataset_.resize({sz + 1, 2});
-      const std::array<size_t, 2> seq = {block.start_seq_num,
-                                         block.end_seq_num};
-      seq_dataset_.select({sz, 0}, {1, 2}).write_raw(seq.data());
+    // Write to disk when batch is full
+    if (buffer_count_ >= batch_size_) {
+      flush();
     }
   }
 
-  void flush() override { file_.flush(); }
+  void flush() override {
+    if (buffer_count_ == 0)
+      return;
+    const auto t = val_dataset_.getDimensions()[0];
+    std::vector<size_t> val_new_dims = {t + buffer_count_};
+    val_new_dims.insert(val_new_dims.end(), val_dims_.begin(), val_dims_.end());
+    val_dataset_.resize(val_new_dims);
+
+    std::vector<size_t> val_offset = {t};
+    val_offset.insert(val_offset.end(), val_dims_.size(), 0);
+    std::vector<size_t> val_count = {buffer_count_};
+    val_count.insert(val_count.end(), val_dims_.begin(), val_dims_.end());
+
+    val_dataset_.select(val_offset, val_count).write_raw(val_buffer_.data());
+
+    const auto t_vec = vec_dataset_.getDimensions()[0];
+    std::vector<size_t> vec_new_dims = {t_vec + buffer_count_};
+    vec_new_dims.insert(vec_new_dims.end(), vec_dims_.begin(), vec_dims_.end());
+    vec_dataset_.resize(vec_new_dims);
+
+    std::vector<size_t> vec_offset = {t_vec};
+    vec_offset.insert(vec_offset.end(), vec_dims_.size(), 0);
+    std::vector<size_t> vec_count = {buffer_count_};
+    vec_count.insert(vec_count.end(), vec_dims_.begin(), vec_dims_.end());
+
+    vec_dataset_.select(vec_offset, vec_count).write_raw(vec_buffer_.data());
+
+    // --- Write Sequence Numbers ---
+    const auto t_seq = seq_dataset_.getDimensions()[0];
+    seq_dataset_.resize({t_seq + buffer_count_, 2});
+    seq_dataset_.select({t_seq, 0}, {buffer_count_, 2})
+        .write_raw(seq_buffer_.data());
+
+    // Clear memory buffers for the next batch
+    val_buffer_.clear();
+    vec_buffer_.clear();
+    seq_buffer_.clear();
+    buffer_count_ = 0;
+
+    file_.flush();
+  }
 
 private:
   HighFive::File &file_;
@@ -1606,4 +1702,13 @@ private:
   std::vector<size_t> val_dims_; // inner shape of TVal, e.g. {CH, POL, POL, N}
   std::vector<size_t>
       vec_dims_; // inner shape of TVec + [2], e.g. {CH, POL, POL, N, N, 2}
+  //
+  size_t batch_size_;
+  size_t buffer_count_ = 0;
+  size_t val_elements_ = 1;
+  size_t vec_elements_ = 1;
+
+  std::vector<float> val_buffer_;
+  std::vector<float> vec_buffer_;
+  std::vector<size_t> seq_buffer_;
 };
