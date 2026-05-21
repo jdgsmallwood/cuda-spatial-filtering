@@ -226,8 +226,9 @@ int main(int argc, char *argv[]) {
   std::cout << "Synchronizing GPU...\n";
   cudaDeviceSynchronize();
 
+  std::cout << "Stopping writers...\n";
   output->running_ = false;
-
+  output->stop_writers();
   FLUSH_LOG();
   spdlog::shutdown();
   std::cout << "Shutdown complete.\n";
