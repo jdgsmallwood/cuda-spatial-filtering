@@ -20,7 +20,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
-
+  set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the C++ compiler during RelWithDebInfo builds." FORCE)
   # Save user choice in another variable
   set(USER_BUILD_TESTING ${BUILD_TESTING})
 if(CMAKE_BUILD_TYPE MATCHES Debug)

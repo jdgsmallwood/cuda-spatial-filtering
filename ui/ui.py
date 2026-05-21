@@ -57,7 +57,11 @@ class CMakeBuilder(App):
                                 )
 
             yield Select(
-                [("Debug", "Debug"), ("Release", "Release")],
+                [
+                    ("Debug", "Debug"),
+                    ("Release", "Release"),
+                    ("RelWithDebInfo", "RelWithDebInfo"),
+                ],
                 value="Release",
                 id="config_type",
             )

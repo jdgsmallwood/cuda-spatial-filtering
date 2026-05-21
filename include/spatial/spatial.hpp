@@ -810,7 +810,8 @@ public:
       size_t buffer_index = buffers_ready_for_pipeline.front();
       buffers_ready_for_pipeline.pop();
       lock.unlock();
-      INFO_LOG("Buffer index {} picked up by pipeline feeder...", buffer_index);
+      DEBUG_LOG("Buffer index {} picked up by pipeline feeder...",
+                buffer_index);
       pipeline_->execute_pipeline(d_samples[buffer_index]);
       pipeline_runs_queued += 1;
     }
