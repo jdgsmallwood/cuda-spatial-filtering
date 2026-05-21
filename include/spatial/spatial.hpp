@@ -359,16 +359,18 @@ public:
           "parsed sample count was zero - something has gone wrong!");
     }
 
-    std::call_once(buffer_init_flag, [&]() {
-      INFO_LOG("Initializing buffers for FPGA {} / {} as this is the first "
-               "packet...",
-               fpga_ids[parsed.fpga_id], parsed.fpga_id);
-
-      initialize_buffers(parsed.sample_count, parsed.fpga_id);
-    });
+    if (!buffer_init_flag.load(std::memory_order_acquire)) [[unlikely]] {
+      static std::mutex init_mutex;
+      std::lock_guard<std::mutex> lock(init_mutex);
+      if (!buffer_init_flag.load(std::memory_order_relaxed)) {
+        INFO_LOG("Initializing buffers...");
+        initialize_buffers(parsed.sample_count, parsed.fpga_id);
+        buffer_init_flag.store(true, std::memory_order_release);
+      }
+    };
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
     if (*parsed.original_packet_processed) [[likely]] {
-      packets_processed.fetch_add(1);
+      packets_processed.fetch_add(1, std::memory_order_relaxed);
     }
     modified_since_last_completion_check[parsed.freq_channel -
                                          MIN_FREQ_CHANNEL] = true;
@@ -890,7 +892,7 @@ private:
       buffer_ordering_queue;
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
-  std::once_flag buffer_init_flag;
+  std::atomic<bool> buffer_init_flag{false};
   std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
       fpga_delays_packet_aligned;
   std::array<int, T::NR_FPGA_SOURCES> fpga_delays_subpacket;

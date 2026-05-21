@@ -189,9 +189,8 @@ struct LambdaPacketEntry
                      sizeof(CustomHeader)) {
       offset = 42;
     }
-    __builtin_prefetch(base + offset, 0, 3);
     if (length < MIN_PCAP_HEADER_SIZE) [[unlikely]] {
-      this->processed = (length < MIN_PCAP_HEADER_SIZE);
+      this->processed = true;
       return {};
     }
 
