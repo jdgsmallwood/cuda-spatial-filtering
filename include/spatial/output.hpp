@@ -321,6 +321,25 @@ public:
     }
   }
 
+  void stop_writers() {
+
+    if (beam_writer_ != nullptr) {
+      beam_writer_->stop();
+    }
+
+    if (vis_writer_ != nullptr) {
+      vis_writer_->stop();
+    }
+
+    if (eigen_writer_ != nullptr) {
+      eigen_writer_->stop();
+    }
+
+    if (fft_writer_ != nullptr) {
+      fft_writer_->stop();
+    }
+  }
+
   std::atomic<bool> running_{true};
 
 private:

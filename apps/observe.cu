@@ -240,7 +240,9 @@ int main(int argc, char *argv[]) {
   std::cout << "Synchronizing GPU...\n";
   cudaDeviceSynchronize();
 
+  std::cout << "Stopping writers...\n";
   output->running_ = false;
+  output->stop_writers();
   std::vector<float> run_timings;
   run_timings.reserve(pipeline.NR_BENCHMARKING_RUNS);
   for (auto i = 0; i < pipeline.NR_BENCHMARKING_RUNS; ++i) {
