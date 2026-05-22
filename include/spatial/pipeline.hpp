@@ -3907,7 +3907,7 @@ private:
   using BeamWeights = BeamWeightsT<T>;
   using ChosenBeamWeights =
       std::conditional_t<RFI_MITIGATE, RFIMitigatedBeamWeights, BeamWeights>;
-  static bool header_written{false};
+  bool header_written;
 
   struct PipelineResources {
     cudaStream_t stream;
@@ -4543,7 +4543,7 @@ public:
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
-        NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
+        NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors), header_written(false),
         min_freq_channel(min_freq_channel), dada_key(dada_key) {
     std::cout << "Pulsar Fold instantiated with NR_CHANNELS: " << T::NR_CHANNELS
               << ", NR_RECEIVERS: " << T::NR_RECEIVERS
