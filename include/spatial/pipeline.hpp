@@ -4488,7 +4488,6 @@ public:
       {
         uint64_t block_id;
         char *block = ipcio_open_block_write(hdu->data_block, &block_id);
-        std::cout << "writing data block with " << block_size << " bytes...\n";
         if (!block) {
           multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
           std::cout << "open block write failed\n";
@@ -4500,7 +4499,6 @@ public:
 
         cudaDeviceSynchronize();
 
-        std::cout << "closing write block\n";
         if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
           multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
         }
