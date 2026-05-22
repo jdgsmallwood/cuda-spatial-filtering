@@ -117,13 +117,41 @@ int main(int argc, char *argv[]) {
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
 
-  for (auto i = 0; i < num_lambda_channels; ++i) {
-    for (auto j = 0; j < nr_lambda_receivers; ++j) {
-      for (auto k = 0; k < nr_lambda_beams; ++k) {
-        for (auto l = 0; l < nr_lambda_polarizations; ++l) {
-          h_weights.weights[i][l][k][j] = std::complex<__half>(
-              __float2half(1.0f / static_cast<float>(Config::NR_RECEIVERS)),
-              __float2half(0.0f / static_cast<float>(Config::NR_RECEIVERS)));
+  if (args.beam_weights_filename == "") {
+    for (auto i = 0; i < num_lambda_channels; ++i) {
+      for (auto j = 0; j < nr_lambda_receivers; ++j) {
+        for (auto k = 0; k < nr_lambda_beams; ++k) {
+          for (auto l = 0; l < nr_lambda_polarizations; ++l) {
+            h_weights.weights[i][l][k][j] = std::complex<__half>(
+                __float2half(1.0f / static_cast<float>(Config::NR_RECEIVERS)),
+                __float2half(0.0f / static_cast<float>(Config::NR_RECEIVERS)));
+          }
+        }
+      }
+    }
+  } else {
+
+    for (auto i = 0; i < num_lambda_channels; ++i) {
+      for (auto f = 0; f < T::NR_FPGA_SOURCES; ++f) {
+        int fpga_id = args.fpga_id_vec[f];
+        for (auto k = 0; k < T::NR_RECEIVERS_PER_PACKET; ++k) {
+          for (auto j = 0; k < nr_lambda_beams; ++k) {
+            for (auto l = 0; l < nr_lambda_polarizations; ++l) {
+              int receiver_idx = f * T::NR_RECEIVERS_PER_PACKET + k;
+              std::string pol_string;
+              if (l == 0) {
+                pol_string = "XX";
+
+              } else {
+                pol_string = "YY";
+              }
+            h_weights.weights[i][l][j][receiver_idx] = std::complex<__half>(
+                __float2half(args.weights['weights'][std::to_string(args.min_freq_channel + i)][pol_string][
+std::to_string(args.antenna_mapping[receiver_idx])]["real"]),
+                __float2half(args.weights['weights'][std::to_string(args.min_freq_channel + i)][pol_string][
+std::to_string(args.antenna_mapping[receiver_idx])]["imag"]);
+            }
+          }
         }
       }
     }
