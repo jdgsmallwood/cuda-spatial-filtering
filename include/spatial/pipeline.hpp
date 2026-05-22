@@ -4459,6 +4459,7 @@ public:
     if (output_ != nullptr && !dummy_run) {
 
       {
+        std::cout << "writing header...\n";
         uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
         char *header = ipcbuf_get_next_write(hdu->header_block);
         cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
@@ -4475,6 +4476,7 @@ public:
         // flag the header block for this "observation" as filled
         if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
           multilog(log, LOG_ERR, "could not mark filled Header Block\n");
+          std::cout << "could not mark filled header block...\n";
         }
       }
 
@@ -4484,8 +4486,10 @@ public:
       {
         uint64_t block_id;
         char *block = ipcio_open_block_write(hdu->data_block, &block_id);
+        std::cout << "writing data block with " << block_size << " bytes...\n";
         if (!block) {
           multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
+          std::cout << "open block write failed\n";
         }
 
         cudaMemcpyAsync(block, b.beam_output.get(), block_size,
@@ -4493,6 +4497,7 @@ public:
 
         cudaDeviceSynchronize();
 
+        std::cout << "closing write block\n";
         if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
           multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
         }
