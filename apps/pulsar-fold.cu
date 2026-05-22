@@ -1,3 +1,4 @@
+#include "dada_def.h"
 #include "spatial/common.hpp"
 
 int main(int argc, char *argv[]) {
@@ -129,9 +130,9 @@ int main(int argc, char *argv[]) {
   }
 
   std::cout << "Initializing pipeline...\n";
-  LambdaAdaptiveBeamformedSpectraPipeline<Config> pipeline(
-      num_buffers, &h_weights, args.nr_signal_eigenvectors,
-      args.min_freq_channel);
+  LambdaPulsarFoldPipeline<Config> pipeline(
+      &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
+      DADA_DEFAULT_BLOCK_KEY, "header.hdr");
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

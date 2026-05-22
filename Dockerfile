@@ -159,22 +159,61 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu
 
 
 RUN git clone https://git.code.sf.net/p/psrdada/code psrdada-code
+RUN git clone git://git.code.sf.net/p/psrchive/code psrchive-code
+RUN git clone --recursive git://git.code.sf.net/p/dspsr/code dspsr-code
+
 
 # Install PSRDADA
 RUN apt-get install -y --no-install-recommends automake libltdl-dev \
       autoconf-archive  \
-      libtool 
+      libtool \
+      gfortran \
+      libyaml-cpp0.8
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig"
 WORKDIR psrdada-code
 RUN ./bootstrap
 RUN ./configure --prefix=/usr/local
 RUN make -j$(nproc)
 RUN make install
 
+# Install PSRCHIVE
+WORKDIR ../psrchive-code
+RUN ./bootstrap
+RUN ./configure --prefix=/usr/local
+RUN make -j$(nproc)
+RUN ./packages/pgplot.csh
+RUN ./packages/tempo.csh
+RUN ./configure --prefix=/usr/local
+RUN make -j$(nproc)
+RUN make install
 
-ENV PATH="/usr/local/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
+# install DSPSR
+WORKDIR ../dspsr-code
+RUN echo "dada" > backends.list
+RUN ./bootstrap
+RUN ./configure --prefix=/usr/local
+RUN make -j$(nproc)
+RUN make install
+
+
+
+
 
 WORKDIR /tmp
+
+RUN wget https://www.atnf.csiro.au/research/pulsar/psrcat/downloads/psrcat_pkg.tar.gz
+RUN gunzip psrcat_pkg.tar.gz
+RUN tar -xvf psrcat_pkg.tar
+
+WORKDIR psrcat_tar
+RUN make psrcat
+ENV PSRCAT_FILE="/tmp/psrcat_tar/psrcat.db"
+
+WORKDIR /tmp
+
+ENV PATH="/usr/local/bin:/tmp/psrcat_tar/:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
+ENV PSRHOME="/usr/local"
 
 SHELL ["/bin/bash", "--login", "-c"]
 
