@@ -4494,8 +4494,8 @@ public:
         }
 
         // This is a big hack it will only take the X pol right now.
-        cudaMemcpyAsync(block, b.beam_output.get(), block_size,
-                        cudaMemcpyDefault, b.stream);
+        cudaMemcpyAsync(block, (char *)b.beam_output.get() + block_size,
+                        block_size, cudaMemcpyDefault, b.stream);
 
         cudaDeviceSynchronize();
 

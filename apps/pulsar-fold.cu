@@ -165,7 +165,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::cout << "Initializing pipeline...\n";
-  LambdaPulsarFoldPipeline<Config> pipeline(
+  LambdaPulsarFoldPipeline<Config, true> pipeline(
       &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
       DADA_DEFAULT_BLOCK_KEY, "header.hdr");
 
