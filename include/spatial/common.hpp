@@ -125,6 +125,7 @@ struct CommonArgs {
   std::string output_filename; // may be empty → caller picks a default
   std::string config_filename;
   std::string gains_filename;
+  std::string beam_weights_filename;
   std::string nr_signal_eigenvectors_filename;
   std::string ifname;
   bool loop_pcap = false;
@@ -136,6 +137,7 @@ struct CommonArgs {
   int64_t fpga_delay = 0;
   json config;
   json gains;
+  json beam_weights;
   std::vector<int> fpga_id_vec;
   std::unordered_map<uint32_t, int> fpga_ids;
   std::unordered_map<int, int> antenna_mapping;
@@ -220,6 +222,11 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .implicit_value(true)
       .store_into(args.apply_gains);
 
+  program.add_argument("-b", "--beam-weights-filename")
+      .help("Filename of json file with beam weights")
+      .default_value("")
+      .store_into(args.beam_weights_filename);
+
   try {
     program.parse_args(argc, argv);
     std::ifstream f(args.config_filename);
@@ -227,6 +234,11 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
     std::ifstream g(args.gains_filename);
     args.gains = json::parse(g);
+
+    if (args.beam_weights_filename != "") {
+      std::ifstream h(args.beam_weights_filename);
+      args.beam_weights = json::parse(h);
+    }
 
     // default initialize the map
     for (auto i = 0; i < 500; ++i) {
