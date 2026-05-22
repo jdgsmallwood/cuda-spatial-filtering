@@ -148,17 +148,15 @@ int main(int argc, char *argv[]) {
               }
               h_weights.weights[i][l][j][receiver_idx] = std::complex<__half>(
                   __float2half(
-                      args.weights['weights']
-                                  [std::to_string(args.min_freq_channel + i)]
-                                  [pol_string][std::to_string(
-                                      args.antenna_mapping[receiver_idx])]
-                                  ["real"]),
+                      args.beam_weights
+                          ['weights'][std::to_string(args.min_freq_channel + i)]
+                          [pol_string][std::to_string(
+                              args.antenna_mapping[receiver_idx])]["real"]),
                   __float2half(
-                      args.weights['weights']
-                                  [std::to_string(args.min_freq_channel + i)]
-                                  [pol_string][std::to_string(
-                                      args.antenna_mapping[receiver_idx])]
-                                  ["imag"]));
+                      args.beam_weights
+                          ['weights'][std::to_string(args.min_freq_channel + i)]
+                          [pol_string][std::to_string(
+                              args.antenna_mapping[receiver_idx])]["imag"]));
             }
           }
         }
