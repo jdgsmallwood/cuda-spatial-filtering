@@ -3907,6 +3907,7 @@ private:
   using BeamWeights = BeamWeightsT<T>;
   using ChosenBeamWeights =
       std::conditional_t<RFI_MITIGATE, RFIMitigatedBeamWeights, BeamWeights>;
+  static bool header_written{false};
 
   struct PipelineResources {
     cudaStream_t stream;
@@ -4458,7 +4459,7 @@ public:
 
     if (output_ != nullptr && !dummy_run) {
 
-      {
+      if (!header_written) {
         std::cout << "writing header...\n";
         uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
         char *header = ipcbuf_get_next_write(hdu->header_block);
@@ -4478,6 +4479,7 @@ public:
           multilog(log, LOG_ERR, "could not mark filled Header Block\n");
           std::cout << "could not mark filled header block...\n";
         }
+        header_written = true;
       }
 
       uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
