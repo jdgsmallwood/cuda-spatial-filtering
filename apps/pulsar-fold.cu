@@ -133,12 +133,12 @@ int main(int argc, char *argv[]) {
   } else {
     std::cout << "using bespoke beam weights...\n";
     for (auto i = 0; i < num_lambda_channels; ++i) {
-      for (auto f = 0; f < T::NR_FPGA_SOURCES; ++f) {
+      for (auto f = 0; f < Config::NR_FPGA_SOURCES; ++f) {
         int fpga_id = args.fpga_id_vec[f];
-        for (auto k = 0; k < T::NR_RECEIVERS_PER_PACKET; ++k) {
+        for (auto k = 0; k < Config::NR_RECEIVERS_PER_PACKET; ++k) {
           for (auto j = 0; k < nr_lambda_beams; ++k) {
             for (auto l = 0; l < nr_lambda_polarizations; ++l) {
-              int receiver_idx = f * T::NR_RECEIVERS_PER_PACKET + k;
+              int receiver_idx = f * Config::NR_RECEIVERS_PER_PACKET + k;
               std::string pol_string;
               if (l == 0) {
                 pol_string = "XX";
