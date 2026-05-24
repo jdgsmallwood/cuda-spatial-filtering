@@ -4227,6 +4227,8 @@ private:
   multilog_t *log;
   key_t dada_key;
   dada_hdu_t *hdu;
+  key_t rfi_dada_key;
+  dada_hdu_t *rfi_hdu;
 
   char *obs_header;
   char *d_obs_header;
@@ -4461,10 +4463,20 @@ public:
 
       if (!header_written) {
         std::cout << "writing header...\n";
+        uint64_t rfi_header_size = 0;
         uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
         char *header = ipcbuf_get_next_write(hdu->header_block);
         cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
                         b.stream);
+
+        if constexpr (RFI_MITIGATE) {
+
+          rfi_header_size = ipcbuf_get_bufsz(rfi_hdu->header_block);
+          char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
+
+          cudaMemcpyAsync(rfi_header, d_obs_header, header_size,
+                          cudaMemcpyDefault, b.stream);
+        }
 
         // // Enable EOD so that subsequent transfers will move to the next
         // buffer
@@ -4479,6 +4491,13 @@ public:
           multilog(log, LOG_ERR, "could not mark filled Header Block\n");
           std::cout << "could not mark filled header block...\n";
         }
+
+        if constexpr (RFI_MITIGATE) {
+          if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) < 0) {
+            multilog(log, LOG_ERR, "could not mark filled Header Block\n");
+            std::cout << "could not mark filled header block...\n";
+          }
+        }
         header_written = true;
       }
 
@@ -4486,6 +4505,7 @@ public:
 
       // write 1 block worth of data block via the "block" method
       {
+        uint64_t rfi_block_size = 0;
         uint64_t block_id;
         char *block = ipcio_open_block_write(hdu->data_block, &block_id);
         if (!block) {
@@ -4497,10 +4517,31 @@ public:
         cudaMemcpyAsync(block, (char *)b.beam_output.get() + block_size,
                         block_size, cudaMemcpyDefault, b.stream);
 
+        if constexpr (RFI_MITIGATE) {
+
+          rfi_block_size = ipcbuf_get_bufsz((ipcbuf_t *)rfi_hdu->data_block);
+          uint64_t rfi_block_id;
+          char *rfi_block =
+              ipcio_open_block_write(rfi_hdu->data_block, &rfi_block_id);
+          if (!rfi_block) {
+            multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
+            std::cout << "open block write failed\n";
+          }
+          // This is a big hack it will only take the X pol right now.
+          cudaMemcpyAsync(rfi_block, (char *)b.beam_output.get() + block_size,
+                          rfi_block_size, cudaMemcpyDefault, b.stream);
+        }
+
         cudaDeviceSynchronize();
 
         if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
           multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
+        }
+        if constexpr (RFI_MITIGATE) {
+          if (ipcio_close_block_write(rfi_hdu->data_block, rfi_block_size) <
+              0) {
+            multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
+          }
         }
       }
 
@@ -4534,7 +4575,8 @@ public:
   LambdaPulsarFoldPipeline(
       BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
-      const int min_freq_channel, key_t dada_key, std::string header_filename)
+      const int min_freq_channel, key_t dada_key, std::string header_filename,
+      key_t rfi_dada_key)
 
       : num_buffers(1), h_weights(h_weights),
         correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
@@ -4543,7 +4585,8 @@ public:
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors), header_written(false),
-        min_freq_channel(min_freq_channel), dada_key(dada_key) {
+        min_freq_channel(min_freq_channel), dada_key(dada_key),
+        rfi_dada_key(rfi_dada_key) {
     std::cout << "Pulsar Fold instantiated with NR_CHANNELS: " << T::NR_CHANNELS
               << ", NR_RECEIVERS: " << T::NR_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS
@@ -4570,6 +4613,20 @@ public:
     // lock as writer on the HDU
     if (dada_hdu_lock_write(hdu) < 0) {
       multilog(log, LOG_ERR, "could not lock write on HDU\n");
+    }
+
+    if constexpr (RFI_MITIGATE) {
+      rfi_hdu = dada_hdu_create(log);
+      dada_hdu_set_key(rfi_hdu, rfi_dada_key);
+
+      if (dada_hdu_connect(rfi_hdu) < 0) {
+        multilog(log, LOG_ERR, "could not connect to RFI HDU\n");
+      }
+
+      // lock as writer on the HDU
+      if (dada_hdu_lock_write(rfi_hdu) < 0) {
+        multilog(log, LOG_ERR, "could not lock write on RFI HDU\n");
+      }
     }
 
     obs_header = (char *)malloc(sizeof(char) * DADA_DEFAULT_HEADER_SIZE);
