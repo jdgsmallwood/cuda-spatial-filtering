@@ -4748,6 +4748,17 @@ public:
     // disconnect from HDU
     if (dada_hdu_disconnect(hdu) < 0)
       multilog(log, LOG_ERR, "could not unlock write on hdu\n");
+
+    if constexpr (RFI_MITIGATE) {
+
+      if (dada_hdu_unlock_write(rfi_hdu) < 0) {
+        multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
+      }
+
+      // disconnect from HDU
+      if (dada_hdu_disconnect(rfi_hdu) < 0)
+        multilog(log, LOG_ERR, "could not unlock write on hdu\n");
+    }
   }
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
