@@ -183,7 +183,8 @@ public:
       ProcessedPacket<typename T::PacketScaleStructure,
                       typename T::PacketDataStructure> &pkt,
       const int current_read_index,
-      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
+      uint64_t (&latest_packet_batch)[T::NR_CHANNELS][T::NR_FPGA_SOURCES]) {
     size_t fpga_index;
     if (fpga_ids.count(pkt.fpga_id)) {
       fpga_index = fpga_ids[pkt.fpga_id];
@@ -194,11 +195,8 @@ public:
 
     const int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
 
-    {
-      std::lock_guard lock(latest_packet_mutex);
-      latest_packet_received[freq_channel][fpga_index] = std::max(
-          latest_packet_received[freq_channel][fpga_index], pkt.sample_count);
-    }
+    latest_packet_batch[freq_channel][fpga_index] = std::max(
+        latest_packet_batch[freq_channel][fpga_index], pkt.sample_count);
     const int current_buf = current_buffer;
     const uint64_t sample_count = pkt.sample_count;
     // on the first run global_max will not be set initially so will be 0.
@@ -289,10 +287,11 @@ public:
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
     }
+    std::lock_guard<std::mutex> lock(latest_packet_mutex);
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
       process_packet_data(d_packet_data[current_read_index], current_read_index,
-                          global_max);
+                          global_max, latest_packet_received);
       int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
       read_index.store(new_read_index, std::memory_order_release);
     }
@@ -335,7 +334,8 @@ public:
 
   __attribute__((hot)) void process_packet_data(
       typename T::PacketEntryType *pkt, const int current_read_index,
-      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
+      uint64_t (&latest_packet_batch)[T::NR_CHANNELS][T::NR_FPGA_SOURCES]) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
@@ -368,7 +368,8 @@ public:
         buffer_init_flag.store(true, std::memory_order_release);
       }
     };
-    copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
+    copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max,
+                                      latest_packet_batch);
     if (*parsed.original_packet_processed) [[likely]] {
       packets_processed.fetch_add(1, std::memory_order_relaxed);
     }
@@ -548,6 +549,7 @@ public:
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
+    std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     constexpr int REGULAR_BATCH_SIZE = 6000;
     while (running.load(std::memory_order_acquire)) [[likely]] {
       const int current_write_index =
@@ -616,11 +618,12 @@ public:
       if (--packets_until_completion_check == 0) {
         // Before checking buffer completion drain any packets from the
         // queue that should be in this buffer
-        std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
         get_global_max_packet_array(global_max);
+
         {
           std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
                                             std::try_to_lock);
+          std::lock_guard<std::mutex> lock_latest(latest_packet_mutex);
           if (lock.owns_lock()) {
             for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
               while (!future_packet_queue[i].empty()) {
@@ -632,21 +635,16 @@ public:
                 lock.unlock();
                 auto *entry = d_packet_data[pkt.index];
                 if (entry->length > 0 && !entry->processed) {
-                  process_packet_data(entry, pkt.index, global_max);
+                  process_packet_data(entry, pkt.index, global_max,
+                                      latest_packet_received);
                 }
                 lock.lock();
               }
             }
           }
         }
-        //    cpu_start = clock::now();
         handle_buffer_completion();
-        //  cpu_end = clock::now();
         packets_until_completion_check = num_loops_before_completion_check;
-        // DEBUG_LOG("CPU time for buffer completion check: {} us",
-        //           std::chrono::duration_cast<std::chrono::microseconds>(
-        //               cpu_end - cpu_start)
-        //               .count());
       }
     }
     std::cout << "Main processor thread is shutting down.";
@@ -664,6 +662,10 @@ public:
     CPU_SET(worker_id, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
+    std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
+
+    uint64_t latest_packet_received_batch[T::NR_CHANNELS][T::NR_FPGA_SOURCES] =
+        {};
     while (running.load(std::memory_order_acquire)) {
       std::unique_lock<std::mutex> lock(work_mutex);
       work_cv.wait(lock, [&] {
@@ -674,14 +676,9 @@ public:
         break;
       }
 
-      std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
-      get_global_max_packet_array(global_max);
       auto [start, end] = worker_tasks[worker_id];
       lock.unlock();
-      // std::cout << "Worker with id " << worker_id
-      //           << " task started with start " << start << " and end " <<
-      //           end
-      //           << std::endl;
+
       int idx = start;
 
       while (idx != end) {
@@ -695,11 +692,22 @@ public:
         __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
 
         if (entry->length > 0 && !entry->processed) {
-          process_packet_data(entry, idx, global_max);
+          process_packet_data(entry, idx, global_max,
+                              latest_packet_received_batch);
         }
         idx = (idx + 1) % RING_BUFFER_SIZE;
       }
 
+      {
+        std::lock_guard lock(latest_packet_mutex);
+        for (auto i = 0; i < T::NR_CHANNELS; ++i) {
+          for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
+            latest_packet_received[i][j] =
+                std::max(latest_packet_received[i][j],
+                         latest_packet_received_batch[i][j]);
+          }
+        }
+      }
       lock.lock();
       worker_completed_task[worker_id].store(true);
       worker_has_task[worker_id].store(false);
@@ -810,8 +818,6 @@ public:
       size_t buffer_index = buffers_ready_for_pipeline.front();
       buffers_ready_for_pipeline.pop();
       lock.unlock();
-      DEBUG_LOG("Buffer index {} picked up by pipeline feeder...",
-                buffer_index);
       pipeline_->execute_pipeline(d_samples[buffer_index]);
       pipeline_runs_queued += 1;
     }
