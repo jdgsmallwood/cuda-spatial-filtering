@@ -55,7 +55,7 @@ int main(int argc, char *argv[]) {
                    nr_lambda_polarizations, nr_lambda_receivers_per_packet,
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers, nr_lambda_padded_receivers,
-                   nr_correlation_blocks_to_integrate, true>;
+                   nr_correlation_blocks_to_integrate, true, 256>;
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
