@@ -643,6 +643,7 @@ public:
 
     if (buffer_count_ >= batch_size_) {
       flush();
+      buffer_count_ = 0;
     }
   }
 
