@@ -165,9 +165,10 @@ int main(int argc, char *argv[]) {
   }
 
   std::cout << "Initializing pipeline...\n";
+  key_t rfi_dada_key = 0xbeef;
   LambdaPulsarFoldPipeline<Config, true> pipeline(
       &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
-      DADA_DEFAULT_BLOCK_KEY, "header.hdr");
+      DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
