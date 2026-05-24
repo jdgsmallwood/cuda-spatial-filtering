@@ -566,6 +566,10 @@ public:
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
 
+    std::cout << "HDF5Visibilities Writer starting with element_count "
+              << element_count_ << " and total size " << sizeof(T) << " bytes."
+              << " Writing in batch_size " << batch_size_ << std::endl;
+
     vis_buffer_.reserve(batch_size_ * element_count_);
     missing_buffer_.reserve(batch_size_ * 3);
     seq_buffer_.reserve(batch_size_ * 2);
@@ -664,6 +668,10 @@ public:
     vis_missing_dataset_.resize({missing_size + buffer_count_, 3});
     vis_missing_dataset_.select({missing_size, 0}, {buffer_count_, 3})
         .write_raw(missing_buffer_.data());
+
+    vis_buffer_.clear();
+    seq_buffer_.clear();
+    missing_buffer_.clear();
 
     file_.flush();
   }
