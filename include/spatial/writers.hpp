@@ -562,8 +562,7 @@ public:
       HighFive::File &file, const int min_channel, const int max_channel,
       const std::unordered_map<int, int> *antenna_map = nullptr,
       const int num_blocks = 100)
-      : VisibilitiesWriter<T>(num_blocks), file_(file),
-        buffer_size_(num_blocks),
+      : VisibilitiesWriter<T>(num_blocks), file_(file), batch_size_(num_blocks),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
 
