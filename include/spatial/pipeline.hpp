@@ -4502,7 +4502,6 @@ public:
       }
 
       uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
-
       // write 1 block worth of data block via the "block" method
       {
         uint64_t rfi_block_size = 0;

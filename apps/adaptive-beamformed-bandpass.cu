@@ -161,7 +161,7 @@ int main(int argc, char *argv[]) {
   output->start_writer_loop();
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
-  int packets_received = 0;
+  int64_t packets_received = 0;
   int timeout = 0;
   while (state.running) {
     sleep(5);
