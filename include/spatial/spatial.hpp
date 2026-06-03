@@ -318,6 +318,9 @@ public:
         INFO_LOG(
             "[BufferInitialization] Buffer {} for FPGA {} goes from {} to {}",
             i, j, buffers[i].start_seq[j], buffers[i].end_seq[j]);
+        DEBUG_LOG("[BufferInitialization] Buffer initialization had common "
+                  "delay {} and other delay {} ",
+                  i, fpga_delay, fpga_delays_packet_aligned[j]);
         // we know 0 will be the first one - so no need to add zero
         if (i != 0 && j == 0) {
           // can just use the first FPGA for checking which buffer should
