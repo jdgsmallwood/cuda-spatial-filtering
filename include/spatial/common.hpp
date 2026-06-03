@@ -128,13 +128,13 @@ struct CommonArgs {
   std::string beam_weights_filename;
   std::string nr_signal_eigenvectors_filename;
   std::string ifname;
+  std::string fpga_delay_file;
   bool loop_pcap = false;
   bool debug_logging = false;
   bool apply_gains = false;
   int min_freq_channel = 0;
   int port = 36001;
   int packets_to_receive = 0;
-  int64_t fpga_delay = 0;
   json config;
   json gains;
   json beam_weights;
@@ -143,6 +143,7 @@ struct CommonArgs {
   std::unordered_map<int, int> antenna_mapping;
   std::unordered_map<int, int> nr_signal_eigenvectors;
   std::vector<std::string> fpga_names;
+  std::unordered_map<int, int64_t> fpga_delays;
 };
 
 // Registers and parses the arguments that are common to every pipeline
@@ -200,11 +201,10 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(0)
       .store_into(args.packets_to_receive);
 
-  program.add_argument("-y", "--delay")
-      .help("Delay from FPGA 1 to 0")
-      .default_value(int64_t{0})
-      .scan<'i', int64_t>()
-      .store_into(args.fpga_delay);
+  program.add_argument("-y", "--delay-file")
+      .help("JSON file with delays between each FPGA.")
+      .default_value("alveo_delays.json")
+      .store_into(args.fpga_delay_file);
 
   program.add_argument("-g", "--gains")
       .help("JSON file with weights")
@@ -255,6 +255,15 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     }
 
     std::cout << args.config.dump(4) << std::endl;
+
+    std::ifstream j(args.fpga_delay_file);
+    json delays = json::parse(j);
+
+    for (const auto &[key, value] : delays.items()) {
+      args.fpga_delays[key] = value;
+      std::cout << "setting FPGA delays for Alveo " << key << " to " << value
+                << std::endl;
+    }
 
     const std::unordered_map<std::string, int> ifname_to_fpga{
         {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};

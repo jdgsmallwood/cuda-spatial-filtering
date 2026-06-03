@@ -63,12 +63,8 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
   std::array<int64_t, nr_fpga_sources> fpga_delays;
-  for (auto i = 0; i < nr_fpga_sources; ++i) {
-    fpga_delays[i] = 0;
-  }
-
-  if (nr_fpga_sources == 2) {
-    fpga_delays[1] = args.fpga_delay;
+  for (auto i : args.fpga_id_vec) {
+    fpga_delays[i] = args.fpga_delays[i];
   }
 
   auto gains = get_gains_structure<Config>(args);
