@@ -133,15 +133,10 @@ public:
     }
 
     for (auto i = 0; i < T::NR_FPGA_SOURCES; ++i) {
-      if (i == 0) {
-        fpga_delays_packet_aligned[i] = 0;
-        fpga_delays_subpacket[i] = 0;
-      } else {
-        auto r = nearest_multiple(fpga_delays[i],
-                                  static_cast<int64_t>(nr_between_samples));
-        fpga_delays_packet_aligned[i] = r.closest;
-        fpga_delays_subpacket[i] = r.remainder;
-      }
+      auto r = nearest_multiple(fpga_delays[i],
+                                static_cast<int64_t>(nr_between_samples));
+      fpga_delays_packet_aligned[i] = r.closest;
+      fpga_delays_subpacket[i] = r.remainder;
     }
   };
   ~ProcessorState() { cleanup(); };
