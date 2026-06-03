@@ -53,12 +53,8 @@ int main(int argc, char *argv[]) {
   }
 
   std::array<int64_t, nr_fpga_sources> fpga_delays;
-  for (auto i = 0; i < nr_fpga_sources; ++i) {
-    fpga_delays[i] = 0;
-  }
-
-  if (nr_fpga_sources == 2) {
-    fpga_delays[1] = args.fpga_delay;
+  for (auto i : args.fpga_id_vec) {
+    fpga_delays[i] = args.fpga_delays[i];
   }
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
