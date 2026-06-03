@@ -65,6 +65,8 @@ int main(int argc, char *argv[]) {
   std::array<int64_t, nr_fpga_sources> fpga_delays;
   for (auto i : args.fpga_id_vec) {
     fpga_delays[i] = args.fpga_delays[i];
+    std::cout << "FPGA delay for ALVEO " << i << " is " << fpga_delays[i]
+              << std::endl;
   }
 
   auto gains = get_gains_structure<Config>(args);
