@@ -260,7 +260,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     json delays = json::parse(j);
 
     for (const auto &[key, value] : delays.items()) {
-      args.fpga_delays[key] = value;
+      args.fpga_delays[std::stoi(key)] = value;
       std::cout << "setting FPGA delays for Alveo " << key << " to " << value
                 << std::endl;
     }
