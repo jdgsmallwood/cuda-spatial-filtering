@@ -1,4 +1,15 @@
 {
+"array_location": {
+  "_comment": "Placeholder -- replace with the array's surveyed reference position to enable source tracking (--targets-filename).",
+  "latitude_deg": 0,
+  "longitude_deg": 0,
+  "height_m": 0
+},
+"frequency_plan": {
+  "_comment": "Placeholder -- replace with the real sky-frequency plan to enable source tracking. base_frequency_hz is the frequency of channel 0; channel_bandwidth_hz is the per-channel width.",
+  "base_frequency_hz": 0,
+  "channel_bandwidth_hz": 0
+},
 "antenna_positions": {
   "0": {
       "0": {"east": 0, "north": 0, "up": 0},

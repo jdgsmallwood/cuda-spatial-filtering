@@ -42,9 +42,20 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
+# Built standalone (not linked against test_app_common) so pointing.cpp's
+# casacore calls are compiled/linked entirely by the system C++ compiler --
+# see the comment blocks in pointing.hpp and src/CMakeLists.txt for why mixing
+# casacore with the CUDA/conda toolchain produces ABI-mismatched link errors.
+add_executable(
+  PointingTests test_pointing.cpp $<TARGET_OBJECTS:pointing>
+)
+target_include_directories(PointingTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(PointingTests PRIVATE GTest::gtest_main ${CASACORE_LIBRARIES})
+
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(PointingTests)

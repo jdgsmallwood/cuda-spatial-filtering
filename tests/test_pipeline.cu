@@ -124,7 +124,11 @@ TEST_F(CudaIsolatedTest, Ex1) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -214,7 +218,11 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -320,7 +328,11 @@ TEST_F(CudaIsolatedTest, PolarizationBlankTest2) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -424,7 +436,11 @@ TEST_F(CudaIsolatedTest, BeamBlankTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -506,7 +522,11 @@ TEST_F(CudaIsolatedTest, ChannelWeightBlankTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -591,7 +611,11 @@ TEST_F(CudaIsolatedTest, ChannelSamplesBlankTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -663,7 +687,11 @@ TEST_F(CudaIsolatedTest, ScalesTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -755,7 +783,11 @@ TEST_F(CudaIsolatedTest, ScalesMultiplePacketsTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(2, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      2, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           /*num_buffers=*/2));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -844,7 +876,11 @@ TEST_F(CudaIsolatedTest, ScalesPerReceiverTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(2, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      2, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           /*num_buffers=*/2));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -946,7 +982,11 @@ TEST_F(CudaIsolatedTest, EigenvalueBasic) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(NR_PACKETS_FOR_CORRELATION, &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -1073,8 +1113,11 @@ TEST_F(CudaIsolatedTest, DelayBeamTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(Config::NR_PACKETS_FOR_CORRELATION,
-                                     &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      Config::NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           Config::NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -1165,8 +1208,11 @@ TEST_F(CudaIsolatedTest, GainsTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(Config::NR_PACKETS_FOR_CORRELATION,
-                                     &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      Config::NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           Config::NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -1263,8 +1309,11 @@ TEST_F(CudaIsolatedTest, GainsOnlyOneFPGAPresentTest) {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaGPUPipeline<Config> pipeline(Config::NR_PACKETS_FOR_CORRELATION,
-                                     &h_weights);
+  LambdaGPUPipeline<Config> pipeline(
+      Config::NR_PACKETS_FOR_CORRELATION, &h_weights,
+      BeamSteering<Config>({}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0,
+                           ArrayLocation{}, /*update_interval_seconds=*/180.0,
+                           Config::NR_PACKETS_FOR_CORRELATION));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);
@@ -1298,5 +1347,199 @@ TEST_F(CudaIsolatedTest, GainsOnlyOneFPGAPresentTest) {
         }
       }
     }
+  }
+};
+
+TEST_F(CudaIsolatedTest, ComputeSteeringWeightsMatchesGeometricPhaseFormula) {
+  // Cross-checks compute_steering_weights() end-to-end for a "radec" target:
+  // calls topocentric_direction() directly with the same inputs and
+  // re-derives the expected per-receiver weight from the documented formula
+  // (phase = -2*pi*f/c * (l*east + m*north + n*up), normalized by
+  // 1/NR_RECEIVERS, unit calibration gain), exercising the channel ->
+  // frequency mapping and the antenna_mapping -> antenna_positions lookup
+  // chain along the way.
+  using namespace std::chrono;
+
+  const std::vector<BeamTarget> targets{
+      BeamTarget{"radec", /*ra_deg=*/83.633, /*dec_deg=*/22.014}};
+  const std::unordered_map<int, ENUPosition> antenna_positions{
+      {100, ENUPosition{0.0, 0.0, 0.0}},
+      {101, ENUPosition{25.0, -10.0, 1.5}},
+      {102, ENUPosition{-12.5, 30.0, -2.0}},
+      {103, ENUPosition{8.0, 8.0, 0.5}},
+  };
+  // Receiver index -> absolute antenna ID (deliberately not the identity
+  // mapping, so the lookup chain is actually exercised).
+  const std::unordered_map<int, int> antenna_mapping{
+      {0, 100}, {1, 101}, {2, 102}, {3, 103}};
+  const FrequencyPlan frequency_plan{/*base_frequency_hz=*/1.4e9,
+                                     /*channel_bandwidth_hz=*/1.0e5};
+  const int min_freq_channel = 64;
+  const ArrayLocation array_location{/*latitude_deg=*/52.91,
+                                     /*longitude_deg=*/6.87,
+                                     /*height_m=*/30.0};
+  const auto utc_time = system_clock::now();
+
+  BeamWeightsT<Config> result = compute_steering_weights<Config>(
+      targets, antenna_positions, antenna_mapping, frequency_plan,
+      min_freq_channel, array_location, utc_time,
+      /*calibration_gains=*/nullptr);
+
+  DirectionCosines dc = topocentric_direction(
+      targets[0].ra_deg, targets[0].dec_deg, utc_time,
+      array_location.latitude_deg, array_location.longitude_deg,
+      array_location.height_m);
+
+  constexpr double kHalfPrecisionTolerance = 2e-3;
+  for (size_t chan = 0; chan < Config::NR_CHANNELS; ++chan) {
+    double frequency_hz = channel_to_frequency_hz(
+        min_freq_channel + static_cast<int>(chan), frequency_plan);
+    double phase_scale =
+        -2.0 * M_PI * frequency_hz / kSpeedOfLightMetresPerSecond;
+
+    for (size_t receiver_idx = 0; receiver_idx < Config::NR_RECEIVERS;
+         ++receiver_idx) {
+      const ENUPosition &enu =
+          antenna_positions.at(antenna_mapping.at(receiver_idx));
+      double phase = phase_scale * (dc.l * enu.east + dc.m * enu.north +
+                                    dc.n * enu.up);
+      std::complex<double> expected =
+          (1.0 / static_cast<double>(Config::NR_RECEIVERS)) *
+          std::complex<double>(std::cos(phase), std::sin(phase));
+
+      for (size_t pol = 0; pol < Config::NR_POLARIZATIONS; ++pol) {
+        std::complex<__half> actual =
+            result.weights[chan][pol][/*beam=*/0][receiver_idx];
+        EXPECT_NEAR(__half2float(actual.real()), expected.real(),
+                    kHalfPrecisionTolerance)
+            << "chan=" << chan << " pol=" << pol
+            << " receiver=" << receiver_idx;
+        EXPECT_NEAR(__half2float(actual.imag()), expected.imag(),
+                    kHalfPrecisionTolerance)
+            << "chan=" << chan << " pol=" << pol
+            << " receiver=" << receiver_idx;
+      }
+    }
+  }
+};
+
+TEST_F(CudaIsolatedTest, BeamSteeringInactiveWithoutTargetsIsNoOp) {
+  // An empty target list (no --targets-filename) makes BeamSteering
+  // permanently inert: active() is false and maybe_refresh() never touches
+  // device_weights, so a pre-existing sentinel value must survive untouched.
+  BeamSteering<Config> steering(
+      {}, {}, {}, FrequencyPlan{}, /*min_freq_channel=*/0, ArrayLocation{},
+      /*update_interval_seconds=*/180.0, /*num_buffers=*/2);
+  EXPECT_FALSE(steering.active());
+
+  auto device_weights = make_device_ptr<BeamWeightsT<Config>>();
+  BeamWeightsT<Config> sentinel{};
+  sentinel.weights[0][0][0][0] =
+      std::complex<__half>(__float2half(0.5f), __float2half(-0.25f));
+  CUDA_CHECK(cudaMemcpy(device_weights.get(), &sentinel, sizeof(sentinel),
+                        cudaMemcpyDefault));
+
+  cudaStream_t stream;
+  CUDA_CHECK(cudaStreamCreate(&stream));
+
+  EXPECT_FALSE(steering.maybe_refresh(device_weights.get(), stream, 0));
+  EXPECT_FALSE(steering.maybe_refresh(device_weights.get(), stream, 1));
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+
+  BeamWeightsT<Config> after{};
+  CUDA_CHECK(cudaMemcpy(&after, device_weights.get(), sizeof(after),
+                        cudaMemcpyDefault));
+  EXPECT_EQ(__half2float(after.weights[0][0][0][0].real()), 0.5f);
+  EXPECT_EQ(__half2float(after.weights[0][0][0][0].imag()), -0.25f);
+
+  CUDA_CHECK(cudaStreamDestroy(stream));
+};
+
+TEST_F(CudaIsolatedTest, BeamSteeringSpreadsRefreshAcrossBuffersRoundRobin) {
+  // BeamSteering starts "always overdue", so the first maybe_refresh() call
+  // (buffer_index 0) synthesizes fresh weights and arms
+  // buffers_pending_refresh_ = num_buffers; the following num_buffers-1 calls
+  // (one per buffer, round-robin) copy them down, then the cycle goes quiet
+  // until the next due tick. A "zenith" target is time-invariant
+  // (zenith_direction() ignores `now`), so a second compute_steering_weights()
+  // call is guaranteed to produce bit-identical output to compare against.
+  using namespace std::chrono;
+  constexpr int kNumBuffers = 3;
+
+  const std::vector<BeamTarget> targets{BeamTarget{"zenith"}};
+  const FrequencyPlan frequency_plan{/*base_frequency_hz=*/1.4e9,
+                                     /*channel_bandwidth_hz=*/1.0e5};
+  const ArrayLocation array_location{/*latitude_deg=*/52.91,
+                                     /*longitude_deg=*/6.87,
+                                     /*height_m=*/30.0};
+  const std::unordered_map<int, ENUPosition> antenna_positions{
+      {0, ENUPosition{0.0, 0.0, 0.0}},
+      {1, ENUPosition{25.0, -10.0, 1.5}},
+      {2, ENUPosition{-12.5, 30.0, -2.0}},
+      {3, ENUPosition{8.0, 8.0, 0.5}},
+  };
+  const std::unordered_map<int, int> antenna_mapping{
+      {0, 0}, {1, 1}, {2, 2}, {3, 3}};
+
+  BeamSteering<Config> steering(targets, antenna_positions, antenna_mapping,
+                                frequency_plan, /*min_freq_channel=*/0,
+                                array_location,
+                                /*update_interval_seconds=*/180.0, kNumBuffers);
+  ASSERT_TRUE(steering.active());
+
+  std::vector<DevicePtr<BeamWeightsT<Config>>> device_weights;
+  std::vector<cudaStream_t> streams(kNumBuffers);
+  for (int i = 0; i < kNumBuffers; ++i) {
+    device_weights.push_back(make_device_ptr<BeamWeightsT<Config>>());
+    CUDA_CHECK(cudaStreamCreate(&streams[i]));
+    BeamWeightsT<Config> sentinel{};
+    sentinel.weights[0][0][0][0] = std::complex<__half>(
+        __float2half(100.0f + static_cast<float>(i)), __float2half(0.0f));
+    CUDA_CHECK(cudaMemcpy(device_weights[i].get(), &sentinel, sizeof(sentinel),
+                          cudaMemcpyDefault));
+  }
+
+  // buffer 0: overdue at startup -> recompute + consume the first refresh.
+  EXPECT_TRUE(steering.maybe_refresh(device_weights[0].get(), streams[0], 0));
+  // buffers 1..kNumBuffers-1 pick theirs up over the next calls.
+  for (int i = 1; i < kNumBuffers; ++i) {
+    EXPECT_TRUE(
+        steering.maybe_refresh(device_weights[i].get(), streams[i], i));
+  }
+  // cycle complete; nothing due again until the next update_interval.
+  EXPECT_FALSE(steering.maybe_refresh(device_weights[0].get(), streams[0], 0));
+
+  for (auto stream : streams) {
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+  }
+
+  BeamWeightsT<Config> expected = compute_steering_weights<Config>(
+      targets, antenna_positions, antenna_mapping, frequency_plan,
+      /*min_freq_channel=*/0, array_location, system_clock::now(),
+      /*calibration_gains=*/nullptr);
+
+  for (int i = 0; i < kNumBuffers; ++i) {
+    BeamWeightsT<Config> actual{};
+    CUDA_CHECK(cudaMemcpy(&actual, device_weights[i].get(), sizeof(actual),
+                          cudaMemcpyDefault));
+    for (size_t chan = 0; chan < Config::NR_CHANNELS; ++chan) {
+      for (size_t pol = 0; pol < Config::NR_POLARIZATIONS; ++pol) {
+        for (size_t receiver_idx = 0; receiver_idx < Config::NR_RECEIVERS;
+             ++receiver_idx) {
+          auto a = actual.weights[chan][pol][0][receiver_idx];
+          auto e = expected.weights[chan][pol][0][receiver_idx];
+          EXPECT_EQ(__half2float(a.real()), __half2float(e.real()))
+              << "buffer=" << i << " chan=" << chan << " pol=" << pol
+              << " receiver=" << receiver_idx;
+          EXPECT_EQ(__half2float(a.imag()), __half2float(e.imag()))
+              << "buffer=" << i << " chan=" << chan << " pol=" << pol
+              << " receiver=" << receiver_idx;
+        }
+      }
+    }
+  }
+
+  for (auto stream : streams) {
+    CUDA_CHECK(cudaStreamDestroy(stream));
   }
 };
