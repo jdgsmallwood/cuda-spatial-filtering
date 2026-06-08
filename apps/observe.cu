@@ -136,14 +136,39 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights);
+  // If beam steering is enabled (a --targets-filename was supplied) and
+  // calibration gains are also requested (-a / --gains-filename), fold the
+  // calibration into the synthesized steering weights (see
+  // compute_steering_weights()/BeamSteering in pipeline.hpp) rather than
+  // applying it a second time at ingest via set_antenna_gains()/d_gains --
+  // applying it twice would square the correction. `gains` (declared above,
+  // and outliving `pipeline`/`beam_steering` since it's declared first) is
+  // reused as the calibration source either way.
+  const bool fold_calibration_into_steering =
+      !args.beam_targets.empty() && args.apply_gains;
+
+  BeamSteering<Config> beam_steering(
+      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.frequency_plan, args.min_freq_channel, args.array_location,
+      args.steering_update_interval_seconds, num_buffers,
+      fold_calibration_into_steering ? &gains : nullptr);
+
+  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights,
+                                     std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
   if (args.apply_gains) {
-    std::cout << "Applying gains as -a is selected!" << std::endl;
-    pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+    if (fold_calibration_into_steering) {
+      std::cout << "Folding calibration gains into synthesized steering "
+                   "weights (skipping separate ingest-time application via "
+                   "set_antenna_gains to avoid double-applying)"
+                << std::endl;
+    } else {
+      std::cout << "Applying gains as -a is selected!" << std::endl;
+      pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+    }
   } else {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }

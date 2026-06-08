@@ -134,7 +134,17 @@ int main() {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaCorrBeamOnlyGPUPipeline<Config> pipeline(5, &h_weights);
+  // This synthetic benchmark has no CommonArgs/config.json (it parses no CLI
+  // args and feeds a DummyFinalPacketData rather than a real array), so there
+  // is no target/geometry to steer toward -- construct BeamSteering with an
+  // empty target list, which makes it permanently inert (active() == false,
+  // maybe_refresh() always a no-op), leaving the static `h_weights` behaviour
+  // below completely unchanged.
+  BeamSteering<Config> beam_steering({}, {}, {}, FrequencyPlan{}, 0,
+                                     ArrayLocation{}, 180.0, 5);
+
+  LambdaCorrBeamOnlyGPUPipeline<Config> pipeline(5, &h_weights,
+                                                 std::move(beam_steering));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);

@@ -160,11 +160,35 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // If beam steering is enabled (a --targets-filename was supplied) and
+  // calibration gains are also requested (-a / --gains-filename), fold the
+  // calibration into the synthesized steering weights (see
+  // compute_steering_weights()/BeamSteering in pipeline.hpp) so it isn't
+  // applied a second time elsewhere. `calibration_gains` must outlive
+  // `beam_steering`/`pipeline` -- it's declared first in this scope, so it's
+  // destroyed last.
+  const bool fold_calibration_into_steering =
+      !args.beam_targets.empty() && args.apply_gains;
+  typename Config::AntennaGains calibration_gains{};
+  if (fold_calibration_into_steering) {
+    calibration_gains = get_gains_structure<Config>(args);
+  }
+
+  // LambdaPulsarFoldPipeline runs with a single GPU buffer (num_buffers{1} in
+  // its definition), so BeamSteering is constructed with num_buffers = 1 to
+  // match -- each due refresh copies fresh weights exactly once.
+  BeamSteering<Config> beam_steering(
+      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.frequency_plan, args.min_freq_channel, args.array_location,
+      args.steering_update_interval_seconds, /*num_buffers=*/1,
+      fold_calibration_into_steering ? &calibration_gains : nullptr);
+
   std::cout << "Initializing pipeline...\n";
   key_t rfi_dada_key = 0xbeef;
   LambdaPulsarFoldPipeline<Config, true> pipeline(
       &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
-      DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key);
+      DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key,
+      std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

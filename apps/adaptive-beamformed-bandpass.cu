@@ -122,10 +122,30 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // If beam steering is enabled (a --targets-filename was supplied) and
+  // calibration gains are also requested (-a / --gains-filename), fold the
+  // calibration into the synthesized steering weights (see
+  // compute_steering_weights()/BeamSteering in pipeline.hpp) so it isn't
+  // applied a second time elsewhere. `calibration_gains` must outlive
+  // `beam_steering`/`pipeline` -- it's declared first in this scope, so it's
+  // destroyed last.
+  const bool fold_calibration_into_steering =
+      !args.beam_targets.empty() && args.apply_gains;
+  typename Config::AntennaGains calibration_gains{};
+  if (fold_calibration_into_steering) {
+    calibration_gains = get_gains_structure<Config>(args);
+  }
+
+  BeamSteering<Config> beam_steering(
+      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.frequency_plan, args.min_freq_channel, args.array_location,
+      args.steering_update_interval_seconds, num_buffers,
+      fold_calibration_into_steering ? &calibration_gains : nullptr);
+
   std::cout << "Initializing pipeline...\n";
   LambdaAdaptiveBeamformedSpectraPipeline<Config> pipeline(
       num_buffers, &h_weights, args.nr_signal_eigenvectors,
-      args.min_freq_channel);
+      args.min_freq_channel, std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

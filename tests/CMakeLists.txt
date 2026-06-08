@@ -42,9 +42,25 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
+# PointingTests covers spatial/pointing.hpp's topocentric_direction(), whose
+# casacore-calling implementation (src/pointing.cpp, linked in here via the
+# `pointing` OBJECT library defined in src/CMakeLists.txt) must be compiled
+# and linked by the system C++ compiler against the system casacore libraries
+# -- mirroring that target's wiring exactly, and deliberately NOT linking
+# test_app_common (whose CUDA::cudart/ccglib/cutensor/... dependencies inject
+# "-isystem /opt/conda/include", resolving <casacore/...> to an
+# ABI-incompatible header copy and producing "undefined reference" link
+# errors -- see the comment blocks in pointing.hpp and src/CMakeLists.txt).
+add_executable(
+  PointingTests test_pointing.cpp $<TARGET_OBJECTS:pointing>
+)
+target_include_directories(PointingTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(PointingTests PRIVATE GTest::gtest_main ${CASACORE_LIBRARIES})
+
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(PointingTests)
