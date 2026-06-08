@@ -56,9 +56,8 @@ struct BeamTarget {
 
 inline double channel_to_frequency_hz(int absolute_channel_index,
                                       const FrequencyPlan &plan) {
-  return plan.base_frequency_hz +
-         static_cast<double>(absolute_channel_index) *
-             plan.channel_bandwidth_hz;
+  return plan.base_frequency_hz + static_cast<double>(absolute_channel_index) *
+                                      plan.channel_bandwidth_hz;
 }
 
 // Direction cosines in the local East-North-Up frame:

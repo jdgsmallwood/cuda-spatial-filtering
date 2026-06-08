@@ -44,8 +44,7 @@ TEST(PointingTest, ToMjdUtcMatchesJ2000Epoch) {
   // 2000-01-01T12:00:00 UTC is MJD 51544.5 by definition (the J2000.0 epoch);
   // 946684800 is that date's Unix timestamp at 00:00 UTC.
   using namespace std::chrono;
-  auto j2000_noon =
-      system_clock::time_point{} + seconds(946684800) + hours(12);
+  auto j2000_noon = system_clock::time_point{} + seconds(946684800) + hours(12);
   EXPECT_NEAR(to_mjd_utc(j2000_noon), 51544.5, 1e-9);
 }
 

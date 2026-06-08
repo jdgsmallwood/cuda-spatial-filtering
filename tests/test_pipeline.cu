@@ -1401,8 +1401,8 @@ TEST_F(CudaIsolatedTest, ComputeSteeringWeightsMatchesGeometricPhaseFormula) {
          ++receiver_idx) {
       const ENUPosition &enu =
           antenna_positions.at(antenna_mapping.at(receiver_idx));
-      double phase = phase_scale * (dc.l * enu.east + dc.m * enu.north +
-                                    dc.n * enu.up);
+      double phase =
+          phase_scale * (dc.l * enu.east + dc.m * enu.north + dc.n * enu.up);
       std::complex<double> expected =
           (1.0 / static_cast<double>(Config::NR_RECEIVERS)) *
           std::complex<double>(std::cos(phase), std::sin(phase));
@@ -1503,8 +1503,7 @@ TEST_F(CudaIsolatedTest, BeamSteeringSpreadsRefreshAcrossBuffersRoundRobin) {
   EXPECT_TRUE(steering.maybe_refresh(device_weights[0].get(), streams[0], 0));
   // buffers 1..kNumBuffers-1 pick theirs up over the next calls.
   for (int i = 1; i < kNumBuffers; ++i) {
-    EXPECT_TRUE(
-        steering.maybe_refresh(device_weights[i].get(), streams[i], i));
+    EXPECT_TRUE(steering.maybe_refresh(device_weights[i].get(), streams[i], i));
   }
   // cycle complete; nothing due again until the next update_interval.
   EXPECT_FALSE(steering.maybe_refresh(device_weights[0].get(), streams[0], 0));

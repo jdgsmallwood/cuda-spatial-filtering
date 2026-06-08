@@ -13,10 +13,11 @@
 #include <casacore/measures/Measures/MeasConvert.h>
 #include <casacore/measures/Measures/MeasFrame.h>
 
-DirectionCosines topocentric_direction(double ra_deg, double dec_deg,
-                                       std::chrono::system_clock::time_point utc_time,
-                                       double latitude_deg, double longitude_deg,
-                                       double height_m) {
+DirectionCosines
+topocentric_direction(double ra_deg, double dec_deg,
+                      std::chrono::system_clock::time_point utc_time,
+                      double latitude_deg, double longitude_deg,
+                      double height_m) {
   using namespace casacore;
 
   MPosition site(MVPosition(Quantity(height_m, "m"),

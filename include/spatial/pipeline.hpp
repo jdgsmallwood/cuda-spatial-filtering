@@ -70,10 +70,11 @@ inline constexpr double kSpeedOfLightMetresPerSecond = 299792458.0;
 // for pure geometric steering (gain 1+0i).
 //
 // `antenna_mapping` (receiver index -> absolute antenna ID) is used to look
-// `antenna_positions` up by absolute ID while writing `weights[...][receiver_idx]`
-// in receiver-index order, matching get_gains_structure()'s convention.
-// Receivers absent from either map fall back to ENUPosition{0,0,0} (zero
-// path-length difference, i.e. zero geometric phase).
+// `antenna_positions` up by absolute ID while writing
+// `weights[...][receiver_idx]` in receiver-index order, matching
+// get_gains_structure()'s convention. Receivers absent from either map fall
+// back to ENUPosition{0,0,0} (zero path-length difference, i.e. zero geometric
+// phase).
 template <typename T>
 inline BeamWeightsT<T> compute_steering_weights(
     const std::vector<BeamTarget> &targets,
@@ -90,10 +91,10 @@ inline BeamWeightsT<T> compute_steering_weights(
     const BeamTarget &target =
         (b < targets.size()) ? targets[b] : kDefaultZenithTarget;
 
-    DirectionCosines dc = (target.mode == "zenith")
-                              ? zenith_direction()
-                              : topocentric_direction(
-                                    target.ra_deg, target.dec_deg, utc_time,
+    DirectionCosines dc =
+        (target.mode == "zenith")
+            ? zenith_direction()
+            : topocentric_direction(target.ra_deg, target.dec_deg, utc_time,
                                     array_location.latitude_deg,
                                     array_location.longitude_deg,
                                     array_location.height_m);
@@ -107,8 +108,7 @@ inline BeamWeightsT<T> compute_steering_weights(
       for (size_t receiver_idx = 0; receiver_idx < T::NR_RECEIVERS;
            ++receiver_idx) {
         ENUPosition enu{};
-        auto mapping_it =
-            antenna_mapping.find(static_cast<int>(receiver_idx));
+        auto mapping_it = antenna_mapping.find(static_cast<int>(receiver_idx));
         if (mapping_it != antenna_mapping.end()) {
           auto position_it = antenna_positions.find(mapping_it->second);
           if (position_it != antenna_positions.end()) {
@@ -116,8 +116,8 @@ inline BeamWeightsT<T> compute_steering_weights(
           }
         }
 
-        double phase = phase_scale * (dc.l * enu.east + dc.m * enu.north +
-                                      dc.n * enu.up);
+        double phase =
+            phase_scale * (dc.l * enu.east + dc.m * enu.north + dc.n * enu.up);
         std::complex<double> steering_phasor(std::cos(phase), std::sin(phase));
 
         for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
@@ -128,8 +128,8 @@ inline BeamWeightsT<T> compute_steering_weights(
                   : std::complex<double>(1.0, 0.0);
 
           std::complex<double> final_weight =
-              (1.0 / static_cast<double>(T::NR_RECEIVERS)) *
-              calibration_gain * steering_phasor;
+              (1.0 / static_cast<double>(T::NR_RECEIVERS)) * calibration_gain *
+              steering_phasor;
 
           result.weights[chan][pol][b][receiver_idx] = std::complex<__half>(
               __float2half(static_cast<float>(final_weight.real())),
@@ -1684,7 +1684,6 @@ public:
     // that ordering is what makes this safe without extra synchronization.
     beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
 
-
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
     INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
@@ -2328,7 +2327,6 @@ public:
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
     beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
-
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -4512,7 +4510,6 @@ public:
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
     beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
-
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;

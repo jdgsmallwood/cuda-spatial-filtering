@@ -279,7 +279,7 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Initializing pipeline...\n";
   LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &projected,
-                                                    std::move(beam_steering));
+                                                   std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

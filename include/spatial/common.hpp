@@ -298,7 +298,8 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
           plan.value("base_frequency_hz", 0.0);
       args.frequency_plan.channel_bandwidth_hz =
           plan.value("channel_bandwidth_hz", 0.0);
-      std::cout << "Frequency plan: base=" << args.frequency_plan.base_frequency_hz
+      std::cout << "Frequency plan: base="
+                << args.frequency_plan.base_frequency_hz
                 << "Hz channel_bandwidth="
                 << args.frequency_plan.channel_bandwidth_hz << "Hz\n";
     }
@@ -319,8 +320,8 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
         }
 
         args.beam_targets.push_back(bt);
-        std::cout << "Beam target " << args.beam_targets.size() - 1 << ": mode="
-                  << bt.mode;
+        std::cout << "Beam target " << args.beam_targets.size() - 1
+                  << ": mode=" << bt.mode;
         if (bt.mode == "radec") {
           std::cout << " ra_deg=" << bt.ra_deg << " dec_deg=" << bt.dec_deg;
         }
