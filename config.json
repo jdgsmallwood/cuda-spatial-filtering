@@ -1,14 +1,14 @@
 {
 "array_location": {
-  "_comment": "Placeholder -- replace with the array's surveyed reference position to enable source tracking (--targets-filename).",
-  "latitude_deg": 0,
-  "longitude_deg": 0,
-  "height_m": 0
+  "_comment": "ATCA site, Narrabri NSW: lat -30 18 46.385 S, lon 149 33 00.500 E, 237m above sea level.",
+  "latitude_deg": -30.31288472,
+  "longitude_deg": 149.55013889,
+  "height_m": 237
 },
 "frequency_plan": {
-  "_comment": "Placeholder -- replace with the real sky-frequency plan to enable source tracking. base_frequency_hz is the frequency of channel 0; channel_bandwidth_hz is the per-channel width.",
+  "_comment": "Channels are spaced 781.25 kHz apart (oversampled by 32/27, hence overlapping); absolute channel 0 sits at 0 Hz, so a channel's center frequency is channel_number * 781.25 kHz.",
   "base_frequency_hz": 0,
-  "channel_bandwidth_hz": 0
+  "channel_bandwidth_hz": 781250
 },
 "antenna_positions": {
   "0": {
