@@ -6,7 +6,7 @@
   "height_m": 237
 },
 "frequency_plan": {
-  "_comment": "Channels are spaced 781.25 kHz apart (oversampled by 32/27, hence overlapping); absolute channel 0 sits at 0 Hz, so a channel's center frequency is channel_number * 781.25 kHz.",
+  "_comment": "Sky frequency of a channel = base_frequency_hz + abs_channel * channel_bandwidth_hz, where abs_channel is the absolute channel number (--min_freq_channel + in-band channel index). Channels are spaced 781.25 kHz apart (oversampled by 32/27, so the per-channel passbands overlap), and absolute channel 0 sits at 0 Hz, hence center frequency = channel_number * 781.25 kHz.",
   "base_frequency_hz": 0,
   "channel_bandwidth_hz": 781250
 },
