@@ -894,19 +894,26 @@ public:
     slot_indices[reserved] = cur;
     reserved++;
     // Claim additional contiguous slots.
+    int next =
+        (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
     while (reserved < max_n) {
-      int next =
-          (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
-      if (next == read_index.load(std::memory_order_acquire))
-        break; // ring full
-      if (!d_packet_data[next]->processed.load(std::memory_order_relaxed))
-        break; // slot still held by consumer
+      if (next == read_index.load(std::memory_order_acquire)) {
+        INFO_LOG("Ring buffer is full!! Dropping packets...");
+        _mm_pause();
+        continue; // ring full
+      }
+      if (!d_packet_data[next]->processed.load(std::memory_order_relaxed)) {
+        next = (next + 1) % RING_BUFFER_SIZE; // slot still held by consumer
+        continue;
+      }
       d_packet_data[next]->committed.store(false, std::memory_order_relaxed);
-      write_index.store(next, std::memory_order_release);
-      slot_ptrs[reserved] = get_current_write_pointer();
+      slot_ptrs[reserved] = (void *)&(d_packet_data[next]->data);
       slot_indices[reserved] = next;
       reserved++;
+      next = (next + 1) % RING_BUFFER_SIZE;
     }
+
+    write_index.store(next, std::memory_order_release);
     return reserved;
   }
 
