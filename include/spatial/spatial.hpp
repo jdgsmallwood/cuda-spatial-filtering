@@ -870,15 +870,15 @@ public:
   // Must be called under producer_mutex.  The slot data[] pointers are
   // returned in slot_ptrs[]; metadata is committed later via commit_write_batch.
   int reserve_write_batch(int max_n, void **slot_ptrs) override {
+    std::lock_guard<std::mutex> lk(receive_buffer_write_index_mutex);
     int reserved = 0;
-    // First slot: use whatever write_index already points at.
+    // Slot 0 uses the current write_index as-is (caller positioned it).
     slot_ptrs[reserved++] = get_current_write_pointer();
+    // Additional slots: advance write_index one step at a time.
     while (reserved < max_n) {
-      // Try to advance to the next free slot without blocking.
-      std::unique_lock<std::mutex> lk(receive_buffer_write_index_mutex);
       int next = (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
       if (next == read_index.load(std::memory_order_acquire))
-        break; // ring full — return what we have
+        break; // ring full
       if (!d_packet_data[next]->processed)
         break; // slot not yet free
       write_index.store(next, std::memory_order_release);
