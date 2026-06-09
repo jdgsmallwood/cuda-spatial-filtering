@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <immintrin.h>
 #include <stdexcept>
 #include <cassert>
 #include <cerrno>
@@ -461,7 +462,7 @@ public:
     while (state.running.load(std::memory_order_acquire)) {
       int n = ibv_poll_cq(cq_, POLL_BATCH, wc);
       if (n == 0) {
-        std::this_thread::yield();
+        _mm_pause();
         continue;
       }
       if (n < 0) {

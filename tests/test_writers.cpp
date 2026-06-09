@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <gtest/gtest.h>
@@ -36,10 +37,11 @@ struct MockT {
 namespace fs = std::filesystem;
 
 static std::string make_temp_hdf5_file() {
-  auto tmp = fs::temp_directory_path() / "test_output.h5";
-  if (fs::exists(tmp))
-    fs::remove(tmp);
-  return tmp.string();
+  auto tmpl = fs::temp_directory_path() / "test_output_XXXXXX.h5";
+  std::string s = tmpl.string();
+  int fd = mkstemps(s.data(), 3); // suffix length = len(".h5") = 3
+  if (fd >= 0) close(fd);         // mkstemps creates the file; HDF5 will re-open
+  return s;
 }
 
 TEST(HDF5BeamWriterTest, WritesBeamAndArrivalsAndSeq) {

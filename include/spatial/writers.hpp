@@ -6,6 +6,7 @@
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
+#include <immintrin.h>
 #include <fitsio.h>
 #include <fstream>
 #include <hdf5.h>
@@ -180,7 +181,7 @@ protected:
     ERROR_LOG("{} ring buffer is full. Waiting...", std::string(writer_name()));
     while ((write_idx_.load(std::memory_order_acquire) + 1) % buffer_size_ ==
            read_idx_.load(std::memory_order_acquire)) {
-      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      _mm_pause();
     }
   }
 
