@@ -10,9 +10,9 @@
 // #include <sys/socket.h>
 #include <atomic>
 #include <barrier>
-#include <immintrin.h>
 #include <bitset>
 #include <chrono>
+#include <immintrin.h>
 #include <mutex>
 #include <pcap/pcap.h>
 #include <queue>
@@ -106,9 +106,10 @@ template <typename T, size_t NR_INPUT_BUFFERS = 2,
 class ProcessorState : public ProcessorStateBase {
 public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
-  // Pointer array kept for API compatibility; all slots come from one contiguous
-  // pool so d_packet_data[i] = &d_packet_data_pool[i].  The contiguous layout
-  // keeps ring slots in L3 as the processor threads stride through them.
+  // Pointer array kept for API compatibility; all slots come from one
+  // contiguous pool so d_packet_data[i] = &d_packet_data_pool[i].  The
+  // contiguous layout keeps ring slots in L3 as the processor threads stride
+  // through them.
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
   typename T::PacketEntryType *d_packet_data_pool = nullptr;
   size_t MIN_FREQ_CHANNEL;
@@ -136,7 +137,8 @@ public:
     try {
       // Single allocation for all ring slots keeps them contiguous in memory.
       // The individual d_packet_data[i] pointers still work for all existing
-      // call sites, but the hardware prefetcher can now stride through the ring.
+      // call sites, but the hardware prefetcher can now stride through the
+      // ring.
       d_packet_data_pool = new typename T::PacketEntryType[RING_BUFFER_SIZE]();
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
         d_packet_data[i] = &d_packet_data_pool[i];
@@ -176,7 +178,8 @@ public:
     int next_write_index = -1;
     bool first_loop = true;
     while (next_write_index < 0 ||
-           !d_packet_data[next_write_index]->processed.load(std::memory_order_relaxed)) {
+           !d_packet_data[next_write_index]->processed.load(
+               std::memory_order_relaxed)) {
       if (first_loop) {
         next_write_index = (write_index.load(std::memory_order_relaxed) + 1) %
                            RING_BUFFER_SIZE;
@@ -577,7 +580,8 @@ public:
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
 
-      // Number of slots waiting to be processed, handling wrap-around correctly.
+      // Number of slots waiting to be processed, handling wrap-around
+      // correctly.
       const int available =
           (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
           (int)RING_BUFFER_SIZE;
@@ -602,8 +606,6 @@ public:
         for (auto i = 0; i < WORKER_COUNT; ++i) {
           int worker_start = start;
 
-          // O(1): compute how many slots remain for this worker, then step
-          // directly to worker_end — no inner incrementing loop.
           const int slots_remaining =
               (slice_end - worker_start + (int)RING_BUFFER_SIZE) %
               (int)RING_BUFFER_SIZE;
@@ -709,9 +711,7 @@ public:
         auto *entry = d_packet_data[idx];
 
         // Prefetch 8 slots ahead: at ~5 ns/packet an L3 miss (~40 ns) needs 8
-        // slots of runway.  With the pool-allocated contiguous ring, d_packet_data
-        // strides predictably so the hardware prefetcher already handles the
-        // pointer array itself; the software prefetch is for the slot data.
+        // slots of runway.
         constexpr int PREFETCH_DIST = 8;
         const int pre_idx = (idx + PREFETCH_DIST) % RING_BUFFER_SIZE;
         __builtin_prefetch(d_packet_data[pre_idx], 0, 1);
@@ -872,10 +872,12 @@ public:
                                     const sockaddr_in &client_addr) {
     d_packet_data[write_index]->length = length;
     d_packet_data[write_index]->sender_addr = client_addr;
-    d_packet_data[write_index]->processed.store(false, std::memory_order_relaxed);
+    d_packet_data[write_index]->processed.store(false,
+                                                std::memory_order_relaxed);
     // Release: consumer's acquire on committed synchronises-with this store,
     // ensuring it sees the data[] already memcpy'd before this call.
-    d_packet_data[write_index]->committed.store(true, std::memory_order_release);
+    d_packet_data[write_index]->committed.store(true,
+                                                std::memory_order_release);
   }
 
   // Reserve up to max_n ring slots.  Must be called under producer_mutex
@@ -893,7 +895,8 @@ public:
     reserved++;
     // Claim additional contiguous slots.
     while (reserved < max_n) {
-      int next = (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
+      int next =
+          (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
       if (next == read_index.load(std::memory_order_acquire))
         break; // ring full
       if (!d_packet_data[next]->processed.load(std::memory_order_relaxed))
@@ -1070,6 +1073,8 @@ public:
         std::lock_guard<std::mutex> lock(state.producer_mutex);
         reserved = state.reserve_write_batch(ret_val, slot_ptrs, slot_indices);
       }
+      std::cout << "Reserved is " << reserved << " for worker " << ifname
+                << std::endl;
 
       // Phase 2: copy into reserved slots — runs in parallel with other NICs.
       for (int i = 0; i < reserved; ++i) {
