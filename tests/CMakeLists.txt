@@ -42,6 +42,7 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
+
 # Built standalone (not linked against test_app_common) so pointing.cpp's
 # casacore calls are compiled/linked entirely by the system C++ compiler --
 # see the comment blocks in pointing.hpp and src/CMakeLists.txt for why mixing
@@ -52,6 +53,21 @@ add_executable(
 target_include_directories(PointingTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(PointingTests PRIVATE GTest::gtest_main ${CASACORE_LIBRARIES})
 
+# Shared high-level pipeline-test harness (tests/support/*.hpp): synthetic
+# packet builders, canonical small LambdaConfigs, a SyntheticPipelineRun driver
+# that wires a real ProcessorState to a real GPUPipeline via the synchronous
+# pipeline seam, and property-based assertion helpers. Header-only -- this
+# INTERFACE library just adds the include path so `#include "support/..."`
+# resolves, and pulls in test_app_common's dependencies.
+add_library(test_support INTERFACE)
+target_include_directories(test_support INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_support INTERFACE test_app_common)
+
+add_executable(
+  PipelineHarnessSelfTest support/test_harness_selftest.cu
+)
+target_link_libraries(PipelineHarnessSelfTest PRIVATE test_support)
+
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
@@ -59,3 +75,4 @@ gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
 gtest_discover_tests(PointingTests)
+gtest_discover_tests(PipelineHarnessSelfTest)
