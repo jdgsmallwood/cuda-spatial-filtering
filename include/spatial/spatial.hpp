@@ -79,15 +79,19 @@ public:
   virtual void add_received_packet_metadata(const int length,
                                             const sockaddr_in &client_addr) = 0;
 
-  // Reserve up to max_n ring slots for direct-to-slot receive (zero-copy path).
-  // Fills slot_ptrs[0..n-1] with pointers to the data[] buffers of the
-  // reserved slots and returns the number actually reserved.  Must be called
-  // under producer_mutex.  Call commit_write_batch() once the slots are filled.
-  virtual int reserve_write_batch(int max_n, void **slot_ptrs) = 0;
+  // Reserve up to max_n ring slots.  Fills slot_ptrs[0..n-1] with data[]
+  // pointers and slot_indices[0..n-1] with ring indices.  Must be called
+  // under producer_mutex (brief: index arithmetic only).  Sets committed=false
+  // so the consumer waits for commit_write_batch() before processing.
+  virtual int reserve_write_batch(int max_n, void **slot_ptrs,
+                                  int *slot_indices) = 0;
 
-  // Commit the n slots previously reserved by reserve_write_batch():
-  // sets length / sender_addr / processed=false on each.
-  virtual void commit_write_batch(int n, const int *lens,
+  // Commit the n slots previously reserved.  May be called WITHOUT
+  // producer_mutex — each slot is exclusively owned by this producer from
+  // reserve until commit.  Writes metadata then sets committed=true (release)
+  // so the consumer sees the filled data[].
+  virtual void commit_write_batch(int n, const int *slot_indices,
+                                  const int *lens,
                                   const sockaddr_in *addrs) = 0;
 
   virtual void release_buffer(const int buffer_index) = 0;
@@ -114,7 +118,6 @@ public:
       buffers;
   uint64_t latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES] = {};
   mutable std::mutex buffer_index_mutex;
-  std::mutex receive_buffer_write_index_mutex;
   GPUPipeline *pipeline_;
   // Constructor / Destructor
   ProcessorState(size_t nr_packets_for_correlation, size_t nr_between_samples,
@@ -136,7 +139,8 @@ public:
       d_packet_data_pool = new typename T::PacketEntryType[RING_BUFFER_SIZE]();
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
         d_packet_data[i] = &d_packet_data_pool[i];
-        d_packet_data[i]->processed = true;
+        d_packet_data[i]->processed.store(true, std::memory_order_relaxed);
+        d_packet_data[i]->committed.store(false, std::memory_order_relaxed);
       }
 
       for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
@@ -171,10 +175,7 @@ public:
     int next_write_index = -1;
     bool first_loop = true;
     while (next_write_index < 0 ||
-           !d_packet_data[next_write_index]->processed) {
-      // Get the next write index that has already been processed. This avoids
-      // overwriting packets that have been left behind because their buffer was
-      // not yet available.
+           !d_packet_data[next_write_index]->processed.load(std::memory_order_relaxed)) {
       if (first_loop) {
         next_write_index = (write_index.load(std::memory_order_relaxed) + 1) %
                            RING_BUFFER_SIZE;
@@ -238,7 +239,7 @@ public:
                  "begin_seq {} actually has packet_index {}",
                  buffer_start, pkt.sample_count);
         packets_discarded.fetch_add(1);
-        *pkt.original_packet_processed = true;
+        pkt.original_packet_processed->store(true, std::memory_order_release);
         return;
       }
 
@@ -278,7 +279,7 @@ public:
         //           *pkt.original_packet_processed);
 
         if (num_copied >= 1 + is_extended) {
-          *(pkt.original_packet_processed) = true;
+          pkt.original_packet_processed->store(true, std::memory_order_release);
           // DEBUG_LOG("DEBUG: original_packet_processed_after={}",
           //           *pkt.original_packet_processed);
 
@@ -293,8 +294,7 @@ public:
     //     sample_count, current_read_index);
   };
   void process_all_available_packets() {
-    // This exists mainly for testing purposes
-    // to allow us to add some packets then process them all.
+    // Testing path — single-threaded drain of the ring.
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
@@ -302,10 +302,16 @@ public:
     std::lock_guard<std::mutex> lock(latest_packet_mutex);
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
-      process_packet_data(d_packet_data[current_read_index], current_read_index,
-                          global_max, latest_packet_received);
-      int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
-      read_index.store(new_read_index, std::memory_order_release);
+      auto *slot = d_packet_data[current_read_index];
+      // Slot reserved but not yet committed (producer still memcpy-ing) — wait.
+      if (!slot->committed.load(std::memory_order_acquire)) [[unlikely]] {
+        std::this_thread::yield();
+        continue;
+      }
+      process_packet_data(slot, current_read_index, global_max,
+                          latest_packet_received);
+      read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
+                       std::memory_order_release);
     }
   }
 
@@ -357,7 +363,7 @@ public:
 
     ProcessedPacket parsed = pkt->parse();
 
-    if (pkt->processed) [[unlikely]] {
+    if (pkt->processed.load(std::memory_order_relaxed)) [[unlikely]] {
       return;
     }
     // DEBUG_LOG(
@@ -649,7 +655,9 @@ public:
                 future_packet_queue[i].pop();
                 lock.unlock();
                 auto *entry = d_packet_data[pkt.index];
-                if (entry->length > 0 && !entry->processed) {
+                if (entry->length > 0 &&
+                    entry->committed.load(std::memory_order_acquire) &&
+                    !entry->processed.load(std::memory_order_relaxed)) {
                   process_packet_data(entry, pkt.index, global_max,
                                       latest_packet_received);
                 }
@@ -710,7 +718,14 @@ public:
         __builtin_prefetch(d_packet_data[pre_idx]->data, 0, 1);
         __builtin_prefetch(d_packet_data[pre_idx]->data + 42, 0, 1);
 
-        if (entry->length > 0 && !entry->processed) {
+        // Wait for the producer to commit this slot before processing.
+        // In the common case (single-phase legacy path or fast producer) this
+        // never spins; the acquire pairs with commit_write_batch's release.
+        while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
+          std::this_thread::yield();
+        }
+        if (entry->length > 0 &&
+            !entry->processed.load(std::memory_order_relaxed)) {
           process_packet_data(entry, idx, global_max,
                               latest_packet_received_batch);
         }
@@ -847,14 +862,9 @@ public:
     return (void *)&(d_packet_data[write_index]->data);
   }
   void *get_next_write_pointer() {
-    std::unique_lock<std::mutex> lock(receive_buffer_write_index_mutex);
     while (!get_next_write_index() && running.load(std::memory_order_acquire)) {
-      lock.unlock();
       std::this_thread::yield();
-      DEBUG_LOG("Waiting for next pointer....");
-      lock.lock();
-      // std::this_thread::sleep_for(std::chrono::nanoseconds(10));
-    };
+    }
     return get_current_write_pointer();
   }
 
@@ -862,45 +872,53 @@ public:
                                     const sockaddr_in &client_addr) {
     d_packet_data[write_index]->length = length;
     d_packet_data[write_index]->sender_addr = client_addr;
-    d_packet_data[write_index]->processed = false;
-    // timestamp field populated by parse() but never read downstream — skip.
+    d_packet_data[write_index]->processed.store(false, std::memory_order_relaxed);
+    // Release: consumer's acquire on committed synchronises-with this store,
+    // ensuring it sees the data[] already memcpy'd before this call.
+    d_packet_data[write_index]->committed.store(true, std::memory_order_release);
   }
 
-  // Reserve up to max_n ring slots.  Returns number actually reserved.
-  // Must be called under producer_mutex.  The slot data[] pointers are
-  // returned in slot_ptrs[]; metadata is committed later via commit_write_batch.
-  int reserve_write_batch(int max_n, void **slot_ptrs) override {
-    std::lock_guard<std::mutex> lk(receive_buffer_write_index_mutex);
+  // Reserve up to max_n ring slots.  Must be called under producer_mutex
+  // (brief: only index arithmetic, no data movement).  Sets committed=false on
+  // each claimed slot so the consumer waits for commit_write_batch().
+  int reserve_write_batch(int max_n, void **slot_ptrs,
+                          int *slot_indices) override {
     int reserved = 0;
-    // Slot 0 uses the current write_index as-is (caller positioned it).
-    slot_ptrs[reserved++] = get_current_write_pointer();
-    // Additional slots: advance write_index one step at a time.
+    // Slot 0 uses the current write_index (caller positioned it via a prior
+    // get_next_write_pointer call, or this is the first batch).
+    int cur = write_index.load(std::memory_order_relaxed);
+    d_packet_data[cur]->committed.store(false, std::memory_order_relaxed);
+    slot_ptrs[reserved] = get_current_write_pointer();
+    slot_indices[reserved] = cur;
+    reserved++;
+    // Claim additional contiguous slots.
     while (reserved < max_n) {
       int next = (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
       if (next == read_index.load(std::memory_order_acquire))
         break; // ring full
-      if (!d_packet_data[next]->processed)
-        break; // slot not yet free
+      if (!d_packet_data[next]->processed.load(std::memory_order_relaxed))
+        break; // slot still held by consumer
+      d_packet_data[next]->committed.store(false, std::memory_order_relaxed);
       write_index.store(next, std::memory_order_release);
-      slot_ptrs[reserved++] = get_current_write_pointer();
+      slot_ptrs[reserved] = get_current_write_pointer();
+      slot_indices[reserved] = next;
+      reserved++;
     }
     return reserved;
   }
 
-  void commit_write_batch(int n, const int *lens,
+  // Commit slots previously reserved.  No lock required: each slot is owned
+  // exclusively by this producer thread from reserve until commit.  The
+  // committed.store(release) pairs with the consumer's committed.load(acquire),
+  // ensuring data[] and metadata are visible before the consumer processes.
+  void commit_write_batch(int n, const int *slot_indices, const int *lens,
                           const sockaddr_in *addrs) override {
-    // We need to walk the ring backwards from the current write_index to find
-    // the n slots we reserved.  Because reserve_write_batch advanced write_index
-    // sequentially, the last n slots before (and including) write_index are ours.
-    int idx = write_index.load(std::memory_order_relaxed);
-    // Commit in forward order: reserved[0] is oldest, reserved[n-1] is newest.
-    // The oldest reserved slot is write_index - (n-1) mod RING_BUFFER_SIZE.
-    int start = (idx - (n - 1) + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
     for (int i = 0; i < n; ++i) {
-      int slot = (start + i) % RING_BUFFER_SIZE;
-      d_packet_data[slot]->length = lens[i];
-      d_packet_data[slot]->sender_addr = addrs[i];
-      d_packet_data[slot]->processed = false;
+      int s = slot_indices[i];
+      d_packet_data[s]->length = lens[i];
+      d_packet_data[s]->sender_addr = addrs[i];
+      d_packet_data[s]->processed.store(false, std::memory_order_relaxed);
+      d_packet_data[s]->committed.store(true, std::memory_order_release);
     }
   }
 
@@ -1029,6 +1047,13 @@ public:
     }
 
     std::cout << "Receiver thread started for ifname " << ifname << std::endl;
+
+    // Per-batch arrays for the two-phase reserve/commit path.
+    void *slot_ptrs[BATCH_SIZE];
+    int slot_indices[BATCH_SIZE];
+    int lens_buf[BATCH_SIZE];
+    sockaddr_in addr_buf[BATCH_SIZE];
+
     while (state.running) {
       int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, nullptr);
       if (ret_val < 0) {
@@ -1036,17 +1061,26 @@ public:
           continue;
         break;
       }
+
+      // Phase 1: claim ring slots (brief lock — index arithmetic only).
+      // commit_write_batch sets committed=true (release) so each slot is
+      // visible to the consumer only after phase 3 completes.
+      int reserved;
       {
         std::lock_guard<std::mutex> lock(state.producer_mutex);
-        void *next_write_pointer = state.get_current_write_pointer();
-        for (int i = 0; i < ret_val; ++i) {
-          const int len = msgs[i].msg_len;
-          std::memcpy(next_write_pointer, staging[i], len);
-          state.add_received_packet_metadata(len, client_addrs[i]);
-          state.packets_received += 1;
-          next_write_pointer = state.get_next_write_pointer();
-        }
+        reserved = state.reserve_write_batch(ret_val, slot_ptrs, slot_indices);
       }
+
+      // Phase 2: copy into reserved slots — runs in parallel with other NICs.
+      for (int i = 0; i < reserved; ++i) {
+        std::memcpy(slot_ptrs[i], staging[i], msgs[i].msg_len);
+        lens_buf[i] = msgs[i].msg_len;
+        addr_buf[i] = client_addrs[i];
+      }
+
+      // Phase 3: commit (no lock — we own these slots exclusively).
+      state.commit_write_batch(reserved, slot_indices, lens_buf, addr_buf);
+      state.packets_received += reserved;
     }
     std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
   };

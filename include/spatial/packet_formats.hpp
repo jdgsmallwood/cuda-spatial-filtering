@@ -1,5 +1,6 @@
 #pragma once
 #include "spatial/logging.hpp"
+#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <cuda_fp16.h>
@@ -155,20 +156,28 @@ struct ProcessedPacket {
   uint64_t sample_count;
   uint64_t timestamp;
   const PacketPayload<PacketScaleStructure, PacketDataStructure> *payload;
-  bool *original_packet_processed;
+  std::atomic<bool> *original_packet_processed;
   uint32_t fpga_id;
   uint32_t payload_size;
   uint16_t freq_channel;
 } __attribute__((aligned(64)));
 
-// Packet storage for ring buffer
+// Packet storage for ring buffer.
+// Two-phase producer protocol: producer calls reserve_write_batch() (sets
+// committed=false, advances write_index), fills slot->data[], then calls
+// commit_write_batch() which sets committed=true (release) so the consumer
+// sees the data.  committed=false while writing lets multiple NIC threads
+// fill their reserved slots in parallel.
 template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketEntry {
   uint8_t data[BUFFER_SIZE];
   int length;
   struct sockaddr_in sender_addr;
   struct timeval timestamp;
-  bool processed; // 0 = unprocessed, 1 = processed
+  // true  = consumer done, producer may claim (FREE)
+  std::atomic<bool> processed{true};
+  // true  = producer committed data, consumer may process (set with release)
+  std::atomic<bool> committed{false};
 
   virtual ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() = 0;
@@ -190,7 +199,7 @@ struct LambdaPacketEntry
       offset = 42;
     }
     if (length < MIN_PCAP_HEADER_SIZE) [[unlikely]] {
-      this->processed = true;
+      this->processed.store(true, std::memory_order_relaxed);
       return {};
     }
 

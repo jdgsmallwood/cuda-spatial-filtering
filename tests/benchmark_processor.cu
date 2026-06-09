@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <spdlog/spdlog.h>
 #include <sys/time.h>
 #include <unordered_map>
 
@@ -65,6 +66,9 @@ static void feed_batch(ProcessorStateBase &state, uint64_t base_sample) {
 
 int main() {
     using clock = std::chrono::high_resolution_clock;
+
+    // Suppress INFO/DEBUG log spam from initialize_buffers etc.
+    spdlog::set_level(spdlog::level::warn);
 
     std::array<int64_t, 1> delays = {0};
     std::unordered_map<uint32_t, int> fpga_map;
