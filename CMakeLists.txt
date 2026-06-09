@@ -141,6 +141,22 @@ find_package(CasaCore REQUIRED)
 set(PSRDADA_ROOT $ENV{PSRHOME})
 find_library(PSRDADA_LIBRARY psrdada ${PSRDADA_ROOT}/lib)
 
+# --------------------------------------------
+# Optional: libibverbs (RDMA) for the ibverbs raw-packet capture backend.
+# Only enabled when both the library and headers are present, so builds on
+# machines without an RDMA stack are unaffected. When found, HAVE_IBVERBS is
+# defined globally (gating include/spatial/libibverbs.hpp) and IBVERBS_LIBRARY
+# is linked onto the app/test common targets below.
+# --------------------------------------------
+find_library(IBVERBS_LIBRARY ibverbs)
+find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
+  message(STATUS "libibverbs found (${IBVERBS_LIBRARY}) -- ibverbs capture backend enabled")
+  add_compile_definitions(HAVE_IBVERBS)
+else()
+  message(STATUS "libibverbs not found -- ibverbs capture backend disabled (use --capture-backend kernel)")
+endif()
+
 message(STATUS "CASACORE_FOUND is ${CASACORE_FOUND}")
 message(STATUS "CASACORE_LIBRARIES are ${CASACORE_LIBRARIES}")
 

@@ -148,17 +148,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
 
-  std::vector<std::unique_ptr<PacketInput>> capture;
-
-  if (!args.pcap_filename.empty()) {
-    capture.push_back(std::make_unique<PCAPPacketCapture>(args.pcap_filename,
-                                                          args.loop_pcap));
-  } else {
-    for (auto nic : args.fpga_names) {
-      capture.push_back(std::make_unique<KernelSocketPacketCapture>(
-          nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
-    }
-  }
+  auto capture = make_packet_captures(args);
   INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;
