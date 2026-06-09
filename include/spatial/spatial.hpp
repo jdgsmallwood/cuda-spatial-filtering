@@ -78,6 +78,18 @@ public:
   virtual void *get_current_write_pointer() = 0;
   virtual void add_received_packet_metadata(const int length,
                                             const sockaddr_in &client_addr) = 0;
+
+  // Reserve up to max_n ring slots for direct-to-slot receive (zero-copy path).
+  // Fills slot_ptrs[0..n-1] with pointers to the data[] buffers of the
+  // reserved slots and returns the number actually reserved.  Must be called
+  // under producer_mutex.  Call commit_write_batch() once the slots are filled.
+  virtual int reserve_write_batch(int max_n, void **slot_ptrs) = 0;
+
+  // Commit the n slots previously reserved by reserve_write_batch():
+  // sets length / sender_addr / processed=false on each.
+  virtual void commit_write_batch(int n, const int *lens,
+                                  const sockaddr_in *addrs) = 0;
+
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
   virtual void process_all_available_packets() = 0;
@@ -839,11 +851,49 @@ public:
 
   void add_received_packet_metadata(const int length,
                                     const sockaddr_in &client_addr) {
-
     d_packet_data[write_index]->length = length;
     d_packet_data[write_index]->sender_addr = client_addr;
     d_packet_data[write_index]->processed = false;
     gettimeofday(&d_packet_data[write_index]->timestamp, NULL);
+  }
+
+  // Reserve up to max_n ring slots.  Returns number actually reserved.
+  // Must be called under producer_mutex.  The slot data[] pointers are
+  // returned in slot_ptrs[]; metadata is committed later via commit_write_batch.
+  int reserve_write_batch(int max_n, void **slot_ptrs) override {
+    int reserved = 0;
+    // First slot: use whatever write_index already points at.
+    slot_ptrs[reserved++] = get_current_write_pointer();
+    while (reserved < max_n) {
+      // Try to advance to the next free slot without blocking.
+      std::unique_lock<std::mutex> lk(receive_buffer_write_index_mutex);
+      int next = (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
+      if (next == read_index.load(std::memory_order_acquire))
+        break; // ring full — return what we have
+      if (!d_packet_data[next]->processed)
+        break; // slot not yet free
+      write_index.store(next, std::memory_order_release);
+      slot_ptrs[reserved++] = get_current_write_pointer();
+    }
+    return reserved;
+  }
+
+  void commit_write_batch(int n, const int *lens,
+                          const sockaddr_in *addrs) override {
+    // We need to walk the ring backwards from the current write_index to find
+    // the n slots we reserved.  Because reserve_write_batch advanced write_index
+    // sequentially, the last n slots before (and including) write_index are ours.
+    int idx = write_index.load(std::memory_order_relaxed);
+    // Commit in forward order: reserved[0] is oldest, reserved[n-1] is newest.
+    // The oldest reserved slot is write_index - (n-1) mod RING_BUFFER_SIZE.
+    int start = (idx - (n - 1) + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
+    for (int i = 0; i < n; ++i) {
+      int slot = (start + i) % RING_BUFFER_SIZE;
+      d_packet_data[slot]->length = lens[i];
+      d_packet_data[slot]->sender_addr = addrs[i];
+      d_packet_data[slot]->processed = false;
+      gettimeofday(&d_packet_data[slot]->timestamp, NULL);
+    }
   }
 
 private:
@@ -943,30 +993,28 @@ public:
 
 class KernelSocketPacketCapture : public PacketInput {
 public:
+  // busy_poll_us: if > 0, enables SO_BUSY_POLL on the socket for that many
+  // microseconds.  Reduces per-packet latency on dedicated cores at the cost
+  // of CPU spin.  Leave at 0 on shared/virtual machines.
   KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
-                            int recv_buffer_size = 64 * 1024 * 1024);
+                            int recv_buffer_size = 64 * 1024 * 1024,
+                            int busy_poll_us = 0);
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
     std::cout << "Starting packet capture on ifname " << ifname << std::endl;
 
-    // adds a timeout here - otherwise the socket will block indefinitely
-    // and get in the way of shutdown.
-    struct timeval tv;
-    tv.tv_sec = 1; // 1 second timeout
-    tv.tv_usec = 0;
-    const int BATCH_SIZE = 64;
-    struct mmsghdr msgs[BATCH_SIZE];
-    struct iovec iovecs[BATCH_SIZE];
-
-    std::vector<std::vector<uint8_t>> packet_buffers(
-        BATCH_SIZE, std::vector<uint8_t>(buffer_size));
-    struct sockaddr_in client_addrs[BATCH_SIZE];
+    // Flat, cache-line-aligned staging buffers — one contiguous allocation,
+    // avoids scattered heap pointers from vector<vector<>>.
+    static constexpr int BATCH_SIZE = 256;
+    alignas(64) static thread_local uint8_t staging[BATCH_SIZE][BUFFER_SIZE];
+    static thread_local struct mmsghdr msgs[BATCH_SIZE];
+    static thread_local struct iovec iovecs[BATCH_SIZE];
+    static thread_local struct sockaddr_in client_addrs[BATCH_SIZE];
 
     for (int i = 0; i < BATCH_SIZE; ++i) {
-      iovecs[i].iov_base = packet_buffers[i].data();
+      iovecs[i].iov_base = staging[i];
       iovecs[i].iov_len = buffer_size;
-
       memset(&msgs[i], 0, sizeof(msgs[i]));
       msgs[i].msg_hdr.msg_iov = &iovecs[i];
       msgs[i].msg_hdr.msg_iovlen = 1;
@@ -974,36 +1022,31 @@ public:
       msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
     }
 
-    // Make kernel receive buffer a bit larger to avoid dropping packets
-    // during the timeout
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
-               sizeof(recv_buffer_size));
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     std::cout << "Receiver thread started for ifname " << ifname << std::endl;
     while (state.running) {
-      int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
+      int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, nullptr);
       if (ret_val < 0) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
-        // perror("recvfrom");
         break;
       }
       {
         std::lock_guard<std::mutex> lock(state.producer_mutex);
         void *next_write_pointer = state.get_current_write_pointer();
-
         for (int i = 0; i < ret_val; ++i) {
-          int len = msgs[i].msg_len;
-          std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
+          const int len = msgs[i].msg_len;
+          std::memcpy(next_write_pointer, staging[i], len);
           state.add_received_packet_metadata(len, client_addrs[i]);
           state.packets_received += 1;
           next_write_pointer = state.get_next_write_pointer();
-          msgs[i].msg_len = 0;
         }
       }
     }
     std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
   };
+
+  // Kernel-drop counter populated from SO_RXQ_OVFL.  Read by the stats loop.
+  std::atomic<uint32_t> kernel_drops{0};
 
 private:
   int sockfd;

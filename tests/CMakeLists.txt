@@ -57,6 +57,12 @@ add_executable(
 )
 target_link_libraries(PipelineHarnessSelfTest PRIVATE test_support)
 
+# Standalone receive-path microbenchmark (not a gtest — run directly).
+# Measures heap-vector staging vs flat-array staging vs direct-to-ring variants
+# of recvmmsg on loopback, reporting pps / Gbps / syscalls/s / kernel drops.
+add_executable(benchmark_recv benchmark_recv.cpp)
+target_link_libraries(benchmark_recv PRIVATE spatial spdlog::spdlog)
+
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)

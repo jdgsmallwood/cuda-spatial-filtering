@@ -27,6 +27,8 @@ struct FakeProcessorState : public ProcessorStateBase {
   void *get_current_write_pointer() override { return nullptr; };
   void add_received_packet_metadata(const int length,
                                     const sockaddr_in &client_addr) override {};
+  int reserve_write_batch(int, void **) override { return 0; }
+  void commit_write_batch(int, const int *, const sockaddr_in *) override {}
   void set_pipeline(GPUPipeline *pipeline) override {};
   void process_all_available_packets() override {};
   void handle_buffer_completion(bool force_flush = false) override {};

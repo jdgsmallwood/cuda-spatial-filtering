@@ -138,6 +138,7 @@ struct CommonArgs {
   int port = 36001;
   int packets_to_receive = 0;
   std::string capture_backend = "kernel";
+  int busy_poll_us = 0;
   json config;
   json gains;
   json beam_weights;
@@ -189,7 +190,8 @@ make_packet_captures(const CommonArgs &args,
     }
 #endif
     capture.push_back(std::make_unique<KernelSocketPacketCapture>(
-        nic, args.port, BUFFER_SIZE, kernel_recv_buffer_size));
+        nic, args.port, BUFFER_SIZE, kernel_recv_buffer_size,
+        args.busy_poll_us));
   }
   return capture;
 }
@@ -244,6 +246,14 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
             "build with libibverbs)")
       .default_value(std::string("kernel"))
       .store_into(args.capture_backend);
+
+  program.add_argument("--busy-poll")
+      .help("Enable SO_BUSY_POLL on the kernel receive socket: number of "
+            "microseconds to busy-spin waiting for packets before sleeping "
+            "(0 = disabled, typical useful range 10-200).  Only effective "
+            "with --capture-backend=kernel on a dedicated NIC IRQ core.")
+      .default_value(0)
+      .store_into(args.busy_poll_us);
 
   program.add_argument("-d", "--debug-logging")
       .help("Enable debug logging")
