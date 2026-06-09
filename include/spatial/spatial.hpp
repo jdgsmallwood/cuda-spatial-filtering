@@ -1080,8 +1080,6 @@ public:
         std::lock_guard<std::mutex> lock(state.producer_mutex);
         reserved = state.reserve_write_batch(ret_val, slot_ptrs, slot_indices);
       }
-      std::cout << "Reserved is " << reserved << " for worker " << ifname
-                << std::endl;
 
       // Phase 2: copy into reserved slots — runs in parallel with other NICs.
       for (int i = 0; i < reserved; ++i) {
