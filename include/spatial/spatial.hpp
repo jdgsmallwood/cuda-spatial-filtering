@@ -101,7 +101,11 @@ template <typename T, size_t NR_INPUT_BUFFERS = 2,
 class ProcessorState : public ProcessorStateBase {
 public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
+  // Pointer array kept for API compatibility; all slots come from one contiguous
+  // pool so d_packet_data[i] = &d_packet_data_pool[i].  The contiguous layout
+  // keeps ring slots in L3 as the processor threads stride through them.
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
+  typename T::PacketEntryType *d_packet_data_pool = nullptr;
   size_t MIN_FREQ_CHANNEL;
   size_t NR_BETWEEN_SAMPLES;
   size_t NR_PACKETS_FOR_CORRELATION;
@@ -126,10 +130,12 @@ public:
     std::fill(modified_since_last_completion_check.begin(),
               modified_since_last_completion_check.end(), false);
     try {
+      // Single allocation for all ring slots keeps them contiguous in memory.
+      // The individual d_packet_data[i] pointers still work for all existing
+      // call sites, but the hardware prefetcher can now stride through the ring.
+      d_packet_data_pool = new typename T::PacketEntryType[RING_BUFFER_SIZE]();
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-        d_packet_data[i] = new typename T::PacketEntryType();
-        if (!d_packet_data[i])
-          throw std::bad_alloc();
+        d_packet_data[i] = &d_packet_data_pool[i];
         d_packet_data[i]->processed = true;
       }
 
@@ -192,13 +198,12 @@ public:
       const int current_read_index,
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
       uint64_t (&latest_packet_batch)[T::NR_CHANNELS][T::NR_FPGA_SOURCES]) {
-    size_t fpga_index;
-    if (fpga_ids.count(pkt.fpga_id)) {
-      fpga_index = fpga_ids[pkt.fpga_id];
-    } else {
+    const auto fpga_it = fpga_ids.find(pkt.fpga_id);
+    if (fpga_it == fpga_ids.end()) [[unlikely]] {
       ERROR_LOG("FPGA ID {} not found.", pkt.fpga_id);
       throw std::out_of_range("FPGA ID not found. Check logs.");
     }
+    const size_t fpga_index = fpga_it->second;
 
     const int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
 
@@ -565,25 +570,23 @@ public:
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
 
-      int slice_end = current_read_index;
+      // Number of slots waiting to be processed, handling wrap-around correctly.
+      const int available =
+          (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
+          (int)RING_BUFFER_SIZE;
 
-      if (current_write_index - current_read_index > 0) {
-        // write index is ahead of read index linearly
-        slice_end = std::min(current_write_index,
-                             current_read_index + REGULAR_BATCH_SIZE);
-      } else {
-        // write index has wrapped around the buffer
-        int to_end_of_buffer = (RING_BUFFER_SIZE - 1) - current_read_index;
-        if (to_end_of_buffer >= REGULAR_BATCH_SIZE) {
-          slice_end = current_read_index + REGULAR_BATCH_SIZE;
-        } else {
-          slice_end = std::min(REGULAR_BATCH_SIZE - to_end_of_buffer,
-                               current_write_index);
-        }
+      if (available == 0) [[unlikely]] {
+        // Ring buffer is empty — yield rather than spin-burning a core.
+        std::this_thread::yield();
+        continue;
       }
 
-      int slice_len = (slice_end - current_read_index + RING_BUFFER_SIZE) %
-                      RING_BUFFER_SIZE;
+      // Clamp batch to available packets; slice_end handles wrap implicitly.
+      const int to_process = std::min(available, REGULAR_BATCH_SIZE);
+      const int slice_end =
+          (current_read_index + to_process) % (int)RING_BUFFER_SIZE;
+
+      const int slice_len = to_process;
       int per_worker = (slice_len + WORKER_COUNT - 1) / WORKER_COUNT;
       int start = current_read_index;
 
@@ -592,13 +595,15 @@ public:
         int workers_with_tasks = 0;
         for (auto i = 0; i < WORKER_COUNT; ++i) {
           int worker_start = start;
-          int worker_end = start;
 
-          for (int j = 0; j < per_worker; ++j) {
-            if (worker_end == slice_end)
-              break;
-            worker_end = (worker_end + 1) % RING_BUFFER_SIZE;
-          }
+          // O(1): compute how many slots remain for this worker, then step
+          // directly to worker_end — no inner incrementing loop.
+          const int slots_remaining =
+              (slice_end - worker_start + (int)RING_BUFFER_SIZE) %
+              (int)RING_BUFFER_SIZE;
+          const int slots_for_worker = std::min(per_worker, slots_remaining);
+          const int worker_end =
+              (worker_start + slots_for_worker) % (int)RING_BUFFER_SIZE;
 
           if (worker_start == worker_end) {
             worker_has_task[i].store(false, std::memory_order_release);
@@ -695,11 +700,15 @@ public:
 
         auto *entry = d_packet_data[idx];
 
-        const int next_idx = (idx + 1) % RING_BUFFER_SIZE;
-        __builtin_prefetch(d_packet_data[next_idx], 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data, 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data + 12, 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
+        // Prefetch 8 slots ahead: at ~5 ns/packet an L3 miss (~40 ns) needs 8
+        // slots of runway.  With the pool-allocated contiguous ring, d_packet_data
+        // strides predictably so the hardware prefetcher already handles the
+        // pointer array itself; the software prefetch is for the slot data.
+        constexpr int PREFETCH_DIST = 8;
+        const int pre_idx = (idx + PREFETCH_DIST) % RING_BUFFER_SIZE;
+        __builtin_prefetch(d_packet_data[pre_idx], 0, 1);
+        __builtin_prefetch(d_packet_data[pre_idx]->data, 0, 1);
+        __builtin_prefetch(d_packet_data[pre_idx]->data + 42, 0, 1);
 
         if (entry->length > 0 && !entry->processed) {
           process_packet_data(entry, idx, global_max,
@@ -854,7 +863,7 @@ public:
     d_packet_data[write_index]->length = length;
     d_packet_data[write_index]->sender_addr = client_addr;
     d_packet_data[write_index]->processed = false;
-    gettimeofday(&d_packet_data[write_index]->timestamp, NULL);
+    // timestamp field populated by parse() but never read downstream — skip.
   }
 
   // Reserve up to max_n ring slots.  Returns number actually reserved.
@@ -892,17 +901,14 @@ public:
       d_packet_data[slot]->length = lens[i];
       d_packet_data[slot]->sender_addr = addrs[i];
       d_packet_data[slot]->processed = false;
-      gettimeofday(&d_packet_data[slot]->timestamp, NULL);
     }
   }
 
 private:
   void cleanup() {
-
-    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-      delete d_packet_data[i];
-      d_packet_data[i] = nullptr;
-    }
+    delete[] d_packet_data_pool;
+    d_packet_data_pool = nullptr;
+    std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
 
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       delete d_samples[i];
