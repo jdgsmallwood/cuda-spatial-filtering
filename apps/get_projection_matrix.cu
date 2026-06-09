@@ -18,6 +18,8 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
   constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
+  constexpr int nr_lambda_padded_receivers_per_block =
+      NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK;
   constexpr int nr_lambda_beams = 1;
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_packets_for_correlation =
@@ -30,7 +32,8 @@ int main(int argc, char *argv[]) {
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
                    nr_lambda_polarizations, nr_lambda_receivers_per_packet,
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
-                   nr_lambda_padded_receivers, nr_lambda_padded_receivers,
+                   nr_lambda_padded_receivers,
+                   nr_lambda_padded_receivers_per_block,
                    nr_correlation_blocks_to_integrate, true>;
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||

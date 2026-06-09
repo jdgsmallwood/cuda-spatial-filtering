@@ -179,6 +179,16 @@ struct PacketEntry {
   // true  = producer committed data, consumer may process (set with release)
   std::atomic<bool> committed{false};
 
+  // std::atomic is neither copyable nor movable; provide an explicit move
+  // constructor so PacketEntry can be returned by value in tests / helpers.
+  PacketEntry() = default;
+  PacketEntry(PacketEntry &&o) noexcept
+      : length(o.length), sender_addr(o.sender_addr), timestamp(o.timestamp),
+        processed(o.processed.load(std::memory_order_relaxed)),
+        committed(o.committed.load(std::memory_order_relaxed)) {
+    std::memcpy(data, o.data, sizeof(data));
+  }
+
   virtual ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() = 0;
 };
@@ -187,6 +197,10 @@ template <typename PacketScaleStructure, typename PacketDataStructure,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>
 struct LambdaPacketEntry
     : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
+  using Base = PacketEntry<PacketScaleStructure, PacketDataStructure>;
+  LambdaPacketEntry() = default;
+  LambdaPacketEntry(LambdaPacketEntry &&o) noexcept : Base(std::move(o)) {}
+
   __attribute__((hot)) __attribute__((flatten))
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() noexcept override {
