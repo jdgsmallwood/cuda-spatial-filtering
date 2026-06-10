@@ -201,7 +201,10 @@ int main(int argc, char *argv[]) {
     std::cout << "Stats: Received=" << state.packets_received
               << ", Processed=" << state.packets_processed
               << ", Missing=" << state.packets_missing
-              << ", Discarded=" << state.packets_discarded << std::endl;
+              << ", Discarded=" << state.packets_discarded
+              << ", FutureQueued=" << state.packets_future_queued
+              << ", StuckUnprocessed=" << state.packets_stuck_unprocessed
+              << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
     state.running.store((int)running, std::memory_order_release);
