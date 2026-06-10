@@ -50,7 +50,7 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
-  constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
+  constexpr size_t PACKET_RING_BUFFER_SIZE = 900000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
