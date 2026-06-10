@@ -188,7 +188,7 @@ public:
         next_write_index = (next_write_index + 1) % RING_BUFFER_SIZE;
       }
       if (next_write_index == read_index.load(std::memory_order_acquire)) {
-        INFO_LOG("Ring buffer is full!! Dropping packets...");
+        // INFO_LOG("Ring buffer is full!! Dropping packets...");
         return false;
       }
     }
@@ -898,8 +898,8 @@ public:
         (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
     while (reserved < max_n) {
       if (next == read_index.load(std::memory_order_acquire)) {
-        INFO_LOG("Ring buffer is full!! Dropping packets...");
-        _mm_pause();
+        // INFO_LOG("Ring buffer is full!! Dropping packets...");
+        //_mm_pause();
         continue; // ring full
       }
       if (!d_packet_data[next]->processed.load(std::memory_order_relaxed)) {
