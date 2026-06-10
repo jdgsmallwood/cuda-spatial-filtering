@@ -1,15 +1,14 @@
 #pragma once
 
-// This raw-packet capture backend requires libibverbs (RDMA). The entire file is
-// compiled only when CMake found libibverbs and defined HAVE_IBVERBS; otherwise it
-// expands to nothing, so builds on machines without an RDMA stack stay green and
-// apps that include it simply see no LibibverbsPacketCapture symbol.
+// This raw-packet capture backend requires libibverbs (RDMA). The entire file
+// is compiled only when CMake found libibverbs and defined HAVE_IBVERBS;
+// otherwise it expands to nothing, so builds on machines without an RDMA stack
+// stay green and apps that include it simply see no LibibverbsPacketCapture
+// symbol.
 #ifdef HAVE_IBVERBS
 
 #include <algorithm>
 #include <arpa/inet.h>
-#include <immintrin.h>
-#include <stdexcept>
 #include <cassert>
 #include <cerrno>
 #include <cstdlib>
@@ -19,9 +18,11 @@
 #include <fstream>
 #include <getopt.h>
 #include <ifaddrs.h>
+#include <immintrin.h>
 #include <infiniband/verbs.h>
 #include <iostream>
 #include <netinet/in.h>
+#include <stdexcept>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -413,7 +414,8 @@ public:
 
     qp_ = init_qp(ctx_, pd_, cq_); // RAW_PACKET QP, INIT -> RTR -> RTS
 
-    // One contiguous, registered CPU buffer; frame i occupies [i*MTU,(i+1)*MTU).
+    // One contiguous, registered CPU buffer; frame i occupies
+    // [i*MTU,(i+1)*MTU).
     const size_t buf_bytes = static_cast<size_t>(num_frames) * MTU;
     cpu_buffer_ = static_cast<uint8_t *>(malloc(buf_bytes));
     if (!cpu_buffer_)
@@ -462,7 +464,6 @@ public:
     while (state.running.load(std::memory_order_acquire)) {
       int n = ibv_poll_cq(cq_, POLL_BATCH, wc);
       if (n == 0) {
-        _mm_pause();
         continue;
       }
       if (n < 0) {
@@ -488,12 +489,12 @@ public:
         // from the captured IP header so OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET
         // demux (fpga id = third octet of 10.0.<id>.x) works exactly as it does
         // with recvmmsg's msg_name on the KernelSocket path.
-        struct sockaddr_in addr {};
+        struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         if (len >=
             static_cast<int>(sizeof(EthernetHeader) + sizeof(IPHeader))) {
-          const IPHeader *ip =
-              reinterpret_cast<const IPHeader *>(frame + sizeof(EthernetHeader));
+          const IPHeader *ip = reinterpret_cast<const IPHeader *>(
+              frame + sizeof(EthernetHeader));
           addr.sin_addr.s_addr = ip->src_ip; // already network byte order
         }
 

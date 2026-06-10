@@ -309,7 +309,7 @@ public:
       auto *slot = d_packet_data[current_read_index];
       // Slot reserved but not yet committed (producer still memcpy-ing) — wait.
       if (!slot->committed.load(std::memory_order_acquire)) [[unlikely]] {
-        _mm_pause();
+        //_mm_pause();
         continue;
       }
       process_packet_data(slot, current_read_index, global_max,
@@ -587,7 +587,7 @@ public:
           (int)RING_BUFFER_SIZE;
 
       if (available == 0) [[unlikely]] {
-        _mm_pause();
+        //_mm_pause();
         continue;
       }
 
@@ -722,7 +722,8 @@ public:
         // In the common case (single-phase legacy path or fast producer) this
         // never spins; the acquire pairs with commit_write_batch's release.
         while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
-          _mm_pause();
+          //_mm_pause();
+          continue;
         }
         if (entry->length > 0 &&
             !entry->processed.load(std::memory_order_relaxed)) {
@@ -863,7 +864,7 @@ public:
   }
   void *get_next_write_pointer() {
     while (!get_next_write_index() && running.load(std::memory_order_acquire)) {
-      _mm_pause();
+      //_mm_pause();
     }
     return get_current_write_pointer();
   }
