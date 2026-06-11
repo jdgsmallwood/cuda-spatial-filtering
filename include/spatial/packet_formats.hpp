@@ -170,7 +170,19 @@ struct ProcessedPacket {
 // fill their reserved slots in parallel.
 template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketEntry {
-  uint8_t data[BUFFER_SIZE];
+  // Slot capacity derived from the config instead of the fixed 4 KB
+  // BUFFER_SIZE: largest frame this config can produce is a PCAP-replayed
+  // Ethernet frame (42 B eth/ip/udp + CustomHeader + scales + samples).
+  // Rounded up to a cache line.  For the default LAMBDA shape this shrinks
+  // each slot from ~4.2 KB to ~2.7 KB, cutting the ring's working set by
+  // ~35% (see scripts/profiling/ANALYSIS.md #3).
+  static constexpr size_t DATA_CAPACITY =
+      (42 + sizeof(CustomHeader) + sizeof(PacketScaleStructure) +
+       sizeof(PacketDataStructure) + 63) &
+      ~static_cast<size_t>(63);
+  static_assert(DATA_CAPACITY >= MIN_PCAP_HEADER_SIZE,
+                "slot must hold at least a minimal frame");
+  uint8_t data[DATA_CAPACITY];
   int length;
   struct sockaddr_in sender_addr;
   struct timeval timestamp;

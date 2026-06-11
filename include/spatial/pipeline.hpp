@@ -370,6 +370,14 @@ private:
     size_t cusolver_work_host_size = 0;
     std::unique_ptr<ccglib::pipeline::Pipeline> gemm_handle;
 
+    // Instantiated CUDA graphs of the two static mid-pipeline sections
+    // (pre- and post-eigendecomposition).  All device pointers in those
+    // sections are fixed per PipelineResources, so the capture stays valid
+    // for the buffer's lifetime.  nullptr -> run the section eagerly
+    // (capture failed or disabled via SPATIAL_DISABLE_CUDA_GRAPH).
+    cudaGraphExec_t graph_pre = nullptr;
+    cudaGraphExec_t graph_post = nullptr;
+
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
@@ -442,6 +450,10 @@ private:
     }
 
     ~PipelineResources() {
+      if (graph_pre)
+        cudaGraphExecDestroy(graph_pre);
+      if (graph_post)
+        cudaGraphExecDestroy(graph_post);
       cudaStreamDestroy(stream);
       cudaStreamDestroy(host_stream);
       if (cusolver_handle)
@@ -468,9 +480,12 @@ private:
           weights_permuted(std::move(other.weights_permuted)),
           beamformer_output(std::move(other.beamformer_output)),
           cufft_work_area(std::move(other.cufft_work_area)),
-          gemm_handle(std::move(other.gemm_handle)) {
+          gemm_handle(std::move(other.gemm_handle)),
+          graph_pre(other.graph_pre), graph_post(other.graph_post) {
       other.stream = nullptr;
       other.host_stream = nullptr;
+      other.graph_pre = nullptr;
+      other.graph_post = nullptr;
     }
 
     PipelineResources &operator=(PipelineResources &&other) noexcept {
@@ -479,6 +494,14 @@ private:
           cudaStreamDestroy(stream);
         if (host_stream)
           cudaStreamDestroy(host_stream);
+        if (graph_pre)
+          cudaGraphExecDestroy(graph_pre);
+        if (graph_post)
+          cudaGraphExecDestroy(graph_post);
+        graph_pre = other.graph_pre;
+        graph_post = other.graph_post;
+        other.graph_pre = nullptr;
+        other.graph_post = nullptr;
 
         stream = other.stream;
         host_stream = other.host_stream;
@@ -548,59 +571,17 @@ public:
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
         dummy_run);
 
-    tensor_16.runPermutation("packetToPreAlign", alpha,
-                             (__half *)b.samples_half.get(),
-                             (__half *)b.samples_pre_align.get(), b.stream);
+    // Pre-eigendecomposition section: a single graph launch replaces ~12
+    // individual launches when capture succeeded at construction (see
+    // enqueue_pre_eigen / capture_graph).
+    if (b.graph_pre != nullptr) {
+      CUDA_CHECK(cudaGraphLaunch(b.graph_pre, b.stream));
+    } else {
+      enqueue_pre_eigen(b);
+    }
 
-    apply_delays_launch((__half *)b.samples_pre_align.get(),
-                        (__half *)b.samples_aligned.get(), d_subpacket_delays,
-                        T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
-                        T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
-                        T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
-
-    tensor_16.runPermutation("alignedToPadding", alpha,
-                             (__half *)b.samples_aligned.get(),
-                             (__half *)b.samples_padding.get(), b.stream);
-
-    CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
-                               sizeof(typename T::HalfPacketAlignedSamplesType),
-                               cudaMemcpyDefault, b.stream));
-
-    CUDA_CHECK(
-        cudaMemsetAsync(reinterpret_cast<char *>(b.samples_padded.get()) +
-                            sizeof(typename T::HalfPacketAlignedSamplesType),
-                        0,
-                        sizeof(typename T::PaddedPacketSamplesType) -
-                            sizeof(typename T::HalfPacketAlignedSamplesType),
-                        b.stream));
-
-    tensor_16.runPermutation("paddedToCorrInput", alpha,
-                             (__half *)b.samples_padded.get(),
-                             (__half *)b.correlator_input.get(), b.stream);
-
-    correlator.launchAsync((CUstream)b.stream,
-                           (CUdeviceptr)b.correlator_output.get(),
-                           (CUdeviceptr)b.correlator_input.get());
-
-    tensor_32.runPermutation("visCorrToBaseline", alpha_32,
-                             (float *)b.correlator_output.get(),
-                             (float *)b.visibilities_baseline.get(), b.stream);
-    CUDA_CHECK(cudaMemcpyAsync(
-        b.visibilities_trimmed_baseline.get(), b.visibilities_baseline.get(),
-        sizeof(TrimmedVisibilities), cudaMemcpyDefault, b.stream));
-
-    tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
-                             (float *)b.visibilities_trimmed_baseline.get(),
-                             (float *)b.visibilities_trimmed.get(), b.stream);
-    tensor_32.runPermutation("visCorrToDecomp", alpha_32,
-                             (float *)b.visibilities_trimmed.get(),
-                             (float *)b.visibilities_permuted.get(), b.stream);
-    unpack_triangular_baseline_batch_launch<cuComplex>(
-        (cuComplex *)b.visibilities_permuted.get(),
-        (cuComplex *)b.decomp_visibilities.get(), T::NR_RECEIVERS,
-        T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
-        T::NR_CHANNELS, b.stream);
-
+    // Eager: cuSOLVER may do host-side work per call that a captured graph
+    // would not replay, so it stays out of the graphs.
     CUSOLVER_CHECK(cusolverDnXsyevBatched(
         b.cusolver_handle, b.cusolver_params, cusolver_jobz, cusolver_uplo,
         T::NR_RECEIVERS, CUDA_C_32F,
@@ -610,45 +591,13 @@ public:
         b.cusolver_work_host, b.cusolver_work_host_size, b.cusolver_info.get(),
         CUSOLVER_BATCH_SIZE));
 
-    accumulate_visibilities((float *)b.visibilities_trimmed.get(),
-                            (float *)d_visibilities_accumulator,
-                            2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
-                                T::NR_POLARIZATIONS * T::NR_CHANNELS,
-                            b.stream);
-
-    tensor_16.runPermutation("alignedToPlanar", alpha,
-                             (__half *)b.samples_aligned.get(),
-                             (__half *)b.samples_consolidated.get(), b.stream);
-
-    tensor_16.runPermutation(
-        "consToColMajCons", alpha, (__half *)b.samples_consolidated.get(),
-        (__half *)b.samples_consolidated_col_maj.get(), b.stream);
-
-    update_weights((__half *)b.weights.get(), (__half *)b.weights_updated.get(),
-                   T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
-                   T::NR_POLARIZATIONS, (float *)b.eigenvalues.get(),
-                   (float *)b.visibilities_trimmed.get(), b.stream);
-
-    tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
-                             (__half *)b.weights_updated.get(),
-                             (__half *)b.weights_permuted.get(), b.stream);
-
-    b.gemm_handle->Run((CUdeviceptr)b.weights_permuted.get(),
-                       (CUdeviceptr)b.samples_consolidated_col_maj.get(),
-                       (CUdeviceptr)b.beamformer_output.get());
-    tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
-                             (float *)b.beamformer_output.get(),
-                             (float *)b.beamformer_data_output.get(), b.stream);
-
-    convert_float_to_half((float *)b.beamformer_data_output.get(),
-                          (__half *)b.beamformer_data_output_half.get(),
-                          2 * T::NR_CHANNELS * T::NR_POLARIZATIONS *
-                              T::NR_BEAMS * NR_TIME_STEPS_FOR_CORRELATION,
-                          b.stream);
-
-    tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
-                             (float *)b.beamformer_output.get(),
-                             (float *)b.samples_cufft_input.get(), b.stream);
+    // Post-eigendecomposition section: accumulation, beamforming GEMM and
+    // output-layout permutations — again one graph launch when available.
+    if (b.graph_post != nullptr) {
+      CUDA_CHECK(cudaGraphLaunch(b.graph_post, b.stream));
+    } else {
+      enqueue_post_eigen(b);
+    }
 
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
@@ -737,6 +686,157 @@ public:
       benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
     }
   }
+  // ---- Static mid-pipeline sections -----------------------------------
+  // Everything in these two methods operates on device pointers that are
+  // fixed for the lifetime of a PipelineResources, which is what allows
+  // them to be captured into CUDA graphs (capture_graph) and replayed as a
+  // single launch each instead of ~20 individual launches.  Any op added
+  // here must use only per-buffer device pointers — no per-run host
+  // pointers — to keep the capture valid.
+
+  // From half-converted samples up to the unpacked hermitian matrices that
+  // feed the eigendecomposition.
+  void enqueue_pre_eigen(PipelineResources &b) {
+    tensor_16.runPermutation("packetToPreAlign", alpha,
+                             (__half *)b.samples_half.get(),
+                             (__half *)b.samples_pre_align.get(), b.stream);
+
+    apply_delays_launch((__half *)b.samples_pre_align.get(),
+                        (__half *)b.samples_aligned.get(), d_subpacket_delays,
+                        T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
+                        T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
+                        T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+
+    tensor_16.runPermutation("alignedToPadding", alpha,
+                             (__half *)b.samples_aligned.get(),
+                             (__half *)b.samples_padding.get(), b.stream);
+
+    CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
+                               sizeof(typename T::HalfPacketAlignedSamplesType),
+                               cudaMemcpyDefault, b.stream));
+
+    CUDA_CHECK(
+        cudaMemsetAsync(reinterpret_cast<char *>(b.samples_padded.get()) +
+                            sizeof(typename T::HalfPacketAlignedSamplesType),
+                        0,
+                        sizeof(typename T::PaddedPacketSamplesType) -
+                            sizeof(typename T::HalfPacketAlignedSamplesType),
+                        b.stream));
+
+    tensor_16.runPermutation("paddedToCorrInput", alpha,
+                             (__half *)b.samples_padded.get(),
+                             (__half *)b.correlator_input.get(), b.stream);
+
+    correlator.launchAsync((CUstream)b.stream,
+                           (CUdeviceptr)b.correlator_output.get(),
+                           (CUdeviceptr)b.correlator_input.get());
+
+    tensor_32.runPermutation("visCorrToBaseline", alpha_32,
+                             (float *)b.correlator_output.get(),
+                             (float *)b.visibilities_baseline.get(), b.stream);
+    CUDA_CHECK(cudaMemcpyAsync(
+        b.visibilities_trimmed_baseline.get(), b.visibilities_baseline.get(),
+        sizeof(TrimmedVisibilities), cudaMemcpyDefault, b.stream));
+
+    tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
+                             (float *)b.visibilities_trimmed_baseline.get(),
+                             (float *)b.visibilities_trimmed.get(), b.stream);
+    tensor_32.runPermutation("visCorrToDecomp", alpha_32,
+                             (float *)b.visibilities_trimmed.get(),
+                             (float *)b.visibilities_permuted.get(), b.stream);
+    unpack_triangular_baseline_batch_launch<cuComplex>(
+        (cuComplex *)b.visibilities_permuted.get(),
+        (cuComplex *)b.decomp_visibilities.get(), T::NR_RECEIVERS,
+        T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
+        T::NR_CHANNELS, b.stream);
+  }
+
+  // From visibility accumulation through beamforming to the cuFFT input
+  // layout.  The cuSOLVER eigendecomposition sits between the two sections
+  // and stays eager (it may do host-side work per call that stream capture
+  // would not replay); cuFFT + downsample stay eager after this section for
+  // the same caution.
+  void enqueue_post_eigen(PipelineResources &b) {
+    accumulate_visibilities((float *)b.visibilities_trimmed.get(),
+                            (float *)d_visibilities_accumulator,
+                            2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
+                                T::NR_POLARIZATIONS * T::NR_CHANNELS,
+                            b.stream);
+
+    tensor_16.runPermutation("alignedToPlanar", alpha,
+                             (__half *)b.samples_aligned.get(),
+                             (__half *)b.samples_consolidated.get(), b.stream);
+
+    tensor_16.runPermutation(
+        "consToColMajCons", alpha, (__half *)b.samples_consolidated.get(),
+        (__half *)b.samples_consolidated_col_maj.get(), b.stream);
+
+    update_weights((__half *)b.weights.get(), (__half *)b.weights_updated.get(),
+                   T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
+                   T::NR_POLARIZATIONS, (float *)b.eigenvalues.get(),
+                   (float *)b.visibilities_trimmed.get(), b.stream);
+
+    tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
+                             (__half *)b.weights_updated.get(),
+                             (__half *)b.weights_permuted.get(), b.stream);
+
+    b.gemm_handle->Run((CUdeviceptr)b.weights_permuted.get(),
+                       (CUdeviceptr)b.samples_consolidated_col_maj.get(),
+                       (CUdeviceptr)b.beamformer_output.get());
+    tensor_32.runPermutation("beamCCGLIBToOutput", alpha_32,
+                             (float *)b.beamformer_output.get(),
+                             (float *)b.beamformer_data_output.get(), b.stream);
+
+    convert_float_to_half((float *)b.beamformer_data_output.get(),
+                          (__half *)b.beamformer_data_output_half.get(),
+                          2 * T::NR_CHANNELS * T::NR_POLARIZATIONS *
+                              T::NR_BEAMS * NR_TIME_STEPS_FOR_CORRELATION,
+                          b.stream);
+
+    tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
+                             (float *)b.beamformer_output.get(),
+                             (float *)b.samples_cufft_input.get(), b.stream);
+  }
+
+  // Capture one section into an instantiated graph.  Raw CUDA calls (not
+  // CUDA_CHECK, which exits the process) so a capture-incompatible op
+  // degrades to eager execution instead of aborting startup.
+  template <typename EnqueueFn>
+  bool capture_graph(PipelineResources &b, EnqueueFn &&enqueue,
+                     cudaGraphExec_t &exec_out) {
+    cudaGraph_t graph = nullptr;
+    if (cudaStreamBeginCapture(b.stream, cudaStreamCaptureModeThreadLocal) !=
+        cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
+    bool enqueue_ok = true;
+    try {
+      enqueue(b);
+    } catch (...) {
+      // ccglib/cudawrappers throw on capture-incompatible calls.
+      enqueue_ok = false;
+    }
+    const cudaError_t end_err = cudaStreamEndCapture(b.stream, &graph);
+    if (!enqueue_ok || end_err != cudaSuccess || graph == nullptr) {
+      if (graph != nullptr) {
+        cudaGraphDestroy(graph);
+      }
+      cudaGetLastError();
+      return false;
+    }
+    cudaGraphExec_t exec = nullptr;
+    if (cudaGraphInstantiateWithFlags(&exec, graph, 0) != cudaSuccess ||
+        exec == nullptr) {
+      cudaGraphDestroy(graph);
+      cudaGetLastError();
+      return false;
+    }
+    cudaGraphDestroy(graph);
+    exec_out = exec;
+    return true;
+  }
+
   LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
 
       : num_buffers(num_buffers), h_weights(h_weights),
@@ -869,6 +969,42 @@ public:
     }
 
     cudaDeviceSynchronize();
+
+    // Capture the two static mid-pipeline sections of each buffer into CUDA
+    // graphs (~21 launches collapse into 2 per run).  Any failure falls back
+    // to eager execution for all buffers — functionally identical, just more
+    // launch overhead.  SPATIAL_DISABLE_CUDA_GRAPH=1 forces the eager path.
+    if (std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr) {
+      bool all_ok = true;
+      for (auto &b : buffers) {
+        if (!capture_graph(
+                b, [this](PipelineResources &r) { enqueue_pre_eigen(r); },
+                b.graph_pre) ||
+            !capture_graph(
+                b, [this](PipelineResources &r) { enqueue_post_eigen(r); },
+                b.graph_post)) {
+          all_ok = false;
+          break;
+        }
+      }
+      if (!all_ok) {
+        for (auto &b : buffers) {
+          if (b.graph_pre) {
+            cudaGraphExecDestroy(b.graph_pre);
+            b.graph_pre = nullptr;
+          }
+          if (b.graph_post) {
+            cudaGraphExecDestroy(b.graph_post);
+            b.graph_post = nullptr;
+          }
+        }
+        WARN_LOG("CUDA graph capture failed — pipeline will run eagerly");
+      } else {
+        INFO_LOG("CUDA graphs captured for {} pipeline buffers",
+                 buffers.size());
+      }
+      cudaDeviceSynchronize();
+    }
 
     // warm up the pipeline.
     // This will JIT the template kernels to avoid having a long startup time

@@ -498,7 +498,8 @@ public:
           addr.sin_addr.s_addr = ip->src_ip; // already network byte order
         }
 
-        const int copy_len = len < BUFFER_SIZE ? len : BUFFER_SIZE;
+        const int copy_len =
+            std::min<int>(len, static_cast<int>(state.slot_data_capacity()));
         std::memcpy(state.get_current_write_pointer(), frame, copy_len);
         state.add_received_packet_metadata(len, addr);
         state.packets_received += 1;

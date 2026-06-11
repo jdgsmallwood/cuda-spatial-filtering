@@ -50,7 +50,13 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
-  constexpr size_t PACKET_RING_BUFFER_SIZE = 900000;
+  // Power of two so the compile-time modulo in ProcessorState reduces to a
+  // mask.  524288 slots ≈ 100 ms of buffering at 5 Mpps — enough to ride out
+  // writer/pipeline hiccups while keeping the slot pool (~1.4 GB at the
+  // config-derived slot size) small enough that a useful fraction stays in
+  // LLC.  The previous 900000 (~3.7 GB at 4 KB slots) guaranteed every slot
+  // access was a DRAM miss.
+  constexpr size_t PACKET_RING_BUFFER_SIZE = 1 << 19;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
