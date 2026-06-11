@@ -151,6 +151,11 @@ int main(int argc, char *argv[]) {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
 
+  std::thread processor([&state]() { state.process_packets(); });
+  std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
+
+  output->start_writer_loop();
+
   auto capture = make_packet_captures(args);
   INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
@@ -160,10 +165,6 @@ int main(int argc, char *argv[]) {
         [&capture, &state, i]() { capture[i]->get_packets(state); });
   }
 
-  std::thread processor([&state]() { state.process_packets(); });
-  std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
-
-  output->start_writer_loop();
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   int64_t packets_received = 0;
