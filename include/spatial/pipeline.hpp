@@ -970,6 +970,25 @@ public:
 
     cudaDeviceSynchronize();
 
+    // Warm up the pipeline *before* attempting graph capture. This is the
+    // first-ever call to most cuTENSOR permutations, the TCC correlator, and
+    // the ccglib GEMM (only "weightsInputToCCGLIB" has run so far, above).
+    // Each of these libraries may do one-time lazy initialization on first
+    // use -- NVRTC JIT compilation, module loading, on-disk JIT-cache
+    // writes -- which is not safe to perform while cudaStreamBeginCapture is
+    // active (can hang or segfault, especially with a cold cache). Running
+    // this eagerly first ensures capture below only ever records
+    // already-loaded kernels. Because everything is zeroed it should have
+    // negligible effect on output.
+    typename T::PacketFinalDataType warmup_packet;
+    std::memset(warmup_packet.samples, 0,
+                warmup_packet.get_samples_elements_size());
+    std::memset(warmup_packet.scales, 0,
+                warmup_packet.get_scales_element_size());
+    std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
+    execute_pipeline(&warmup_packet, true);
+    cudaDeviceSynchronize();
+
     // Capture the two static mid-pipeline sections of each buffer into CUDA
     // graphs (~21 launches collapse into 2 per run).  Any failure falls back
     // to eager execution for all buffers — functionally identical, just more
@@ -1002,22 +1021,15 @@ public:
       } else {
         INFO_LOG("CUDA graphs captured for {} pipeline buffers",
                  buffers.size());
+        // Exercise the captured graphs (cudaGraphLaunch replay) once before
+        // real traffic arrives, so a replay problem surfaces here rather
+        // than on the first live buffer.
+        execute_pipeline(&warmup_packet, true);
       }
       cudaDeviceSynchronize();
     }
 
-    // warm up the pipeline.
-    // This will JIT the template kernels to avoid having a long startup time
-    // Because everything is zeroed it should have negligible effect on output.
-    typename T::PacketFinalDataType warmup_packet;
-    std::memset(warmup_packet.samples, 0,
-                warmup_packet.get_samples_elements_size());
-    std::memset(warmup_packet.scales, 0,
-                warmup_packet.get_scales_element_size());
-    std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
-    cudaDeviceSynchronize();
-    // these need to be set after the dummy run.
+    // these need to be set after the dummy run(s).
     visibilities_start_seq_num = -1;
     visibilities_end_seq_num = -1;
     visibilities_missing_packets = 0;
