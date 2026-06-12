@@ -1426,6 +1426,62 @@ TEST_F(CudaIsolatedTest, ComputeSteeringWeightsMatchesGeometricPhaseFormula) {
   }
 };
 
+TEST_F(CudaIsolatedTest, ComputeSteeringWeightsZeroesNullAntennas) {
+  // Receivers mapped to a negative antenna ID (-100 in AntennaMapRegistry =
+  // no antenna connected to that FPGA stream, e.g. FPGA 0 streams 0/2/4/6)
+  // are null inputs: their weights must be exactly zero for every
+  // beam/channel/pol so the disconnected stream's noise is never summed into
+  // a beam. Connected receivers keep their full 1/NR_RECEIVERS-amplitude
+  // steering phasor.
+  using namespace std::chrono;
+
+  const std::vector<BeamTarget> targets{BeamTarget{"zenith"}};
+  const std::unordered_map<int, ENUPosition> antenna_positions{
+      {100, ENUPosition{0.0, 0.0, 0.0}},
+      {101, ENUPosition{25.0, -10.0, 1.5}},
+  };
+  // Receivers 0 and 2 are null inputs (mirroring FPGA 0's -100 streams);
+  // receivers 1 and 3 are real antennas.
+  const std::unordered_map<int, int> antenna_mapping{
+      {0, -100}, {1, 100}, {2, -100}, {3, 101}};
+  const FrequencyPlan frequency_plan{/*base_frequency_hz=*/1.4e9,
+                                     /*channel_bandwidth_hz=*/1.0e5};
+
+  BeamWeightsT<Config> result = compute_steering_weights<Config>(
+      targets, antenna_positions, antenna_mapping, frequency_plan,
+      /*min_freq_channel=*/0, ArrayLocation{}, system_clock::now(),
+      /*calibration_gains=*/nullptr);
+
+  constexpr double kHalfPrecisionTolerance = 2e-3;
+  const double expected_amplitude =
+      1.0 / static_cast<double>(Config::NR_RECEIVERS);
+  for (size_t chan = 0; chan < Config::NR_CHANNELS; ++chan) {
+    for (size_t pol = 0; pol < Config::NR_POLARIZATIONS; ++pol) {
+      for (size_t b = 0; b < Config::NR_BEAMS; ++b) {
+        for (size_t receiver_idx = 0; receiver_idx < Config::NR_RECEIVERS;
+             ++receiver_idx) {
+          auto w = result.weights[chan][pol][b][receiver_idx];
+          std::complex<float> wf(__half2float(w.real()),
+                                 __half2float(w.imag()));
+          if (antenna_mapping.at(static_cast<int>(receiver_idx)) < 0) {
+            EXPECT_EQ(wf.real(), 0.0f)
+                << "null receiver=" << receiver_idx << " chan=" << chan
+                << " pol=" << pol << " beam=" << b;
+            EXPECT_EQ(wf.imag(), 0.0f)
+                << "null receiver=" << receiver_idx << " chan=" << chan
+                << " pol=" << pol << " beam=" << b;
+          } else {
+            EXPECT_NEAR(std::abs(wf), expected_amplitude,
+                        kHalfPrecisionTolerance)
+                << "connected receiver=" << receiver_idx << " chan=" << chan
+                << " pol=" << pol << " beam=" << b;
+          }
+        }
+      }
+    }
+  }
+};
+
 TEST_F(CudaIsolatedTest, BeamSteeringInactiveWithoutTargetsIsNoOp) {
   // An empty target list (no --targets-filename) makes BeamSteering
   // permanently inert: active() is false and maybe_refresh() never touches

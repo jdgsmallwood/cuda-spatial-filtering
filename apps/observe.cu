@@ -133,10 +133,19 @@ int main(int argc, char *argv[]) {
 
   for (auto i = 0; i < num_lambda_channels; ++i) {
     for (auto j = 0; j < nr_lambda_receivers; ++j) {
+      // Null inputs -- receivers mapped to a negative antenna ID (-100 in
+      // AntennaMapRegistry, FPGA streams with no antenna connected) -- get
+      // zero weight so their noise is never summed into a beam. This covers
+      // the unsteered case; when steering is active, compute_steering_weights
+      // zeroes them the same way on the first refresh.
+      const auto mapping_it = args.antenna_mapping.find(j);
+      const bool null_input = mapping_it != args.antenna_mapping.end() &&
+                              mapping_it->second < 0;
+      const __half amplitude = __float2half(null_input ? 0.0f : 1.0f);
       for (auto k = 0; k < nr_lambda_beams; ++k) {
         for (auto l = 0; l < nr_lambda_polarizations; ++l) {
           h_weights.weights[i][l][k][j] =
-              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+              std::complex<__half>(amplitude, __float2half(0.0f));
         }
       }
     }

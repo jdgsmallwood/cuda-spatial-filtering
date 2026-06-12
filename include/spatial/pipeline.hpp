@@ -75,6 +75,12 @@ inline constexpr double kSpeedOfLightMetresPerSecond = 299792458.0;
 // get_gains_structure()'s convention. Receivers absent from either map fall
 // back to ENUPosition{0,0,0} (zero path-length difference, i.e. zero geometric
 // phase).
+//
+// Receivers mapped to a *negative* antenna ID (AntennaMapRegistry uses -100
+// for FPGA streams with no antenna connected, e.g. FPGA 0 streams 0/2/4/6)
+// are null inputs: their weights are left exactly zero for every
+// beam/channel/pol, so the disconnected stream's noise is never summed into
+// a beam.
 template <typename T>
 inline BeamWeightsT<T> compute_steering_weights(
     const std::vector<BeamTarget> &targets,
@@ -110,6 +116,13 @@ inline BeamWeightsT<T> compute_steering_weights(
         ENUPosition enu{};
         auto mapping_it = antenna_mapping.find(static_cast<int>(receiver_idx));
         if (mapping_it != antenna_mapping.end()) {
+          // Negative antenna ID = null input (no antenna on this FPGA
+          // stream). Leave its weights at the zero `result{}` was
+          // initialized with -- the ENUPosition{0,0,0} fallback below would
+          // instead give it a full-amplitude 1/NR_RECEIVERS weight and sum
+          // the disconnected stream's noise into every beam.
+          if (mapping_it->second < 0)
+            continue;
           auto position_it = antenna_positions.find(mapping_it->second);
           if (position_it != antenna_positions.end()) {
             enu = position_it->second;
