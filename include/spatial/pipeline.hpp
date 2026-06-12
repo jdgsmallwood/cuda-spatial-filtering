@@ -134,6 +134,11 @@ inline BeamWeightsT<T> compute_steering_weights(
           result.weights[chan][pol][b][receiver_idx] = std::complex<__half>(
               __float2half(static_cast<float>(final_weight.real())),
               __float2half(static_cast<float>(final_weight.imag())));
+
+          std::cout << "Weight for channel " << chan << " pol " << pol
+                    << " and receiver " << receiver_idx << " is "
+                    << final_weight.real() << " + " << final_weight.imag()
+                    << "j.\n";
         }
       }
     }
@@ -681,9 +686,8 @@ private:
           weights_permuted(std::move(other.weights_permuted)),
           beamformer_output(std::move(other.beamformer_output)),
           cufft_work_area(std::move(other.cufft_work_area)),
-          gemm_handle(std::move(other.gemm_handle)),
-          graph_pre(other.graph_pre), graph_post(other.graph_post),
-          accumulate_done(other.accumulate_done) {
+          gemm_handle(std::move(other.gemm_handle)), graph_pre(other.graph_pre),
+          graph_post(other.graph_post), accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
       other.host_stream = nullptr;
       other.graph_pre = nullptr;
@@ -3341,13 +3345,12 @@ public:
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, streams[i]));
 
-    CUDA_CHECK(cudaMemsetAsync(
-        reinterpret_cast<char *>(d_samples_padded[i]) +
-            sizeof(typename T::HalfPacketSamplesType),
-        0,
-        sizeof(typename T::PaddedPacketSamplesType) -
-            sizeof(typename T::HalfPacketSamplesType),
-        streams[i]));
+    CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<char *>(d_samples_padded[i]) +
+                                   sizeof(typename T::HalfPacketSamplesType),
+                               0,
+                               sizeof(typename T::PaddedPacketSamplesType) -
+                                   sizeof(typename T::HalfPacketSamplesType),
+                               streams[i]));
 
     tensor_16.runPermutation("paddedToCorrInput", alpha,
                              (__half *)d_samples_padded[i],
@@ -3360,10 +3363,9 @@ public:
     tensor_32.runPermutation("visCorrToBaseline", alpha_32,
                              (float *)d_correlator_output[i],
                              (float *)d_visibilities_baseline[i], streams[i]);
-    CUDA_CHECK(cudaMemcpyAsync(d_visibilities_trimmed_baseline[i],
-                               d_visibilities_baseline[i],
-                               sizeof(TrimmedVisibilities), cudaMemcpyDefault,
-                               streams[i]));
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_visibilities_trimmed_baseline[i], d_visibilities_baseline[i],
+        sizeof(TrimmedVisibilities), cudaMemcpyDefault, streams[i]));
 
     tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
                              (float *)d_visibilities_trimmed_baseline[i],
@@ -3380,10 +3382,9 @@ public:
                              (__half *)d_samples_half[i],
                              (__half *)d_samples_consolidated[i], streams[i]);
 
-    tensor_16.runPermutation("consToColMajCons", alpha,
-                             (__half *)d_samples_consolidated[i],
-                             (__half *)d_samples_consolidated_col_maj[i],
-                             streams[i]);
+    tensor_16.runPermutation(
+        "consToColMajCons", alpha, (__half *)d_samples_consolidated[i],
+        (__half *)d_samples_consolidated_col_maj[i], streams[i]);
 
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights[i],
@@ -3544,8 +3545,8 @@ public:
     graph_main.assign(num_buffers, nullptr);
     accumulate_done.resize(num_buffers);
     for (auto i = 0; i < num_buffers; ++i) {
-      CUDA_CHECK(
-          cudaEventCreateWithFlags(&accumulate_done[i], cudaEventDisableTiming));
+      CUDA_CHECK(cudaEventCreateWithFlags(&accumulate_done[i],
+                                          cudaEventDisableTiming));
     }
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
@@ -3647,8 +3648,8 @@ public:
     if (std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr) {
       bool all_ok = true;
       for (auto i = 0; i < num_buffers; ++i) {
-        if (!capture_graph(streams[i], [this, i]() { enqueue_main(i); },
-                           graph_main[i])) {
+        if (!capture_graph(
+                streams[i], [this, i]() { enqueue_main(i); }, graph_main[i])) {
           all_ok = false;
           break;
         }
@@ -4434,13 +4435,12 @@ private:
                                    sizeof(DecompositionVisibilities),
                                    cudaMemcpyDefault, b0.stream));
 
-        CUDA_CHECK(cudaMemcpyAsync(eigval_ptr,
-                                   d_projection_eigenvalues_scratch,
+        CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, d_projection_eigenvalues_scratch,
                                    sizeof(Eigenvalues), cudaMemcpyDefault,
                                    b0.stream));
 
-        auto *ctx = new OutputTransferCompleteContext{
-            .output = this->output_, .block_index = block_num};
+        auto *ctx = new OutputTransferCompleteContext{.output = this->output_,
+                                                      .block_index = block_num};
         CUDA_CHECK(cudaLaunchHostFunc(
             b0.stream, eigen_output_transfer_complete_host_func, ctx));
       }
