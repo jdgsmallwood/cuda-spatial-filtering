@@ -263,8 +263,26 @@ int main(int argc, char *argv[]) {
       /*beam_idx=*/1,
       /*nr_eigenvectors=*/3, h_weights);
 
+  // Fold calibration into the synthesized steering weights rather than
+  // applying it again elsewhere (see compute_steering_weights() in
+  // pipeline.hpp). `calibration_gains` is declared first so it outlives
+  // `beam_steering`/`pipeline`.
+  const bool fold_calibration_into_steering =
+      !args.beam_targets.empty() && args.apply_gains;
+  typename Config::AntennaGains calibration_gains{};
+  if (fold_calibration_into_steering) {
+    calibration_gains = get_gains_structure<Config>(args);
+  }
+
+  BeamSteering<Config> beam_steering(
+      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.frequency_plan, args.min_freq_channel, args.array_location,
+      args.steering_update_interval_seconds, num_buffers,
+      fold_calibration_into_steering ? &calibration_gains : nullptr);
+
   std::cout << "Initializing pipeline...\n";
-  LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &projected);
+  LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &projected,
+                                                   std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

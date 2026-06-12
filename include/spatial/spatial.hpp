@@ -27,6 +27,11 @@
 
 #define MIN_PCAP_HEADER_SIZE 64
 #define BUFFER_SIZE 4096
+
+#ifndef NR_OBSERVING_PACKET_WORKER_THREADS
+#define NR_OBSERVING_PACKET_WORKER_THREADS 3
+#endif
+
 #include <cuda_fp16.h>
 
 // template <typename T>
@@ -140,6 +145,13 @@ public:
   std::atomic<uint64_t> packets_processed = 0;
   uint64_t packets_missing = 0;
   std::atomic<uint64_t> packets_discarded = 0;
+  // Diagnostics for the ring-buffer "reserve" logic: packets deferred to
+  // future_packet_queue (waiting for their buffer to roll around), and
+  // packets that fell through copy_data_to_input_buffer_if_able without
+  // being copied, future-queued, or discarded (would otherwise permanently
+  // poison their ring slot as processed=false).
+  std::atomic<uint64_t> packets_future_queued = 0;
+  std::atomic<uint64_t> packets_stuck_unprocessed = 0;
   uint64_t pipeline_runs_queued = 0;
   std::mutex producer_mutex;
   virtual void *get_next_write_pointer() = 0;
@@ -286,7 +298,9 @@ public:
         next_write_index = (next_write_index + 1) % RING_BUFFER_SIZE;
       }
       if (next_write_index == read_index.load(std::memory_order_acquire)) {
-        // INFO_LOG("Ring buffer is full!! Dropping packets...");
+
+        log_ring_full_diagnostics();
+
         return false;
       }
     }
@@ -294,6 +308,50 @@ public:
     //  DEBUG_LOG("Next write index is...{}", next_write_index);
     return true;
   };
+
+  // Rate-limited (at most once/sec) snapshot of why the ring buffer is full,
+  // logged from get_next_write_index() right before it starts spinning. If
+  // the spin never recovers, this is the last thing that gets written and
+  // tells you whether packets are backing up in future_packet_queue (a
+  // per-FPGA stream not advancing) vs. simply being produced faster than
+  // process_packets() can drain them.
+  void log_ring_full_diagnostics() {
+    static std::chrono::steady_clock::time_point last_log{};
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_log < std::chrono::seconds(1)) {
+      return;
+    }
+    last_log = now;
+
+    size_t unprocessed_slots = 0;
+    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
+      if (!d_packet_data[i]->processed) {
+        ++unprocessed_slots;
+      }
+    }
+
+    std::array<size_t, T::NR_FPGA_SOURCES> future_queue_sizes{};
+    {
+      std::lock_guard<std::mutex> lock(future_packet_queue_mutex);
+      for (auto i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+        future_queue_sizes[i] = future_packet_queue[i].size();
+      }
+    }
+
+    INFO_LOG("Ring buffer is full!! Dropping packets... "
+             "read_index={} write_index={} unprocessed_slots={}/{} "
+             "received={} processed={} discarded={} future_queued={} "
+             "stuck_unprocessed={}",
+             read_index.load(std::memory_order_relaxed),
+             write_index.load(std::memory_order_relaxed), unprocessed_slots,
+             RING_BUFFER_SIZE, packets_received.load(),
+             packets_processed.load(), packets_discarded.load(),
+             packets_future_queued.load(), packets_stuck_unprocessed.load());
+    for (auto i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+      INFO_LOG("  future_packet_queue[fpga_index={}].size() = {}", i,
+               future_queue_sizes[i]);
+    }
+  }
 
   __attribute__((hot)) void copy_data_to_input_buffer_if_able(
       ProcessedPacket<typename T::PacketScaleStructure,
@@ -322,6 +380,7 @@ public:
     // on the first run global_max will not be set initially so will be 0.
     // We don't want it to seize up on this.
     if (sample_count > global_max[fpga_index] && global_max[fpga_index] > 0) {
+      packets_future_queued.fetch_add(1, std::memory_order_relaxed);
       std::lock_guard lock(future_packet_queue_mutex);
       future_packet_queue[fpga_index].push({current_read_index, sample_count});
       return;
@@ -397,11 +456,15 @@ public:
         }
       }
     }
-    // DEBUG_LOG(
-    //     "Packet with seq number {} and read index {} was unable to find a "
-    //     "home. Adding to "
-    //     "future_packet_queue...",
-    //     sample_count, current_read_index);
+    // sample_count <= global_max[fpga_index], so this packet wasn't deferred
+    // to future_packet_queue, but it also didn't land within any of the
+    // NR_INPUT_BUFFERS windows above (e.g. it's an out-of-order packet
+    // belonging to a buffer that has already been released/rotated past).
+    // Mark it processed so its ring slot stays reusable -- otherwise
+    // *pkt.original_packet_processed stays false forever, and once enough of
+    // these accumulate get_next_write_index() can no longer find a free slot.
+    packets_stuck_unprocessed.fetch_add(1, std::memory_order_relaxed);
+    *pkt.original_packet_processed = true;
   };
   void process_all_available_packets() {
     // Testing path — single-threaded drain of the ring.

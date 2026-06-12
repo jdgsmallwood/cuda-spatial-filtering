@@ -133,23 +133,52 @@ int main(int argc, char *argv[]) {
 
   for (auto i = 0; i < num_lambda_channels; ++i) {
     for (auto j = 0; j < nr_lambda_receivers; ++j) {
+      // Null inputs -- receivers mapped to a negative antenna ID (-100 in
+      // AntennaMapRegistry, FPGA streams with no antenna connected) -- get
+      // zero weight so their noise is never summed into a beam. This covers
+      // the unsteered case; when steering is active, compute_steering_weights
+      // zeroes them the same way on the first refresh.
+      const auto mapping_it = args.antenna_mapping.find(j);
+      const bool null_input = mapping_it != args.antenna_mapping.end() &&
+                              mapping_it->second < 0;
+      const __half amplitude = __float2half(null_input ? 0.0f : 1.0f);
       for (auto k = 0; k < nr_lambda_beams; ++k) {
         for (auto l = 0; l < nr_lambda_polarizations; ++l) {
           h_weights.weights[i][l][k][j] =
-              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+              std::complex<__half>(amplitude, __float2half(0.0f));
         }
       }
     }
   }
 
-  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights);
+  // Fold calibration into the synthesized steering weights instead of also
+  // applying it at ingest via set_antenna_gains()/d_gains -- doing both would
+  // square the correction (see compute_steering_weights() in pipeline.hpp).
+  const bool fold_calibration_into_steering =
+      !args.beam_targets.empty() && args.apply_gains;
+
+  BeamSteering<Config> beam_steering(
+      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.frequency_plan, args.min_freq_channel, args.array_location,
+      args.steering_update_interval_seconds, num_buffers,
+      fold_calibration_into_steering ? &gains : nullptr);
+
+  LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights,
+                                     std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
   if (args.apply_gains) {
-    std::cout << "Applying gains as -a is selected!" << std::endl;
-    pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+    if (fold_calibration_into_steering) {
+      std::cout << "Folding calibration gains into synthesized steering "
+                   "weights (skipping separate ingest-time application via "
+                   "set_antenna_gains to avoid double-applying)"
+                << std::endl;
+    } else {
+      std::cout << "Applying gains as -a is selected!" << std::endl;
+      pipeline.set_antenna_gains((std::complex<float> *)gains.data());
+    }
   } else {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
@@ -178,7 +207,10 @@ int main(int argc, char *argv[]) {
     std::cout << "Stats: Received=" << state.packets_received
               << ", Processed=" << state.packets_processed
               << ", Missing=" << state.packets_missing
-              << ", Discarded=" << state.packets_discarded << std::endl;
+              << ", Discarded=" << state.packets_discarded
+              << ", FutureQueued=" << state.packets_future_queued
+              << ", StuckUnprocessed=" << state.packets_stuck_unprocessed
+              << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
     state.running.store((int)running, std::memory_order_release);
