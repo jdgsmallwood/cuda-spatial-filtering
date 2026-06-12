@@ -1248,11 +1248,13 @@ public:
     INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
+    // dummy_run must be forwarded so the warmup run's release_buffer host
+    // func skips the release (state_ is unset during construction).
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, streams[current_buffer],
         streams[current_buffer], d_samples_entry[current_buffer],
         d_scales[current_buffer], d_gains, d_samples_half[current_buffer],
-        false);
+        dummy_run);
 
     tensor_16.runPermutation(
         "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],
@@ -2986,11 +2988,15 @@ public:
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
 
+    // dummy_run must be forwarded: on the constructor's warmup run state_
+    // is not set yet and packet_data->buffer_index is meaningless, so the
+    // release_buffer host func has to skip the release (a hardcoded false
+    // here made the warmup segfault in release_buffer_host_func).
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, streams[current_buffer],
         streams[current_buffer], d_samples_entry[current_buffer],
         d_scales[current_buffer], d_gains, d_samples_half[current_buffer],
-        false);
+        dummy_run);
 
     // enqueue_main's first op (accumulate_visibilities) adds into
     // d_visibilities_accumulator. Wait for dump_visibilities' last reset of
