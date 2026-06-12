@@ -1192,9 +1192,16 @@ public:
     //   4. commit the filled slots; abandon the rest as empty so neither
     //      side ever waits on them.
     static constexpr int BATCH_SIZE = 256;
-    static thread_local struct mmsghdr msgs[BATCH_SIZE];
-    static thread_local struct iovec iovecs[BATCH_SIZE];
-    static thread_local struct sockaddr_in client_addrs[BATCH_SIZE];
+    // Plain stack locals, not `static thread_local`: get_packets is this
+    // receiver thread's entire body (called once, loops internally for the
+    // thread's lifetime), so a stack array already has the right lifetime
+    // and is inherently per-thread. `thread_local` here can hit glibc's
+    // __tls_get_addr, which has a known race with concurrent dlopen() (e.g.
+    // CUDA driver/NVRTC/cuSOLVER lazy-loading during pipeline construction)
+    // -- intermittent SIGSEGV in __tls_get_addr on a freshly started thread.
+    struct mmsghdr msgs[BATCH_SIZE];
+    struct iovec iovecs[BATCH_SIZE];
+    struct sockaddr_in client_addrs[BATCH_SIZE];
 
     const size_t slot_cap = state.slot_data_capacity();
     memset(msgs, 0, sizeof(msgs));

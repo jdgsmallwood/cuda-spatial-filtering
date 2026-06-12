@@ -378,6 +378,13 @@ private:
     cudaGraphExec_t graph_pre = nullptr;
     cudaGraphExec_t graph_post = nullptr;
 
+    // Recorded on `stream` right after the post-eigendecomposition section
+    // (which includes the accumulate_visibilities add into
+    // d_visibilities_accumulator) on every execute_pipeline call.
+    // dump_visibilities waits on this from all buffers before reading the
+    // accumulator, instead of a full cudaDeviceSynchronize().
+    cudaEvent_t accumulate_done = nullptr;
+
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
@@ -454,6 +461,8 @@ private:
         cudaGraphExecDestroy(graph_pre);
       if (graph_post)
         cudaGraphExecDestroy(graph_post);
+      if (accumulate_done)
+        cudaEventDestroy(accumulate_done);
       cudaStreamDestroy(stream);
       cudaStreamDestroy(host_stream);
       if (cusolver_handle)
@@ -481,11 +490,13 @@ private:
           beamformer_output(std::move(other.beamformer_output)),
           cufft_work_area(std::move(other.cufft_work_area)),
           gemm_handle(std::move(other.gemm_handle)),
-          graph_pre(other.graph_pre), graph_post(other.graph_post) {
+          graph_pre(other.graph_pre), graph_post(other.graph_post),
+          accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
       other.host_stream = nullptr;
       other.graph_pre = nullptr;
       other.graph_post = nullptr;
+      other.accumulate_done = nullptr;
     }
 
     PipelineResources &operator=(PipelineResources &&other) noexcept {
@@ -498,10 +509,14 @@ private:
           cudaGraphExecDestroy(graph_pre);
         if (graph_post)
           cudaGraphExecDestroy(graph_post);
+        if (accumulate_done)
+          cudaEventDestroy(accumulate_done);
         graph_pre = other.graph_pre;
         graph_post = other.graph_post;
+        accumulate_done = other.accumulate_done;
         other.graph_pre = nullptr;
         other.graph_post = nullptr;
+        other.accumulate_done = nullptr;
 
         stream = other.stream;
         host_stream = other.host_stream;
@@ -534,6 +549,12 @@ private:
 
   BeamWeights *h_weights;
   TrimmedVisibilities *d_visibilities_accumulator;
+
+  // Recorded on buffers[0].stream after dump_visibilities resets
+  // d_visibilities_accumulator. Each buffer's post-eigen section waits on
+  // this before its next accumulate_visibilities, so the reset can never
+  // race with an in-flight accumulation -- without a cudaDeviceSynchronize().
+  cudaEvent_t visibilities_reset_done = nullptr;
 
   typename T::AntennaGains *d_gains;
   std::vector<PipelineResources> buffers;
@@ -591,6 +612,12 @@ public:
         b.cusolver_work_host, b.cusolver_work_host_size, b.cusolver_info.get(),
         CUSOLVER_BATCH_SIZE));
 
+    // The post-eigen section's first op (accumulate_visibilities) adds into
+    // d_visibilities_accumulator. Wait for dump_visibilities' last reset of
+    // that accumulator (on buffers[0].stream) to land first -- a GPU-side
+    // wait, not a host-blocking sync. No-op until the first dump happens.
+    cudaStreamWaitEvent(b.stream, visibilities_reset_done, 0);
+
     // Post-eigendecomposition section: accumulation, beamforming GEMM and
     // output-layout permutations — again one graph launch when available.
     if (b.graph_post != nullptr) {
@@ -598,6 +625,11 @@ public:
     } else {
       enqueue_post_eigen(b);
     }
+
+    // Lets dump_visibilities (on buffers[0].stream) wait for this buffer's
+    // accumulate_visibilities to land before reading
+    // d_visibilities_accumulator, without a cudaDeviceSynchronize().
+    cudaEventRecord(b.accumulate_done, b.stream);
 
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
@@ -866,6 +898,8 @@ public:
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
                           sizeof(TrimmedVisibilities)));
+    CUDA_CHECK(cudaEventCreateWithFlags(&visibilities_reset_done,
+                                        cudaEventDisableTiming));
 
     CUDA_CHECK(cudaMalloc((void **)&d_subpacket_delays,
                           sizeof(int) * T::NR_FPGA_SOURCES));
@@ -949,6 +983,8 @@ public:
 
       // Finalize cuFFT plan for this buffer
       auto &b = buffers.back();
+      CUDA_CHECK(
+          cudaEventCreateWithFlags(&b.accumulate_done, cudaEventDisableTiming));
       CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
                                       CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
                                       CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
@@ -1039,6 +1075,8 @@ public:
     // out to disk. These will get tagged with a -1 end_seq_id currently
     // which is not fully ideal.
 
+    if (visibilities_reset_done)
+      cudaEventDestroy(visibilities_reset_done);
   };
   virtual void set_subpacket_delays(int *delays_subpacket) override {
     subpacket_delays_ = delays_subpacket;
@@ -1080,7 +1118,13 @@ public:
         num_correlation_units_integrated;
     INFO_LOG("Current num integrated units processed is {}",
              current_num_integrated_units_processed);
-    cudaDeviceSynchronize();
+    // GPU-side wait (not a host-blocking sync): make buffers[0].stream's
+    // upcoming memcpy of d_visibilities_accumulator wait for every buffer's
+    // most recent accumulate_visibilities to land first. accumulate_done is a
+    // no-op wait until it has been recorded at least once.
+    for (auto &buf : buffers) {
+      cudaStreamWaitEvent(buffers[0].stream, buf.accumulate_done, 0);
+    }
     const int visibilities_total_packets =
         current_num_integrated_units_processed *
         visibilities_total_packets_per_block;
@@ -1105,7 +1149,9 @@ public:
     cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(TrimmedVisibilities),
                     buffers[0].stream);
     num_correlation_units_integrated.store(0);
-    cudaDeviceSynchronize();
+    // Record the reset so every buffer's next accumulate_visibilities (via
+    // the wait above, in execute_pipeline) is ordered after it.
+    cudaEventRecord(visibilities_reset_done, buffers[0].stream);
   };
 };
 
