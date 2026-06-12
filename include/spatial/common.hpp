@@ -7,6 +7,8 @@
 #include "spatial/pipeline.hpp"
 #include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
+// Self-guarded: expands to nothing unless the build defined HAVE_IBVERBS.
+#include "spatial/libibverbs.hpp"
 #include "spatial/writers.hpp"
 #include <algorithm>
 #include <argparse/argparse.hpp>
@@ -142,6 +144,8 @@ struct CommonArgs {
   int port = 36001;
   int packets_to_receive = 0;
   double steering_update_interval_seconds = 180.0;
+  std::string capture_backend = "kernel";
+  int busy_poll_us = 0;
   json config;
   json gains;
   json beam_weights;
@@ -164,6 +168,52 @@ struct CommonArgs {
   // beam_weights/uniform-default behaviour (steering is opt-in).
   std::vector<BeamTarget> beam_targets;
 };
+
+// Builds the per-NIC packet-capture objects for an app from the parsed args,
+// centralizing the pcap-vs-live and kernel-vs-ibverbs backend choice so every
+// binary selects backends identically: offline pcap replay when --pcap-filename
+// is set, otherwise one live capture per NIC using the --capture-backend the
+// user asked for. `kernel_recv_buffer_size` tunes SO_RCVBUF for the kernel
+// backend (pulsar-fold historically uses a larger value than the others).
+inline std::vector<std::unique_ptr<PacketInput>>
+make_packet_captures(const CommonArgs &args,
+                     int kernel_recv_buffer_size = 256 * 1024 * 1024) {
+  std::vector<std::unique_ptr<PacketInput>> capture;
+
+  if (!args.pcap_filename.empty()) {
+    capture.push_back(std::make_unique<PCAPPacketCapture>(args.pcap_filename,
+                                                          args.loop_pcap));
+    return capture;
+  }
+
+  const bool use_ibverbs = args.capture_backend == "ibverbs";
+  if (!use_ibverbs && args.capture_backend != "kernel") {
+    throw std::runtime_error("Unknown --capture-backend '" +
+                             args.capture_backend +
+                             "' (expected 'kernel' or 'ibverbs')");
+  }
+#ifndef HAVE_IBVERBS
+  if (use_ibverbs) {
+    throw std::runtime_error(
+        "--capture-backend=ibverbs requested but this binary was built without "
+        "libibverbs (install libibverbs-dev and rebuild on an RDMA host)");
+  }
+#endif
+
+  for (auto nic : args.fpga_names) {
+#ifdef HAVE_IBVERBS
+    if (use_ibverbs) {
+      capture.push_back(std::make_unique<LibibverbsPacketCapture>(
+          nic, args.port, BUFFER_SIZE));
+      continue;
+    }
+#endif
+    capture.push_back(std::make_unique<KernelSocketPacketCapture>(
+        nic, args.port, BUFFER_SIZE, kernel_recv_buffer_size,
+        args.busy_poll_us));
+  }
+  return capture;
+}
 
 // Registers and parses the arguments that are common to every pipeline
 // binary. Extra arguments (e.g. --pulsar-period-samples) can be added to
@@ -208,6 +258,21 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .help("Port to bind on")
       .default_value(36001)
       .store_into(args.port);
+
+  program.add_argument("--capture-backend")
+      .help("Live packet-capture backend: 'kernel' (SOCK_DGRAM/recvmmsg) or "
+            "'ibverbs' (libibverbs raw-packet QP, requires an RDMA NIC and a "
+            "build with libibverbs)")
+      .default_value(std::string("kernel"))
+      .store_into(args.capture_backend);
+
+  program.add_argument("--busy-poll")
+      .help("Enable SO_BUSY_POLL on the kernel receive socket: number of "
+            "microseconds to busy-spin waiting for packets before sleeping "
+            "(0 = disabled, typical useful range 10-200).  Only effective "
+            "with --capture-backend=kernel on a dedicated NIC IRQ core.")
+      .default_value(0)
+      .store_into(args.busy_poll_us);
 
   program.add_argument("-d", "--debug-logging")
       .help("Enable debug logging")

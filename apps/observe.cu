@@ -42,19 +42,24 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_receivers =
       nr_lambda_receivers_per_packet * nr_fpga_sources;
   constexpr int nr_lambda_padded_receivers = NR_OBSERVING_PADDED_RECEIVERS;
+  constexpr int nr_lambda_padded_receivers_per_block =
+      NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK;
   constexpr int nr_lambda_beams = NUMBER_BEAMS;
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_packets_for_correlation =
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
-  constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
+  // Power of two so the compile-time modulo in ProcessorState reduces to a
+  // mask.  
+  constexpr size_t PACKET_RING_BUFFER_SIZE = 1 << 19;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
                    nr_lambda_polarizations, nr_lambda_receivers_per_packet,
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
-                   nr_lambda_padded_receivers, nr_lambda_padded_receivers,
+                   nr_lambda_padded_receivers,
+                   nr_lambda_padded_receivers_per_block,
                    nr_correlation_blocks_to_integrate, true, 256>;
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
@@ -112,8 +117,9 @@ int main(int argc, char *argv[]) {
       make_default_filename("eigendata", args.min_freq_channel,
                             num_lambda_channels, args.fpga_id_vec);
   HighFive::File eigen_file(eigen_filename, HighFive::File::Truncate);
-  auto eigen_writer = std::make_unique<HDF5EigenWriter<
-      Config::EigenvalueOutputType, Config::EigenvectorOutputType>>(eigen_file);
+  auto eigen_writer = nullptr; // std::make_unique<HDF5EigenWriter<
+  //      Config::EigenvalueOutputType,
+  //      Config::EigenvectorOutputType>>(eigen_file);
 
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
       num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations);
@@ -168,17 +174,12 @@ int main(int argc, char *argv[]) {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
 
-  std::vector<std::unique_ptr<PacketInput>> capture;
+  std::thread processor([&state]() { state.process_packets(); });
+  std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
-  if (!args.pcap_filename.empty()) {
-    capture.push_back(std::make_unique<PCAPPacketCapture>(args.pcap_filename,
-                                                          args.loop_pcap));
-  } else {
-    for (auto nic : args.fpga_names) {
-      capture.push_back(std::make_unique<KernelSocketPacketCapture>(
-          nic, args.port, BUFFER_SIZE, 256 * 1024 * 1024));
-    }
-  }
+  output->start_writer_loop();
+
+  auto capture = make_packet_captures(args);
   INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;
@@ -187,10 +188,6 @@ int main(int argc, char *argv[]) {
         [&capture, &state, i]() { capture[i]->get_packets(state); });
   }
 
-  std::thread processor([&state]() { state.process_packets(); });
-  std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
-
-  output->start_writer_loop();
   std::cout << "Setup completed. Ready to receive!" << std::endl;
   // Print statistics periodically
   int64_t packets_received = 0;

@@ -141,6 +141,22 @@ find_package(CasaCore REQUIRED)
 set(PSRDADA_ROOT $ENV{PSRHOME})
 find_library(PSRDADA_LIBRARY psrdada ${PSRDADA_ROOT}/lib)
 
+# --------------------------------------------
+# Optional: libibverbs (RDMA) for the ibverbs raw-packet capture backend.
+# Only enabled when both the library and headers are present, so builds on
+# machines without an RDMA stack are unaffected. When found, HAVE_IBVERBS is
+# defined globally (gating include/spatial/libibverbs.hpp) and IBVERBS_LIBRARY
+# is linked onto the app/test common targets below.
+# --------------------------------------------
+find_library(IBVERBS_LIBRARY ibverbs)
+find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
+  message(STATUS "libibverbs found (${IBVERBS_LIBRARY}) -- ibverbs capture backend enabled")
+  add_compile_definitions(HAVE_IBVERBS)
+else()
+  message(STATUS "libibverbs not found -- ibverbs capture backend disabled (use --capture-backend kernel)")
+endif()
+
 message(STATUS "CASACORE_FOUND is ${CASACORE_FOUND}")
 message(STATUS "CASACORE_LIBRARIES are ${CASACORE_LIBRARIES}")
 
@@ -197,6 +213,9 @@ if(${USER_BUILD_TESTING} STREQUAL "OFF")
   set(NR_OBSERVING_CHANNELS "8" CACHE STRING "Number of lambda channels")
   set(NR_OBSERVING_RECEIVERS_PER_PACKET "10" CACHE STRING "Number of receivers per packet")
   set(NR_OBSERVING_PADDED_RECEIVERS "32" CACHE STRING "Should be next multiple of 32 above total receivers (per packet receivers * nr_fpga_sources)")
+  # Keep at 32 even when NR_OBSERVING_PADDED_RECEIVERS=64: going to 64/block collapses
+  # blocks/channel from 3 to 1 (triangular formula), cutting TCC grid size by 3x.
+  set(NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK "32" CACHE STRING "TCC tile size — must be 32, 48, or 64. Keep at 32 unless NR_PADDED_RECEIVERS >= 96")
   set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets to correlate")
   set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
   set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
@@ -207,6 +226,7 @@ add_compile_definitions(
     NR_OBSERVING_CHANNELS=${NR_OBSERVING_CHANNELS}
     NR_OBSERVING_RECEIVERS_PER_PACKET=${NR_OBSERVING_RECEIVERS_PER_PACKET}
     NR_OBSERVING_PADDED_RECEIVERS=${NR_OBSERVING_PADDED_RECEIVERS}
+    NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK=${NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK}
     NR_OBSERVING_PACKETS_FOR_CORRELATION=${NR_OBSERVING_PACKETS_FOR_CORRELATION}
     NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE=${NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE}
     NR_OBSERVING_PACKET_WORKER_THREADS=${NR_OBSERVING_PACKET_WORKER_THREADS}
