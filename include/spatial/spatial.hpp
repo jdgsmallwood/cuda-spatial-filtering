@@ -301,9 +301,8 @@ public:
       const int current_read_index,
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
       uint64_t (&latest_packet_batch)[T::NR_CHANNELS][T::NR_FPGA_SOURCES]) {
-    int fpga_index_i = pkt.fpga_id < fpga_index_lut.size()
-                           ? fpga_index_lut[pkt.fpga_id]
-                           : -1;
+    int fpga_index_i =
+        pkt.fpga_id < fpga_index_lut.size() ? fpga_index_lut[pkt.fpga_id] : -1;
     if (fpga_index_i < 0) [[unlikely]] {
       const auto fpga_it = fpga_ids.find(pkt.fpga_id);
       if (fpga_it == fpga_ids.end()) {
@@ -491,6 +490,22 @@ public:
           "parsed sample count was zero - something has gone wrong!");
     }
 
+    // freq_channel comes straight off the wire (CustomHeader) and is
+    // otherwise unvalidated: a packet for a channel outside the configured
+    // [MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + NR_CHANNELS) window would
+    // underflow/overflow this index and write out of bounds into
+    // latest_packet_batch / modified_since_last_completion_check / the
+    // per-buffer samples-scales-arrivals arrays in
+    // copy_data_to_input_buffer_if_able. Drop such packets here.
+    const int freq_channel = static_cast<int>(parsed.freq_channel) -
+                             static_cast<int>(MIN_FREQ_CHANNEL);
+    if (freq_channel < 0 || freq_channel >= static_cast<int>(T::NR_CHANNELS))
+        [[unlikely]] {
+      packets_discarded.fetch_add(1, std::memory_order_relaxed);
+      parsed.original_packet_processed->store(true, std::memory_order_release);
+      return;
+    }
+
     if (!buffer_init_flag.load(std::memory_order_acquire)) [[unlikely]] {
       static std::mutex init_mutex;
       std::lock_guard<std::mutex> lock(init_mutex);
@@ -505,8 +520,7 @@ public:
     if (*parsed.original_packet_processed) [[likely]] {
       packets_processed.fetch_add(1, std::memory_order_relaxed);
     }
-    modified_since_last_completion_check[parsed.freq_channel -
-                                         MIN_FREQ_CHANNEL] = true;
+    modified_since_last_completion_check[freq_channel] = true;
   };
 
   void
@@ -792,8 +806,8 @@ public:
     // Affinity is opt-in via SPATIAL_WORKER_CPUS="4,5,6" (one entry per
     // worker).  Unset means no pinning — the previous hard pin to cores
     // 0..N-1 landed workers on the cores NIC IRQs typically use.
-    const int cpu = nth_cpu_from_list(std::getenv("SPATIAL_WORKER_CPUS"),
-                                      worker_id);
+    const int cpu =
+        nth_cpu_from_list(std::getenv("SPATIAL_WORKER_CPUS"), worker_id);
     if (cpu >= 0) {
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
@@ -1011,8 +1025,7 @@ public:
     slot_indices[reserved] = cur;
     reserved++;
     // Claim additional contiguous slots.
-    int next =
-        (write_index.load(std::memory_order_relaxed) + 1) % RING_BUFFER_SIZE;
+    int next = (cur + 1) % RING_BUFFER_SIZE;
     while (reserved < max_n) {
       if (next == read_index.load(std::memory_order_acquire)) {
         // Ring full: wait for the consumer to free slots, but never spin
@@ -1222,7 +1235,7 @@ public:
     // Adaptive batch: tracks the recent drain size so light traffic doesn't
     // burn (and immediately abandon) 256 ring slots per datagram, while
     // sustained load quickly ramps back to full batches.
-    int reserve_target = 64;
+    int reserve_target = BATCH_SIZE;
 
     while (state.running) {
       // Wait for data before claiming any slots.  100 ms timeout keeps the
@@ -1238,8 +1251,8 @@ public:
       int reserved;
       {
         std::lock_guard<std::mutex> lock(state.producer_mutex);
-        reserved = state.reserve_write_batch(reserve_target, slot_ptrs,
-                                             slot_indices);
+        reserved =
+            state.reserve_write_batch(reserve_target, slot_ptrs, slot_indices);
       }
       for (int i = 0; i < reserved; ++i) {
         iovecs[i].iov_base = slot_ptrs[i];
@@ -1252,6 +1265,12 @@ public:
         state.abandon_write_batch(reserved, slot_indices);
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
+        // Fatal receive error: without this log the thread dies silently
+        // and the only visible symptom is packets_received freezing.
+        ERROR_LOG("recvmmsg failed on ifname {}: {} — receiver thread exiting",
+                  ifname, strerror(errno));
+        std::cerr << "recvmmsg failed on ifname " << ifname << ": "
+                  << strerror(errno) << " — receiver thread exiting\n";
         break;
       }
 
@@ -1264,12 +1283,6 @@ public:
         state.abandon_write_batch(reserved - ret_val, slot_indices + ret_val);
       }
       state.packets_received += ret_val;
-
-      // Drained the whole reservation -> more was probably waiting; grow.
-      // Partial drain -> shrink toward what actually arrived.
-      reserve_target = (ret_val == reserved)
-                           ? std::min(BATCH_SIZE, reserved * 2)
-                           : std::max(8, ret_val + 8);
     }
     std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
   };
