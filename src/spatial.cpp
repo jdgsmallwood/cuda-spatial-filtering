@@ -1,4 +1,5 @@
 #include "spatial/spatial.hpp"
+#include <stdexcept>
 #include "ccglib/common/precision.h"
 #include "ccglib/common/value_type.h"
 #include "ccglib/gemm/mma.h"
@@ -325,47 +326,71 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
 
 KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
                                                      int port, int buffer_size,
-                                                     int recv_buffer_size)
+                                                     int recv_buffer_size,
+                                                     int busy_poll_us)
     : ifname(ifname), port(port), buffer_size(buffer_size),
       recv_buffer_size(recv_buffer_size) {
 
-  INFO_LOG("UDP Server with concurrent processing starting on port {}...",
-           port);
-  // Create UDP socket
+  INFO_LOG("UDP Server starting on port {} (recv_buf={} MB, busy_poll={}us)",
+           port, recv_buffer_size / (1024 * 1024), busy_poll_us);
+
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
   if (sockfd < 0) {
     perror("socket");
-  }
-  // Allow address reuse
-  int reuse = 1;
-  if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-    perror("setsockopt");
-  }
-  if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
-                 ifname.size()) < 0) {
-    perror("SO_BINDTODEVICE");
+    throw std::runtime_error("failed to create UDP socket");
   }
 
-  // int poll_us = 50; // Poll for 50 microseconds
-  // if (setsockopt(sockfd, SOL_SOCKET, SO_BUSY_POLL, &poll_us, sizeof(poll_us))
-  // <
-  //     0) {
-  //   perror("setsockopt SO_BUSY_POLL");
-  // }
-  // Setup server address
+  int reuse = 1;
+  setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  if (!ifname.empty()) {
+    if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),
+                   ifname.size()) < 0) {
+      perror("SO_BINDTODEVICE");
+    }
+  }
+
+  // Receive buffer: set early (before bind) so it is in effect from the first
+  // packet.  The kernel silently caps at net.core.rmem_max — raise that sysctl
+  // on the observing machine if drops appear (SO_RXQ_OVFL counter).
+  setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
+             sizeof(recv_buffer_size));
+
+  // Enable the per-socket kernel drop counter so get_packets() can expose it.
+  int one = 1;
+  setsockopt(sockfd, SOL_SOCKET, SO_RXQ_OVFL, &one, sizeof(one));
+
+  // 1-second receive timeout so the shutdown path isn't stuck in recvmmsg.
+  struct timeval tv { 1, 0 };
+  setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+  if (busy_poll_us > 0) {
+    if (setsockopt(sockfd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us,
+                   sizeof(busy_poll_us)) < 0) {
+      INFO_LOG("SO_BUSY_POLL not supported on this kernel — ignored");
+    }
+  }
+
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_addr.s_addr = INADDR_ANY;
   server_addr.sin_port = htons(port);
 
-  // Bind socket
   if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
     perror("bind");
     close(sockfd);
+    throw std::runtime_error("failed to bind UDP socket");
   }
 
-  INFO_LOG("Server listening on 0.0.0.0:{}", port);
-  INFO_LOG("Press Ctrl+C to stop\n");
+  // Log the actual receive buffer size the kernel granted (may be capped).
+  int actual = 0;
+  socklen_t optlen = sizeof(actual);
+  if (getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &actual, &optlen) == 0) {
+    INFO_LOG("SO_RCVBUF granted: {} KB (requested {} MB)",
+             actual / 1024, recv_buffer_size / (1024 * 1024));
+  }
+
+  INFO_LOG("Listening on 0.0.0.0:{}", port);
 }
 
 KernelSocketPacketCapture::~KernelSocketPacketCapture() { close(sockfd); }

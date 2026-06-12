@@ -6,6 +6,7 @@
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
+#include <immintrin.h>
 #include <fitsio.h>
 #include <fstream>
 #include <hdf5.h>
@@ -180,7 +181,7 @@ protected:
     ERROR_LOG("{} ring buffer is full. Waiting...", std::string(writer_name()));
     while ((write_idx_.load(std::memory_order_acquire) + 1) % buffer_size_ ==
            read_idx_.load(std::memory_order_acquire)) {
-      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      _mm_pause();
     }
   }
 
@@ -382,6 +383,8 @@ public:
     DataSpace beam_space(beam_dataset_dims, beam_dataset_max_dims);
     DataSetCreateProps beam_props;
     beam_props.add(Chunking(beam_chunk));
+    beam_props.add(Shuffle());
+    beam_props.add(Deflate(1));
     beam_dataset_ =
         file_.createDataSet<beam_type>("beam_data", beam_space, beam_props);
 
@@ -403,14 +406,13 @@ public:
   void process_block(
       const typename BeamWriter<BeamT, ArrivalsT>::BlockType &block) override {
     INFO_LOG("Writing beam block...");
-    auto current_size = beam_dataset_.getDimensions()[0];
+    const size_t n = n_blocks_written_;
 
-    std::vector<size_t> new_dims = {current_size + 1};
+    std::vector<size_t> new_dims = {n + 1};
     new_dims.insert(new_dims.end(), beam_dims_.begin(), beam_dims_.end());
-
     beam_dataset_.resize(new_dims);
 
-    std::vector<size_t> beam_offset = {current_size};
+    std::vector<size_t> beam_offset = {n};
     beam_offset.insert(beam_offset.end(), beam_dims_.size(), 0);
     std::vector<size_t> beam_count = {1};
     beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
@@ -419,30 +421,23 @@ public:
     beam_dataset_.select(beam_offset, beam_count)
         .write_raw(&block.beam_data[0]);
 
-    // Write arrivals data
-    auto arrivals_size = arrivals_dataset_.getDimensions()[0];
-
-    std::vector<size_t> arrivals_new_dims = {arrivals_size + 1};
+    std::vector<size_t> arrivals_new_dims = {n + 1};
     arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
                              arrivals_dims_.end());
-    std::vector<size_t> arrivals_offset = {arrivals_size};
+    std::vector<size_t> arrivals_offset = {n};
     arrivals_offset.insert(arrivals_offset.end(), arrivals_dims_.size(), 0);
     std::vector<size_t> arrivals_count = {1};
     arrivals_count.insert(arrivals_count.end(), arrivals_dims_.begin(),
                           arrivals_dims_.end());
-
     arrivals_dataset_.resize(arrivals_new_dims);
-
     arrivals_dataset_.select(arrivals_offset, arrivals_count)
         .write_raw(&block.arrivals_data[0]);
 
-    // Write sequence numbers
-    auto seq_size = beam_seq_dataset_.getDimensions()[0];
-
-    beam_seq_dataset_.resize({seq_size + 1, 2});
-
+    beam_seq_dataset_.resize({n + 1, 2});
     std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
-    beam_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+    beam_seq_dataset_.select({n, 0}, {1, 2}).write_raw(seq_nums.data());
+
+    ++n_blocks_written_;
   }
 
   void flush() override { file_.flush(); }
@@ -456,6 +451,7 @@ private:
   HighFive::DataSet beam_dataset_;
   HighFive::DataSet arrivals_dataset_;
   HighFive::DataSet beam_seq_dataset_;
+  size_t n_blocks_written_ = 0;
 };
 
 template <typename T> class HDF5FFTWriter : public FFTWriter<T> {
@@ -509,12 +505,12 @@ public:
   }
 
   void process_block(const FFTBlock<T> &block) override {
-    auto current_size = fft_dataset_.getDimensions()[0];
-    std::vector<size_t> new_dims = {current_size + 1};
+    const size_t n = n_blocks_written_;
+    std::vector<size_t> new_dims = {n + 1};
     new_dims.insert(new_dims.end(), fft_dims_.begin(), fft_dims_.end());
     fft_dataset_.resize(new_dims);
 
-    std::vector<size_t> fft_offset = {current_size};
+    std::vector<size_t> fft_offset = {n};
     fft_offset.insert(fft_offset.end(), fft_dims_.size(), 0);
     std::vector<size_t> fft_count = {1};
     fft_count.insert(fft_count.end(), fft_dims_.begin(), fft_dims_.end());
@@ -522,10 +518,10 @@ public:
     fft_dataset_.select(fft_offset, fft_count)
         .write(reinterpret_cast<const float *>(&block.fft_output));
 
-    auto seq_size = fft_seq_dataset_.getDimensions()[0];
-    fft_seq_dataset_.resize({seq_size + 1, 2});
+    fft_seq_dataset_.resize({n + 1, 2});
     std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
-    fft_seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+    fft_seq_dataset_.select({n, 0}, {1, 2}).write_raw(seq_nums.data());
+    ++n_blocks_written_;
 
     // auto missing_size = fft_missing_dataset_.getDimensions()[0];
     // fft_missing_dataset_.resize({missing_size + 1, 3});
@@ -546,6 +542,7 @@ private:
   HighFive::DataSet fft_dataset_;
   HighFive::DataSet fft_seq_dataset_;
   std::vector<size_t> fft_dims_;
+  size_t n_blocks_written_ = 0;
 
   size_t batch_size_;
   size_t buffer_count_ = 0;
@@ -598,7 +595,8 @@ public:
     DataSpace vis_space(vis_dataset_dims, vis_dataset_max_dims);
     DataSetCreateProps props;
     props.add(HighFive::Chunking(vis_chunk));
-    // I imagine createDataSet needs a primitive type
+    props.add(HighFive::Shuffle());
+    props.add(HighFive::Deflate(1));
     vis_dataset_ = file_.createDataSet<float>("visibilities", vis_space, props);
 
     DataSetCreateProps vis_seq_props;
@@ -673,8 +671,6 @@ public:
     vis_buffer_.clear();
     seq_buffer_.clear();
     missing_buffer_.clear();
-
-    file_.flush();
   }
 
 private:
@@ -1389,47 +1385,37 @@ public:
   // vec_data — pointer to one TVec worth of eigenvector data.
   // -------------------------------------------------------------------------
   void process_block(const EigenBlock<TVal, TVec> &block) override {
+    const size_t n = n_blocks_written_;
+
     // ---- eigenvalues -------------------------------------------------------
-    {
-      const auto current_size = val_dataset_.getDimensions()[0];
+    std::vector<size_t> val_dims = {n + 1};
+    val_dims.insert(val_dims.end(), val_dims_.begin(), val_dims_.end());
+    val_dataset_.resize(val_dims);
 
-      std::vector<size_t> new_dims = {current_size + 1};
-      new_dims.insert(new_dims.end(), val_dims_.begin(), val_dims_.end());
-      val_dataset_.resize(new_dims);
+    std::vector<size_t> val_offset = {n};
+    val_offset.insert(val_offset.end(), val_dims_.size(), 0);
+    std::vector<size_t> val_count = {1};
+    val_count.insert(val_count.end(), val_dims_.begin(), val_dims_.end());
+    val_dataset_.select(val_offset, val_count).write_raw(&block.eigenvalues[0]);
 
-      std::vector<size_t> offset = {current_size};
-      offset.insert(offset.end(), val_dims_.size(), 0);
-      std::vector<size_t> count = {1};
-      count.insert(count.end(), val_dims_.begin(), val_dims_.end());
-
-      // write_raw interprets the memory as a flat array of the dataset's
-      // element type (float), which is exactly what interleaved complex<float>
-      // gives us.
-      val_dataset_.select(offset, count).write_raw(&block.eigenvalues[0]);
-    }
     // ---- eigenvectors -------------------------------------------------------
-    const auto current_size = vec_dataset_.getDimensions()[0];
+    std::vector<size_t> vec_dims = {n + 1};
+    vec_dims.insert(vec_dims.end(), vec_dims_.begin(), vec_dims_.end());
+    vec_dataset_.resize(vec_dims);
 
-    std::vector<size_t> new_dims = {current_size + 1};
-    new_dims.insert(new_dims.end(), vec_dims_.begin(), vec_dims_.end());
-    vec_dataset_.resize(new_dims);
-
-    std::vector<size_t> offset = {current_size};
-    offset.insert(offset.end(), vec_dims_.size(), 0);
-    std::vector<size_t> count = {1};
-    count.insert(count.end(), vec_dims_.begin(), vec_dims_.end());
-
-    // write_raw interprets the memory as a flat array of the dataset's
-    // element type (float), which is exactly what interleaved complex<float>
-    // gives us.
-    vec_dataset_.select(offset, count).write_raw(&block.eigenvectors[0]);
+    std::vector<size_t> vec_offset = {n};
+    vec_offset.insert(vec_offset.end(), vec_dims_.size(), 0);
+    std::vector<size_t> vec_count = {1};
+    vec_count.insert(vec_count.end(), vec_dims_.begin(), vec_dims_.end());
+    vec_dataset_.select(vec_offset, vec_count).write_raw(&block.eigenvectors[0]);
 
     // ---- sequence numbers ---------------------------------------------------
-    const auto seq_size = seq_dataset_.getDimensions()[0];
-    seq_dataset_.resize({seq_size + 1, 2});
+    seq_dataset_.resize({n + 1, 2});
     const std::vector<size_t> seq_nums = {block.start_seq_num,
                                           block.end_seq_num};
-    seq_dataset_.select({seq_size, 0}, {1, 2}).write_raw(seq_nums.data());
+    seq_dataset_.select({n, 0}, {1, 2}).write_raw(seq_nums.data());
+
+    ++n_blocks_written_;
   }
 
   void flush() override { file_.flush(); }
@@ -1441,6 +1427,7 @@ private:
   HighFive::DataSet seq_dataset_;
   std::vector<size_t> vec_dims_; // inner shape of TVec, e.g. {CH,POL,POL,N,N}
   std::vector<size_t> val_dims_;
+  size_t n_blocks_written_ = 0;
 };
 
 template <typename T> class HDF5BeamFFTWriter : public FFTWriter<T> {
@@ -1488,6 +1475,8 @@ public:
     DataSpace fft_space(fft_dataset_dims, fft_dataset_max_dims);
     DataSetCreateProps props;
     props.add(Chunking(fft_chunk));
+    props.add(Shuffle());
+    props.add(Deflate(1));
     fft_dataset_ = file_.createDataSet<float>("beam_ffts", fft_space, props);
 
     // Sequence number dataset: [N, 2] (start_seq, end_seq)
@@ -1536,8 +1525,6 @@ public:
     fft_buffer_.clear();
     seq_buffer_.clear();
     buffer_count_ = 0;
-
-    file_.flush();
   }
 
 private:
@@ -1699,8 +1686,6 @@ public:
     vec_buffer_.clear();
     seq_buffer_.clear();
     buffer_count_ = 0;
-
-    file_.flush();
   }
 
 private:

@@ -26,6 +26,12 @@ target_compile_definitions(gpu_app_common INTERFACE
     NUMBER_BEAMS=${NUMBER_BEAMS}
 )
 
+# Link libibverbs only when it was found at configure time (HAVE_IBVERBS),
+# so the ibverbs capture backend resolves; no-op on non-RDMA machines.
+if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
+    target_link_libraries(gpu_app_common INTERFACE ${IBVERBS_LIBRARY})
+endif()
+
 add_executable(observe ${PROJECT_SOURCE_DIR}/apps/observe.cu)
 target_link_libraries(observe PRIVATE gpu_app_common)
 

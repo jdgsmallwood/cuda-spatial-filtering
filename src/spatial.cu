@@ -2,6 +2,21 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+// Grid size for grid-stride elementwise kernels: enough blocks to cover n,
+// capped at 32 blocks/SM so huge n doesn't oversubscribe the scheduler.  The
+// previous fixed cap of 8-16 blocks left these bandwidth-bound kernels running
+// on a small fraction of the SMs for multi-megabyte arrays.
+static int elementwise_grid_size(int n, int block_size = 1024) {
+  static const int max_blocks = [] {
+    int device = 0;
+    int sms = 0;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device);
+    return sms > 0 ? 32 * sms : 2048;
+  }();
+  return std::max(1, std::min((n + block_size - 1) / block_size, max_blocks));
+}
+
 __global__ void convert_int8_to_half_kernel(const int8_t *d_input,
                                             __half *d_output, const int n) {
 
@@ -68,7 +83,7 @@ __global__ void convert_float_to_half_kernel(const float *input, __half *output,
 void convert_int8_to_half(const int8_t *d_input, __half *d_output, const int n,
                           cudaStream_t stream) {
 
-  const int num_blocks = std::min(8, n / 1024 + 1);
+  const int num_blocks = elementwise_grid_size(n);
 
   convert_int8_to_half_kernel<<<num_blocks, 1024, 0, stream>>>(d_input,
                                                                d_output, n);
@@ -77,7 +92,7 @@ void convert_int8_to_half(const int8_t *d_input, __half *d_output, const int n,
 void convert_int_to_float(const int *d_input, float *d_output, const int n,
                           cudaStream_t stream) {
 
-  const int num_blocks = std::min(8, n / 1024 + 1);
+  const int num_blocks = elementwise_grid_size(n);
 
   convert_int_to_float_kernel<<<num_blocks, 1024, 0, stream>>>(d_input,
                                                                d_output, n);
@@ -86,7 +101,7 @@ void convert_int_to_float(const int *d_input, float *d_output, const int n,
 void convert_float_to_half(const float *d_input, __half *d_output, const int n,
                            cudaStream_t stream) {
 
-  const int num_blocks = std::min(16, n / 1024 + 1);
+  const int num_blocks = elementwise_grid_size(n);
 
   convert_float_to_half_kernel<<<num_blocks, 1024, 0, stream>>>(d_input,
                                                                 d_output, n);
@@ -98,8 +113,10 @@ void update_weights(const __half *d_weights, __half *d_weights_output,
                     const float *d_eigenvalues, float *d_eigenvectors,
                     cudaStream_t &stream) {
 
-  const int n = num_beams * num_receivers * num_channels * num_polarizations;
-  const int num_blocks = std::min(8, n / 1024 + 1);
+  // The kernel iterates over n * 2 elements (real+imag) internally.
+  const int n =
+      num_beams * num_receivers * num_channels * num_polarizations * 2;
+  const int num_blocks = elementwise_grid_size(n);
 
   update_weights_kernel<<<num_blocks, 1024, 0, stream>>>(
       d_weights, d_weights_output, num_beams, num_receivers, num_channels,
@@ -110,7 +127,7 @@ void accumulate_visibilities(const float *d_visibilities,
                              float *d_visibilities_accumulated, const int n,
                              cudaStream_t stream) {
 
-  const int num_blocks = std::min(8, n / 1024 + 1);
+  const int num_blocks = elementwise_grid_size(n);
 
   accumulate_visibilities_kernel<<<num_blocks, 1024, 0, stream>>>(
       d_visibilities, d_visibilities_accumulated, n);

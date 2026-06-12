@@ -8,14 +8,21 @@
 #include <libtcc/Correlator.h>
 #include <netinet/in.h>
 // #include <sys/socket.h>
+#include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <bitset>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <immintrin.h>
 #include <mutex>
+#include <new>
 #include <pcap/pcap.h>
+#include <poll.h>
 #include <queue>
 #include <stdatomic.h>
+#include <sys/mman.h>
 #include <sys/time.h>
 
 #define MIN_PCAP_HEADER_SIZE 64
@@ -57,6 +64,66 @@ inline Result nearest_multiple(int64_t x, int64_t k) {
   return {closest, remainder};
 }
 
+// Non-temporal copy for write-only destinations (the pinned d_samples landing
+// buffers): streaming stores bypass the cache and skip the read-for-ownership
+// a normal memcpy incurs, roughly halving memory traffic for data the CPU
+// never reads back — the GPU DMAs it out.  Falls back to memcpy when the
+// destination or size isn't vector-aligned.  The sfence is required: NT
+// stores are weakly ordered and must be globally visible before the release
+// store that publishes the packet as processed.
+inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
+                    size_t n) {
+#if defined(__AVX2__)
+  if ((reinterpret_cast<uintptr_t>(dst) & 31) == 0 && (n & 31) == 0) {
+    char *d = static_cast<char *>(dst);
+    const char *s = static_cast<const char *>(src);
+    for (size_t i = 0; i < n; i += 32) {
+      _mm256_stream_si256(
+          reinterpret_cast<__m256i *>(d + i),
+          _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s + i)));
+    }
+    _mm_sfence();
+    return;
+  }
+#elif defined(__SSE2__) || defined(__x86_64__)
+  if ((reinterpret_cast<uintptr_t>(dst) & 15) == 0 && (n & 15) == 0) {
+    char *d = static_cast<char *>(dst);
+    const char *s = static_cast<const char *>(src);
+    for (size_t i = 0; i < n; i += 16) {
+      _mm_stream_si128(
+          reinterpret_cast<__m128i *>(d + i),
+          _mm_loadu_si128(reinterpret_cast<const __m128i *>(s + i)));
+    }
+    _mm_sfence();
+    return;
+  }
+#endif
+  std::memcpy(dst, src, n);
+}
+
+// Returns the n-th entry of a comma-separated CPU list ("4,5,6"), or -1 if
+// the list is missing/short/garbled.  Used for SPATIAL_WORKER_CPUS.
+inline int nth_cpu_from_list(const char *list, int n) {
+  if (list == nullptr) {
+    return -1;
+  }
+  const char *p = list;
+  for (int idx = 0;; ++idx) {
+    char *end = nullptr;
+    long val = std::strtol(p, &end, 10);
+    if (end == p) {
+      return -1;
+    }
+    if (idx == n) {
+      return static_cast<int>(val);
+    }
+    if (*end != ',') {
+      return -1;
+    }
+    p = end + 1;
+  }
+}
+
 // forward declaration of GPUPipeline.
 class GPUPipeline;
 
@@ -68,7 +135,8 @@ public:
   std::unordered_map<uint32_t, int> fpga_ids;
   bool synchronous_pipeline = false;
   std::atomic<int> running = 1;
-  uint64_t packets_received = 0;
+  // Atomic: incremented concurrently by every receiver thread.
+  std::atomic<uint64_t> packets_received = 0;
   std::atomic<uint64_t> packets_processed = 0;
   uint64_t packets_missing = 0;
   std::atomic<uint64_t> packets_discarded = 0;
@@ -78,6 +146,32 @@ public:
   virtual void *get_current_write_pointer() = 0;
   virtual void add_received_packet_metadata(const int length,
                                             const sockaddr_in &client_addr) = 0;
+
+  // Reserve up to max_n ring slots.  Fills slot_ptrs[0..n-1] with data[]
+  // pointers and slot_indices[0..n-1] with ring indices.  Must be called
+  // under producer_mutex (brief: index arithmetic only).  Sets committed=false
+  // so the consumer waits for commit_write_batch() before processing.
+  virtual int reserve_write_batch(int max_n, void **slot_ptrs,
+                                  int *slot_indices) = 0;
+
+  // Commit the n slots previously reserved.  May be called WITHOUT
+  // producer_mutex — each slot is exclusively owned by this producer from
+  // reserve until commit.  Writes metadata then sets committed=true (release)
+  // so the consumer sees the filled data[].
+  virtual void commit_write_batch(int n, const int *slot_indices,
+                                  const int *lens,
+                                  const sockaddr_in *addrs) = 0;
+
+  // Return reserved-but-unfilled slots to the ring as empty (length=0,
+  // processed=true, committed=true) so neither producers nor consumers wait
+  // on them.  Used by receive-into-ring producers that reserve a batch before
+  // knowing how many datagrams arrive.
+  virtual void abandon_write_batch(int n, const int *slot_indices) {}
+
+  // Usable bytes in one ring slot's data[] — producers that receive directly
+  // into slots size their iovecs/copies with this.
+  virtual size_t slot_data_capacity() const { return BUFFER_SIZE; }
+
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
   virtual void process_all_available_packets() = 0;
@@ -85,11 +179,16 @@ public:
   virtual void handle_buffer_completion(bool force_flush = false) = 0;
 };
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
-          size_t RING_BUFFER_SIZE = 1000>
+          size_t RING_BUFFER_SIZE = 1000, int WORKER_COUNT = 3>
 class ProcessorState : public ProcessorStateBase {
 public:
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
+  // Pointer array kept for API compatibility; all slots come from one
+  // contiguous pool so d_packet_data[i] = &d_packet_data_pool[i].  The
+  // contiguous layout keeps ring slots in L3 as the processor threads stride
+  // through them.
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
+  typename T::PacketEntryType *d_packet_data_pool = nullptr;
   size_t MIN_FREQ_CHANNEL;
   size_t NR_BETWEEN_SAMPLES;
   size_t NR_PACKETS_FOR_CORRELATION;
@@ -98,7 +197,6 @@ public:
       buffers;
   uint64_t latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES] = {};
   mutable std::mutex buffer_index_mutex;
-  std::mutex receive_buffer_write_index_mutex;
   GPUPipeline *pipeline_;
   // Constructor / Destructor
   ProcessorState(size_t nr_packets_for_correlation, size_t nr_between_samples,
@@ -109,16 +207,41 @@ public:
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
     this->fpga_ids = fpga_ids_;
+    // Flat lookup for the per-packet hot path: FPGA ids are small integers
+    // (IP third octet when OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET), so an
+    // array indexed by id replaces an unordered_map hash per packet.  Ids
+    // outside [0,256) fall back to the map.
+    fpga_index_lut.fill(-1);
+    for (const auto &[id, idx] : fpga_ids) {
+      if (id < fpga_index_lut.size()) {
+        fpga_index_lut[id] = static_cast<int16_t>(idx);
+      }
+    }
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
     std::fill(modified_since_last_completion_check.begin(),
               modified_since_last_completion_check.end(), false);
     try {
+      // Single allocation for all ring slots keeps them contiguous in memory.
+      // The individual d_packet_data[i] pointers still work for all existing
+      // call sites, but the hardware prefetcher can now stride through the
+      // ring.  2 MB-aligned + MADV_HUGEPAGE so the multi-hundred-MB pool is
+      // backed by huge pages, cutting dTLB misses while striding the ring.
+      const size_t pool_bytes =
+          sizeof(typename T::PacketEntryType) * RING_BUFFER_SIZE;
+      void *raw = nullptr;
+      if (posix_memalign(&raw, 2 * 1024 * 1024, pool_bytes) != 0) {
+        throw std::bad_alloc();
+      }
+#ifdef MADV_HUGEPAGE
+      madvise(raw, pool_bytes, MADV_HUGEPAGE);
+#endif
+      d_packet_data_pool = static_cast<typename T::PacketEntryType *>(raw);
       for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-        d_packet_data[i] = new typename T::PacketEntryType();
-        if (!d_packet_data[i])
-          throw std::bad_alloc();
-        d_packet_data[i]->processed = true;
+        new (&d_packet_data_pool[i]) typename T::PacketEntryType();
+        d_packet_data[i] = &d_packet_data_pool[i];
+        d_packet_data[i]->processed.store(true, std::memory_order_relaxed);
+        d_packet_data[i]->committed.store(false, std::memory_order_relaxed);
       }
 
       for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
@@ -153,10 +276,8 @@ public:
     int next_write_index = -1;
     bool first_loop = true;
     while (next_write_index < 0 ||
-           !d_packet_data[next_write_index]->processed) {
-      // Get the next write index that has already been processed. This avoids
-      // overwriting packets that have been left behind because their buffer was
-      // not yet available.
+           !d_packet_data[next_write_index]->processed.load(
+               std::memory_order_relaxed)) {
       if (first_loop) {
         next_write_index = (write_index.load(std::memory_order_relaxed) + 1) %
                            RING_BUFFER_SIZE;
@@ -165,7 +286,7 @@ public:
         next_write_index = (next_write_index + 1) % RING_BUFFER_SIZE;
       }
       if (next_write_index == read_index.load(std::memory_order_acquire)) {
-        INFO_LOG("Ring buffer is full!! Dropping packets...");
+        // INFO_LOG("Ring buffer is full!! Dropping packets...");
         return false;
       }
     }
@@ -180,13 +301,17 @@ public:
       const int current_read_index,
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
       uint64_t (&latest_packet_batch)[T::NR_CHANNELS][T::NR_FPGA_SOURCES]) {
-    size_t fpga_index;
-    if (fpga_ids.count(pkt.fpga_id)) {
-      fpga_index = fpga_ids[pkt.fpga_id];
-    } else {
-      ERROR_LOG("FPGA ID {} not found.", pkt.fpga_id);
-      throw std::out_of_range("FPGA ID not found. Check logs.");
+    int fpga_index_i =
+        pkt.fpga_id < fpga_index_lut.size() ? fpga_index_lut[pkt.fpga_id] : -1;
+    if (fpga_index_i < 0) [[unlikely]] {
+      const auto fpga_it = fpga_ids.find(pkt.fpga_id);
+      if (fpga_it == fpga_ids.end()) {
+        ERROR_LOG("FPGA ID {} not found.", pkt.fpga_id);
+        throw std::out_of_range("FPGA ID not found. Check logs.");
+      }
+      fpga_index_i = fpga_it->second;
     }
+    const size_t fpga_index = static_cast<size_t>(fpga_index_i);
 
     const int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
 
@@ -221,7 +346,7 @@ public:
                  "begin_seq {} actually has packet_index {}",
                  buffer_start, pkt.sample_count);
         packets_discarded.fetch_add(1);
-        *pkt.original_packet_processed = true;
+        pkt.original_packet_processed->store(true, std::memory_order_release);
         return;
       }
 
@@ -243,8 +368,11 @@ public:
             (*buffer->scales)[freq_channel][packet_index + 1][receiver_index];
         auto &arrival =
             buffer->arrivals[0][freq_channel][packet_index + 1][fpga_index];
-        std::memcpy(&samples, pkt.payload->data,
-                    sizeof(typename T::PacketDataStructure));
+        // Samples (2.5 KB for the default shape, always 64 B-aligned dest):
+        // streamed past the cache — the CPU never reads this buffer, the GPU
+        // DMAs it.  Scales are 40 B and stride-unaligned; plain memcpy.
+        copy_nt(&samples, pkt.payload->data,
+                sizeof(typename T::PacketDataStructure));
         std::memcpy(&scales, pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
         arrival = true;
@@ -261,7 +389,7 @@ public:
         //           *pkt.original_packet_processed);
 
         if (num_copied >= 1 + is_extended) {
-          *(pkt.original_packet_processed) = true;
+          pkt.original_packet_processed->store(true, std::memory_order_release);
           // DEBUG_LOG("DEBUG: original_packet_processed_after={}",
           //           *pkt.original_packet_processed);
 
@@ -276,8 +404,7 @@ public:
     //     sample_count, current_read_index);
   };
   void process_all_available_packets() {
-    // This exists mainly for testing purposes
-    // to allow us to add some packets then process them all.
+    // Testing path — single-threaded drain of the ring.
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
@@ -285,10 +412,16 @@ public:
     std::lock_guard<std::mutex> lock(latest_packet_mutex);
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
-      process_packet_data(d_packet_data[current_read_index], current_read_index,
-                          global_max, latest_packet_received);
-      int new_read_index = (current_read_index + 1) % RING_BUFFER_SIZE;
-      read_index.store(new_read_index, std::memory_order_release);
+      auto *slot = d_packet_data[current_read_index];
+      // Slot reserved but not yet committed (producer still memcpy-ing) — wait.
+      if (!slot->committed.load(std::memory_order_acquire)) [[unlikely]] {
+        _mm_pause();
+        continue;
+      }
+      process_packet_data(slot, current_read_index, global_max,
+                          latest_packet_received);
+      read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
+                       std::memory_order_release);
     }
   }
 
@@ -340,7 +473,7 @@ public:
 
     ProcessedPacket parsed = pkt->parse();
 
-    if (pkt->processed) [[unlikely]] {
+    if (pkt->processed.load(std::memory_order_relaxed)) [[unlikely]] {
       return;
     }
     // DEBUG_LOG(
@@ -357,6 +490,22 @@ public:
           "parsed sample count was zero - something has gone wrong!");
     }
 
+    // freq_channel comes straight off the wire (CustomHeader) and is
+    // otherwise unvalidated: a packet for a channel outside the configured
+    // [MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + NR_CHANNELS) window would
+    // underflow/overflow this index and write out of bounds into
+    // latest_packet_batch / modified_since_last_completion_check / the
+    // per-buffer samples-scales-arrivals arrays in
+    // copy_data_to_input_buffer_if_able. Drop such packets here.
+    const int freq_channel = static_cast<int>(parsed.freq_channel) -
+                             static_cast<int>(MIN_FREQ_CHANNEL);
+    if (freq_channel < 0 || freq_channel >= static_cast<int>(T::NR_CHANNELS))
+        [[unlikely]] {
+      packets_discarded.fetch_add(1, std::memory_order_relaxed);
+      parsed.original_packet_processed->store(true, std::memory_order_release);
+      return;
+    }
+
     if (!buffer_init_flag.load(std::memory_order_acquire)) [[unlikely]] {
       static std::mutex init_mutex;
       std::lock_guard<std::mutex> lock(init_mutex);
@@ -371,8 +520,7 @@ public:
     if (*parsed.original_packet_processed) [[likely]] {
       packets_processed.fetch_add(1, std::memory_order_relaxed);
     }
-    modified_since_last_completion_check[parsed.freq_channel -
-                                         MIN_FREQ_CHANNEL] = true;
+    modified_since_last_completion_check[freq_channel] = true;
   };
 
   void
@@ -553,25 +701,23 @@ public:
       const int current_write_index =
           write_index.load(std::memory_order_acquire);
 
-      int slice_end = current_read_index;
+      // Number of slots waiting to be processed, handling wrap-around
+      // correctly.
+      const int available =
+          (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
+          (int)RING_BUFFER_SIZE;
 
-      if (current_write_index - current_read_index > 0) {
-        // write index is ahead of read index linearly
-        slice_end = std::min(current_write_index,
-                             current_read_index + REGULAR_BATCH_SIZE);
-      } else {
-        // write index has wrapped around the buffer
-        int to_end_of_buffer = (RING_BUFFER_SIZE - 1) - current_read_index;
-        if (to_end_of_buffer >= REGULAR_BATCH_SIZE) {
-          slice_end = current_read_index + REGULAR_BATCH_SIZE;
-        } else {
-          slice_end = std::min(REGULAR_BATCH_SIZE - to_end_of_buffer,
-                               current_write_index);
-        }
+      if (available == 0) [[unlikely]] {
+        _mm_pause();
+        continue;
       }
 
-      int slice_len = (slice_end - current_read_index + RING_BUFFER_SIZE) %
-                      RING_BUFFER_SIZE;
+      // Clamp batch to available packets; slice_end handles wrap implicitly.
+      const int to_process = std::min(available, REGULAR_BATCH_SIZE);
+      const int slice_end =
+          (current_read_index + to_process) % (int)RING_BUFFER_SIZE;
+
+      const int slice_len = to_process;
       int per_worker = (slice_len + WORKER_COUNT - 1) / WORKER_COUNT;
       int start = current_read_index;
 
@@ -580,13 +726,13 @@ public:
         int workers_with_tasks = 0;
         for (auto i = 0; i < WORKER_COUNT; ++i) {
           int worker_start = start;
-          int worker_end = start;
 
-          for (int j = 0; j < per_worker; ++j) {
-            if (worker_end == slice_end)
-              break;
-            worker_end = (worker_end + 1) % RING_BUFFER_SIZE;
-          }
+          const int slots_remaining =
+              (slice_end - worker_start + (int)RING_BUFFER_SIZE) %
+              (int)RING_BUFFER_SIZE;
+          const int slots_for_worker = std::min(per_worker, slots_remaining);
+          const int worker_end =
+              (worker_start + slots_for_worker) % (int)RING_BUFFER_SIZE;
 
           if (worker_start == worker_end) {
             worker_has_task[i].store(false, std::memory_order_release);
@@ -632,7 +778,9 @@ public:
                 future_packet_queue[i].pop();
                 lock.unlock();
                 auto *entry = d_packet_data[pkt.index];
-                if (entry->length > 0 && !entry->processed) {
+                if (entry->length > 0 &&
+                    entry->committed.load(std::memory_order_acquire) &&
+                    !entry->processed.load(std::memory_order_relaxed)) {
                   process_packet_data(entry, pkt.index, global_max,
                                       latest_packet_received);
                 }
@@ -655,10 +803,19 @@ public:
 
   __attribute__((hot)) void worker_thread_fn(int worker_id) {
     std::cout << "Starting worker with id " << worker_id << std::endl;
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(worker_id, &cpuset);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    // Affinity is opt-in via SPATIAL_WORKER_CPUS="4,5,6" (one entry per
+    // worker).  Unset means no pinning — the previous hard pin to cores
+    // 0..N-1 landed workers on the cores NIC IRQs typically use.
+    const int cpu =
+        nth_cpu_from_list(std::getenv("SPATIAL_WORKER_CPUS"), worker_id);
+    if (cpu >= 0) {
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(cpu, &cpuset);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+      std::cout << "Worker " << worker_id << " pinned to CPU " << cpu
+                << std::endl;
+    }
 
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
 
@@ -683,13 +840,23 @@ public:
 
         auto *entry = d_packet_data[idx];
 
-        const int next_idx = (idx + 1) % RING_BUFFER_SIZE;
-        __builtin_prefetch(d_packet_data[next_idx], 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data, 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data + 12, 0, 3);
-        __builtin_prefetch(d_packet_data[next_idx]->data + 42, 0, 3);
+        // Prefetch 8 slots ahead: at ~5 ns/packet an L3 miss (~40 ns) needs 8
+        // slots of runway.
+        constexpr int PREFETCH_DIST = 8;
+        const int pre_idx = (idx + PREFETCH_DIST) % RING_BUFFER_SIZE;
+        __builtin_prefetch(d_packet_data[pre_idx], 0, 1);
+        __builtin_prefetch(d_packet_data[pre_idx]->data, 0, 1);
+        __builtin_prefetch(d_packet_data[pre_idx]->data + 42, 0, 1);
 
-        if (entry->length > 0 && !entry->processed) {
+        // Wait for the producer to commit this slot before processing.
+        // In the common case (single-phase legacy path or fast producer) this
+        // never spins; the acquire pairs with commit_write_batch's release.
+        while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
+          _mm_pause();
+          continue;
+        }
+        if (entry->length > 0 &&
+            !entry->processed.load(std::memory_order_relaxed)) {
           process_packet_data(entry, idx, global_max,
                               latest_packet_received_batch);
         }
@@ -826,33 +993,106 @@ public:
     return (void *)&(d_packet_data[write_index]->data);
   }
   void *get_next_write_pointer() {
-    std::unique_lock<std::mutex> lock(receive_buffer_write_index_mutex);
     while (!get_next_write_index() && running.load(std::memory_order_acquire)) {
-      lock.unlock();
-      std::this_thread::yield();
-      DEBUG_LOG("Waiting for next pointer....");
-      lock.lock();
-      // std::this_thread::sleep_for(std::chrono::nanoseconds(10));
-    };
+      _mm_pause();
+    }
     return get_current_write_pointer();
   }
 
   void add_received_packet_metadata(const int length,
                                     const sockaddr_in &client_addr) {
-
     d_packet_data[write_index]->length = length;
     d_packet_data[write_index]->sender_addr = client_addr;
-    d_packet_data[write_index]->processed = false;
-    gettimeofday(&d_packet_data[write_index]->timestamp, NULL);
+    d_packet_data[write_index]->processed.store(false,
+                                                std::memory_order_relaxed);
+    // Release: consumer's acquire on committed synchronises-with this store,
+    // ensuring it sees the data[] already memcpy'd before this call.
+    d_packet_data[write_index]->committed.store(true,
+                                                std::memory_order_release);
+  }
+
+  // Reserve up to max_n ring slots.  Must be called under producer_mutex
+  // (brief: only index arithmetic, no data movement).  Sets committed=false on
+  // each claimed slot so the consumer waits for commit_write_batch().
+  int reserve_write_batch(int max_n, void **slot_ptrs,
+                          int *slot_indices) override {
+    int reserved = 0;
+    // Slot 0 uses the current write_index (caller positioned it via a prior
+    // get_next_write_pointer call, or this is the first batch).
+    int cur = write_index.load(std::memory_order_relaxed);
+    d_packet_data[cur]->committed.store(false, std::memory_order_relaxed);
+    slot_ptrs[reserved] = get_current_write_pointer();
+    slot_indices[reserved] = cur;
+    reserved++;
+    // Claim additional contiguous slots.
+    int next = (cur + 1) % RING_BUFFER_SIZE;
+    while (reserved < max_n) {
+      if (next == read_index.load(std::memory_order_acquire)) {
+        // Ring full: wait for the consumer to free slots, but never spin
+        // past shutdown (the consumer is gone by then).
+        if (!running.load(std::memory_order_acquire)) {
+          break;
+        }
+        _mm_pause();
+        continue;
+      }
+      if (!d_packet_data[next]->processed.load(std::memory_order_relaxed)) {
+        next = (next + 1) % RING_BUFFER_SIZE; // slot still held by consumer
+        continue;
+      }
+      d_packet_data[next]->committed.store(false, std::memory_order_relaxed);
+      slot_ptrs[reserved] = (void *)&(d_packet_data[next]->data);
+      slot_indices[reserved] = next;
+      reserved++;
+      next = (next + 1) % RING_BUFFER_SIZE;
+    }
+
+    write_index.store(next, std::memory_order_release);
+    return reserved;
+  }
+
+  // Commit slots previously reserved.  No lock required: each slot is owned
+  // exclusively by this producer thread from reserve until commit.  The
+  // committed.store(release) pairs with the consumer's committed.load(acquire),
+  // ensuring data[] and metadata are visible before the consumer processes.
+  void commit_write_batch(int n, const int *slot_indices, const int *lens,
+                          const sockaddr_in *addrs) override {
+    for (int i = 0; i < n; ++i) {
+      int s = slot_indices[i];
+      d_packet_data[s]->length = lens[i];
+      d_packet_data[s]->sender_addr = addrs[i];
+      d_packet_data[s]->processed.store(false, std::memory_order_relaxed);
+      d_packet_data[s]->committed.store(true, std::memory_order_release);
+    }
+  }
+
+  // Return reserved-but-unfilled slots as empty: consumers skip them
+  // (length==0, committed so they never spin) and producers can reclaim them
+  // (processed==true).
+  void abandon_write_batch(int n, const int *slot_indices) override {
+    for (int i = 0; i < n; ++i) {
+      auto *slot = d_packet_data[slot_indices[i]];
+      slot->length = 0;
+      slot->processed.store(true, std::memory_order_relaxed);
+      slot->committed.store(true, std::memory_order_release);
+    }
+  }
+
+  size_t slot_data_capacity() const override {
+    return T::PacketEntryType::DATA_CAPACITY;
   }
 
 private:
   void cleanup() {
-
-    for (auto i = 0; i < RING_BUFFER_SIZE; ++i) {
-      delete d_packet_data[i];
-      d_packet_data[i] = nullptr;
+    if (d_packet_data_pool != nullptr) {
+      using EntryT = typename T::PacketEntryType;
+      for (size_t i = 0; i < RING_BUFFER_SIZE; ++i) {
+        d_packet_data_pool[i].~EntryT();
+      }
+      std::free(d_packet_data_pool);
     }
+    d_packet_data_pool = nullptr;
+    std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
 
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       delete d_samples[i];
@@ -903,7 +1143,7 @@ private:
   std::array<int, T::NR_FPGA_SOURCES> fpga_delays_subpacket;
 
   std::mutex latest_packet_mutex;
-  static constexpr int WORKER_COUNT = 3;
+  std::array<int16_t, 256> fpga_index_lut;
   struct WorkRange {
     int start;
     int end;
@@ -943,67 +1183,112 @@ public:
 
 class KernelSocketPacketCapture : public PacketInput {
 public:
+  // busy_poll_us: if > 0, enables SO_BUSY_POLL on the socket for that many
+  // microseconds.  Reduces per-packet latency on dedicated cores at the cost
+  // of CPU spin.  Leave at 0 on shared/virtual machines.
   KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
-                            int recv_buffer_size = 64 * 1024 * 1024);
+                            int recv_buffer_size = 64 * 1024 * 1024,
+                            int busy_poll_us = 0);
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
     std::cout << "Starting packet capture on ifname " << ifname << std::endl;
 
-    // adds a timeout here - otherwise the socket will block indefinitely
-    // and get in the way of shutdown.
-    struct timeval tv;
-    tv.tv_sec = 1; // 1 second timeout
-    tv.tv_usec = 0;
-    const int BATCH_SIZE = 64;
+    // Zero-copy variant: ring slots are reserved up front and recvmmsg
+    // receives *directly into slot->data*, eliminating the staging buffer
+    // and one full copy of the data stream (~25 GB/s of memory traffic at
+    // 5 Mpps).  Sequence per batch:
+    //   1. poll() until the socket is readable — no ring slots are held
+    //      while waiting, so consumers never spin on uncommitted slots.
+    //   2. reserve BATCH_SIZE slots (brief lock — index arithmetic only).
+    //   3. recvmmsg(MSG_DONTWAIT) straight into the reserved slots.
+    //   4. commit the filled slots; abandon the rest as empty so neither
+    //      side ever waits on them.
+    static constexpr int BATCH_SIZE = 256;
+    // Plain stack locals, not `static thread_local`: get_packets is this
+    // receiver thread's entire body (called once, loops internally for the
+    // thread's lifetime), so a stack array already has the right lifetime
+    // and is inherently per-thread. `thread_local` here can hit glibc's
+    // __tls_get_addr, which has a known race with concurrent dlopen() (e.g.
+    // CUDA driver/NVRTC/cuSOLVER lazy-loading during pipeline construction)
+    // -- intermittent SIGSEGV in __tls_get_addr on a freshly started thread.
     struct mmsghdr msgs[BATCH_SIZE];
     struct iovec iovecs[BATCH_SIZE];
-
-    std::vector<std::vector<uint8_t>> packet_buffers(
-        BATCH_SIZE, std::vector<uint8_t>(buffer_size));
     struct sockaddr_in client_addrs[BATCH_SIZE];
 
+    const size_t slot_cap = state.slot_data_capacity();
+    memset(msgs, 0, sizeof(msgs));
     for (int i = 0; i < BATCH_SIZE; ++i) {
-      iovecs[i].iov_base = packet_buffers[i].data();
-      iovecs[i].iov_len = buffer_size;
-
-      memset(&msgs[i], 0, sizeof(msgs[i]));
       msgs[i].msg_hdr.msg_iov = &iovecs[i];
       msgs[i].msg_hdr.msg_iovlen = 1;
       msgs[i].msg_hdr.msg_name = &client_addrs[i];
       msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
     }
 
-    // Make kernel receive buffer a bit larger to avoid dropping packets
-    // during the timeout
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size,
-               sizeof(recv_buffer_size));
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     std::cout << "Receiver thread started for ifname " << ifname << std::endl;
+
+    void *slot_ptrs[BATCH_SIZE];
+    int slot_indices[BATCH_SIZE];
+    int lens_buf[BATCH_SIZE];
+    sockaddr_in addr_buf[BATCH_SIZE];
+
+    // Adaptive batch: tracks the recent drain size so light traffic doesn't
+    // burn (and immediately abandon) 256 ring slots per datagram, while
+    // sustained load quickly ramps back to full batches.
+    int reserve_target = BATCH_SIZE;
+
     while (state.running) {
-      int ret_val = recvmmsg(sockfd, msgs, BATCH_SIZE, MSG_WAITFORONE, NULL);
-      if (ret_val < 0) {
-        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-          continue;
-        // perror("recvfrom");
-        break;
+      // Wait for data before claiming any slots.  100 ms timeout keeps the
+      // shutdown check responsive.
+      struct pollfd pfd = {sockfd, POLLIN, 0};
+      const int pret = poll(&pfd, 1, 100);
+      if (pret <= 0) {
+        if (pret < 0 && errno != EINTR && errno != EAGAIN)
+          break;
+        continue;
       }
+
+      int reserved;
       {
         std::lock_guard<std::mutex> lock(state.producer_mutex);
-        void *next_write_pointer = state.get_current_write_pointer();
-
-        for (int i = 0; i < ret_val; ++i) {
-          int len = msgs[i].msg_len;
-          std::memcpy(next_write_pointer, packet_buffers[i].data(), len);
-          state.add_received_packet_metadata(len, client_addrs[i]);
-          state.packets_received += 1;
-          next_write_pointer = state.get_next_write_pointer();
-          msgs[i].msg_len = 0;
-        }
+        reserved =
+            state.reserve_write_batch(reserve_target, slot_ptrs, slot_indices);
       }
+      for (int i = 0; i < reserved; ++i) {
+        iovecs[i].iov_base = slot_ptrs[i];
+        iovecs[i].iov_len = slot_cap;
+        msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
+      }
+
+      int ret_val = recvmmsg(sockfd, msgs, reserved, MSG_DONTWAIT, nullptr);
+      if (ret_val < 0) {
+        state.abandon_write_batch(reserved, slot_indices);
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+          continue;
+        // Fatal receive error: without this log the thread dies silently
+        // and the only visible symptom is packets_received freezing.
+        ERROR_LOG("recvmmsg failed on ifname {}: {} — receiver thread exiting",
+                  ifname, strerror(errno));
+        std::cerr << "recvmmsg failed on ifname " << ifname << ": "
+                  << strerror(errno) << " — receiver thread exiting\n";
+        break;
+      }
+
+      for (int i = 0; i < ret_val; ++i) {
+        lens_buf[i] = msgs[i].msg_len;
+        addr_buf[i] = client_addrs[i];
+      }
+      state.commit_write_batch(ret_val, slot_indices, lens_buf, addr_buf);
+      if (ret_val < reserved) {
+        state.abandon_write_batch(reserved - ret_val, slot_indices + ret_val);
+      }
+      state.packets_received += ret_val;
     }
     std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
   };
+
+  // Kernel-drop counter populated from SO_RXQ_OVFL.  Read by the stats loop.
+  std::atomic<uint32_t> kernel_drops{0};
 
 private:
   int sockfd;
@@ -1067,7 +1352,8 @@ public:
         // Get pointer to write location
         void *write_pointer = state.get_current_write_pointer();
 
-        if (header->caplen <= header->len) {
+        if (header->caplen <= header->len &&
+            header->caplen <= state.slot_data_capacity()) {
           std::memcpy(write_pointer, data, header->caplen);
 
           // Extract and potentially modify the sample number
@@ -1253,7 +1539,8 @@ public:
         for (int i = 0; i < num_fpgas; ++i) {
           void *write_pointer = state.get_current_write_pointer();
 
-          if (header->caplen <= header->len) {
+          if (header->caplen <= header->len &&
+              header->caplen <= state.slot_data_capacity()) {
             std::memcpy(write_pointer, data, header->caplen);
 
             // Extract and potentially modify the sample number

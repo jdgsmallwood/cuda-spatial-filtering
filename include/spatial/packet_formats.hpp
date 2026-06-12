@@ -1,5 +1,6 @@
 #pragma once
 #include "spatial/logging.hpp"
+#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <cuda_fp16.h>
@@ -155,20 +156,50 @@ struct ProcessedPacket {
   uint64_t sample_count;
   uint64_t timestamp;
   const PacketPayload<PacketScaleStructure, PacketDataStructure> *payload;
-  bool *original_packet_processed;
+  std::atomic<bool> *original_packet_processed;
   uint32_t fpga_id;
   uint32_t payload_size;
   uint16_t freq_channel;
 } __attribute__((aligned(64)));
 
-// Packet storage for ring buffer
+// Packet storage for ring buffer.
+// Two-phase producer protocol: producer calls reserve_write_batch() (sets
+// committed=false, advances write_index), fills slot->data[], then calls
+// commit_write_batch() which sets committed=true (release) so the consumer
+// sees the data.  committed=false while writing lets multiple NIC threads
+// fill their reserved slots in parallel.
 template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketEntry {
-  uint8_t data[BUFFER_SIZE];
+  // Slot capacity derived from the config instead of the fixed 4 KB
+  // BUFFER_SIZE: largest frame this config can produce is a PCAP-replayed
+  // Ethernet frame (42 B eth/ip/udp + CustomHeader + scales + samples).
+  // Rounded up to a cache line.  For the default LAMBDA shape this shrinks
+  // each slot from ~4.2 KB to ~2.7 KB, cutting the ring's working set by
+  // ~35% (see scripts/profiling/ANALYSIS.md #3).
+  static constexpr size_t DATA_CAPACITY =
+      (42 + sizeof(CustomHeader) + sizeof(PacketScaleStructure) +
+       sizeof(PacketDataStructure) + 63) &
+      ~static_cast<size_t>(63);
+  static_assert(DATA_CAPACITY >= MIN_PCAP_HEADER_SIZE,
+                "slot must hold at least a minimal frame");
+  uint8_t data[DATA_CAPACITY];
   int length;
   struct sockaddr_in sender_addr;
   struct timeval timestamp;
-  bool processed; // 0 = unprocessed, 1 = processed
+  // true  = consumer done, producer may claim (FREE)
+  std::atomic<bool> processed{true};
+  // true  = producer committed data, consumer may process (set with release)
+  std::atomic<bool> committed{false};
+
+  // std::atomic is neither copyable nor movable; provide an explicit move
+  // constructor so PacketEntry can be returned by value in tests / helpers.
+  PacketEntry() = default;
+  PacketEntry(PacketEntry &&o) noexcept
+      : length(o.length), sender_addr(o.sender_addr), timestamp(o.timestamp),
+        processed(o.processed.load(std::memory_order_relaxed)),
+        committed(o.committed.load(std::memory_order_relaxed)) {
+    std::memcpy(data, o.data, sizeof(data));
+  }
 
   virtual ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() = 0;
@@ -178,6 +209,10 @@ template <typename PacketScaleStructure, typename PacketDataStructure,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>
 struct LambdaPacketEntry
     : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
+  using Base = PacketEntry<PacketScaleStructure, PacketDataStructure>;
+  LambdaPacketEntry() = default;
+  LambdaPacketEntry(LambdaPacketEntry &&o) noexcept : Base(std::move(o)) {}
+
   __attribute__((hot)) __attribute__((flatten))
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() noexcept override {
@@ -190,7 +225,7 @@ struct LambdaPacketEntry
       offset = 42;
     }
     if (length < MIN_PCAP_HEADER_SIZE) [[unlikely]] {
-      this->processed = true;
+      this->processed.store(true, std::memory_order_relaxed);
       return {};
     }
 
