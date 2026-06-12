@@ -1289,18 +1289,22 @@ public:
       // pol to be passed but this implementation does not use it.
       size_t fft_block_num =
           output_->register_fft_block(start_seq_num, end_seq_num);
-      auto *fft_output_pointer =
-          (void *)output_->get_fft_landing_pointer(fft_block_num);
-      cudaMemcpyAsync(fft_output_pointer,
-                      d_cufft_downsampled_output[current_buffer],
-                      sizeof(typename T::MultiChannelAntennaFFTOutputType),
-                      cudaMemcpyDefault, streams[current_buffer]);
+      // size_t::max means no FFT writer attached -- the landing pointer
+      // would be nullptr.
+      if (fft_block_num != std::numeric_limits<size_t>::max()) {
+        auto *fft_output_pointer =
+            (void *)output_->get_fft_landing_pointer(fft_block_num);
+        cudaMemcpyAsync(fft_output_pointer,
+                        d_cufft_downsampled_output[current_buffer],
+                        sizeof(typename T::MultiChannelAntennaFFTOutputType),
+                        cudaMemcpyDefault, streams[current_buffer]);
 
-      auto *fft_output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = fft_block_num};
-      cudaLaunchHostFunc(streams[current_buffer],
-                         fft_output_transfer_complete_host_func,
-                         fft_output_ctx);
+        auto *fft_output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = fft_block_num};
+        cudaLaunchHostFunc(streams[current_buffer],
+                           fft_output_transfer_complete_host_func,
+                           fft_output_ctx);
+      }
     }
 
     // Rotate buffer indices
@@ -1708,15 +1712,19 @@ public:
       // pol to be passed but this implementation does not use it.
       size_t fft_block_num =
           output_->register_fft_block(start_seq_num, end_seq_num);
-      auto *fft_output_pointer =
-          (void *)output_->get_fft_landing_pointer(fft_block_num);
-      cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
-                      sizeof(FFTOutputType), cudaMemcpyDefault, b.stream);
+      // size_t::max means no FFT writer attached -- the landing pointer
+      // would be nullptr.
+      if (fft_block_num != std::numeric_limits<size_t>::max()) {
+        auto *fft_output_pointer =
+            (void *)output_->get_fft_landing_pointer(fft_block_num);
+        cudaMemcpyAsync(fft_output_pointer, b.cufft_downsampled_output.get(),
+                        sizeof(FFTOutputType), cudaMemcpyDefault, b.stream);
 
-      auto *fft_output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = fft_block_num};
-      cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
-                         fft_output_ctx);
+        auto *fft_output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = fft_block_num};
+        cudaLaunchHostFunc(b.stream, fft_output_transfer_complete_host_func,
+                           fft_output_ctx);
+      }
     }
 
     // Rotate buffer indices
@@ -3025,22 +3033,28 @@ public:
     if (output_ != nullptr && !dummy_run) {
       size_t block_num =
           output_->register_beam_data_block(start_seq_num, end_seq_num);
-      void *landing_pointer = output_->get_beam_data_landing_pointer(block_num);
-      cudaMemcpyAsync(landing_pointer,
-                      d_beamformer_data_output_half[current_buffer],
-                      sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
-                      streams[current_buffer]);
-      auto *output_ctx = new OutputTransferCompleteContext{
-          .output = this->output_, .block_index = block_num};
-      cudaLaunchHostFunc(streams[current_buffer],
-                         output_transfer_complete_host_func, output_ctx);
+      // size_t::max means no beam writer is attached (e.g. observe.cu's
+      // beam_writer = nullptr): the landing pointers would be nullptr, so
+      // skip the beam/arrivals copies entirely.
+      if (block_num != std::numeric_limits<size_t>::max()) {
+        void *landing_pointer =
+            output_->get_beam_data_landing_pointer(block_num);
+        cudaMemcpyAsync(landing_pointer,
+                        d_beamformer_data_output_half[current_buffer],
+                        sizeof(HalfBeamformerOutput), cudaMemcpyDefault,
+                        streams[current_buffer]);
+        auto *output_ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = block_num};
+        cudaLaunchHostFunc(streams[current_buffer],
+                           output_transfer_complete_host_func, output_ctx);
 
-      // memcpy arrivals
-      bool *arrivals_output_pointer =
-          (bool *)output_->get_arrivals_data_landing_pointer(block_num);
-      std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
-                  packet_data->get_arrivals_size());
-      output_->register_arrivals_transfer_complete(block_num);
+        // memcpy arrivals
+        bool *arrivals_output_pointer =
+            (bool *)output_->get_arrivals_data_landing_pointer(block_num);
+        std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
+                    packet_data->get_arrivals_size());
+        output_->register_arrivals_transfer_complete(block_num);
+      }
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=
           NR_CORRELATED_BLOCKS_TO_ACCUMULATE) {
@@ -3516,16 +3530,19 @@ public:
         visibilities_total_packets);
     visibilities_start_seq_num = -1;
     visibilities_missing_packets = 0;
-    void *landing_pointer =
-        output_->get_visibilities_landing_pointer(block_num);
-    cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
-                    sizeof(TrimmedVisibilities), cudaMemcpyDefault, streams[0]);
-    auto *output_ctx = new OutputTransferCompleteContext{
-        .output = this->output_, .block_index = block_num};
+    if (block_num != std::numeric_limits<size_t>::max()) {
+      void *landing_pointer =
+          output_->get_visibilities_landing_pointer(block_num);
+      cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
+                      sizeof(TrimmedVisibilities), cudaMemcpyDefault,
+                      streams[0]);
+      auto *output_ctx = new OutputTransferCompleteContext{
+          .output = this->output_, .block_index = block_num};
 
-    cudaLaunchHostFunc(streams[0],
-                       output_visibilities_transfer_complete_host_func,
-                       output_ctx);
+      cudaLaunchHostFunc(streams[0],
+                         output_visibilities_transfer_complete_host_func,
+                         output_ctx);
+    }
     cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(TrimmedVisibilities),
                     streams[0]);
     num_correlation_units_integrated.store(0);
@@ -4145,25 +4162,29 @@ private:
     if (output_ != nullptr) {
       size_t block_num = output_->register_eigendecomposition_data_block(
           start_seq_num, end_seq_num);
+      // size_t::max means no eigen writer attached -- the landing pointers
+      // would be nullptr.
+      if (block_num != std::numeric_limits<size_t>::max()) {
+        // d_projection_averaged now holds the eigenvectors (cuSOLVER
+        // in-place).
+        void *eigval_ptr =
+            output_->get_eigenvalues_data_landing_pointer(block_num);
+        void *eigvec_ptr =
+            output_->get_eigenvectors_data_landing_pointer(block_num);
+        CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, d_projection_averaged,
+                                   sizeof(DecompositionVisibilities),
+                                   cudaMemcpyDefault, b0.stream));
 
-      // d_projection_averaged now holds the eigenvectors (cuSOLVER in-place).
-      //
-      void *eigval_ptr =
-          output_->get_eigenvalues_data_landing_pointer(block_num);
-      void *eigvec_ptr =
-          output_->get_eigenvectors_data_landing_pointer(block_num);
-      CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, d_projection_averaged,
-                                 sizeof(DecompositionVisibilities),
-                                 cudaMemcpyDefault, b0.stream));
+        CUDA_CHECK(cudaMemcpyAsync(eigval_ptr,
+                                   d_projection_eigenvalues_scratch,
+                                   sizeof(Eigenvalues), cudaMemcpyDefault,
+                                   b0.stream));
 
-      CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, d_projection_eigenvalues_scratch,
-                                 sizeof(Eigenvalues), cudaMemcpyDefault,
-                                 b0.stream));
-
-      auto *ctx = new OutputTransferCompleteContext{.output = this->output_,
-                                                    .block_index = block_num};
-      CUDA_CHECK(cudaLaunchHostFunc(
-          b0.stream, eigen_output_transfer_complete_host_func, ctx));
+        auto *ctx = new OutputTransferCompleteContext{
+            .output = this->output_, .block_index = block_num};
+        CUDA_CHECK(cudaLaunchHostFunc(
+            b0.stream, eigen_output_transfer_complete_host_func, ctx));
+      }
     }
 
     // Reset accumulator and run counter.
