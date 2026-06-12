@@ -35,8 +35,8 @@ int main(int argc, char *argv[]) {
       nr_lambda_receivers, nr_lambda_polarizations,
       nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
       nr_lambda_beams, nr_lambda_padded_receivers,
-      nr_lambda_padded_receivers_per_block,
-      nr_correlation_blocks_to_integrate, true, fft_downsample_factor>;
+      nr_lambda_padded_receivers_per_block, nr_correlation_blocks_to_integrate,
+      true, fft_downsample_factor>;
 
   // 2x as there will be original & RFI mitigated beams.
   using FFTOutputType =
@@ -183,7 +183,7 @@ int main(int argc, char *argv[]) {
 
   std::cout << "Initializing pipeline...\n";
   key_t rfi_dada_key = 0xbeef;
-  LambdaPulsarFoldPipeline<Config, true> pipeline(
+  LambdaPulsarFoldPipeline<Config, false> pipeline(
       &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
       DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key,
       std::move(beam_steering));

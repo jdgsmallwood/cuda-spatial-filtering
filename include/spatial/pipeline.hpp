@@ -4839,7 +4839,7 @@ private:
                                                                's', 'f', 'n'};
 
   inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'e', 's'};
-  inline static const std::vector<int> modeBeamOutput{'p', 'e', 's', 'c', 'z'};
+  inline static const std::vector<int> modeBeamOutput{'e', 's', 'c', 'p', 'z'};
   inline static const std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r',
                                                         'z'};
   inline static const std::vector<int> modeWeightsBeamMajor{'m', 'c', 'p', 'r',
@@ -5189,7 +5189,9 @@ public:
           std::cout << "open block write failed\n";
         }
 
-        // This is a big hack it will only take the X pol right now.
+        // control how much gets written using the block_size.
+        // can toggle polarization from outer to inner dimensions
+        // in order to control how many polarizations get written out.
         cudaMemcpyAsync(block, (char *)b.beam_output.get(), block_size,
                         cudaMemcpyDefault, b.stream);
 
