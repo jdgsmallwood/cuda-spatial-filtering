@@ -344,9 +344,9 @@ public:
              "stuck_unprocessed={}",
              read_index.load(std::memory_order_relaxed),
              write_index.load(std::memory_order_relaxed), unprocessed_slots,
-             RING_BUFFER_SIZE, packets_received, packets_processed.load(),
-             packets_discarded.load(), packets_future_queued.load(),
-             packets_stuck_unprocessed.load());
+             RING_BUFFER_SIZE, packets_received.load(),
+             packets_processed.load(), packets_discarded.load(),
+             packets_future_queued.load(), packets_stuck_unprocessed.load());
     for (auto i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       INFO_LOG("  future_packet_queue[fpga_index={}].size() = {}", i,
                future_queue_sizes[i]);
