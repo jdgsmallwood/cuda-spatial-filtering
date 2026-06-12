@@ -157,23 +157,29 @@ inline BeamWeightsT<T> compute_steering_weights(
 // min_freq_channel/array_location/steering_update_interval_seconds). With no
 // targets (no --targets-filename), it is permanently inert: maybe_refresh()
 // always returns false and the pipeline's static h_weights are left
-// untouched -- steering is opt-in. Otherwise maybe_refresh() recomputes
-// `current_weights_` host-side at most once per `update_interval` (pure CPU
-// work -- no GPU sync) and re-issues the pipeline's usual
-// `cudaMemcpyAsync(device_weights, ..., stream)`, spread across up to
-// num_buffers consecutive calls so every buffer picks up the refresh within
-// one round-robin cycle.
+// untouched -- steering is opt-in.
 //
-// *** Call this at the very top of execute_pipeline ***, before any kernel
-// that reads `device_weights` is enqueued, and only from pipeline_feeder's
-// single dedicated thread (which calls execute_pipeline strictly
-// sequentially). That's what makes this safe with no extra synchronization:
-// the refresh copy and the kernels reading `device_weights` are enqueued onto
-// the same stream from the same thread in that order, and CUDA streams
-// execute enqueued work FIFO, so the copy always lands first. A separate
-// timer thread issuing the copy concurrently would NOT have this guarantee
-// (enqueue order between two host threads is unspecified) and could corrupt a
-// run by landing new weights mid-kernel-chain.
+// The pipeline registers every buffer's device-weights pointer + stream once
+// at construction (register_buffer(), before the warmup run). When a refresh
+// is due, maybe_refresh() recomputes `current_weights_` host-side at most
+// once per `update_interval` (pure CPU work -- no GPU sync) and enqueues the
+// `cudaMemcpyAsync(device_weights, ..., stream)` onto *every* registered
+// buffer's stream in that same call -- all buffers always beamform with
+// identical weights; no buffer is ever left running on weights computed at a
+// different time than its peers'.
+//
+// *** Call maybe_refresh() at the very top of execute_pipeline ***, before
+// any kernel that reads the weights is enqueued, and only from
+// pipeline_feeder's single dedicated thread (which calls execute_pipeline
+// strictly sequentially). That's what makes this safe with no extra
+// synchronization: every refresh copy and every kernel that reads a buffer's
+// weights are enqueued from that one thread, and CUDA streams execute
+// enqueued work FIFO -- so on each buffer's stream the copy lands after any
+// still-in-flight run (which completes on the old weights) and before the
+// buffer's next run (which reads the new ones). A separate timer thread
+// issuing the copies concurrently would NOT have this guarantee (enqueue
+// order between two host threads is unspecified) and could corrupt a run by
+// landing new weights mid-kernel-chain.
 template <typename T> struct BeamSteering {
   using BeamWeights = BeamWeightsT<T>;
 
@@ -189,44 +195,56 @@ template <typename T> struct BeamSteering {
         antenna_mapping_(std::move(antenna_mapping)),
         frequency_plan_(frequency_plan), min_freq_channel_(min_freq_channel),
         array_location_(array_location),
-        update_interval_(update_interval_seconds), num_buffers_(num_buffers),
-        calibration_gains_(calibration_gains) {}
+        update_interval_(update_interval_seconds),
+        calibration_gains_(calibration_gains) {
+    buffers_.reserve(num_buffers);
+  }
 
   // True once real targets have been supplied (vs. permanently inert).
   bool active() const { return !targets_.empty(); }
 
-  // `buffer_index` is the pipeline's `current_buffer` for this call. Returns
-  // true if a refresh copy was enqueued (informational only).
-  bool maybe_refresh(BeamWeights *device_weights, cudaStream_t stream,
-                     int buffer_index) {
-    if (!active())
+  // Register one buffer's device weights + the stream its kernels run on.
+  // Call once per buffer from the pipeline constructor, before the warmup
+  // run, so the first (always-overdue) maybe_refresh() reaches every buffer.
+  void register_buffer(BeamWeights *device_weights, cudaStream_t stream) {
+    buffers_.push_back({device_weights, stream});
+  }
+
+  // Returns true if a refresh was recomputed and the copies were enqueued
+  // (informational only).
+  bool maybe_refresh() {
+    if (!active() || buffers_.empty())
       return false;
 
-    const auto now = std::chrono::system_clock::now();
-
-    // Gated on buffer_index == 0 so exactly one call per due tick performs
-    // the recompute, not once per buffer. last_update_ starts at the epoch,
-    // so the very first call -- during the constructor's warmup run, where
-    // buffer_index is always 0 -- is immediately overdue and synthesizes real
+    // last_update_ starts at the epoch, so the very first call -- during the
+    // constructor's warmup run -- is immediately overdue and synthesizes real
     // weights right away rather than running on placeholder h_weights.
-    if (buffer_index == 0 && (now - last_update_) >= update_interval_) {
-      current_weights_ = compute_steering_weights<T>(
-          targets_, antenna_positions_, antenna_mapping_, frequency_plan_,
-          min_freq_channel_, array_location_, now, calibration_gains_);
-      last_update_ = now;
-      buffers_pending_refresh_ = num_buffers_;
-    }
-
-    if (buffers_pending_refresh_ <= 0)
+    const auto now = std::chrono::system_clock::now();
+    if ((now - last_update_) < update_interval_)
       return false;
 
-    cudaMemcpyAsync(device_weights, &current_weights_, sizeof(BeamWeights),
-                    cudaMemcpyDefault, stream);
-    --buffers_pending_refresh_;
+    current_weights_ = compute_steering_weights<T>(
+        targets_, antenna_positions_, antenna_mapping_, frequency_plan_,
+        min_freq_channel_, array_location_, now, calibration_gains_);
+    last_update_ = now;
+
+    // One recompute, every buffer, one call: all copies are enqueued here so
+    // no buffer beamforms with older (or newer) weights than its peers.
+    // current_weights_ stays untouched until the next recompute -- minutes
+    // away -- so every async copy reads it intact.
+    for (const auto &buf : buffers_) {
+      cudaMemcpyAsync(buf.device_weights, &current_weights_,
+                      sizeof(BeamWeights), cudaMemcpyDefault, buf.stream);
+    }
     return true;
   }
 
 private:
+  struct RegisteredBuffer {
+    BeamWeights *device_weights;
+    cudaStream_t stream;
+  };
+
   std::vector<BeamTarget> targets_;
   std::unordered_map<int, ENUPosition> antenna_positions_;
   std::unordered_map<int, int> antenna_mapping_;
@@ -235,13 +253,12 @@ private:
   ArrayLocation array_location_;
   // seconds-as-double, comparable directly against system_clock durations.
   std::chrono::duration<double> update_interval_;
-  int num_buffers_;
   const typename T::AntennaGains *calibration_gains_;
 
+  std::vector<RegisteredBuffer> buffers_;
   BeamWeights current_weights_{};
   // Epoch-initialized so the first maybe_refresh() call is always overdue.
   std::chrono::system_clock::time_point last_update_{};
-  int buffers_pending_refresh_ = 0;
 };
 
 template <typename T> struct CudaDeleter {
@@ -779,13 +796,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
-    // Refresh this buffer's beam-steering weights if a tracked target's
-    // direction needs re-pointing -- inert no-op when steering is disabled
-    // (no --targets-filename). Must run here, before anything below reads
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
     // b.weights, and only from this single-threaded pipeline_feeder context
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
-    beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
+    beam_steering_.maybe_refresh();
 
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
@@ -1211,6 +1229,9 @@ public:
       tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                                (__half *)b.weights.get(),
                                (__half *)b.weights_permuted.get(), b.stream);
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
       cudaEventCreate(&start_run[i]);
@@ -1881,13 +1902,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
-    // Refresh this buffer's beam-steering weights if a tracked target's
-    // direction needs re-pointing -- inert no-op when steering is disabled
-    // (no --targets-filename). Must run here, before anything below reads
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
     // b.weights, and only from this single-threaded pipeline_feeder context
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
-    beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
+    beam_steering_.maybe_refresh();
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -2015,6 +2037,9 @@ public:
       // Copy initial weights
       cudaMemcpy(b.weights.get(), h_weights, sizeof(BeamWeights),
                  cudaMemcpyDefault);
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     last_frame_processed = 0;
     current_buffer = 0;
@@ -2529,13 +2554,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
-    // Refresh this buffer's beam-steering weights if a tracked target's
-    // direction needs re-pointing -- inert no-op when steering is disabled
-    // (no --targets-filename). Must run here, before anything below reads
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
     // b.weights, and only from this single-threaded pipeline_feeder context
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
-    beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
+    beam_steering_.maybe_refresh();
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -2997,6 +3023,9 @@ public:
                                (__half *)b.weights_permuted.get(), b.stream);
       cudaMemcpyAsync(b.weights_rfi_mitigated.get(), b.weights_permuted.get(),
                       sizeof(BeamWeights), cudaMemcpyDefault, b.stream);
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     last_frame_processed = 0;
     current_buffer = 0;
@@ -3211,8 +3240,8 @@ private:
   // See the comment on this member in LambdaGPUPipeline (pipeline.hpp above)
   // -- same helper, same inert-when-unsteered contract. Note this pipeline
   // keeps its weights in d_weights[buffer_index]/streams[buffer_index]
-  // (rather than buffers[i].weights/.stream); maybe_refresh() doesn't care --
-  // it just needs a device pointer and a stream.
+  // (rather than buffers[i].weights/.stream); register_buffer() doesn't care
+  // -- it just needs each buffer's device pointer and stream.
   BeamSteering<T> beam_steering_;
 
   int visibilities_start_seq_num;
@@ -3235,24 +3264,16 @@ public:
     }
     visibilities_missing_packets += packet_data->get_num_missing_packets();
 
-    // Refresh this buffer's beam-steering weights if a tracked target's
-    // direction needs re-pointing -- inert no-op when steering is disabled
-    // (no --targets-filename). Must run here, before anything below reads
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call (the d_weights[i]/streams[i]
+    // pairs registered in the constructor below), so all buffers always run
+    // with identical weights. Must run here, before anything below reads
     // d_weights[current_buffer], and only from this single-threaded
     // pipeline_feeder context -- see the BeamSteering<T> comment block
     // (pipeline.hpp above) for why that ordering is what makes this safe
-    // without extra synchronization. (This pipeline keeps its weights in
-    // d_weights[buffer_index]/streams[buffer_index] rather than
-    // buffers[i].weights/.stream -- maybe_refresh() just needs a device
-    // pointer and a stream, so the different storage layout doesn't matter.
-    // d_weights is declared as std::vector<__half *> -- it's allocated with
-    // cudaMalloc(..., sizeof(BeamWeights)) and copied into via cudaMemcpy
-    // against sizeof(BeamWeights) (see the constructor below), exactly like
-    // every other pipeline's b.weights/d_weights[i]; reinterpret_cast back to
-    // BeamWeights* here mirrors that existing convention.)
-    beam_steering_.maybe_refresh(
-        reinterpret_cast<BeamWeights *>(d_weights[current_buffer]),
-        streams[current_buffer], current_buffer);
+    // without extra synchronization.
+    beam_steering_.maybe_refresh();
 
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
@@ -3573,6 +3594,13 @@ public:
     for (auto i = 0; i < num_buffers; ++i) {
       cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights),
                  cudaMemcpyDefault);
+      // d_weights[i] is a __half* but is allocated and copied against
+      // sizeof(BeamWeights) (above), exactly like every other pipeline's
+      // b.weights -- the reinterpret_cast mirrors that existing convention.
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(
+          reinterpret_cast<BeamWeights *>(d_weights[i]), streams[i]);
     }
     for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
       cudaEventCreate(&start_run[i]);
@@ -4870,13 +4898,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
-    // Refresh this buffer's beam-steering weights if a tracked target's
-    // direction needs re-pointing -- inert no-op when steering is disabled
-    // (no --targets-filename). Must run here, before anything below reads
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
     // b.weights, and only from this single-threaded pipeline_feeder context
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
-    beam_steering_.maybe_refresh(b.weights.get(), b.stream, current_buffer);
+    beam_steering_.maybe_refresh();
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -5358,6 +5387,9 @@ public:
         cudaMemcpyAsync(b.weights_rfi_mitigated.get(), b.weights_permuted.get(),
                         sizeof(BeamWeights), cudaMemcpyDefault, b.stream);
       }
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     last_frame_processed = 0;
     current_buffer = 0;

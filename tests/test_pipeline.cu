@@ -1444,9 +1444,10 @@ TEST_F(CudaIsolatedTest, BeamSteeringInactiveWithoutTargetsIsNoOp) {
 
   cudaStream_t stream;
   CUDA_CHECK(cudaStreamCreate(&stream));
+  steering.register_buffer(device_weights.get(), stream);
 
-  EXPECT_FALSE(steering.maybe_refresh(device_weights.get(), stream, 0));
-  EXPECT_FALSE(steering.maybe_refresh(device_weights.get(), stream, 1));
+  EXPECT_FALSE(steering.maybe_refresh());
+  EXPECT_FALSE(steering.maybe_refresh());
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
   BeamWeightsT<Config> after{};
@@ -1458,11 +1459,11 @@ TEST_F(CudaIsolatedTest, BeamSteeringInactiveWithoutTargetsIsNoOp) {
   CUDA_CHECK(cudaStreamDestroy(stream));
 };
 
-TEST_F(CudaIsolatedTest, BeamSteeringSpreadsRefreshAcrossBuffersRoundRobin) {
+TEST_F(CudaIsolatedTest, BeamSteeringRefreshesAllBuffersInOneCall) {
   // BeamSteering starts "always overdue", so the first maybe_refresh() call
-  // (buffer_index 0) synthesizes fresh weights and arms
-  // buffers_pending_refresh_ = num_buffers; the following num_buffers-1 calls
-  // (one per buffer, round-robin) copy them down, then the cycle goes quiet
+  // recomputes the weights and enqueues the copy onto *every* registered
+  // buffer's stream in that same call -- no buffer is left running on stale
+  // weights while its peers have been re-steered. Subsequent calls are quiet
   // until the next due tick. A "zenith" target is time-invariant
   // (zenith_direction() ignores `now`), so a second compute_steering_weights()
   // call is guaranteed to produce bit-identical output to compare against.
@@ -1500,16 +1501,13 @@ TEST_F(CudaIsolatedTest, BeamSteeringSpreadsRefreshAcrossBuffersRoundRobin) {
         __float2half(100.0f + static_cast<float>(i)), __float2half(0.0f));
     CUDA_CHECK(cudaMemcpy(device_weights[i].get(), &sentinel, sizeof(sentinel),
                           cudaMemcpyDefault));
+    steering.register_buffer(device_weights[i].get(), streams[i]);
   }
 
-  // buffer 0: overdue at startup -> recompute + consume the first refresh.
-  EXPECT_TRUE(steering.maybe_refresh(device_weights[0].get(), streams[0], 0));
-  // buffers 1..kNumBuffers-1 pick theirs up over the next calls.
-  for (int i = 1; i < kNumBuffers; ++i) {
-    EXPECT_TRUE(steering.maybe_refresh(device_weights[i].get(), streams[i], i));
-  }
-  // cycle complete; nothing due again until the next update_interval.
-  EXPECT_FALSE(steering.maybe_refresh(device_weights[0].get(), streams[0], 0));
+  // Overdue at startup -> one recompute that refreshes all three buffers.
+  EXPECT_TRUE(steering.maybe_refresh());
+  // Nothing due again until the next update_interval.
+  EXPECT_FALSE(steering.maybe_refresh());
 
   for (auto stream : streams) {
     CUDA_CHECK(cudaStreamSynchronize(stream));
