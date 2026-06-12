@@ -35,6 +35,8 @@ topocentric_direction(double ra_deg, double dec_deg,
   Vector<Double> azel_rad = azel.getAngle("rad").getValue();
   double az = azel_rad[0];
   double el = azel_rad[1];
+  std::cout << "Updating Beam weights. " << "Az is " << az << " and el is "
+            << el << std::endl;
 
   DirectionCosines dc;
   dc.l = std::sin(az) * std::cos(el);
