@@ -57,6 +57,13 @@ add_executable(
 )
 target_link_libraries(PipelineHarnessSelfTest PRIVATE test_support)
 
+# Standalone processor-path benchmark (not a gtest — run directly).
+# Measures process_all_available_packets() throughput plus hash-lookup,
+# gettimeofday, and pool-alloc microbenchmarks for the six hot-path fixes.
+add_executable(benchmark_processor benchmark_processor.cu)
+target_link_libraries(benchmark_processor PRIVATE test_app_common)
+set_target_properties(benchmark_processor PROPERTIES CUDA_ARCHITECTURES "native")
+
 include(GoogleTest)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)

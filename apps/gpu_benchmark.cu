@@ -22,7 +22,8 @@ constexpr size_t NR_TIME_STEPS_PER_PACKET = 64;
 constexpr size_t NR_POLARIZATIONS = 2;
 constexpr size_t NR_BEAMS = NUMBER_BEAMS;
 constexpr size_t NR_PADDED_RECEIVERS = NR_OBSERVING_PADDED_RECEIVERS;
-constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK = 32;
+constexpr size_t NR_PADDED_RECEIVERS_PER_BLOCK =
+    NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK;
 constexpr size_t NR_PACKETS_FOR_CORRELATION =
     NR_OBSERVING_PACKETS_FOR_CORRELATION;
 constexpr size_t NR_VISIBILITIES_BEFORE_DUMP = 10000000;
@@ -79,6 +80,9 @@ struct FakeProcessorState : public ProcessorStateBase {
   void *get_current_write_pointer() override { return nullptr; };
   void add_received_packet_metadata(const int length,
                                     const sockaddr_in &client_addr) override {};
+  int reserve_write_batch(int, void **, int *) override { return 0; }
+  void commit_write_batch(int, const int *, const int *,
+                          const sockaddr_in *) override {}
   void set_pipeline(GPUPipeline *pipeline) override {};
   void process_all_available_packets() override {};
   void handle_buffer_completion(bool force_flush = false) override {};

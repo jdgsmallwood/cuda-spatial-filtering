@@ -1,5 +1,13 @@
 #pragma once
 
+// This raw-packet capture backend requires libibverbs (RDMA). The entire file
+// is compiled only when CMake found libibverbs and defined HAVE_IBVERBS;
+// otherwise it expands to nothing, so builds on machines without an RDMA stack
+// stay green and apps that include it simply see no LibibverbsPacketCapture
+// symbol.
+#ifdef HAVE_IBVERBS
+
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
 #include <cerrno>
@@ -10,9 +18,11 @@
 #include <fstream>
 #include <getopt.h>
 #include <ifaddrs.h>
+#include <immintrin.h>
 #include <infiniband/verbs.h>
 #include <iostream>
 #include <netinet/in.h>
+#include <stdexcept>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
@@ -356,36 +366,192 @@ private:
   }
 
 public:
-  LibibverbsPacketCapture() { print_device_list(); };
-  ~LibibverbsPacketCapture();
+  // Construct a raw-packet capture bound to one NIC (`ifname`, e.g.
+  // "enp216s0np0"), steering UDP traffic destined to `port` into a dedicated
+  // RAW_PACKET QP. One object (and one capture thread) per NIC -- mirrors
+  // KernelSocketPacketCapture so the apps' existing per-NIC threading is
+  // unchanged. `buffer_size` is accepted only for signature parity with
+  // KernelSocketPacketCapture; captured frames always land in MTU-sized slots.
+  LibibverbsPacketCapture(std::string &ifname, int port, int buffer_size)
+      : ifname_(ifname), port_(port) {
+    (void)buffer_size;
+    print_device_list();
 
+    // Resolve the requested ethernet interface name to its RDMA device by
+    // matching each ibv device's backing netdev (via ibname_to_ethname).
+    int num_devices = 0;
+    ibv_device **device_list = ibv_get_device_list(&num_devices);
+    if (!device_list) {
+      throw std::runtime_error("ibv_get_device_list failed: " +
+                               std::string(strerror(errno)));
+    }
+    ibv_device *dev = nullptr;
+    for (int i = 0; i < num_devices; ++i) {
+      char ethname[256] = {};
+      ibname_to_ethname(ibv_get_device_name(device_list[i]), ethname);
+      if (ifname_ == ethname) {
+        dev = device_list[i];
+        break;
+      }
+    }
+    if (!dev) {
+      ibv_free_device_list(device_list);
+      throw std::runtime_error("No RDMA device backs interface " + ifname_);
+    }
+
+    ctx_ = ibv_open_device(dev);
+    ibv_free_device_list(device_list);
+    if (!ctx_)
+      throw std::runtime_error("ibv_open_device failed for " + ifname_);
+
+    pd_ = ibv_alloc_pd(ctx_);
+    if (!pd_)
+      throw std::runtime_error("ibv_alloc_pd failed for " + ifname_);
+
+    cq_ = ibv_create_cq(ctx_, num_frames, nullptr, nullptr, 0);
+    if (!cq_)
+      throw std::runtime_error("ibv_create_cq failed for " + ifname_);
+
+    qp_ = init_qp(ctx_, pd_, cq_); // RAW_PACKET QP, INIT -> RTR -> RTS
+
+    // One contiguous, registered CPU buffer; frame i occupies
+    // [i*MTU,(i+1)*MTU).
+    const size_t buf_bytes = static_cast<size_t>(num_frames) * MTU;
+    cpu_buffer_ = static_cast<uint8_t *>(malloc(buf_bytes));
+    if (!cpu_buffer_)
+      throw std::runtime_error("capture buffer alloc failed for " + ifname_);
+    mr_ = ibv_reg_mr(pd_, cpu_buffer_, buf_bytes, IBV_ACCESS_LOCAL_WRITE);
+    if (!mr_)
+      throw std::runtime_error("ibv_reg_mr failed for " + ifname_);
+
+    // Steer UDP packets with our destination port into this QP.
+    flow_ = create_udp_flow(qp_, static_cast<uint16_t>(port_));
+    if (!flow_)
+      throw std::runtime_error("create_udp_flow failed for " + ifname_);
+
+    // Pre-post every receive WR so the QP can absorb bursts immediately.
+    for (int jframe = 0; jframe < num_frames; ++jframe)
+      repost(jframe);
+
+    INFO_LOG("libibverbs capture ready on {} (udp port {})", ifname_, port_);
+  }
+
+  ~LibibverbsPacketCapture() override {
+    if (flow_)
+      ibv_destroy_flow(flow_);
+    if (qp_)
+      ibv_destroy_qp(qp_);
+    if (mr_)
+      ibv_dereg_mr(mr_);
+    if (cq_)
+      ibv_destroy_cq(cq_);
+    if (pd_)
+      ibv_dealloc_pd(pd_);
+    if (ctx_)
+      ibv_close_device(ctx_);
+    if (cpu_buffer_)
+      free(cpu_buffer_);
+  }
+
+  // Busy-poll the CQ and copy each completed frame into the shared CPU ring
+  // buffer, then re-post its receive WR. Completions are polled in batches and
+  // producer_mutex is taken once per batch (like KernelSocket's recvmmsg batch)
+  // to keep shared-ring contention low at 1M+ pps.
   void get_packets(ProcessorStateBase &state) override {
+    INFO_LOG("libibverbs receiver thread started for {}", ifname_);
+    ibv_wc wc[POLL_BATCH];
 
-  };
+    while (state.running.load(std::memory_order_acquire)) {
+      int n = ibv_poll_cq(cq_, POLL_BATCH, wc);
+      if (n == 0) {
+        continue;
+      }
+      if (n < 0) {
+        ERROR_LOG("ibv_poll_cq failed on {}", ifname_);
+        break;
+      }
+
+      std::lock_guard<std::mutex> lock(state.producer_mutex);
+      for (int i = 0; i < n; ++i) {
+        const uint32_t jframe = static_cast<uint32_t>(wc[i].wr_id & 0xFFFFFFFF);
+        uint8_t *frame = cpu_buffer_ + static_cast<size_t>(jframe) * MTU;
+
+        if (wc[i].status != IBV_WC_SUCCESS) {
+          ERROR_LOG("ibverbs WC error on {}: {}", ifname_,
+                    ibv_wc_status_str(wc[i].status));
+          repost(jframe); // don't lose the slot
+          continue;
+        }
+
+        const int len = static_cast<int>(wc[i].byte_len);
+
+        // The raw QP delivers the full Ethernet frame; recover the source IP
+        // from the captured IP header so OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET
+        // demux (fpga id = third octet of 10.0.<id>.x) works exactly as it does
+        // with recvmmsg's msg_name on the KernelSocket path.
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        if (len >=
+            static_cast<int>(sizeof(EthernetHeader) + sizeof(IPHeader))) {
+          const IPHeader *ip = reinterpret_cast<const IPHeader *>(
+              frame + sizeof(EthernetHeader));
+          addr.sin_addr.s_addr = ip->src_ip; // already network byte order
+        }
+
+        const int copy_len =
+            std::min<int>(len, static_cast<int>(state.slot_data_capacity()));
+        std::memcpy(state.get_current_write_pointer(), frame, copy_len);
+        state.add_received_packet_metadata(len, addr);
+        state.packets_received += 1;
+        state.get_next_write_pointer();
+
+        repost(jframe); // hand the slot back to the NIC
+      }
+    }
+    INFO_LOG("libibverbs receiver thread exiting for {}", ifname_);
+  }
 
   void print_device_list() {
     int num_devices = 0;
-    // Get the list of devices
     ibv_device **device_list = ibv_get_device_list(&num_devices);
     if (!device_list) {
       std::cerr << "Failed to get IB devices list: " << strerror(errno)
                 << " (errno: " << errno << ")" << std::endl;
       exit(-1);
     }
-
-    // Print the list of devices
     std::cout << "Available devices:" << std::endl;
     for (int i = 0; i < num_devices; ++i) {
-      interfaces[i] = ibv_get_device_name(device_list[i]);
-      char ethname[256];
-      ibname_to_ethname(interfaces[i], ethname);
-      std::cout << "Device " << i << ": " << interfaces[i] << " " << ethname
-                << " " << std::endl;
-      struct sockaddr_in ipaddr;
-      get_interface_ip(ethname, &ipaddr);
+      const char *ibname = ibv_get_device_name(device_list[i]);
+      char ethname[256] = {};
+      ibname_to_ethname(ibname, ethname);
+      std::cout << "Device " << i << ": " << ibname << " " << ethname
+                << std::endl;
     }
-
-    // Free the device list
     ibv_free_device_list(device_list);
   }
-}
+
+private:
+  // Re-arm a single receive WR for frame slot `jframe` (single SGE, CPU path).
+  void repost(int jframe) {
+    post_recv(qp_, mr_, mr_, reinterpret_cast<char *>(cpu_buffer_),
+              reinterpret_cast<char *>(cpu_buffer_), jframe, /*qpid=*/0,
+              /*separate_header=*/false);
+  }
+
+  std::string ifname_;
+  int port_ = 0;
+  ibv_context *ctx_ = nullptr;
+  ibv_pd *pd_ = nullptr;
+  ibv_cq *cq_ = nullptr;
+  ibv_qp *qp_ = nullptr;
+  ibv_flow *flow_ = nullptr;
+  ibv_mr *mr_ = nullptr;
+  uint8_t *cpu_buffer_ = nullptr;
+
+  static constexpr int MTU = 9216;          // >= max jumbo frame, 64B aligned
+  static constexpr int TOTAL_HDR_SIZE = 42; // eth(14)+ip(20)+udp(8)
+  static constexpr int num_frames = 1024;   // pre-posted recv WRs per QP
+  static constexpr int POLL_BATCH = 64;     // completions polled per batch
+};
+
+#endif // HAVE_IBVERBS
