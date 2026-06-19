@@ -20,26 +20,57 @@ from 8 to 32 channels in steps of 8.
 
 ### GPU pipeline scaling behaviour (RTX 4060, 8 GB VRAM)
 
-Real-time baseline: 15500 packets/sec/channel/FPGA × 2660 bytes/packet, with
-NR_PACKETS_FOR_CORRELATION=256 → required 60.5 runs/sec for any config (channels
-and FPGA count cancel out). `real-time %` = (actual runs/sec ÷ 60.5) × 100.
+Real-time baseline: 15500 packets/sec/channel/FPGA × 2660 bytes/packet.
+`real-time %` = (actual runs/sec) ÷ (15500 / NR_PACKETS_FOR_CORRELATION) × 100.
+Channel and FPGA counts cancel out — only NR_PACKETS_FOR_CORRELATION sets the
+required runs/sec threshold.
+
+### Channel sweep (NR_PACKETS_FOR_CORRELATION=256, required 60.5 runs/sec)
 
 | Config | runs/sec | input_GB/sec | real-time % |
 |---|---|---|---|
-| 8ch/1fpga | 807 | 4.26 | 1333% |
-| 16ch/1fpga | 400 | 4.23 | 661% |
-| 24ch/1fpga | 263 | 4.17 | 434% |
-| 32ch/1fpga | 197 | 4.16 | 325% |
-| 8ch/4fpga | 321 | 6.78 | 530% |
-| 16ch/4fpga | 161 | 6.81 | 266% |
-| 24ch/4fpga | 106 | 6.69 | 175% |
+| 8ch/1fpga | 804 | 4.25 | 1329% |
+| 16ch/1fpga | 399 | 4.21 | 659% |
+| 24ch/1fpga | 262 | 4.16 | 433% |
+| 32ch/1fpga | 196 | 4.14 | 324% |
+| 8ch/4fpga | 321 | 6.78 | 531% |
+| 16ch/4fpga | 160 | 6.78 | 265% |
+| 24ch/4fpga | 105 | 6.67 | 174% |
 | 32ch/4fpga | 77 | 6.53 | 127% |
 
+### Corr-packet sweep (8ch, 1fpga and 4fpga, corr=64→1024)
+
+Integration time per run = NR_PACKETS_FOR_CORRELATION / 15500 packets/sec/channel.
+
+| corr pkts | integ. time | required runs/sec | 8ch/1fpga runs/sec | real-time % | 8ch/4fpga runs/sec | real-time % |
+|---|---|---|---|---|---|---|
+| 64 | 4.1 ms | 242.2 | 3460 | 1428% | 1418 | 586% |
+| 128 | 8.3 ms | 121.1 | 1625 | 1342% | 648 | 535% |
+| 256 | 16.5 ms | 60.5 | 805 | 1330% | 320 | 529% |
+| 512 | 33.0 ms | 30.3 | 402 | 1327% | 158 | 521% |
+| 1024 | 66.1 ms | 15.1 | 201 | 1331% | 79 | 523% |
+
+| corr pkts | 8ch/1fpga GB/sec | 8ch/4fpga GB/sec |
+|---|---|---|
+| 64 | 4.68 | 7.67 |
+| 128 | 4.33 | 6.90 |
+| 256 | 4.25 | 6.76 |
+| 512 | 4.23 | 6.66 |
+| 1024 | 4.22 | 6.60 |
+
 Key findings:
-- **1fpga (10 rx → 32 padded)**: ~4.1 GB/sec constant across 8–32 channels.
-  Runs/sec halves each time channels double — GPU is compute-bound on TCC.
-- **4fpga (40 rx → 64 padded)**: ~6.6–6.9 GB/sec across 8–32 channels.
-  Larger correlation matrices give better GPU SM utilization than 1fpga.
+- **1fpga (10 rx → 32 padded)**: ~4.1–4.7 GB/sec across all configs. Runs/sec
+  halves when channels or corr_packets double — GPU is compute-bound on TCC.
+  Real-time % is ~1330% for all corr_packet values: margin is set by compute,
+  not integration length.
+- **4fpga (40 rx → 64 padded)**: ~6.6–7.7 GB/sec. Larger correlation matrices
+  give better GPU SM utilization. Real-time % ~520–590%, roughly constant across
+  corr_packet values for the same reason.
+- **Smaller NR_PACKETS_FOR_CORRELATION gives higher GB/sec** (shorter CUDA
+  graph → less per-graph overhead amortised over more launches). 4fpga benefits
+  more: +13% GB/sec at corr=64 vs 256 (7.67 vs 6.76), vs +10% for 1fpga.
+  Choose the smallest corr value that gives acceptable integration time for your
+  science use-case.
 - **3 pipeline buffers** is the sweet spot for 4fpga configs on 8 GB VRAM: 38%
   faster than 2 buffers (6.24 vs ~4.5 GB/sec for 8ch/4fpga) while avoiding OOM.
 - `bench_gpu --with-output` adds D2H cost (~0.7 GB/sec for 8ch/1fpga) and

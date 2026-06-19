@@ -31,6 +31,19 @@ using Cfg16ch4fpga = LambdaConfig<    16,  4,   64,  40,  2,  10, 256,  1,  64, 
 using Cfg24ch4fpga = LambdaConfig<    24,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg32ch4fpga = LambdaConfig<    32,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 
+// Correlation-packet sweep: 8ch/1fpga and 8ch/4fpga held fixed while
+// NR_PACKETS_FOR_CORRELATION varies 64→1024 (powers of 2).  The 256-packet
+// case reuses the configs above.
+//                                       ch  fp   ts   rx  pol rxpp  corr   bm  pad  blk       acc
+using Cfg8ch1fpga_c64   = LambdaConfig<  8,  1,   64,  10,  2,  10,   64,  1,  32,  32, 10000000>;
+using Cfg8ch1fpga_c128  = LambdaConfig<  8,  1,   64,  10,  2,  10,  128,  1,  32,  32, 10000000>;
+using Cfg8ch1fpga_c512  = LambdaConfig<  8,  1,   64,  10,  2,  10,  512,  1,  32,  32, 10000000>;
+using Cfg8ch1fpga_c1024 = LambdaConfig<  8,  1,   64,  10,  2,  10, 1024,  1,  32,  32, 10000000>;
+using Cfg8ch4fpga_c64   = LambdaConfig<  8,  4,   64,  40,  2,  10,   64,  1,  64,  32, 10000000>;
+using Cfg8ch4fpga_c128  = LambdaConfig<  8,  4,   64,  40,  2,  10,  128,  1,  64,  32, 10000000>;
+using Cfg8ch4fpga_c512  = LambdaConfig<  8,  4,   64,  40,  2,  10,  512,  1,  64,  32, 10000000>;
+using Cfg8ch4fpga_c1024 = LambdaConfig<  8,  4,   64,  40,  2,  10, 1024,  1,  64,  32, 10000000>;
+
 // --------------------------------------------------------------------------
 // Minimal FinalPacketData and ProcessorState stubs -- identical in purpose
 // to the ones in gpu_benchmark.cu; reproduced here as templates so they work
@@ -213,13 +226,15 @@ int main(int argc, char *argv[]) {
   logger->set_level(spdlog::level::info);
   spatial::Logger::set(logger);
 
-  std::cout << "bench_gpu: 8 configs x " << duration_s << "s each"
+  std::cout << "bench_gpu: channel sweep (8 configs) + corr-packet sweep (10 configs)"
+            << "\n  duration=" << duration_s << "s each"
             << "  num_buffers(1fpga)=" << num_buffers
             << "  num_buffers(4fpga)=" << num_buffers_4fpga
             << "  with_output=" << (with_output ? "yes" : "no")
             << "\nNOTE: first run per config triggers TCC NVRTC JIT compilation "
                "(cached for subsequent runs)\n";
 
+  std::cout << "\n=== Channel sweep (NR_PACKETS_FOR_CORRELATION=256) ===\n";
   print_result(run_gpu_bench<Cfg8ch1fpga> (duration_s, num_buffers,       with_output));
   print_result(run_gpu_bench<Cfg16ch1fpga>(duration_s, num_buffers,       with_output));
   print_result(run_gpu_bench<Cfg24ch1fpga>(duration_s, num_buffers,       with_output));
@@ -228,6 +243,18 @@ int main(int argc, char *argv[]) {
   print_result(run_gpu_bench<Cfg16ch4fpga>(duration_s, num_buffers_4fpga, with_output));
   print_result(run_gpu_bench<Cfg24ch4fpga>(duration_s, num_buffers_4fpga, with_output));
   print_result(run_gpu_bench<Cfg32ch4fpga>(duration_s, num_buffers_4fpga, with_output));
+
+  std::cout << "\n=== Corr-packet sweep (8ch, corr=64..1024) ===\n";
+  print_result(run_gpu_bench<Cfg8ch1fpga_c64>  (duration_s, num_buffers,       with_output));
+  print_result(run_gpu_bench<Cfg8ch1fpga_c128> (duration_s, num_buffers,       with_output));
+  print_result(run_gpu_bench<Cfg8ch1fpga>      (duration_s, num_buffers,       with_output));
+  print_result(run_gpu_bench<Cfg8ch1fpga_c512> (duration_s, num_buffers,       with_output));
+  print_result(run_gpu_bench<Cfg8ch1fpga_c1024>(duration_s, num_buffers,       with_output));
+  print_result(run_gpu_bench<Cfg8ch4fpga_c64>  (duration_s, num_buffers_4fpga, with_output));
+  print_result(run_gpu_bench<Cfg8ch4fpga_c128> (duration_s, num_buffers_4fpga, with_output));
+  print_result(run_gpu_bench<Cfg8ch4fpga>      (duration_s, num_buffers_4fpga, with_output));
+  print_result(run_gpu_bench<Cfg8ch4fpga_c512> (duration_s, num_buffers_4fpga, with_output));
+  print_result(run_gpu_bench<Cfg8ch4fpga_c1024>(duration_s, num_buffers_4fpga, with_output));
 
   return 0;
 }
