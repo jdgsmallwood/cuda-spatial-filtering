@@ -231,8 +231,8 @@ public:
     }
     std::fill_n(d_samples, NR_INPUT_BUFFERS, nullptr);
     std::fill_n(d_packet_data, RING_BUFFER_SIZE, nullptr);
-    std::fill(modified_since_last_completion_check.begin(),
-              modified_since_last_completion_check.end(), false);
+    for (auto &f : modified_since_last_completion_check)
+      f.store(false, std::memory_order_relaxed);
     try {
       // Single allocation for all ring slots keeps them contiguous in memory.
       // The individual d_packet_data[i] pointers still work for all existing
@@ -534,11 +534,11 @@ public:
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
 
-    ProcessedPacket parsed = pkt->parse();
-
     if (pkt->processed.load(std::memory_order_relaxed)) [[unlikely]] {
       return;
     }
+
+    ProcessedPacket parsed = pkt->parse();
     // DEBUG_LOG(
     //     "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
     //     "payload={} bytes",
@@ -583,7 +583,8 @@ public:
     if (*parsed.original_packet_processed) [[likely]] {
       packets_processed.fetch_add(1, std::memory_order_relaxed);
     }
-    modified_since_last_completion_check[freq_channel] = true;
+    modified_since_last_completion_check[freq_channel].store(
+        true, std::memory_order_release);
   };
 
   void
@@ -596,14 +597,13 @@ public:
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
   __attribute__((hot)) void release_buffer(const int buffer_index) {
-    // INFO_LOG("[ProcessorState] Releasing buffer with index {}",
-    // buffer_index);
-    //  This is called to let the processor know that the buffer has been
-    //  copied to the GPU and now can be overwritten.
-    // This is necessary to avoid multiple GPU threads competing / racing.
-    // DEBUG_LOG(
-    //    "[ProcessorState - release_buffer] acquiring lock for index {}...",
-    //    buffer_index);
+    // Zero arrivals before taking the lock. Safe: the GPU just finished with
+    // this slot, and no processor thread can claim it as current_buffer until
+    // is_ready=true and the queue push happen below under buffer_index_mutex.
+    std::memset(d_samples[buffer_index]->arrivals, 0,
+                T::NR_CHANNELS * (T::NR_PACKETS_FOR_CORRELATION + 2) *
+                    T::NR_FPGA_SOURCES * sizeof(bool));
+
     {
       std::lock_guard<std::mutex> lock(buffer_index_mutex);
 
@@ -616,31 +616,12 @@ public:
             max_end_seq_in_buffers[i] + 1 * NR_BETWEEN_SAMPLES;
         const uint64_t new_end =
             new_start + (NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
-        // DEBUG_LOG("[ProcessorState - release_buffer] lock acquired for index
-        // {}...",
-        //           buffer_index);
-        // for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
-        //  max_end_seq_in_buffers =
-        //      std::max(max_end_seq_in_buffers, buffers[i].end_seq);
-        //}
         buffer.start_seq[i] = new_start;
         buffer.end_seq[i] = new_end;
         global_max_end_seq[i].store(new_end, std::memory_order_release);
       }
-      // DEBUG_LOG("[ProcessorState - release_buffer] filling arrivals as false
-      // for "
-      //           "buffer {}...",
-      //           buffer_index);
-      std::memset(d_samples[buf_idx]->arrivals, 0,
-                  T::NR_CHANNELS * (T::NR_PACKETS_FOR_CORRELATION + 2) *
-                      T::NR_FPGA_SOURCES * sizeof(bool));
 
       buffer.is_populated.reset();
-      // DEBUG_LOG("[ProcessorState - release_buffer] pushing to queue for index
-      // {} "
-      //           "with seq {}",
-      //           buffer_index, buffers[buffer_index].start_seq);
-
       buffer.is_ready = true;
       buffer_ordering_queue.push({buf_idx, buffer.start_seq[0]});
     }
@@ -680,8 +661,8 @@ public:
     buffers[b.index].is_populated.reset();
     // Set modified to true so that all channels get checked on next
     // completion check in case there are packets that went ahead.
-    std::fill(modified_since_last_completion_check.begin(),
-              modified_since_last_completion_check.end(), true);
+    for (auto &f : modified_since_last_completion_check)
+      f.store(true, std::memory_order_relaxed);
     //  INFO_LOG(
     //      "Current buffer is all complete. Moving to next buffer which is
     //      #{}", current_buffer);
@@ -705,7 +686,8 @@ public:
       const std::array<uint64_t, T::NR_FPGA_SOURCES> end_seq = buffer.end_seq;
       for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
         if (buffer.is_populated[channel] ||
-            !modified_since_last_completion_check[channel]) {
+            !modified_since_last_completion_check[channel].load(
+                std::memory_order_acquire)) {
           continue;
         }
         // INFO_LOG("Check if buffers are complete for channel {}", channel);
@@ -742,7 +724,8 @@ public:
       }
     }
     for (int channel = 0; channel < T::NR_CHANNELS; channel++) {
-      modified_since_last_completion_check[channel] = false;
+      modified_since_last_completion_check[channel].store(
+          false, std::memory_order_relaxed);
     }
   };
 
@@ -785,7 +768,9 @@ public:
       int start = current_read_index;
 
       {
-        std::lock_guard<std::mutex> lock(work_mutex);
+        // Write task ranges and count before releasing any worker_has_task
+        // flag, so workers can't decrement num_workers_with_tasks before we've
+        // finished setting it.
         int workers_with_tasks = 0;
         for (auto i = 0; i < WORKER_COUNT; ++i) {
           int worker_start = start;
@@ -797,25 +782,27 @@ public:
           const int worker_end =
               (worker_start + slots_for_worker) % (int)RING_BUFFER_SIZE;
 
-          if (worker_start == worker_end) {
-            worker_has_task[i].store(false, std::memory_order_release);
-          } else {
+          if (worker_start != worker_end) {
             worker_tasks[i] = {worker_start, worker_end};
-            worker_has_task[i].store(true, std::memory_order_release);
-            worker_completed_task[i].store(false, std::memory_order_release);
             workers_with_tasks++;
           }
           start = worker_end;
         }
+        // Publish count first; the release fence below ensures workers that
+        // acquire their task flag also see this value.
         num_workers_with_tasks.store(workers_with_tasks,
-                                     std::memory_order_release);
+                                     std::memory_order_relaxed);
+        // Signal workers: release store ensures worker_tasks[i] write is
+        // visible before any worker reads it via its acquire load below.
+        for (auto i = 0; i < workers_with_tasks; ++i) {
+          worker_has_task[i].store(true, std::memory_order_release);
+        }
       }
-      work_cv.notify_all();
-      {
-        std::unique_lock<std::mutex> lock(work_mutex);
-        work_cv.wait(lock, [this] {
-          return !running.load() || num_workers_with_tasks.load() == 0;
-        });
+      // Spin-wait without mutex: lower latency than a CV round-trip for the
+      // short durations of a packet-processing batch.
+      while (num_workers_with_tasks.load(std::memory_order_acquire) > 0) {
+        if (!running.load(std::memory_order_relaxed)) break;
+        _mm_pause();
       }
 
       current_read_index = slice_end;
@@ -884,18 +871,17 @@ public:
 
     uint64_t latest_packet_received_batch[T::NR_CHANNELS][T::NR_FPGA_SOURCES] =
         {};
-    while (running.load(std::memory_order_acquire)) {
-      std::unique_lock<std::mutex> lock(work_mutex);
-      work_cv.wait(lock, [&] {
-        return !running.load() || worker_has_task[worker_id].load();
-      });
-      if (!running.load(std::memory_order_acquire)) {
-        std::cout << "Worker " << worker_id << " exiting at the top\n";
-        break;
+    while (true) {
+      // Spin-wait for a task signal from the main thread, or exit.
+      while (!worker_has_task[worker_id].load(std::memory_order_acquire)) {
+        if (!running.load(std::memory_order_relaxed)) {
+          std::cout << "Worker " << worker_id << " exited\n";
+          return;
+        }
+        _mm_pause();
       }
 
       auto [start, end] = worker_tasks[worker_id];
-      lock.unlock();
 
       int idx = start;
 
@@ -916,7 +902,6 @@ public:
         // never spins; the acquire pairs with commit_write_batch's release.
         while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
           _mm_pause();
-          continue;
         }
         if (entry->length > 0 &&
             !entry->processed.load(std::memory_order_relaxed)) {
@@ -936,14 +921,11 @@ public:
           }
         }
       }
-      lock.lock();
-      worker_completed_task[worker_id].store(true);
-      worker_has_task[worker_id].store(false);
-      num_workers_with_tasks.fetch_sub(1);
-      work_cv.notify_all();
+      // Clear flag BEFORE decrementing so the main thread can't re-signal this
+      // worker and have us clear the new signal.
+      worker_has_task[worker_id].store(false, std::memory_order_relaxed);
+      num_workers_with_tasks.fetch_sub(1, std::memory_order_acq_rel);
     }
-
-    std::cout << "Worker " << worker_id << " exited\n";
   }
 
   __attribute__((hot)) void handle_buffer_completion(bool force_flush = false) {
@@ -1024,11 +1006,10 @@ public:
   void shutdown() {
     {
       std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
-      std::lock_guard<std::mutex> lock_stop(work_mutex);
       running.store(0, std::memory_order_release);
     };
     buffer_ready_for_pipeline.notify_all();
-    work_cv.notify_all();
+    // Workers check running in their spin loop and exit naturally.
   };
 
   void pipeline_feeder() {
@@ -1194,7 +1175,7 @@ private:
              T::NR_FPGA_SOURCES>
       future_packet_queue;
   std::mutex future_packet_queue_mutex;
-  std::array<bool, T::NR_CHANNELS> modified_since_last_completion_check;
+  std::array<std::atomic<bool>, T::NR_CHANNELS> modified_since_last_completion_check;
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
       buffer_ordering_queue;
@@ -1207,17 +1188,19 @@ private:
 
   std::mutex latest_packet_mutex;
   std::array<int16_t, 256> fpga_index_lut;
-  struct WorkRange {
+  // Each WorkRange is on its own cache line to prevent false sharing between
+  // the main thread writing and workers reading.
+  struct alignas(64) WorkRange {
     int start;
     int end;
   };
 
+  // Per-worker task signaling. Main writes worker_tasks[i] then stores true
+  // (release) to worker_has_task[i]. Workers spin-acquire on worker_has_task
+  // and read the task without any mutex. Workers store false (relaxed) then
+  // decrement num_workers_with_tasks (acq_rel) to signal completion.
   std::array<std::atomic<bool>, WORKER_COUNT> worker_has_task;
-  std::array<std::atomic<bool>, WORKER_COUNT> worker_completed_task;
   std::array<WorkRange, WORKER_COUNT> worker_tasks;
-
-  std::mutex work_mutex;
-  std::condition_variable work_cv;
   std::atomic<int> num_workers_with_tasks = 0;
 
   std::vector<std::thread> workers;
@@ -1229,7 +1212,8 @@ private:
     };
   };
   void stop_processing_threads() {
-    work_cv.notify_all();
+    // Workers spin on running.load(); setting it false (done by the caller
+    // before invoking this) wakes them from their idle spin.
     std::cout << "Trying to join worker threads...\n";
     for (auto &t : workers) {
       t.join();
