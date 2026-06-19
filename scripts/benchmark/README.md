@@ -20,16 +20,20 @@ from 8 to 32 channels in steps of 8.
 
 ### GPU pipeline scaling behaviour (RTX 4060, 8 GB VRAM)
 
-| Config | runs/sec | input_GB/sec |
-|---|---|---|
-| 8ch/1fpga | 807 | 4.26 |
-| 16ch/1fpga | 400 | 4.23 |
-| 24ch/1fpga | 263 | 4.17 |
-| 32ch/1fpga | 197 | 4.16 |
-| 8ch/4fpga | 321 | 6.78 |
-| 16ch/4fpga | 161 | 6.81 |
-| 24ch/4fpga | 106 | 6.69 |
-| 32ch/4fpga | 77 | 6.53 |
+Real-time baseline: 15500 packets/sec/channel/FPGA × 2660 bytes/packet, with
+NR_PACKETS_FOR_CORRELATION=256 → required 60.5 runs/sec for any config (channels
+and FPGA count cancel out). `real-time %` = (actual runs/sec ÷ 60.5) × 100.
+
+| Config | runs/sec | input_GB/sec | real-time % |
+|---|---|---|---|
+| 8ch/1fpga | 807 | 4.26 | 1333% |
+| 16ch/1fpga | 400 | 4.23 | 661% |
+| 24ch/1fpga | 263 | 4.17 | 434% |
+| 32ch/1fpga | 197 | 4.16 | 325% |
+| 8ch/4fpga | 321 | 6.78 | 530% |
+| 16ch/4fpga | 161 | 6.81 | 266% |
+| 24ch/4fpga | 106 | 6.69 | 175% |
+| 32ch/4fpga | 77 | 6.53 | 127% |
 
 Key findings:
 - **1fpga (10 rx → 32 padded)**: ~4.1 GB/sec constant across 8–32 channels.
@@ -40,6 +44,9 @@ Key findings:
   faster than 2 buffers (6.24 vs ~4.5 GB/sec for 8ch/4fpga) while avoiding OOM.
 - `bench_gpu --with-output` adds D2H cost (~0.7 GB/sec for 8ch/1fpga) and
   measures the combined H2D+compute+D2H path as seen by writers.
+- **32ch/4fpga at 127%** is the tightest margin — only 27% headroom above
+  real-time on this GPU. Writer overhead and CPU-side processing will eat into
+  that, making it the bottleneck config to watch for live deployments.
 
 Optionally (`--with-observe`) it also runs the full `observe` pipeline against a
 looping multi-FPGA PCAP replay, as an end-to-end comparison point.
