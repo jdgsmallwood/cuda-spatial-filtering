@@ -3385,13 +3385,6 @@ public:
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, streams[i]));
 
-    CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<char *>(d_samples_padded[i]) +
-                                   sizeof(typename T::HalfPacketSamplesType),
-                               0,
-                               sizeof(typename T::PaddedPacketSamplesType) -
-                                   sizeof(typename T::HalfPacketSamplesType),
-                               streams[i]));
-
     tensor_16.runPermutation("paddedToCorrInput", alpha,
                              (__half *)d_samples_padded[i],
                              (__half *)d_correlator_input[i], streams[i]);
@@ -3544,6 +3537,11 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_padded[i],
+                            sizeof(typename T::PaddedPacketSamplesType)));
+      // The tail beyond HalfPacketSamplesType must be zero for TCC (padding
+      // receivers). The D2D copy in enqueue_main never touches this tail, so
+      // one upfront zero is sufficient — no per-run cudaMemset needed.
+      CUDA_CHECK(cudaMemset(d_samples_padded[i], 0,
                             sizeof(typename T::PaddedPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_padding[i],
                             sizeof(typename T::HalfPacketSamplesType)));
