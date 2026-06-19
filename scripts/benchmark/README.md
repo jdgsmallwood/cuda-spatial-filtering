@@ -22,14 +22,14 @@ from 8 to 32 channels in steps of 8.
 
 | Config | runs/sec | input_GB/sec |
 |---|---|---|
-| 8ch/1fpga | 796 | 4.21 |
-| 16ch/1fpga | 396 | 4.18 |
-| 24ch/1fpga | 261 | 4.14 |
-| 32ch/1fpga | 195 | 4.11 |
-| 8ch/4fpga | 325 | 6.86 |
-| 16ch/4fpga | 162 | 6.87 |
-| 24ch/4fpga | 107 | 6.76 |
-| 32ch/4fpga | 78 | 6.56 |
+| 8ch/1fpga | 807 | 4.26 |
+| 16ch/1fpga | 400 | 4.23 |
+| 24ch/1fpga | 263 | 4.17 |
+| 32ch/1fpga | 197 | 4.16 |
+| 8ch/4fpga | 321 | 6.78 |
+| 16ch/4fpga | 161 | 6.81 |
+| 24ch/4fpga | 106 | 6.69 |
+| 32ch/4fpga | 77 | 6.53 |
 
 Key findings:
 - **1fpga (10 rx → 32 padded)**: ~4.1 GB/sec constant across 8–32 channels.

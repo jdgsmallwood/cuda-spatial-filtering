@@ -3226,8 +3226,6 @@ private:
   std::vector<CorrelatorInput *> d_correlator_input;
   std::vector<CorrelatorOutput *> d_correlator_output;
 
-  std::vector<TrimmedVisibilities *> d_visibilities_baseline,
-      d_visibilities_trimmed_baseline, d_visibilities_trimmed;
   TrimmedVisibilities *d_visibilities_accumulator;
 
   // Captured replay of the static per-buffer permutation/correlator/gemm
@@ -3388,23 +3386,12 @@ public:
                            (CUdeviceptr)d_correlator_output[i],
                            (CUdeviceptr)d_correlator_input[i]);
 
-    tensor_32.runPermutation("visCorrToBaseline", alpha_32,
-                             (float *)d_correlator_output[i],
-                             (float *)d_visibilities_baseline[i], streams[i]);
-    CUDA_CHECK(cudaMemcpyAsync(
-        d_visibilities_trimmed_baseline[i], d_visibilities_baseline[i],
-        sizeof(TrimmedVisibilities), cudaMemcpyDefault, streams[i]));
-
-    tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
-                             (float *)d_visibilities_trimmed_baseline[i],
-                             (float *)d_visibilities_trimmed[i], streams[i]);
-
-    // accumulate_visibilities (CPU wrapper)
-    accumulate_visibilities((float *)d_visibilities_trimmed[i],
-                            (float *)d_visibilities_accumulator,
-                            2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
-                                T::NR_POLARIZATIONS * T::NR_CHANNELS,
-                            streams[i]);
+    // Fused: visCorrToBaseline + D2D trim + visBaselineTrimmedToTrimmed +
+    // accumulate_visibilities in one kernel pass (no intermediate buffers).
+    accumulate_visibilities_from_corr(
+        (float *)d_correlator_output[i], (float *)d_visibilities_accumulator,
+        T::NR_CHANNELS, NR_BASELINES, NR_UNPADDED_BASELINES,
+        T::NR_POLARIZATIONS * T::NR_POLARIZATIONS * COMPLEX, streams[i]);
 
     tensor_16.runPermutation("packetToColMajCons", alpha,
                              (__half *)d_samples_half[i],
@@ -3510,10 +3497,6 @@ public:
     d_beamformer_output.resize(num_buffers);
     d_beamformer_data_output.resize(num_buffers);
     d_beamformer_data_output_half.resize(num_buffers);
-    d_visibilities_baseline.resize(num_buffers);
-    d_visibilities_trimmed_baseline.resize(num_buffers);
-    d_visibilities_trimmed.resize(num_buffers);
-
     CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
     auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
                                            T::NR_POLARIZATIONS>();
@@ -3554,12 +3537,6 @@ public:
                             sizeof(BeamformerOutput)));
       CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output_half[i],
                             sizeof(HalfBeamformerOutput)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_baseline[i],
-                            sizeof(Visibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed_baseline[i],
-                            sizeof(TrimmedVisibilities)));
-      CUDA_CHECK(cudaMalloc((void **)&d_visibilities_trimmed[i],
-                            sizeof(TrimmedVisibilities)));
     }
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
@@ -3761,18 +3738,6 @@ public:
 
     for (auto samples_consolidated_col_maj : d_samples_consolidated_col_maj) {
       cudaFree(samples_consolidated_col_maj);
-    }
-
-    for (auto vis : d_visibilities_trimmed_baseline) {
-      cudaFree(vis);
-    }
-
-    for (auto vis : d_visibilities_baseline) {
-      cudaFree(vis);
-    }
-
-    for (auto vis : d_visibilities_trimmed) {
-      cudaFree(vis);
     }
 
     for (auto event : start_run) {

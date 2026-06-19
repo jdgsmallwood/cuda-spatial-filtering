@@ -132,3 +132,39 @@ void accumulate_visibilities(const float *d_visibilities,
   accumulate_visibilities_kernel<<<num_blocks, 1024, 0, stream>>>(
       d_visibilities, d_visibilities_accumulated, n);
 }
+
+// Fuses visCorrToBaseline + D2D trim + visBaselineTrimmedToTrimmed +
+// accumulate_visibilities into a single kernel.
+//
+// TCC output:  float[n_ch][n_bl][pol][pol][2]  (CorrelatorOutput)
+// Accumulator: float[n_ch][n_up][pol][pol][2]  (TrimmedVisibilities, n_up ≤ n_bl)
+//
+// For baseline a < n_up: accum[c*n_up*S + a*S + inner] += corr[c*n_bl*S + a*S + inner]
+// where S = inner_stride = pol*pol*2.  The full four-step chain collapses to
+// this identity mapping because the net permutation of (visCorrToBaseline ∘
+// visBaselineTrimmedToTrimmed) is the identity for elements where a < n_up.
+__global__ void accumulate_visibilities_from_corr_kernel(
+    const float *corr_out, float *accum, const int n_ch, const int n_bl,
+    const int n_up, const int inner_stride) {
+  const int total = n_ch * n_up * inner_stride;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int grid_stride = blockDim.x * gridDim.x;
+  while (idx < total) {
+    const int inner = idx % inner_stride;
+    const int ca = idx / inner_stride;
+    const int a = ca % n_up;
+    const int c = ca / n_up;
+    atomicAdd(&accum[idx], corr_out[(c * n_bl + a) * inner_stride + inner]);
+    idx += grid_stride;
+  }
+}
+
+void accumulate_visibilities_from_corr(const float *corr_out, float *accum,
+                                       int n_channels, int n_baselines,
+                                       int n_unpadded, int inner_stride,
+                                       cudaStream_t stream) {
+  const int total = n_channels * n_unpadded * inner_stride;
+  const int num_blocks = elementwise_grid_size(total);
+  accumulate_visibilities_from_corr_kernel<<<num_blocks, 1024, 0, stream>>>(
+      corr_out, accum, n_channels, n_baselines, n_unpadded, inner_stride);
+}
