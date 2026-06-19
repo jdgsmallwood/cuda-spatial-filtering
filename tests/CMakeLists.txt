@@ -42,6 +42,17 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
+
+# Built standalone (not linked against test_app_common) so pointing.cpp's
+# casacore calls are compiled/linked entirely by the system C++ compiler --
+# see the comment blocks in pointing.hpp and src/CMakeLists.txt for why mixing
+# casacore with the CUDA/conda toolchain produces ABI-mismatched link errors.
+add_executable(
+  PointingTests test_pointing.cpp $<TARGET_OBJECTS:pointing>
+)
+target_include_directories(PointingTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(PointingTests PRIVATE GTest::gtest_main ${CASACORE_LIBRARIES})
+
 # Shared high-level pipeline-test harness (tests/support/*.hpp): synthetic
 # packet builders, canonical small LambdaConfigs, a SyntheticPipelineRun driver
 # that wires a real ProcessorState to a real GPUPipeline via the synchronous
@@ -57,6 +68,12 @@ add_executable(
 )
 target_link_libraries(PipelineHarnessSelfTest PRIVATE test_support)
 
+add_executable(
+  PulsarFoldTests test_pulsar_fold.cu
+)
+target_link_libraries(PulsarFoldTests PRIVATE test_support)
+set_target_properties(PulsarFoldTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
 # gettimeofday, and pool-alloc microbenchmarks for the six hot-path fixes.
@@ -70,4 +87,6 @@ gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
+gtest_discover_tests(PulsarFoldTests)

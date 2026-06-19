@@ -28,6 +28,17 @@ void accumulate_visibilities(const float *d_visibilities,
                              float *d_visibilities_accumulated, const int n,
                              cudaStream_t stream);
 
+// Accumulate directly from TCC CorrelatorOutput into TrimmedVisibilities
+// accumulator, fusing visCorrToBaseline + D2D trim + visBaselineTrimmedToTrimmed
+// + accumulate_visibilities into one kernel pass.
+// corr_out layout: float[n_channels][n_baselines][n_pol][n_pol][2] (CorrelatorOutput)
+// accum layout:    float[n_channels][n_unpadded][n_pol][n_pol][2] (TrimmedVisibilities)
+// inner_stride = n_pol * n_pol * 2 (= 8 for NR_POL=2)
+void accumulate_visibilities_from_corr(const float *corr_out, float *accum,
+                                       int n_channels, int n_baselines,
+                                       int n_unpadded, int inner_stride,
+                                       cudaStream_t stream);
+
 __global__ void convert_float_to_half_kernel(const float *input, __half *output,
                                              const int n);
 

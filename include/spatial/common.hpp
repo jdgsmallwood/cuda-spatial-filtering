@@ -5,6 +5,7 @@
 #include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline.hpp"
+#include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
 // Self-guarded: expands to nothing unless the build defined HAVE_IBVERBS.
 #include "spatial/libibverbs.hpp"
@@ -122,6 +123,10 @@ private:
   std::unordered_map<int, std::unordered_map<int, int>> base_maps;
 };
 
+// ENUPosition, ArrayLocation, FrequencyPlan, and BeamTarget come from
+// pointing.hpp (via pipeline.hpp above) -- shared geometry/target types also
+// consumed by compute_steering_weights().
+
 struct CommonArgs {
   std::string pcap_filename;
   std::string output_filename; // may be empty → caller picks a default
@@ -129,6 +134,7 @@ struct CommonArgs {
   std::string gains_filename;
   std::string beam_weights_filename;
   std::string nr_signal_eigenvectors_filename;
+  std::string targets_filename;
   std::string ifname;
   std::string fpga_delay_file;
   bool loop_pcap = false;
@@ -137,17 +143,30 @@ struct CommonArgs {
   int min_freq_channel = 0;
   int port = 36001;
   int packets_to_receive = 0;
+  double steering_update_interval_seconds = 180.0;
   std::string capture_backend = "kernel";
   int busy_poll_us = 0;
   json config;
   json gains;
   json beam_weights;
+  json targets;
   std::vector<int> fpga_id_vec;
   std::unordered_map<uint32_t, int> fpga_ids;
   std::unordered_map<int, int> antenna_mapping;
   std::unordered_map<int, int> nr_signal_eigenvectors;
   std::vector<std::string> fpga_names;
   std::unordered_map<int, int64_t> fpga_delays;
+  // Antenna ENU positions (metres), keyed by absolute antenna ID; from
+  // config.json's "antenna_positions" (defaults to zeros if absent).
+  std::unordered_map<int, ENUPosition> antenna_positions;
+  // Array reference point; from config.json's "array_location".
+  ArrayLocation array_location;
+  // Channel-to-frequency mapping; from config.json's "frequency_plan".
+  FrequencyPlan frequency_plan;
+  // One pointing target per beam, from --targets-filename. Empty when no
+  // targets file is supplied, in which case callers fall back to static
+  // beam_weights/uniform-default behaviour (steering is opt-in).
+  std::vector<BeamTarget> beam_targets;
 };
 
 // Builds the per-NIC packet-capture objects for an app from the parsed args,
@@ -292,10 +311,88 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value("")
       .store_into(args.beam_weights_filename);
 
+  program.add_argument("-T", "--targets-filename")
+      .help("JSON file describing per-beam pointing targets (RA/Dec or "
+            "zenith). When supplied, beam weights are computed from these "
+            "targets and the array/antenna geometry in the config file "
+            "instead of from --beam-weights-filename, and re-steered "
+            "periodically to track sidereal motion.")
+      .default_value("")
+      .store_into(args.targets_filename);
+
+  program.add_argument("--steering-update-interval-seconds")
+      .help("How often (in seconds) to recompute beam-steering weights so "
+            "tracked sources stay pointed at as the sky rotates")
+      .default_value(180.0)
+      .store_into(args.steering_update_interval_seconds);
+
   try {
     program.parse_args(argc, argv);
     std::ifstream f(args.config_filename);
     args.config = json::parse(f);
+
+    if (args.config.contains("antenna_positions")) {
+      for (const auto &[fpga_key, antennas] :
+           args.config["antenna_positions"].items()) {
+        for (const auto &[antenna_key, pos] : antennas.items()) {
+          int absolute_antenna_id = std::stoi(antenna_key);
+          ENUPosition enu;
+          enu.east = pos.value("east", 0.0);
+          enu.north = pos.value("north", 0.0);
+          enu.up = pos.value("up", 0.0);
+          args.antenna_positions[absolute_antenna_id] = enu;
+        }
+      }
+      std::cout << "Loaded " << args.antenna_positions.size()
+                << " antenna position(s) from config\n";
+    }
+
+    if (args.config.contains("array_location")) {
+      const auto &loc = args.config["array_location"];
+      args.array_location.latitude_deg = loc.value("latitude_deg", 0.0);
+      args.array_location.longitude_deg = loc.value("longitude_deg", 0.0);
+      args.array_location.height_m = loc.value("height_m", 0.0);
+      std::cout << "Array location: lat=" << args.array_location.latitude_deg
+                << " lon=" << args.array_location.longitude_deg
+                << " height=" << args.array_location.height_m << "m\n";
+    }
+
+    if (args.config.contains("frequency_plan")) {
+      const auto &plan = args.config["frequency_plan"];
+      args.frequency_plan.base_frequency_hz =
+          plan.value("base_frequency_hz", 0.0);
+      args.frequency_plan.channel_bandwidth_hz =
+          plan.value("channel_bandwidth_hz", 0.0);
+      std::cout << "Frequency plan: base="
+                << args.frequency_plan.base_frequency_hz
+                << "Hz channel_bandwidth="
+                << args.frequency_plan.channel_bandwidth_hz << "Hz\n";
+    }
+
+    if (args.targets_filename != "") {
+      std::ifstream tf(args.targets_filename);
+      args.targets = json::parse(tf);
+
+      for (const auto &target : args.targets.at("targets")) {
+        BeamTarget bt;
+        bt.mode = target.value("mode", std::string("zenith"));
+        bt.ra_deg = target.value("ra_deg", 0.0);
+        bt.dec_deg = target.value("dec_deg", 0.0);
+
+        if (bt.mode != "zenith" && bt.mode != "radec") {
+          throw std::runtime_error("Unknown beam target mode '" + bt.mode +
+                                   "' (expected 'radec' or 'zenith')");
+        }
+
+        args.beam_targets.push_back(bt);
+        std::cout << "Beam target " << args.beam_targets.size() - 1
+                  << ": mode=" << bt.mode;
+        if (bt.mode == "radec") {
+          std::cout << " ra_deg=" << bt.ra_deg << " dec_deg=" << bt.dec_deg;
+        }
+        std::cout << std::endl;
+      }
+    }
 
     std::ifstream g(args.gains_filename);
     args.gains = json::parse(g);

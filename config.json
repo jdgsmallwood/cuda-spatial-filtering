@@ -1,53 +1,59 @@
 {
+"array_location": {
+  "_comment": "Array reference position -- this 50-350 MHz instrument is co-located with (next to) ATCA at Narrabri NSW: lat -30 18 46.385 S, lon 149 33 00.500 E, 237m above sea level.",
+  "latitude_deg": -30.31288472,
+  "longitude_deg": 149.55013889,
+  "height_m": 237
+},
+"frequency_plan": {
+  "_comment": "Sky frequency of a channel = base_frequency_hz + abs_channel * channel_bandwidth_hz, where abs_channel is the absolute channel number (--min_freq_channel + in-band channel index). Channels are spaced 781.25 kHz apart (oversampled by 32/27, so the per-channel passbands overlap), and absolute channel 0 sits at 0 Hz, hence center frequency = channel_number * 781.25 kHz. This instrument's 50-350 MHz band is absolute channels 64-448.",
+  "base_frequency_hz": 0,
+  "channel_bandwidth_hz": 781250
+},
 "antenna_positions": {
   "0": {
-      "0": {"east": 0, "north": 0, "up": 0},
-      "1": {"east": 0, "north": 0, "up": 0},
-      "2": {"east": 0, "north": 0, "up": 0},
-      "3": {"east": 0, "north": 0, "up": 0},
-      "4": {"east": 0, "north": 0, "up": 0},
-      "5": {"east": 0, "north": 0, "up": 0},
-      "6": {"east": 0, "north": 0, "up": 0},
-      "7": {"east": 0, "north": 0, "up": 0},
-      "8": {"east": 0, "north": 0, "up": 0},
-      "9": {"east": 0, "north": 0, "up": 0}
+      "35": {"east": 5.881, "north": 3.46, "up": 0},
+      "1": {"east": -16.773, "north": 8.696, "up": 0},
+      "14": {"east": 1.915, "north": -18.699, "up": 0},
+      "36": {"east": 14.896, "north": 12.985, "up": 0},
+      "18": {"east": 2.064, "north": -4.383, "up": 0},
+      "25": {"east": 3.587, "north": -5.706, "up": 0}
     },
-    "1": {
-
-      "0": {"east": 0, "north": 0, "up": 0},
-      "1": {"east": 0, "north": 0, "up": 0},
-      "2": {"east": 0, "north": 0, "up": 0},
-      "3": {"east": 0, "north": 0, "up": 0},
-      "4": {"east": 0, "north": 0, "up": 0},
-      "5": {"east": 0, "north": 0, "up": 0},
-      "6": {"east": 0, "north": 0, "up": 0},
-      "7": {"east": 0, "north": 0, "up": 0},
-      "8": {"east": 0, "north": 0, "up": 0},
-      "9": {"east": 0, "north": 0, "up": 0}
+  "1": {
+      "15": {"east": -2.269, "north": -6.491, "up": 0},
+      "16": {"east": -0.852, "north": -5.374, "up": 0},
+      "23": {"east": 0.453, "north": -3.085, "up": 0},
+      "24": {"east": 0.891, "north": -1.225, "up": 0},
+      "26": {"east": 3.231, "north": -2.206, "up": 0},
+      "32": {"east": 5.865, "north": -0.901, "up": 0},
+      "17": {"east": 5.331, "north": -2.672, "up": 0},
+      "33": {"east": 3.761, "north": -3.937, "up": 0},
+      "11": {"east": -3.994, "north": -4.987, "up": 0},
+      "13": {"east": -4.108, "north": -2.648, "up": 0}
     },
-    "2": {
-      "0": {"east": 0, "north": 0, "up": 0},
-      "1": {"east": 0, "north": 0, "up": 0},
-      "2": {"east": 0, "north": 0, "up": 0},
-      "3": {"east": 0, "north": 0, "up": 0},
-      "4": {"east": 0, "north": 0, "up": 0},
-      "5": {"east": 0, "north": 0, "up": 0},
-      "6": {"east": 0, "north": 0, "up": 0},
-      "7": {"east": 0, "north": 0, "up": 0},
-      "8": {"east": 0, "north": 0, "up": 0},
-      "9": {"east": 0, "north": 0, "up": 0}
-  },
-    "3": {
-      "0": {"east": 0, "north": 0, "up": 0},
-      "1": {"east": 0, "north": 0, "up": 0},
-      "2": {"east": 0, "north": 0, "up": 0},
-      "3": {"east": 0, "north": 0, "up": 0},
-      "4": {"east": 0, "north": 0, "up": 0},
-      "5": {"east": 0, "north": 0, "up": 0},
-      "6": {"east": 0, "north": 0, "up": 0},
-      "7": {"east": 0, "north": 0, "up": 0},
-      "8": {"east": 0, "north": 0, "up": 0},
-      "9": {"east": 0, "north": 0, "up": 0}
+  "2": {
+      "4": {"east": 2.3, "north": 5.235, "up": 0},
+      "6": {"east": -1.024, "north": 6.134, "up": 0},
+      "5": {"east": 0.837, "north": 4.11, "up": 0},
+      "29": {"east": -0.75, "north": 3.375, "up": 0},
+      "10": {"east": -2.804, "north": 1.786, "up": 0},
+      "20": {"east": -4.471, "north": 1.064, "up": 0},
+      "7": {"east": -6.015, "north": -2.721, "up": 0},
+      "9": {"east": -6.113, "north": -0.038, "up": 0},
+      "2": {"east": -3.352, "north": 4.189, "up": 0},
+      "3": {"east": -4.978, "north": 2.732, "up": 0}
+    },
+  "3": {
+      "19": {"east": 2.203, "north": 2.904, "up": 0},
+      "28": {"east": 0.482, "north": 1.173, "up": 0},
+      "31": {"east": 4.064, "north": 3.257, "up": 0},
+      "34": {"east": 5.851, "north": 1.663, "up": 0},
+      "27": {"east": 3.71, "north": 1.519, "up": 0},
+      "30": {"east": 2.152, "north": 0.608, "up": 0},
+      "12": {"east": -1.028, "north": -1.394, "up": 0},
+      "22": {"east": -1.946, "north": -3.131, "up": 0},
+      "8": {"east": -1.925, "north": 0.17, "up": 0},
+      "21": {"east": -3.246, "north": -1.023, "up": 0}
     }
   },
   "flagged_antennas": {

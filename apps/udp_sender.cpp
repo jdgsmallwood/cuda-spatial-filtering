@@ -122,15 +122,17 @@ int main(int argc, char *argv[]) {
   const u_char *packet;
   int sockfd;
   struct sockaddr_in server_addr;
-  const char *server_ip = "127.0.0.1";
   int packet_count = 0;
   int custom_packet_count = 0;
   int res;
 
   if (argc < 2) {
-    spdlog::error("Usage: %s <pcap_file>\n", argv[0]);
+    spdlog::error("Usage: {} <pcap_file> [port] [ip]\n", argv[0]);
     return 1;
   }
+  const int dest_port = (argc >= 3) ? atoi(argv[2]) : UDP_PORT;
+  const char *server_ip = (argc >= 4) ? argv[3] : "127.0.0.1";
+
   // Open pcap file using libpcap
   handle = pcap_open_offline(argv[1], errbuf);
   if (!handle) {
@@ -139,7 +141,7 @@ int main(int argc, char *argv[]) {
   }
 
   spdlog::info("Reading pcap file: {}", argv[1]);
-  spdlog::info("Sending packets to {}:{}", server_ip, UDP_PORT);
+  spdlog::info("Sending packets to {}:{}", server_ip, dest_port);
 
   // Create UDP socket for sending
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -152,7 +154,7 @@ int main(int argc, char *argv[]) {
   // Setup server address
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(UDP_PORT);
+  server_addr.sin_port = htons(dest_port);
   server_addr.sin_addr.s_addr = inet_addr(server_ip);
 
   // Read packets using pcap_next_ex
