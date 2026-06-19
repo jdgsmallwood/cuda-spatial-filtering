@@ -68,3 +68,6 @@ target_link_libraries(bench_processor PRIVATE gpu_app_common)
 add_executable(bench_writers ${PROJECT_SOURCE_DIR}/apps/bench_writers.cu)
 target_link_libraries(bench_writers PRIVATE gpu_app_common)
 
+add_executable(bench_gpu ${PROJECT_SOURCE_DIR}/apps/bench_gpu.cu)
+target_link_libraries(bench_gpu PRIVATE gpu_app_common)
+

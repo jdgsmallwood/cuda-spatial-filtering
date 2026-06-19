@@ -9,17 +9,25 @@
 #include <thread>
 #include <unordered_map>
 
+#include "spatial/logging.hpp"
 #include "spatial/pipeline_base.hpp"
 #include "spatial/spatial.hpp"
 #include "synthetic_packets.hpp"
+#include <spdlog/async.h>
+#include <spdlog/sinks/basic_file_sink.h>
 
 // Fixed representative configs for the LAMBDA instrument.  These are
-// compile-time constants so the same binary benchmarks all three shapes
-// without needing to rebuild with different -DNR_OBSERVING_* values.
+// compile-time constants so the same binary benchmarks all shapes without
+// needing to rebuild with different -DNR_OBSERVING_* values.
 //                                    ch  fp   ts   rx  pol rxpp corr  bm  pad  blk       acc
-using Cfg1ch1fpga = LambdaConfig<     1,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg8ch1fpga = LambdaConfig<     8,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg8ch4fpga = LambdaConfig<     8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+using Cfg1ch1fpga  = LambdaConfig<    1,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg8ch1fpga  = LambdaConfig<    8,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg16ch1fpga = LambdaConfig<   16,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg24ch1fpga = LambdaConfig<   24,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg32ch1fpga = LambdaConfig<   32,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg8ch4fpga  = LambdaConfig<    8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+using Cfg16ch4fpga = LambdaConfig<   16,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+using Cfg32ch4fpga = LambdaConfig<   32,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 
 struct BenchResult {
   size_t nr_channels;
@@ -181,12 +189,27 @@ int main(int argc, char *argv[]) {
 
   const double duration_s = program.get<double>("--duration");
 
-  std::cout << "bench_processor: 3 configs x " << duration_s << "s each"
+  // Redirect the default stdout spdlog logger to a file so INFO_LOG calls
+  // from ProcessorState don't pollute the benchmark's stdout output.
+  static auto tp = std::make_shared<spdlog::details::thread_pool>(8192, 1);
+  auto logger = std::make_shared<spdlog::async_logger>(
+      "bench_processor",
+      std::make_shared<spdlog::sinks::basic_file_sink_mt>("app.log", false),
+      tp, spdlog::async_overflow_policy::overrun_oldest);
+  logger->set_level(spdlog::level::warn);
+  spatial::Logger::set(logger);
+
+  std::cout << "bench_processor: 8 configs x " << duration_s << "s each"
             << std::endl;
 
-  print_result(run_processor_bench<Cfg1ch1fpga>(duration_s));
-  print_result(run_processor_bench<Cfg8ch1fpga>(duration_s));
-  print_result(run_processor_bench<Cfg8ch4fpga>(duration_s));
+  print_result(run_processor_bench<Cfg1ch1fpga> (duration_s));
+  print_result(run_processor_bench<Cfg8ch1fpga> (duration_s));
+  print_result(run_processor_bench<Cfg16ch1fpga>(duration_s));
+  print_result(run_processor_bench<Cfg24ch1fpga>(duration_s));
+  print_result(run_processor_bench<Cfg32ch1fpga>(duration_s));
+  print_result(run_processor_bench<Cfg8ch4fpga> (duration_s));
+  print_result(run_processor_bench<Cfg16ch4fpga>(duration_s));
+  print_result(run_processor_bench<Cfg32ch4fpga>(duration_s));
 
   return 0;
 }

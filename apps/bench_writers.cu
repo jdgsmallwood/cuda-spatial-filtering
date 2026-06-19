@@ -2,12 +2,17 @@
 #include <chrono>
 #include <cstring>
 
-// Fixed representative configs for the LAMBDA instrument -- same three shapes
-// as bench_processor so the writer numbers are directly comparable.
+// Fixed representative configs for the LAMBDA instrument -- same shapes as
+// bench_processor so the writer numbers are directly comparable.
 //                                    ch  fp   ts   rx  pol rxpp corr  bm  pad  blk       acc
-using Cfg1ch1fpga = LambdaConfig<     1,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg8ch1fpga = LambdaConfig<     8,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg8ch4fpga = LambdaConfig<     8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+using Cfg1ch1fpga  = LambdaConfig<    1,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg8ch1fpga  = LambdaConfig<    8,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg16ch1fpga = LambdaConfig<   16,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg24ch1fpga = LambdaConfig<   24,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg32ch1fpga = LambdaConfig<   32,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
+using Cfg8ch4fpga  = LambdaConfig<    8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+using Cfg16ch4fpga = LambdaConfig<   16,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+using Cfg32ch4fpga = LambdaConfig<   32,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 
 struct WriterBenchResult {
   size_t nr_channels;
@@ -160,12 +165,17 @@ int main(int argc, char *argv[]) {
   const int num_blocks = program.get<int>("--num-blocks");
   const std::string output_dir = program.get<std::string>("-o");
 
-  std::cout << "bench_writers: 3 configs x " << duration_s << "s each"
+  std::cout << "bench_writers: 8 configs x " << duration_s << "s each"
             << " num_blocks=" << num_blocks << std::endl;
 
-  print_result(run_writers_bench<Cfg1ch1fpga>(duration_s, num_blocks, output_dir));
-  print_result(run_writers_bench<Cfg8ch1fpga>(duration_s, num_blocks, output_dir));
-  print_result(run_writers_bench<Cfg8ch4fpga>(duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg1ch1fpga> (duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg8ch1fpga> (duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg16ch1fpga>(duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg24ch1fpga>(duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg32ch1fpga>(duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg8ch4fpga> (duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg16ch4fpga>(duration_s, num_blocks, output_dir));
+  print_result(run_writers_bench<Cfg32ch4fpga>(duration_s, num_blocks, output_dir));
 
   return 0;
 }

@@ -4,9 +4,9 @@
 Runs the per-component throughput microbenchmarks built in `apps/`:
 
   - bench_capture   -- raw kernel-socket packet capture (recvmmsg ingestion)
-  - bench_processor -- ring-buffer reassembly, 3 configs (1ch/1fpga, 8ch/1fpga, 8ch/4fpga)
-  - gpu_benchmark   -- GPU correlate+beamform pipeline (LambdaCorrBeamOnlyGPUPipeline)
-  - bench_writers   -- HDF5 visibilities/eigendata writer throughput, 3 configs
+  - bench_processor -- ring-buffer reassembly, 8 configs (1..32ch, 1/4fpga)
+  - bench_gpu       -- GPU correlate+beamform, 8 configs (8..32ch × 1/4fpga)
+  - bench_writers   -- HDF5 visibilities/eigendata writer throughput, 8 configs
 
 and prints a summary table of packets/sec and GB/sec for each stage so the
 slowest stage (the bottleneck) is obvious at a glance.
@@ -47,6 +47,9 @@ VIS_WRITER_HDR_RE = re.compile(
 )
 EIGEN_WRITER_HDR_RE = re.compile(
     r"\[Eigen Writer ch=(\d+) fpga=(\d+) rx=(\d+)\]"
+)
+GPU_BENCH_HDR_RE = re.compile(
+    r"\[GPU Pipeline ch=(\d+) fpga=(\d+) rx=(\d+)\]"
 )
 
 
@@ -189,8 +192,8 @@ def bench_capture(args, env, results):
 def bench_processor(args, env, results):
     binary = args.build_dir / "apps" / "bench_processor"
     cmd = [str(binary), "--duration", str(args.processor_duration)]
-    # 3 configs each running for processor_duration
-    timeout = args.processor_duration * 3 + 60
+    # 8 configs each running for processor_duration
+    timeout = args.processor_duration * 8 + 60
     stdout = run(cmd, env=env, timeout=timeout, label="bench_processor")
 
     processor_rows = []
@@ -214,20 +217,50 @@ def bench_processor(args, env, results):
 
 
 def gpu_benchmark(args, env, results):
-    binary = args.build_dir / "apps" / "gpu_benchmark"
-    cmd = [str(binary), "--duration", str(args.gpu_duration)]
-    stdout = run(cmd, env=env, timeout=args.gpu_duration + 60, label="gpu_benchmark")
-    gpu_rows = []
-    for line in stdout.splitlines():
-        if line.startswith("[GPU Pipeline]"):
-            row = parse_kv_line(line)
-            gpu_rows.append(row)
-    if gpu_rows:
-        results["gpu_pipeline"] = gpu_rows[0] if len(gpu_rows) == 1 else gpu_rows
+    # Prefer bench_gpu (multi-config) over gpu_benchmark (single compile-time config).
+    bench_gpu_bin = args.build_dir / "apps" / "bench_gpu"
+    legacy_bin    = args.build_dir / "apps" / "gpu_benchmark"
+
+    if bench_gpu_bin.exists():
+        # bench_gpu runs 8 configs sequentially; each TCC NVRTC compile is
+        # cached after the first run.  Add 120 s/config for first-run compile.
+        n_configs = 8
+        timeout = args.gpu_duration * n_configs + 120 * n_configs
+        cmd = [str(bench_gpu_bin), "--duration", str(args.gpu_duration)]
+        if args.gpu_num_buffers != 5:
+            cmd += ["--num-buffers", str(args.gpu_num_buffers)]
+        if args.gpu_with_output:
+            cmd += ["--with-output"]
+        stdout = run(cmd, env=env, timeout=timeout, label="bench_gpu")
+
+        gpu_rows = []
+        for line in stdout.splitlines():
+            m = GPU_BENCH_HDR_RE.match(line)
+            if m:
+                row = {
+                    "nr_channels": int(m.group(1)),
+                    "nr_fpga_sources": int(m.group(2)),
+                    "nr_receivers": int(m.group(3)),
+                }
+                row.update(parse_kv_line(line))
+                gpu_rows.append(row)
+        if gpu_rows:
+            results["gpu_pipeline"] = gpu_rows
+        else:
+            print("!! bench_gpu: no '[GPU Pipeline ch=...]' lines found")
     else:
-        print("!! gpu_benchmark: no '[GPU Pipeline]' summary line found -- the "
-              "process likely crashed before finishing a full run (see "
-              "scripts/benchmark/README.md, 'Known issues')")
+        # Legacy fallback: single-config gpu_benchmark
+        cmd = [str(legacy_bin), "--duration", str(args.gpu_duration)]
+        stdout = run(cmd, env=env, timeout=args.gpu_duration + 60, label="gpu_benchmark")
+        gpu_rows = []
+        for line in stdout.splitlines():
+            if line.startswith("[GPU Pipeline]"):
+                row = parse_kv_line(line)
+                gpu_rows.append(row)
+        if gpu_rows:
+            results["gpu_pipeline"] = gpu_rows[0] if len(gpu_rows) == 1 else gpu_rows
+        else:
+            print("!! gpu_benchmark: no '[GPU Pipeline]' summary line found")
 
 
 def bench_writers(args, env, results):
@@ -240,8 +273,8 @@ def bench_writers(args, env, results):
         "--num-blocks", str(args.writer_num_blocks),
         "-o", str(out_dir),
     ]
-    # 3 configs × 2 writers each running for writer_duration
-    timeout = args.writer_duration * 6 + 60
+    # 8 configs × 2 writers each running for writer_duration
+    timeout = args.writer_duration * 16 + 60
     stdout = run(cmd, env=env, timeout=timeout, label="bench_writers")
 
     vis_rows = []
@@ -450,10 +483,14 @@ def main():
 
     proc = parser.add_argument_group("bench_processor")
     proc.add_argument("--processor-duration", type=float, default=None,
-                       help="Duration per config (binary runs 3 configs sequentially)")
+                       help="Duration per config (binary runs 8 configs sequentially)")
 
-    gpu = parser.add_argument_group("gpu_benchmark")
+    gpu = parser.add_argument_group("bench_gpu / gpu_benchmark")
     gpu.add_argument("--gpu-duration", type=float, default=None)
+    gpu.add_argument("--gpu-num-buffers", type=int, default=5,
+                      help="Pipeline double-buffer count passed to bench_gpu")
+    gpu.add_argument("--gpu-with-output", action="store_true",
+                      help="Enable D2H beam output in bench_gpu (off by default)")
 
     wr = parser.add_argument_group("bench_writers")
     wr.add_argument("--writer-duration", type=float, default=None,
