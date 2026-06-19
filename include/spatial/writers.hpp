@@ -165,7 +165,7 @@ public:
     size_t current_write_idx_ = write_idx_.load(std::memory_order_acquire);
     size_t read = read_idx_.load(std::memory_order_relaxed);
 
-    while (read != current_write_idx_ && blocks_[read_idx_].is_ready()) {
+    while (read != current_write_idx_ && blocks_[read].is_ready()) {
       process_block(blocks_[read]);
       read = (read + 1) % buffer_size_;
     }
@@ -210,7 +210,12 @@ private:
     }
   }
 
-  std::atomic<bool> running_;
+  // Must be value-initialized: ~Writer() -> stop() reads running_ to decide
+  // whether to join the drain thread and do a final flush(). Left
+  // uninitialized, a writer that was never start()ed would nondeterministically
+  // run that teardown (spurious flush on a writer with no live drain thread),
+  // which is UB and was observed throwing from a destructor-time flush().
+  std::atomic<bool> running_{false};
   std::mutex mutex_;
   std::condition_variable cv_;
   std::thread drain_thread_;
@@ -641,7 +646,6 @@ public:
 
     if (buffer_count_ >= batch_size_) {
       flush();
-      buffer_count_ = 0;
     }
   }
 
@@ -671,6 +675,7 @@ public:
     vis_buffer_.clear();
     seq_buffer_.clear();
     missing_buffer_.clear();
+    buffer_count_ = 0;
   }
 
 private:
