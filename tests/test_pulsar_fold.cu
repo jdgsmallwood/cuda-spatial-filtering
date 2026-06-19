@@ -161,6 +161,55 @@ TEST_F(PulsarFoldPipelineTest, ZeroWeightsProduceZeroBeams) {
          "actually being written by this run (stale memory?)";
 }
 
+// Regression test for the non-RFI-mitigate tracking bug: when BeamSteering is
+// active (targets non-empty), maybe_refresh() updates b.weights with new
+// steering weights on every pipeline execution that is due for a refresh --
+// but in the non-RFI path the only permutation that feeds weights_permuted (the
+// tensor actually read by the CCGLIB GEMM) used to be the one-shot init in the
+// constructor.  After a maybe_refresh() update, weights_permuted was stale
+// (still the permuted *initial* weights), so the GEMM ran on whatever the
+// constructor put in weights_permuted, not on the tracking-updated values.
+//
+// The test makes this observable by starting with zero initial weights: if
+// weights_permuted is never refreshed after maybe_refresh() writes non-zero
+// steering weights into b.weights, the GEMM multiplies by zero and the output
+// is all zeros.  With the fix (re-permute b.weights -> weights_permuted in the
+// else branch before each GEMM), the steering weights reach the GEMM and the
+// output is non-zero.
+TEST_F(PulsarFoldPipelineTest, TrackingWeightsAreAppliedWithoutRFIMitigate) {
+  // Zero initial weights: if the bug is present, weights_permuted is
+  // initialised from these zeros and never refreshed, so the GEMM output is
+  // zero regardless of what maybe_refresh() put in b.weights.
+  BeamWeightsT<Config> zero_weights{};
+
+  // A zenith target is direction-independent (no casacore call needed) and
+  // produces non-zero steering weights: 1/NR_RECEIVERS for every
+  // receiver/channel/pol. These are written into b.weights by the first
+  // maybe_refresh() (which fires during the constructor's warmup run because
+  // last_update_ is epoch-initialised and thus always overdue on the first
+  // call).
+  BeamTarget zenith;
+  zenith.mode = "zenith";
+
+  auto pipeline =
+      test_support::pipeline_factories::make_tracked_pulsar_fold_pipeline<
+          Config>(&zero_weights, {zenith});
+  test_support::SyntheticPipelineRun<Config> driver(*pipeline,
+                                                    /*output=*/nullptr);
+  driver.run_uniform(constant_sample, unit_scale);
+
+  std::vector<float> beams(Pipeline::beam_output_size_bytes() / sizeof(float));
+  pipeline->copy_latest_beam_output_to_host(beams.data());
+
+  EXPECT_TRUE(all_finite(beams)) << "beam_output contains NaN/Inf";
+  EXPECT_TRUE(any_nonzero(beams))
+      << "beam_output is zero even though maybe_refresh() wrote non-zero "
+         "steering weights (1/NR_RECEIVERS) into b.weights -- the non-RFI "
+         "path is not re-permuting b.weights into b.weights_permuted after "
+         "the tracking update, so the GEMM still runs on the zero "
+         "initial weights";
+}
+
 // Directly refutes the "__half flushes the weights to zero" hypothesis: the
 // observed ~1e-3 weight magnitudes survive float -> __half -> float storage
 // with only small rounding error, nowhere near being zeroed. (This is a pure

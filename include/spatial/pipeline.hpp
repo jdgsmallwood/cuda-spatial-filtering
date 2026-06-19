@@ -5123,6 +5123,14 @@ public:
                                (__half *)b.weights_rfi_mitigated.get(),
                                (__half *)b.weights_beamformer.get(), b.stream);
     } else {
+      // Re-permute b.weights -> b.weights_permuted on every execute_pipeline
+      // call so that tracking updates written by maybe_refresh() (which lands
+      // in b.weights) are reflected in the GEMM.  Without this step, the GEMM
+      // always ran on the weights_permuted that was initialised once in the
+      // constructor, ignoring every steering update after that.
+      tensor_16.runPermutation("weightsToBeamMajor", alpha,
+                               (__half *)b.weights.get(),
+                               (__half *)b.weights_permuted.get(), b.stream);
       tensor_16.runPermutation("weights2xBeamMajorToCCGLIB", alpha,
                                (__half *)b.weights_permuted.get(),
                                (__half *)b.weights_beamformer.get(), b.stream);

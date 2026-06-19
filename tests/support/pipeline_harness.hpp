@@ -100,6 +100,29 @@ make_pulsar_fold_pipeline(BeamWeightsT<Config> *weights,
       /*rfi_dada_key=*/0, std::move(beam_steering));
 }
 
+// Constructs a LambdaPulsarFoldPipeline with active beam steering (targets is
+// non-empty so maybe_refresh() actually fires) but with the PSRDADA sink
+// disabled (dada_key == 0). Used to test that the non-RFI-mitigate path
+// re-applies updated steering weights each pipeline run.
+//
+// `update_interval_seconds` is set large so only the constructor's warmup run
+// triggers a refresh -- the test's single real run then exercises whatever
+// state maybe_refresh() left behind.
+template <typename Config>
+std::unique_ptr<LambdaPulsarFoldPipeline<Config, false>>
+make_tracked_pulsar_fold_pipeline(BeamWeightsT<Config> *weights,
+                                   std::vector<BeamTarget> targets,
+                                   int min_freq_channel = 0) {
+  BeamSteering<Config> beam_steering(
+      std::move(targets), /*antenna_positions=*/{}, /*antenna_mapping=*/{},
+      FrequencyPlan{}, min_freq_channel, ArrayLocation{},
+      /*update_interval_seconds=*/3600.0, /*num_buffers=*/1);
+  return std::make_unique<LambdaPulsarFoldPipeline<Config, false>>(
+      weights, /*nr_signal_eigenvectors=*/std::unordered_map<int, int>{},
+      min_freq_channel, /*dada_key=*/0, /*header_filename=*/"",
+      /*rfi_dada_key=*/0, std::move(beam_steering));
+}
+
 } // namespace pipeline_factories
 
 // Drives a complete synthetic correlation buffer through a real
