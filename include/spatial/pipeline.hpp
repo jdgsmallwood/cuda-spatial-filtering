@@ -5459,15 +5459,25 @@ public:
     if (dada_key == 0)
       return;
 
+    // Signal end-of-data on the data block before releasing the write lock.
+    // Without this, DSPSR's reader loop blocks indefinitely on the next
+    // ipcio_open_block_read() call -- it sees a broken writer connection
+    // rather than a clean observation end, and does not finalize the folded
+    // profile.
+    if (ipcbuf_enable_eod((ipcbuf_t *)hdu->data_block) < 0)
+      multilog(log, LOG_ERR, "ipcbuf_enable_eod failed on data block\n");
+
     if (dada_hdu_unlock_write(hdu) < 0) {
       multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
     }
 
     // disconnect from HDU
     if (dada_hdu_disconnect(hdu) < 0)
-      multilog(log, LOG_ERR, "could not unlock write on hdu\n");
+      multilog(log, LOG_ERR, "could not disconnect from hdu\n");
 
     if constexpr (RFI_MITIGATE) {
+      if (ipcbuf_enable_eod((ipcbuf_t *)rfi_hdu->data_block) < 0)
+        multilog(log, LOG_ERR, "ipcbuf_enable_eod failed on rfi data block\n");
 
       if (dada_hdu_unlock_write(rfi_hdu) < 0) {
         multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
@@ -5475,7 +5485,7 @@ public:
 
       // disconnect from HDU
       if (dada_hdu_disconnect(rfi_hdu) < 0)
-        multilog(log, LOG_ERR, "could not unlock write on hdu\n");
+        multilog(log, LOG_ERR, "could not disconnect from rfi hdu\n");
     }
   }
 
