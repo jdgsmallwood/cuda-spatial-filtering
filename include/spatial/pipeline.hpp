@@ -32,6 +32,7 @@
 #include <iostream>
 #include <libtcc/Correlator.h>
 #include <sys/time.h>
+#include <ctime>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -5345,6 +5346,21 @@ public:
         free(obs_header);
         fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
                 header_filename);
+      }
+
+      // Overwrite UTC_START with the current wall-clock UTC so DSPSR folds
+      // at the correct pulsar phase. The header file contains a placeholder
+      // that is only valid for the exact instant it was written.
+      {
+        time_t now = time(nullptr);
+        struct tm utc_tm{};
+        gmtime_r(&now, &utc_tm);
+        char utc_start[32];
+        strftime(utc_start, sizeof(utc_start), "%Y-%m-%d-%H:%M:%S", &utc_tm);
+        if (ascii_header_set(obs_header, "UTC_START", "%s", utc_start) < 0)
+          fprintf(stderr, "WARNING: could not set UTC_START in PSRDADA header\n");
+        else
+          fprintf(stderr, "INFO: PSRDADA header UTC_START set to %s\n", utc_start);
       }
 
       cudaMalloc(&d_obs_header, DADA_DEFAULT_HEADER_SIZE);
