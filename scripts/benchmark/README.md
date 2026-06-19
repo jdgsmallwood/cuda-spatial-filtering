@@ -18,6 +18,32 @@ in a single run without rebuilding: `1ch/1fpga`, `8ch/1fpga`, `16ch/1fpga`,
 lets you see how each stage scales with channel count and FPGA count
 from 8 to 32 channels in steps of 8.
 
+### Packet processor scaling behaviour
+
+Real-time threshold = 15500 pkt/sec/channel/FPGA.
+
+| Config | pkt/sec | GB/sec | real-time× |
+|---|---|---|---|
+| 1ch/1fpga | 5,789,000 | 15.4 | 374× |
+| 8ch/1fpga | 4,662,000 | 12.4 | 37.6× |
+| 16ch/1fpga | 4,657,000 | 12.4 | 18.8× |
+| 24ch/1fpga | 4,641,000 | 12.4 | 12.5× |
+| 32ch/1fpga | 4,709,000 | 12.5 | 9.5× |
+| 8ch/4fpga | 4,632,000 | 12.3 | 9.3× |
+| 16ch/4fpga | 4,652,000 | 12.4 | 4.7× |
+| 32ch/4fpga | 4,621,000 | 12.3 | 2.3× |
+
+Key findings:
+- Throughput is flat at ~4.6–4.7 M pkt/sec across all 8+ channel configs —
+  the bottleneck is the per-packet CPU work (parse + copy + arrivals tracking),
+  not dispatch overhead.
+- **Lock-free work dispatch** (replacing mutex+CV with per-worker atomic spin)
+  gave +144–387% vs the previous CV-based scheme; 8ch/4fpga went from 1.9× to
+  9.3× real-time headroom.
+- `32ch/4fpga` at 2.3× real-time is now the tightest processor margin. At
+  15500 × 32 × 4 = 1.98 M pkt/sec incoming, the processor can handle it with
+  ~2.3× headroom — comfortable for production with live packet capture overhead.
+
 ### GPU pipeline scaling behaviour (RTX 4060, 8 GB VRAM)
 
 Real-time baseline: 15500 packets/sec/channel/FPGA × 2660 bytes/packet.
