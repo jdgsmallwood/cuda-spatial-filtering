@@ -82,3 +82,8 @@ scripts/.venv
 *.pcap
 //*.ms/*
 *.zip
+
+# DSPSR files
+*.ar
+*.zap
+
