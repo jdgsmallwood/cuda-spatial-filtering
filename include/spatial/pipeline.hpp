@@ -3163,6 +3163,11 @@ private:
                                                          'f', 'n', 's'};
   inline static const std::vector<int> modePlanarColMajCons = {'c', 'p', 'z',
                                                                's', 'f', 'n'};
+  // Fused: packet → col-maj-cons in one step (replaces packetToPlanar +
+  // consToColMajCons). o,u adjacent in output with u inner gives stride(s)=
+  // stride(u), same layout as ['c','p','z','s','f','n'] with s=o*u.
+  inline static const std::vector<int> modePacketDirectColMajCons = {
+      'c', 'p', 'z', 'o', 'u', 'f', 'n'};
   inline static const std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
   inline static const std::vector<int> modeVisCorrBaseline{'l', 'c', 'p', 'q',
                                                            'z'};
@@ -3246,8 +3251,8 @@ private:
   std::vector<BeamformerInput *> d_beamformer_input;
   std::vector<BeamformerOutput *> d_beamformer_output, d_beamformer_data_output;
   std::vector<HalfBeamformerOutput *> d_beamformer_data_output_half;
-  std::vector<__half *> d_samples_consolidated, d_samples_consolidated_col_maj,
-      d_weights, d_weights_permuted;
+  std::vector<__half *> d_samples_consolidated_col_maj, d_weights,
+      d_weights_permuted;
   std::vector<typename T::PacketScalesType *> d_scales;
 
   BeamWeights *h_weights;
@@ -3413,13 +3418,10 @@ public:
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             streams[i]);
 
-    tensor_16.runPermutation("packetToPlanar", alpha,
+    tensor_16.runPermutation("packetToColMajCons", alpha,
                              (__half *)d_samples_half[i],
-                             (__half *)d_samples_consolidated[i], streams[i]);
-
-    tensor_16.runPermutation(
-        "consToColMajCons", alpha, (__half *)d_samples_consolidated[i],
-        (__half *)d_samples_consolidated_col_maj[i], streams[i]);
+                             (__half *)d_samples_consolidated_col_maj[i],
+                             streams[i]);
 
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights[i],
@@ -3514,7 +3516,6 @@ public:
     d_samples_half.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
     d_samples_padding.resize(num_buffers);
-    d_samples_consolidated.resize(num_buffers);
     d_samples_consolidated_col_maj.resize(num_buffers);
     d_correlator_input.resize(num_buffers);
     d_correlator_output.resize(num_buffers);
@@ -3539,8 +3540,6 @@ public:
       CUDA_CHECK(cudaMalloc((void **)&d_samples_entry[i],
                             sizeof(typename T::InputPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_half[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated[i],
                             sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_samples_consolidated_col_maj[i],
                             sizeof(typename T::HalfPacketSamplesType)));
@@ -3633,6 +3632,7 @@ public:
 
     tensor_16.addTensor(modeWeightsInput, "weightsInput");
     tensor_16.addTensor(modeWeightsCCGLIB, "weightsCCGLIB");
+    tensor_16.addTensor(modePacketDirectColMajCons, "packetColMajCons");
     tensor_32.addTensor(modeVisCorr, "visCorr");
     tensor_32.addTensor(modeVisDecomp, "visDecomp");
     tensor_32.addTensor(modeVisCorrBaseline, "visBaseline");
@@ -3652,6 +3652,8 @@ public:
                              "packetToPlanar");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
+    tensor_16.addPermutation("packet", "packetColMajCons",
+                             CUTENSOR_COMPUTE_DESC_16F, "packetToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
                              CUTENSOR_COMPUTE_DESC_16F, "weightsInputToCCGLIB");
     tensor_32.addPermutation("visCorrTrimmed", "visDecomp",
@@ -3769,10 +3771,6 @@ public:
 
     for (auto samples_padded : d_samples_padded) {
       cudaFree(samples_padded);
-    }
-
-    for (auto samples_consolidated : d_samples_consolidated) {
-      cudaFree(samples_consolidated);
     }
 
     for (auto samples_consolidated_col_maj : d_samples_consolidated_col_maj) {
