@@ -560,10 +560,13 @@ private:
 template <typename T>
 class HDF5VisibilitiesWriter : public VisibilitiesWriter<T> {
 public:
+  // deflate_level: 0 = no compression (fast, recommended for real-time writes),
+  //               1-9 = zlib level (smaller files, slower).
   HDF5VisibilitiesWriter(
       HighFive::File &file, const int min_channel, const int max_channel,
       const std::unordered_map<int, int> *antenna_map = nullptr,
-      const int num_blocks = 100)
+      const int num_blocks = 100,
+      const int deflate_level = 0)
       : VisibilitiesWriter<T>(num_blocks), file_(file), batch_size_(num_blocks),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
@@ -600,8 +603,10 @@ public:
     DataSpace vis_space(vis_dataset_dims, vis_dataset_max_dims);
     DataSetCreateProps props;
     props.add(HighFive::Chunking(vis_chunk));
-    props.add(HighFive::Shuffle());
-    props.add(HighFive::Deflate(1));
+    if (deflate_level > 0) {
+      props.add(HighFive::Shuffle());
+      props.add(HighFive::Deflate(deflate_level));
+    }
     vis_dataset_ = file_.createDataSet<float>("visibilities", vis_space, props);
 
     DataSetCreateProps vis_seq_props;
@@ -650,7 +655,11 @@ public:
   }
 
   void flush() override {
-    auto current_size = vis_dataset_.getDimensions()[0];
+    if (buffer_count_ == 0)
+      return;
+    // Use locally tracked size to avoid a getDimensions() HDF5 metadata round-
+    // trip on every flush — confirmed safe because only this thread appends.
+    const size_t current_size = n_blocks_written_;
     std::vector<size_t> new_dims = {current_size + buffer_count_};
     new_dims.insert(new_dims.end(), vis_dims_.begin(), vis_dims_.end());
     vis_dataset_.resize(new_dims);
@@ -662,16 +671,15 @@ public:
 
     vis_dataset_.select(vis_offset, vis_count).write_raw(vis_buffer_.data());
 
-    auto seq_size = vis_seq_dataset_.getDimensions()[0];
-    vis_seq_dataset_.resize({seq_size + buffer_count_, 2});
-    vis_seq_dataset_.select({seq_size, 0}, {buffer_count_, 2})
+    vis_seq_dataset_.resize({current_size + buffer_count_, 2});
+    vis_seq_dataset_.select({current_size, 0}, {buffer_count_, 2})
         .write_raw(seq_buffer_.data());
 
-    auto missing_size = vis_missing_dataset_.getDimensions()[0];
-    vis_missing_dataset_.resize({missing_size + buffer_count_, 3});
-    vis_missing_dataset_.select({missing_size, 0}, {buffer_count_, 3})
+    vis_missing_dataset_.resize({current_size + buffer_count_, 3});
+    vis_missing_dataset_.select({current_size, 0}, {buffer_count_, 3})
         .write_raw(missing_buffer_.data());
 
+    n_blocks_written_ += buffer_count_;
     vis_buffer_.clear();
     seq_buffer_.clear();
     missing_buffer_.clear();
@@ -730,6 +738,7 @@ private:
 
   size_t batch_size_;
   size_t buffer_count_ = 0;
+  size_t n_blocks_written_ = 0;
   size_t vis_elements_ = 1;
 
   std::vector<float> vis_buffer_;
@@ -1552,7 +1561,9 @@ private:
 template <typename TVal, typename TVec>
 class HDF5EigenWriter : public EigenWriter<TVal, TVec> {
 public:
-  explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 4,
+  // deflate_level: 0 = no compression (fast, recommended for real-time writes),
+  //               1-9 = zlib level (smaller files, slower).
+  explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 0,
                            const int num_blocks = 100)
       : EigenWriter<TVal, TVec>(num_blocks), file_(file),
         batch_size_(num_blocks) {
@@ -1656,7 +1667,9 @@ public:
   void flush() override {
     if (buffer_count_ == 0)
       return;
-    const auto t = val_dataset_.getDimensions()[0];
+    // Locally tracked row count avoids getDimensions() HDF5 metadata
+    // round-trips on every flush (three calls eliminated per batch).
+    const size_t t = n_blocks_written_;
     std::vector<size_t> val_new_dims = {t + buffer_count_};
     val_new_dims.insert(val_new_dims.end(), val_dims_.begin(), val_dims_.end());
     val_dataset_.resize(val_new_dims);
@@ -1668,25 +1681,22 @@ public:
 
     val_dataset_.select(val_offset, val_count).write_raw(val_buffer_.data());
 
-    const auto t_vec = vec_dataset_.getDimensions()[0];
-    std::vector<size_t> vec_new_dims = {t_vec + buffer_count_};
+    std::vector<size_t> vec_new_dims = {t + buffer_count_};
     vec_new_dims.insert(vec_new_dims.end(), vec_dims_.begin(), vec_dims_.end());
     vec_dataset_.resize(vec_new_dims);
 
-    std::vector<size_t> vec_offset = {t_vec};
+    std::vector<size_t> vec_offset = {t};
     vec_offset.insert(vec_offset.end(), vec_dims_.size(), 0);
     std::vector<size_t> vec_count = {buffer_count_};
     vec_count.insert(vec_count.end(), vec_dims_.begin(), vec_dims_.end());
 
     vec_dataset_.select(vec_offset, vec_count).write_raw(vec_buffer_.data());
 
-    // --- Write Sequence Numbers ---
-    const auto t_seq = seq_dataset_.getDimensions()[0];
-    seq_dataset_.resize({t_seq + buffer_count_, 2});
-    seq_dataset_.select({t_seq, 0}, {buffer_count_, 2})
+    seq_dataset_.resize({t + buffer_count_, 2});
+    seq_dataset_.select({t, 0}, {buffer_count_, 2})
         .write_raw(seq_buffer_.data());
 
-    // Clear memory buffers for the next batch
+    n_blocks_written_ += buffer_count_;
     val_buffer_.clear();
     vec_buffer_.clear();
     seq_buffer_.clear();
@@ -1704,6 +1714,7 @@ private:
   //
   size_t batch_size_;
   size_t buffer_count_ = 0;
+  size_t n_blocks_written_ = 0;
   size_t val_elements_ = 1;
   size_t vec_elements_ = 1;
 

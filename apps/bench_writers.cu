@@ -81,7 +81,7 @@ WriterBenchResult run_writers_bench(double duration_s, int num_blocks,
     HighFive::File file(filename, HighFive::File::Truncate);
     HDF5EigenWriter<typename Config::EigenvalueOutputType,
                     typename Config::EigenvectorOutputType>
-        writer(file, 4, num_blocks);
+        writer(file, 0, num_blocks);
     writer.start();
 
     constexpr size_t bytes_per_block =
