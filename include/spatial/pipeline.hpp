@@ -1,5 +1,6 @@
 #pragma once
 #include "spatial/packet_formats.hpp"
+#include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
 #include <chrono>
 #include <complex>
@@ -31,6 +32,7 @@
 #include <iostream>
 #include <libtcc/Correlator.h>
 #include <sys/time.h>
+#include <ctime>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -45,6 +47,232 @@
 template <typename T> struct BeamWeightsT {
   std::complex<__half> weights[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
                               [T::NR_RECEIVERS];
+};
+
+// Vacuum speed of light, m/s -- used to convert a geometric path-length
+// difference (direction . antenna_position, in metres) into a phase via
+// phase = -2*pi*f/c * path_length.
+inline constexpr double kSpeedOfLightMetresPerSecond = 299792458.0;
+
+// Synthesizes per-beam steering weights that point each beam at its target
+// (resolved to ENU direction cosines via zenith_direction()/
+// topocentric_direction(), see pointing.hpp), optionally folding in an
+// existing calibration solution as a multiplicative factor.
+//
+// For each beam/channel/antenna, computes the geometric steering phasor
+// exp(i*phase) with phase = -2*pi*f_channel/c * (l*east + m*north + n*up) --
+// the phase aligning that antenna's signal with a plane wave arriving from
+// the target direction -- then combines it with the optional calibration gain
+// G[chan][pol][receiver]: `final_weight = (1/NR_RECEIVERS) * G * exp(i*phase)`.
+// Because both factors are per-antenna multiplicative scalars and
+// multiplication commutes with the beamforming sum, this is exactly
+// equivalent to applying calibration and steering separately, so an existing
+// calibration solution plugs straight in. Pass `calibration_gains = nullptr`
+// for pure geometric steering (gain 1+0i).
+//
+// `antenna_mapping` (receiver index -> absolute antenna ID) is used to look
+// `antenna_positions` up by absolute ID while writing
+// `weights[...][receiver_idx]` in receiver-index order, matching
+// get_gains_structure()'s convention. Receivers absent from either map fall
+// back to ENUPosition{0,0,0} (zero path-length difference, i.e. zero geometric
+// phase).
+//
+// Receivers mapped to a *negative* antenna ID (AntennaMapRegistry uses -100
+// for FPGA streams with no antenna connected, e.g. FPGA 0 streams 0/2/4/6)
+// are null inputs: their weights are left exactly zero for every
+// beam/channel/pol, so the disconnected stream's noise is never summed into
+// a beam.
+template <typename T>
+inline BeamWeightsT<T> compute_steering_weights(
+    const std::vector<BeamTarget> &targets,
+    const std::unordered_map<int, ENUPosition> &antenna_positions,
+    const std::unordered_map<int, int> &antenna_mapping,
+    const FrequencyPlan &frequency_plan, int min_freq_channel,
+    const ArrayLocation &array_location,
+    std::chrono::system_clock::time_point utc_time,
+    const typename T::AntennaGains *calibration_gains = nullptr) {
+  BeamWeightsT<T> result{};
+
+  for (size_t b = 0; b < T::NR_BEAMS; ++b) {
+    static const BeamTarget kDefaultZenithTarget{};
+    const BeamTarget &target =
+        (b < targets.size()) ? targets[b] : kDefaultZenithTarget;
+
+    DirectionCosines dc =
+        (target.mode == "zenith")
+            ? zenith_direction()
+            : topocentric_direction(target.ra_deg, target.dec_deg, utc_time,
+                                    array_location.latitude_deg,
+                                    array_location.longitude_deg,
+                                    array_location.height_m);
+
+    for (size_t chan = 0; chan < T::NR_CHANNELS; ++chan) {
+      double frequency_hz = channel_to_frequency_hz(
+          min_freq_channel + static_cast<int>(chan), frequency_plan);
+      double phase_scale =
+          -2.0 * M_PI * frequency_hz / kSpeedOfLightMetresPerSecond;
+
+      for (size_t receiver_idx = 0; receiver_idx < T::NR_RECEIVERS;
+           ++receiver_idx) {
+        ENUPosition enu{};
+        auto mapping_it = antenna_mapping.find(static_cast<int>(receiver_idx));
+        if (mapping_it != antenna_mapping.end()) {
+          // Negative antenna ID = null input (no antenna on this FPGA
+          // stream). Leave its weights at the zero `result{}` was
+          // initialized with -- the ENUPosition{0,0,0} fallback below would
+          // instead give it a full-amplitude 1/NR_RECEIVERS weight and sum
+          // the disconnected stream's noise into every beam.
+          if (mapping_it->second < 0)
+            continue;
+          auto position_it = antenna_positions.find(mapping_it->second);
+          if (position_it != antenna_positions.end()) {
+            enu = position_it->second;
+          }
+        }
+
+        double phase =
+            phase_scale * (dc.l * enu.east + dc.m * enu.north + dc.n * enu.up);
+        std::complex<double> steering_phasor(std::cos(phase), std::sin(phase));
+
+        for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+          std::complex<double> calibration_gain =
+              calibration_gains
+                  ? std::complex<double>(
+                        (*calibration_gains)[chan][pol][receiver_idx])
+                  : std::complex<double>(1.0, 0.0);
+
+          std::complex<double> final_weight =
+              (1.0 / static_cast<double>(T::NR_RECEIVERS)) * calibration_gain *
+              steering_phasor;
+
+          result.weights[chan][pol][b][receiver_idx] = std::complex<__half>(
+              __float2half(static_cast<float>(final_weight.real())),
+              __float2half(static_cast<float>(final_weight.imag())));
+
+          std::cout << "Weight for channel " << chan << " pol " << pol
+                    << " and receiver " << receiver_idx << " is "
+                    << final_weight.real() << " + " << final_weight.imag()
+                    << "j.\n";
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+// Periodically refreshes a pipeline's device-side beam weights so each beam
+// stays pointed at its target as the sky rotates (host-side counterpart to
+// the per-buffer `b.weights`/`b.stream` GPU machinery in every
+// Lambda*Pipeline).
+//
+// Construct one per pipeline with the parsed targets and array geometry
+// (CommonArgs::beam_targets/antenna_positions/antenna_mapping/frequency_plan/
+// min_freq_channel/array_location/steering_update_interval_seconds). With no
+// targets (no --targets-filename), it is permanently inert: maybe_refresh()
+// always returns false and the pipeline's static h_weights are left
+// untouched -- steering is opt-in.
+//
+// The pipeline registers every buffer's device-weights pointer + stream once
+// at construction (register_buffer(), before the warmup run). When a refresh
+// is due, maybe_refresh() recomputes `current_weights_` host-side at most
+// once per `update_interval` (pure CPU work -- no GPU sync) and enqueues the
+// `cudaMemcpyAsync(device_weights, ..., stream)` onto *every* registered
+// buffer's stream in that same call -- all buffers always beamform with
+// identical weights; no buffer is ever left running on weights computed at a
+// different time than its peers'.
+//
+// *** Call maybe_refresh() at the very top of execute_pipeline ***, before
+// any kernel that reads the weights is enqueued, and only from
+// pipeline_feeder's single dedicated thread (which calls execute_pipeline
+// strictly sequentially). That's what makes this safe with no extra
+// synchronization: every refresh copy and every kernel that reads a buffer's
+// weights are enqueued from that one thread, and CUDA streams execute
+// enqueued work FIFO -- so on each buffer's stream the copy lands after any
+// still-in-flight run (which completes on the old weights) and before the
+// buffer's next run (which reads the new ones). A separate timer thread
+// issuing the copies concurrently would NOT have this guarantee (enqueue
+// order between two host threads is unspecified) and could corrupt a run by
+// landing new weights mid-kernel-chain.
+template <typename T> struct BeamSteering {
+  using BeamWeights = BeamWeightsT<T>;
+
+  BeamSteering(std::vector<BeamTarget> targets,
+               std::unordered_map<int, ENUPosition> antenna_positions,
+               std::unordered_map<int, int> antenna_mapping,
+               FrequencyPlan frequency_plan, int min_freq_channel,
+               ArrayLocation array_location, double update_interval_seconds,
+               int num_buffers,
+               const typename T::AntennaGains *calibration_gains = nullptr)
+      : targets_(std::move(targets)),
+        antenna_positions_(std::move(antenna_positions)),
+        antenna_mapping_(std::move(antenna_mapping)),
+        frequency_plan_(frequency_plan), min_freq_channel_(min_freq_channel),
+        array_location_(array_location),
+        update_interval_(update_interval_seconds),
+        calibration_gains_(calibration_gains) {
+    buffers_.reserve(num_buffers);
+  }
+
+  // True once real targets have been supplied (vs. permanently inert).
+  bool active() const { return !targets_.empty(); }
+
+  // Register one buffer's device weights + the stream its kernels run on.
+  // Call once per buffer from the pipeline constructor, before the warmup
+  // run, so the first (always-overdue) maybe_refresh() reaches every buffer.
+  void register_buffer(BeamWeights *device_weights, cudaStream_t stream) {
+    buffers_.push_back({device_weights, stream});
+  }
+
+  // Returns true if a refresh was recomputed and the copies were enqueued
+  // (informational only).
+  bool maybe_refresh() {
+    if (!active() || buffers_.empty())
+      return false;
+
+    // last_update_ starts at the epoch, so the very first call -- during the
+    // constructor's warmup run -- is immediately overdue and synthesizes real
+    // weights right away rather than running on placeholder h_weights.
+    const auto now = std::chrono::system_clock::now();
+    if ((now - last_update_) < update_interval_)
+      return false;
+
+    current_weights_ = compute_steering_weights<T>(
+        targets_, antenna_positions_, antenna_mapping_, frequency_plan_,
+        min_freq_channel_, array_location_, now, calibration_gains_);
+    last_update_ = now;
+
+    // One recompute, every buffer, one call: all copies are enqueued here so
+    // no buffer beamforms with older (or newer) weights than its peers.
+    // current_weights_ stays untouched until the next recompute -- minutes
+    // away -- so every async copy reads it intact.
+    for (const auto &buf : buffers_) {
+      cudaMemcpyAsync(buf.device_weights, &current_weights_,
+                      sizeof(BeamWeights), cudaMemcpyDefault, buf.stream);
+    }
+    return true;
+  }
+
+private:
+  struct RegisteredBuffer {
+    BeamWeights *device_weights;
+    cudaStream_t stream;
+  };
+
+  std::vector<BeamTarget> targets_;
+  std::unordered_map<int, ENUPosition> antenna_positions_;
+  std::unordered_map<int, int> antenna_mapping_;
+  FrequencyPlan frequency_plan_;
+  int min_freq_channel_;
+  ArrayLocation array_location_;
+  // seconds-as-double, comparable directly against system_clock durations.
+  std::chrono::duration<double> update_interval_;
+  const typename T::AntennaGains *calibration_gains_;
+
+  std::vector<RegisteredBuffer> buffers_;
+  BeamWeights current_weights_{};
+  // Epoch-initialized so the first maybe_refresh() call is always overdue.
+  std::chrono::system_clock::time_point last_update_{};
 };
 
 template <typename T> struct CudaDeleter {
@@ -489,9 +717,8 @@ private:
           weights_permuted(std::move(other.weights_permuted)),
           beamformer_output(std::move(other.beamformer_output)),
           cufft_work_area(std::move(other.cufft_work_area)),
-          gemm_handle(std::move(other.gemm_handle)),
-          graph_pre(other.graph_pre), graph_post(other.graph_post),
-          accumulate_done(other.accumulate_done) {
+          gemm_handle(std::move(other.gemm_handle)), graph_pre(other.graph_pre),
+          graph_post(other.graph_post), accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
       other.host_stream = nullptr;
       other.graph_pre = nullptr;
@@ -548,6 +775,12 @@ private:
   };
 
   BeamWeights *h_weights;
+  // Periodically refreshes b.weights to track this pipeline's beam targets
+  // (see compute_steering_weights()/BeamSteering above pipeline.hpp:46+ for
+  // why and how) -- inert (a permanent no-op) when no --targets-filename was
+  // supplied, in which case h_weights above remains the sole source of truth,
+  // exactly as before this feature existed.
+  BeamSteering<T> beam_steering_;
   TrimmedVisibilities *d_visibilities_accumulator;
 
   // Recorded on buffers[0].stream after dump_visibilities resets
@@ -577,6 +810,15 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
+    // b.weights, and only from this single-threaded pipeline_feeder context
+    // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
+    // that ordering is what makes this safe without extra synchronization.
+    beam_steering_.maybe_refresh();
+
     const size_t start_seq_num = packet_data->start_seq_id;
     const size_t end_seq_num = packet_data->end_seq_id;
     if (visibilities_start_seq_num == -1) {
@@ -718,6 +960,7 @@ public:
       benchmark_runs_done = (benchmark_runs_done + 1) % NR_BENCHMARKING_RUNS;
     }
   }
+
   // ---- Static mid-pipeline sections -----------------------------------
   // Everything in these two methods operates on device pointers that are
   // fixed for the lifetime of a PipelineResources, which is what allows
@@ -869,9 +1112,11 @@ public:
     return true;
   }
 
-  LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights)
+  LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights,
+                    BeamSteering<T> beam_steering)
 
       : num_buffers(num_buffers), h_weights(h_weights),
+        beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
@@ -998,6 +1243,9 @@ public:
       tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                                (__half *)b.weights.get(),
                                (__half *)b.weights_permuted.get(), b.stream);
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
       cudaEventCreate(&start_run[i]);
@@ -1655,6 +1903,9 @@ private:
   std::atomic<int> last_frame_processed;
 
   BeamWeights *h_weights;
+  // See the comment on this member in LambdaGPUPipeline (pipeline.hpp above)
+  // -- same helper, same inert-when-unsteered contract.
+  BeamSteering<T> beam_steering_;
 
   static constexpr int fft_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
@@ -1665,6 +1916,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
+    // b.weights, and only from this single-threaded pipeline_feeder context
+    // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
+    // that ordering is what makes this safe without extra synchronization.
+    beam_steering_.maybe_refresh();
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -1733,9 +1992,11 @@ public:
     }
   }
   LambdaBeamformedSpectraPipeline(const int num_buffers,
-                                  BeamWeightsT<T> *h_weights)
+                                  BeamWeightsT<T> *h_weights,
+                                  BeamSteering<T> beam_steering)
 
       : num_buffers(num_buffers), h_weights(h_weights),
+        beam_steering_(std::move(beam_steering)),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128)
 
@@ -1790,6 +2051,9 @@ public:
       // Copy initial weights
       cudaMemcpy(b.weights.get(), h_weights, sizeof(BeamWeights),
                  cudaMemcpyDefault);
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     last_frame_processed = 0;
     current_buffer = 0;
@@ -2289,6 +2553,9 @@ private:
   std::atomic<int> last_frame_processed;
 
   BeamWeights *h_weights;
+  // See the comment on this member in LambdaGPUPipeline (pipeline.hpp above)
+  // -- same helper, same inert-when-unsteered contract.
+  BeamSteering<T> beam_steering_;
   int *d_subpacket_delays;
   typename T::AntennaGains *d_gains;
 
@@ -2301,6 +2568,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
+    // b.weights, and only from this single-threaded pipeline_feeder context
+    // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
+    // that ordering is what makes this safe without extra synchronization.
+    beam_steering_.maybe_refresh();
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -2625,9 +2900,10 @@ public:
   LambdaAdaptiveBeamformedSpectraPipeline(
       const int num_buffers, BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
-      const int min_freq_channel)
+      const int min_freq_channel, BeamSteering<T> beam_steering)
 
       : num_buffers(num_buffers), h_weights(h_weights),
+        beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
@@ -2761,6 +3037,9 @@ public:
                                (__half *)b.weights_permuted.get(), b.stream);
       cudaMemcpyAsync(b.weights_rfi_mitigated.get(), b.weights_permuted.get(),
                       sizeof(BeamWeights), cudaMemcpyDefault, b.stream);
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     last_frame_processed = 0;
     current_buffer = 0;
@@ -2972,6 +3251,12 @@ private:
   std::vector<typename T::PacketScalesType *> d_scales;
 
   BeamWeights *h_weights;
+  // See the comment on this member in LambdaGPUPipeline (pipeline.hpp above)
+  // -- same helper, same inert-when-unsteered contract. Note this pipeline
+  // keeps its weights in d_weights[buffer_index]/streams[buffer_index]
+  // (rather than buffers[i].weights/.stream); register_buffer() doesn't care
+  // -- it just needs each buffer's device pointer and stream.
+  BeamSteering<T> beam_steering_;
 
   int visibilities_start_seq_num;
   int visibilities_end_seq_num;
@@ -2992,6 +3277,17 @@ public:
       visibilities_start_seq_num = packet_data->start_seq_id;
     }
     visibilities_missing_packets += packet_data->get_num_missing_packets();
+
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call (the d_weights[i]/streams[i]
+    // pairs registered in the constructor below), so all buffers always run
+    // with identical weights. Must run here, before anything below reads
+    // d_weights[current_buffer], and only from this single-threaded
+    // pipeline_feeder context -- see the BeamSteering<T> comment block
+    // (pipeline.hpp above) for why that ordering is what makes this safe
+    // without extra synchronization.
+    beam_steering_.maybe_refresh();
 
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);
@@ -3084,13 +3380,12 @@ public:
                                sizeof(typename T::HalfPacketSamplesType),
                                cudaMemcpyDefault, streams[i]));
 
-    CUDA_CHECK(cudaMemsetAsync(
-        reinterpret_cast<char *>(d_samples_padded[i]) +
-            sizeof(typename T::HalfPacketSamplesType),
-        0,
-        sizeof(typename T::PaddedPacketSamplesType) -
-            sizeof(typename T::HalfPacketSamplesType),
-        streams[i]));
+    CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<char *>(d_samples_padded[i]) +
+                                   sizeof(typename T::HalfPacketSamplesType),
+                               0,
+                               sizeof(typename T::PaddedPacketSamplesType) -
+                                   sizeof(typename T::HalfPacketSamplesType),
+                               streams[i]));
 
     tensor_16.runPermutation("paddedToCorrInput", alpha,
                              (__half *)d_samples_padded[i],
@@ -3103,10 +3398,9 @@ public:
     tensor_32.runPermutation("visCorrToBaseline", alpha_32,
                              (float *)d_correlator_output[i],
                              (float *)d_visibilities_baseline[i], streams[i]);
-    CUDA_CHECK(cudaMemcpyAsync(d_visibilities_trimmed_baseline[i],
-                               d_visibilities_baseline[i],
-                               sizeof(TrimmedVisibilities), cudaMemcpyDefault,
-                               streams[i]));
+    CUDA_CHECK(cudaMemcpyAsync(
+        d_visibilities_trimmed_baseline[i], d_visibilities_baseline[i],
+        sizeof(TrimmedVisibilities), cudaMemcpyDefault, streams[i]));
 
     tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
                              (float *)d_visibilities_trimmed_baseline[i],
@@ -3123,10 +3417,9 @@ public:
                              (__half *)d_samples_half[i],
                              (__half *)d_samples_consolidated[i], streams[i]);
 
-    tensor_16.runPermutation("consToColMajCons", alpha,
-                             (__half *)d_samples_consolidated[i],
-                             (__half *)d_samples_consolidated_col_maj[i],
-                             streams[i]);
+    tensor_16.runPermutation(
+        "consToColMajCons", alpha, (__half *)d_samples_consolidated[i],
+        (__half *)d_samples_consolidated_col_maj[i], streams[i]);
 
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights[i],
@@ -3187,9 +3480,11 @@ public:
   }
 
   LambdaCorrBeamOnlyGPUPipeline(const int num_buffers,
-                                BeamWeightsT<T> *h_weights)
+                                BeamWeightsT<T> *h_weights,
+                                BeamSteering<T> beam_steering)
 
       : num_buffers(num_buffers), h_weights(h_weights),
+        beam_steering_(std::move(beam_steering)),
 
         correlator(cu::Device(0),
                    16, // tcc::Format::fp16,
@@ -3285,8 +3580,8 @@ public:
     graph_main.assign(num_buffers, nullptr);
     accumulate_done.resize(num_buffers);
     for (auto i = 0; i < num_buffers; ++i) {
-      CUDA_CHECK(
-          cudaEventCreateWithFlags(&accumulate_done[i], cudaEventDisableTiming));
+      CUDA_CHECK(cudaEventCreateWithFlags(&accumulate_done[i],
+                                          cudaEventDisableTiming));
     }
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
@@ -3313,6 +3608,13 @@ public:
     for (auto i = 0; i < num_buffers; ++i) {
       cudaMemcpy(d_weights[i], h_weights, sizeof(BeamWeights),
                  cudaMemcpyDefault);
+      // d_weights[i] is a __half* but is allocated and copied against
+      // sizeof(BeamWeights) (above), exactly like every other pipeline's
+      // b.weights -- the reinterpret_cast mirrors that existing convention.
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(
+          reinterpret_cast<BeamWeights *>(d_weights[i]), streams[i]);
     }
     for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
       cudaEventCreate(&start_run[i]);
@@ -3388,8 +3690,8 @@ public:
     if (std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr) {
       bool all_ok = true;
       for (auto i = 0; i < num_buffers; ++i) {
-        if (!capture_graph(streams[i], [this, i]() { enqueue_main(i); },
-                           graph_main[i])) {
+        if (!capture_graph(
+                streams[i], [this, i]() { enqueue_main(i); }, graph_main[i])) {
           all_ok = false;
           break;
         }
@@ -4175,13 +4477,12 @@ private:
                                    sizeof(DecompositionVisibilities),
                                    cudaMemcpyDefault, b0.stream));
 
-        CUDA_CHECK(cudaMemcpyAsync(eigval_ptr,
-                                   d_projection_eigenvalues_scratch,
+        CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, d_projection_eigenvalues_scratch,
                                    sizeof(Eigenvalues), cudaMemcpyDefault,
                                    b0.stream));
 
-        auto *ctx = new OutputTransferCompleteContext{
-            .output = this->output_, .block_index = block_num};
+        auto *ctx = new OutputTransferCompleteContext{.output = this->output_,
+                                                      .block_index = block_num};
         CUDA_CHECK(cudaLaunchHostFunc(
             b0.stream, eigen_output_transfer_complete_host_func, ctx));
       }
@@ -4539,7 +4840,7 @@ private:
                                                                's', 'f', 'n'};
 
   inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'e', 's'};
-  inline static const std::vector<int> modeBeamOutput{'p', 'e', 's', 'c', 'z'};
+  inline static const std::vector<int> modeBeamOutput{'e', 's', 'c', 'p', 'z'};
   inline static const std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r',
                                                         'z'};
   inline static const std::vector<int> modeWeightsBeamMajor{'m', 'c', 'p', 'r',
@@ -4600,6 +4901,9 @@ private:
   char *d_obs_header;
 
   BeamWeights *h_weights;
+  // See the comment on this member in LambdaGPUPipeline (pipeline.hpp above)
+  // -- same helper, same inert-when-unsteered contract.
+  BeamSteering<T> beam_steering_;
   int *d_subpacket_delays;
   typename T::AntennaGains *d_gains;
 
@@ -4608,6 +4912,14 @@ public:
                         const bool dummy_run = false) override {
 
     auto &b = buffers[current_buffer];
+    // Re-steer tracked beams if due -- inert no-op when steering is disabled
+    // (no --targets-filename). A due refresh enqueues the new weights onto
+    // *every* buffer's stream in this one call, so all buffers always run
+    // with identical weights. Must run here, before anything below reads
+    // b.weights, and only from this single-threaded pipeline_feeder context
+    // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
+    // that ordering is what makes this safe without extra synchronization.
+    beam_steering_.maybe_refresh();
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
@@ -4812,6 +5124,14 @@ public:
                                (__half *)b.weights_rfi_mitigated.get(),
                                (__half *)b.weights_beamformer.get(), b.stream);
     } else {
+      // Re-permute b.weights -> b.weights_permuted on every execute_pipeline
+      // call so that tracking updates written by maybe_refresh() (which lands
+      // in b.weights) are reflected in the GEMM.  Without this step, the GEMM
+      // always ran on the weights_permuted that was initialised once in the
+      // constructor, ignoring every steering update after that.
+      tensor_16.runPermutation("weightsToBeamMajor", alpha,
+                               (__half *)b.weights.get(),
+                               (__half *)b.weights_permuted.get(), b.stream);
       tensor_16.runPermutation("weights2xBeamMajorToCCGLIB", alpha,
                                (__half *)b.weights_permuted.get(),
                                (__half *)b.weights_beamformer.get(), b.stream);
@@ -4827,88 +5147,98 @@ public:
 
     if (output_ != nullptr && !dummy_run) {
 
-      if (!header_written) {
-        std::cout << "writing header...\n";
-        uint64_t rfi_header_size = 0;
-        uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
-        char *header = ipcbuf_get_next_write(hdu->header_block);
-        cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
-                        b.stream);
+      // PSRDADA beam streaming -- the header/data block writes below all
+      // dereference `hdu`, which is null when the sink is disabled
+      // (dada_key == 0). Skip them in that case; the eigen-output block that
+      // follows uses `output_` (not PSRDADA) and is intentionally left
+      // outside this guard.
+      if (dada_key != 0) {
+        if (!header_written) {
+          std::cout << "writing header...\n";
+          uint64_t rfi_header_size = 0;
+          uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
+          char *header = ipcbuf_get_next_write(hdu->header_block);
+          cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
+                          b.stream);
 
-        if constexpr (RFI_MITIGATE) {
+          if constexpr (RFI_MITIGATE) {
 
-          rfi_header_size = ipcbuf_get_bufsz(rfi_hdu->header_block);
-          char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
+            rfi_header_size = ipcbuf_get_bufsz(rfi_hdu->header_block);
+            char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
 
-          cudaMemcpyAsync(rfi_header, d_obs_header, header_size,
-                          cudaMemcpyDefault, b.stream);
-        }
+            cudaMemcpyAsync(rfi_header, d_obs_header, header_size,
+                            cudaMemcpyDefault, b.stream);
+          }
 
-        // // Enable EOD so that subsequent transfers will move to the next
-        // buffer
-        // // in the header block
-        // if (ipcbuf_enable_eod(hdu->header_block) < 0) {
-        //   multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
-        // }
+          // // Enable EOD so that subsequent transfers will move to the next
+          // buffer
+          // // in the header block
+          // if (ipcbuf_enable_eod(hdu->header_block) < 0) {
+          //   multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
+          // }
 
-        cudaDeviceSynchronize();
-        // flag the header block for this "observation" as filled
-        if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
-          multilog(log, LOG_ERR, "could not mark filled Header Block\n");
-          std::cout << "could not mark filled header block...\n";
-        }
-
-        if constexpr (RFI_MITIGATE) {
-          if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) < 0) {
+          cudaDeviceSynchronize();
+          // flag the header block for this "observation" as filled
+          if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
             multilog(log, LOG_ERR, "could not mark filled Header Block\n");
             std::cout << "could not mark filled header block...\n";
           }
-        }
-        header_written = true;
-      }
 
-      uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
-      // write 1 block worth of data block via the "block" method
-      {
-        uint64_t rfi_block_size = 0;
-        uint64_t block_id;
-        char *block = ipcio_open_block_write(hdu->data_block, &block_id);
-        if (!block) {
-          multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
-          std::cout << "open block write failed\n";
+          if constexpr (RFI_MITIGATE) {
+            if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) <
+                0) {
+              multilog(log, LOG_ERR, "could not mark filled Header Block\n");
+              std::cout << "could not mark filled header block...\n";
+            }
+          }
+          header_written = true;
         }
 
-        // This is a big hack it will only take the X pol right now.
-        cudaMemcpyAsync(block, (char *)b.beam_output.get(), block_size,
-                        cudaMemcpyDefault, b.stream);
-
-        if constexpr (RFI_MITIGATE) {
-
-          rfi_block_size = ipcbuf_get_bufsz((ipcbuf_t *)rfi_hdu->data_block);
-          uint64_t rfi_block_id;
-          char *rfi_block =
-              ipcio_open_block_write(rfi_hdu->data_block, &rfi_block_id);
-          if (!rfi_block) {
+        uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
+        // write 1 block worth of data block via the "block" method
+        {
+          uint64_t rfi_block_size = 0;
+          uint64_t block_id;
+          char *block = ipcio_open_block_write(hdu->data_block, &block_id);
+          if (!block) {
             multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
             std::cout << "open block write failed\n";
           }
-          // This is a big hack it will only take the X pol right now.
-          cudaMemcpyAsync(rfi_block, (char *)b.beam_output.get() + block_size,
-                          rfi_block_size, cudaMemcpyDefault, b.stream);
-        }
 
-        cudaDeviceSynchronize();
+          // control how much gets written using the block_size.
+          // can toggle polarization from outer to inner dimensions
+          // in order to control how many polarizations get written out.
+          cudaMemcpyAsync(block, (char *)b.beam_output.get(), block_size,
+                          cudaMemcpyDefault, b.stream);
 
-        if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
-          multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
-        }
-        if constexpr (RFI_MITIGATE) {
-          if (ipcio_close_block_write(rfi_hdu->data_block, rfi_block_size) <
-              0) {
+          if constexpr (RFI_MITIGATE) {
+
+            rfi_block_size = ipcbuf_get_bufsz((ipcbuf_t *)rfi_hdu->data_block);
+            uint64_t rfi_block_id;
+            char *rfi_block =
+                ipcio_open_block_write(rfi_hdu->data_block, &rfi_block_id);
+            if (!rfi_block) {
+              multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
+              std::cout << "open block write failed\n";
+            }
+            // This is a big hack it will only take the X pol right now.
+            cudaMemcpyAsync(rfi_block, (char *)b.beam_output.get() + block_size,
+                            rfi_block_size, cudaMemcpyDefault, b.stream);
+          }
+
+          cudaDeviceSynchronize();
+
+          if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
             multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
           }
+          if constexpr (RFI_MITIGATE) {
+            if (ipcio_close_block_write(rfi_hdu->data_block, rfi_block_size) <
+                0) {
+              multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
+            }
+          }
         }
-      }
+      } // end PSRDADA beam streaming (dada_key != 0)
 
       if constexpr (RFI_MITIGATE) {
         size_t eig_block_num = output_->register_eigendecomposition_data_block(
@@ -4941,9 +5271,10 @@ public:
       BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
       const int min_freq_channel, key_t dada_key, std::string header_filename,
-      key_t rfi_dada_key)
+      key_t rfi_dada_key, BeamSteering<T> beam_steering)
 
       : num_buffers(1), h_weights(h_weights),
+        beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
@@ -4960,52 +5291,82 @@ public:
               << ", NR_TIMES_PER_BLOCK: " << NR_TIMES_PER_BLOCK
               << ", NR_BLOCKS_FOR_FFT: " << NR_BLOCKS_FOR_CORRELATION
               << ", NR_BEAMS: " << num_beams << std::endl;
+    std::cout << "[PulsarFoldPipeline] beam output size is "
+              << sizeof(BeamOutput) << " bytes." << std::endl;
 
     const size_t NUM_TOTAL_BATCHES = num_beams * T::NR_CHANNELS *
                                      T::NR_POLARIZATIONS *
                                      T::NR_PACKETS_FOR_CORRELATION;
 
-    // set up PSRDADA ring buffer
-    log = multilog_open("pulsar_fold_writer", 0);
-    multilog_add(log, stderr);
-    hdu = dada_hdu_create(log);
-    dada_hdu_set_key(hdu, dada_key);
-    // connect to HDU
-    if (dada_hdu_connect(hdu) < 0) {
-      multilog(log, LOG_ERR, "could not connect to HDU\n");
-    }
-
-    // lock as writer on the HDU
-    if (dada_hdu_lock_write(hdu) < 0) {
-      multilog(log, LOG_ERR, "could not lock write on HDU\n");
-    }
-
-    if constexpr (RFI_MITIGATE) {
-      rfi_hdu = dada_hdu_create(log);
-      dada_hdu_set_key(rfi_hdu, rfi_dada_key);
-
-      if (dada_hdu_connect(rfi_hdu) < 0) {
-        multilog(log, LOG_ERR, "could not connect to RFI HDU\n");
+    // set up PSRDADA ring buffer. A zero dada_key disables the PSRDADA sink
+    // entirely (no connect/lock, no header read, no block writes) -- the
+    // pipeline then computes beams into b.beam_output but never streams them
+    // out. Production always passes a real key (DADA_DEFAULT_BLOCK_KEY); the
+    // zero-key path exists so tests can drive the full GPU compute without a
+    // running ring buffer. Kept in lockstep with the same guard in
+    // execute_pipeline's output block and in the destructor.
+    log = nullptr;
+    hdu = nullptr;
+    rfi_hdu = nullptr;
+    obs_header = nullptr;
+    d_obs_header = nullptr;
+    if (dada_key != 0) {
+      log = multilog_open("pulsar_fold_writer", 0);
+      multilog_add(log, stderr);
+      hdu = dada_hdu_create(log);
+      dada_hdu_set_key(hdu, dada_key);
+      // connect to HDU
+      if (dada_hdu_connect(hdu) < 0) {
+        multilog(log, LOG_ERR, "could not connect to HDU\n");
       }
 
       // lock as writer on the HDU
-      if (dada_hdu_lock_write(rfi_hdu) < 0) {
-        multilog(log, LOG_ERR, "could not lock write on RFI HDU\n");
+      if (dada_hdu_lock_write(hdu) < 0) {
+        multilog(log, LOG_ERR, "could not lock write on HDU\n");
       }
+
+      if constexpr (RFI_MITIGATE) {
+        rfi_hdu = dada_hdu_create(log);
+        dada_hdu_set_key(rfi_hdu, rfi_dada_key);
+
+        if (dada_hdu_connect(rfi_hdu) < 0) {
+          multilog(log, LOG_ERR, "could not connect to RFI HDU\n");
+        }
+
+        // lock as writer on the HDU
+        if (dada_hdu_lock_write(rfi_hdu) < 0) {
+          multilog(log, LOG_ERR, "could not lock write on RFI HDU\n");
+        }
+      }
+
+      obs_header = (char *)malloc(sizeof(char) * DADA_DEFAULT_HEADER_SIZE);
+
+      if (fileread(header_filename.c_str(), obs_header,
+                   DADA_DEFAULT_HEADER_SIZE) < 0) {
+        free(obs_header);
+        fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
+                header_filename);
+      }
+
+      // Overwrite UTC_START with the current wall-clock UTC so DSPSR folds
+      // at the correct pulsar phase. The header file contains a placeholder
+      // that is only valid for the exact instant it was written.
+      {
+        time_t now = time(nullptr);
+        struct tm utc_tm{};
+        gmtime_r(&now, &utc_tm);
+        char utc_start[32];
+        strftime(utc_start, sizeof(utc_start), "%Y-%m-%d-%H:%M:%S", &utc_tm);
+        if (ascii_header_set(obs_header, "UTC_START", "%s", utc_start) < 0)
+          fprintf(stderr, "WARNING: could not set UTC_START in PSRDADA header\n");
+        else
+          fprintf(stderr, "INFO: PSRDADA header UTC_START set to %s\n", utc_start);
+      }
+
+      cudaMalloc(&d_obs_header, DADA_DEFAULT_HEADER_SIZE);
+      cudaMemcpy(d_obs_header, obs_header, DADA_DEFAULT_HEADER_SIZE,
+                 cudaMemcpyDefault);
     }
-
-    obs_header = (char *)malloc(sizeof(char) * DADA_DEFAULT_HEADER_SIZE);
-
-    if (fileread(header_filename.c_str(), obs_header,
-                 DADA_DEFAULT_HEADER_SIZE) < 0) {
-      free(obs_header);
-      fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
-              header_filename);
-    }
-
-    cudaMalloc(&d_obs_header, DADA_DEFAULT_HEADER_SIZE);
-    cudaMemcpy(d_obs_header, obs_header, DADA_DEFAULT_HEADER_SIZE,
-               cudaMemcpyDefault);
     tensor_16.addTensor(modePacket, "packet");
     tensor_16.addTensor(modePacketPreAlign, "prealign");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
@@ -5088,6 +5449,9 @@ public:
         cudaMemcpyAsync(b.weights_rfi_mitigated.get(), b.weights_permuted.get(),
                         sizeof(BeamWeights), cudaMemcpyDefault, b.stream);
       }
+      // Registered before the warmup run below, so the first (always-overdue)
+      // maybe_refresh() steers every buffer in one shot.
+      beam_steering_.register_buffer(b.weights.get(), b.stream);
     }
     last_frame_processed = 0;
     current_buffer = 0;
@@ -5106,15 +5470,30 @@ public:
   };
 
   ~LambdaPulsarFoldPipeline() {
+    // Mirror the constructor: nothing to tear down when the PSRDADA sink was
+    // disabled (dada_key == 0), and hdu/log are left null in that case.
+    if (dada_key == 0)
+      return;
+
+    // Signal end-of-data on the data block before releasing the write lock.
+    // Without this, DSPSR's reader loop blocks indefinitely on the next
+    // ipcio_open_block_read() call -- it sees a broken writer connection
+    // rather than a clean observation end, and does not finalize the folded
+    // profile.
+    if (ipcbuf_enable_eod((ipcbuf_t *)hdu->data_block) < 0)
+      multilog(log, LOG_ERR, "ipcbuf_enable_eod failed on data block\n");
+
     if (dada_hdu_unlock_write(hdu) < 0) {
       multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
     }
 
     // disconnect from HDU
     if (dada_hdu_disconnect(hdu) < 0)
-      multilog(log, LOG_ERR, "could not unlock write on hdu\n");
+      multilog(log, LOG_ERR, "could not disconnect from hdu\n");
 
     if constexpr (RFI_MITIGATE) {
+      if (ipcbuf_enable_eod((ipcbuf_t *)rfi_hdu->data_block) < 0)
+        multilog(log, LOG_ERR, "ipcbuf_enable_eod failed on rfi data block\n");
 
       if (dada_hdu_unlock_write(rfi_hdu) < 0) {
         multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
@@ -5122,7 +5501,7 @@ public:
 
       // disconnect from HDU
       if (dada_hdu_disconnect(rfi_hdu) < 0)
-        multilog(log, LOG_ERR, "could not unlock write on hdu\n");
+        multilog(log, LOG_ERR, "could not disconnect from rfi hdu\n");
     }
   }
 
@@ -5134,5 +5513,26 @@ public:
     subpacket_delays_ = delays_subpacket;
     CUDA_CHECK(cudaMemcpy(d_subpacket_delays, subpacket_delays_,
                           sizeof(int) * T::NR_FPGA_SOURCES, cudaMemcpyDefault));
+  }
+
+  // Test/debug hook. After execute_pipeline() completes, copies the most
+  // recently computed beamformer output -- the exact device-side
+  // `b.beam_output` buffer that gets streamed to PSRDADA -- to a host
+  // destination (`dst` must have room for beam_output_size_bytes()). Lets
+  // tests inspect the beams without a PSRDADA sink (see the dada_key == 0
+  // path); not used on the production hot path.
+  void copy_latest_beam_output_to_host(void *dst) {
+    auto &b = buffers[current_buffer];
+    CUDA_CHECK(cudaStreamSynchronize(b.stream));
+    CUDA_CHECK(cudaMemcpy(dst, b.beam_output.get(), sizeof(BeamOutput),
+                          cudaMemcpyDefault));
+  }
+  static constexpr size_t beam_output_size_bytes() {
+    return sizeof(BeamOutput);
+  }
+  // Beam-output shape: [NUM_BEAMS][NR_TIMES][NR_CHANNELS][NR_POL][COMPLEX].
+  static constexpr int beam_output_num_beams() { return num_beams; }
+  static constexpr int beam_output_num_times() {
+    return NR_TIME_STEPS_FOR_CORRELATION;
   }
 };

@@ -66,8 +66,61 @@ namespace pipeline_factories {
 
 template <typename Config>
 std::unique_ptr<LambdaGPUPipeline<Config>>
-make_gpu_pipeline(int num_buffers, BeamWeightsT<Config> *weights) {
-  return std::make_unique<LambdaGPUPipeline<Config>>(num_buffers, weights);
+make_gpu_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
+                  int min_freq_channel = 0) {
+  // Inert beam steering (empty targets => maybe_refresh() is a permanent
+  // no-op, leaving the static `weights` untouched).
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     num_buffers);
+  return std::make_unique<LambdaGPUPipeline<Config>>(num_buffers, weights,
+                                                     std::move(beam_steering));
+}
+
+// Constructs a LambdaPulsarFoldPipeline with its PSRDADA sink disabled
+// (dada_key == 0), so the full GPU compute (ingest/scale -> permute -> ccglib
+// beamform) runs without a running ring buffer or a header.hdr file. The
+// computed beams stay in the pipeline's device buffer and are read back via
+// LambdaPulsarFoldPipeline::copy_latest_beam_output_to_host(). Steering is
+// inert (empty targets); RFI mitigation is off, so the eigen path never runs.
+template <typename Config>
+std::unique_ptr<LambdaPulsarFoldPipeline<Config, false>>
+make_pulsar_fold_pipeline(BeamWeightsT<Config> *weights,
+                          int min_freq_channel = 0) {
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     /*num_buffers=*/1);
+  return std::make_unique<LambdaPulsarFoldPipeline<Config, false>>(
+      weights, /*nr_signal_eigenvectors=*/std::unordered_map<int, int>{},
+      min_freq_channel, /*dada_key=*/0, /*header_filename=*/"",
+      /*rfi_dada_key=*/0, std::move(beam_steering));
+}
+
+// Constructs a LambdaPulsarFoldPipeline with active beam steering (targets is
+// non-empty so maybe_refresh() actually fires) but with the PSRDADA sink
+// disabled (dada_key == 0). Used to test that the non-RFI-mitigate path
+// re-applies updated steering weights each pipeline run.
+//
+// `update_interval_seconds` is set large so only the constructor's warmup run
+// triggers a refresh -- the test's single real run then exercises whatever
+// state maybe_refresh() left behind.
+template <typename Config>
+std::unique_ptr<LambdaPulsarFoldPipeline<Config, false>>
+make_tracked_pulsar_fold_pipeline(BeamWeightsT<Config> *weights,
+                                   std::vector<BeamTarget> targets,
+                                   int min_freq_channel = 0) {
+  BeamSteering<Config> beam_steering(
+      std::move(targets), /*antenna_positions=*/{}, /*antenna_mapping=*/{},
+      FrequencyPlan{}, min_freq_channel, ArrayLocation{},
+      /*update_interval_seconds=*/3600.0, /*num_buffers=*/1);
+  return std::make_unique<LambdaPulsarFoldPipeline<Config, false>>(
+      weights, /*nr_signal_eigenvectors=*/std::unordered_map<int, int>{},
+      min_freq_channel, /*dada_key=*/0, /*header_filename=*/"",
+      /*rfi_dada_key=*/0, std::move(beam_steering));
 }
 
 } // namespace pipeline_factories

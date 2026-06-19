@@ -138,7 +138,14 @@ int main() {
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
 
-  LambdaCorrBeamOnlyGPUPipeline<Config> pipeline(5, &h_weights);
+  // No CommonArgs/config.json here, so no target to steer toward -- an empty
+  // target list makes BeamSteering permanently inert, leaving the static
+  // `h_weights` behaviour below unchanged.
+  BeamSteering<Config> beam_steering({}, {}, {}, FrequencyPlan{}, 0,
+                                     ArrayLocation{}, 180.0, 5);
+
+  LambdaCorrBeamOnlyGPUPipeline<Config> pipeline(5, &h_weights,
+                                                 std::move(beam_steering));
 
   pipeline.set_state(&state);
   pipeline.set_output(output);

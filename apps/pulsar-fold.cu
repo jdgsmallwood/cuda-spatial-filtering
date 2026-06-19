@@ -35,8 +35,8 @@ int main(int argc, char *argv[]) {
       nr_lambda_receivers, nr_lambda_polarizations,
       nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
       nr_lambda_beams, nr_lambda_padded_receivers,
-      nr_lambda_padded_receivers_per_block,
-      nr_correlation_blocks_to_integrate, true, fft_downsample_factor>;
+      nr_lambda_padded_receivers_per_block, nr_correlation_blocks_to_integrate,
+      true, fft_downsample_factor>;
 
   // 2x as there will be original & RFI mitigated beams.
   using FFTOutputType =
@@ -163,11 +163,30 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // Fold calibration into the synthesized steering weights rather than
+  // applying it again elsewhere (see compute_steering_weights() in
+  // pipeline.hpp). `calibration_gains` is declared first so it outlives
+  // `beam_steering`/`pipeline`.
+  const bool fold_calibration_into_steering =
+      !args.beam_targets.empty() && args.apply_gains;
+  typename Config::AntennaGains calibration_gains{};
+  if (fold_calibration_into_steering) {
+    calibration_gains = get_gains_structure<Config>(args);
+  }
+
+  // LambdaPulsarFoldPipeline runs with a single GPU buffer, so num_buffers = 1.
+  BeamSteering<Config> beam_steering(
+      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.frequency_plan, args.min_freq_channel, args.array_location,
+      args.steering_update_interval_seconds, /*num_buffers=*/1,
+      fold_calibration_into_steering ? &calibration_gains : nullptr);
+
   std::cout << "Initializing pipeline...\n";
   key_t rfi_dada_key = 0xbeef;
-  LambdaPulsarFoldPipeline<Config, true> pipeline(
+  LambdaPulsarFoldPipeline<Config, false> pipeline(
       &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
-      DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key);
+      DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key,
+      std::move(beam_steering));
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);

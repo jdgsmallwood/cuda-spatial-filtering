@@ -56,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     less \
     libcfitsio-dev \
     casacore-dev \
+    casacore-data \
     libnl-3-dev \
     libnl-genl-3-dev \
     libcurl4-gnutls-dev \
