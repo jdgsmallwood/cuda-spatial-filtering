@@ -9,12 +9,38 @@ glance:
 |---|---|
 | `bench_capture` | Raw kernel-socket packet capture (`recvmmsg` ingestion) |
 | `bench_processor` | Ring-buffer reassembly (`ProcessorState::process_packets + pipeline_feeder`), fed by synthetic packets so it measures only the CPU path, not GPU time |
-| `gpu_benchmark` | GPU correlate+beamform pipeline (`LambdaCorrBeamOnlyGPUPipeline`) |
+| `bench_gpu` | GPU correlate+beamform pipeline (`LambdaCorrBeamOnlyGPUPipeline`), **no writer overhead** (output_=nullptr so no D2H; measures raw GPU compute throughput) |
 | `bench_writers` | HDF5 visibilities/eigendata writer throughput |
 
-`bench_processor` and `bench_writers` each test **three representative configs** in
-a single run without rebuilding: `1ch/1fpga`, `8ch/1fpga`, `8ch/4fpga`.  This
-lets you see how each stage scales with channel count and FPGA count.
+`bench_processor`, `bench_gpu`, and `bench_writers` each test **eight configs**
+in a single run without rebuilding: `1ch/1fpga`, `8ch/1fpga`, `16ch/1fpga`,
+`24ch/1fpga`, `32ch/1fpga`, `8ch/4fpga`, `16ch/4fpga`, `32ch/4fpga`. This
+lets you see how each stage scales with channel count and FPGA count
+from 8 to 32 channels in steps of 8.
+
+### GPU pipeline scaling behaviour (RTX 4060, 8 GB VRAM)
+
+| Config | runs/sec | input_GB/sec |
+|---|---|---|
+| 8ch/1fpga | 648 | 3.43 |
+| 16ch/1fpga | 317 | 3.35 |
+| 24ch/1fpga | 210 | 3.33 |
+| 32ch/1fpga | 157 | 3.31 |
+| 8ch/4fpga | 252 | 5.33 |
+| 16ch/4fpga | 123 | 5.22 |
+| 24ch/4fpga | 81 | 5.14 |
+| 32ch/4fpga | 61 | 5.12 |
+
+Key findings:
+- **1fpga (10 rx → 32 padded)**: GB/sec is nearly constant across 8–32 channels
+  (~3.3 GB/sec). Runs/sec halves each time channels double — the GPU is
+  compute-bound and scales linearly with channels.
+- **4fpga (40 rx → 64 padded)**: GB/sec *increases* slightly with more channels
+  (4.7 → 5.1 GB/sec). Larger correlation matrices improve GPU SM utilization.
+- **3 pipeline buffers** is the sweet spot for 4fpga configs on 8 GB VRAM: 38%
+  faster than 2 buffers (5.33 vs 3.87 GB/sec for 8ch/4fpga) while avoiding OOM.
+- `bench_gpu --with-output` adds D2H cost (~0.7 GB/sec for 8ch/1fpga) and
+  measures the combined H2D+compute+D2H path as seen by writers.
 
 Optionally (`--with-observe`) it also runs the full `observe` pipeline against a
 looping multi-FPGA PCAP replay, as an end-to-end comparison point.

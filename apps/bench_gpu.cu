@@ -183,8 +183,8 @@ int main(int argc, char *argv[]) {
       .scan<'i', int>();
   program.add_argument("--num-buffers-4fpga")
       .help("Pipeline double-buffer slots for 4-FPGA (large) configs; "
-            "default 2 to fit in ≤8 GB VRAM")
-      .default_value(2)
+            "default 3 (sweet spot on 8 GB VRAM; 4+ buffers OOM at 32ch/4fpga)")
+      .default_value(3)
       .scan<'i', int>();
   program.add_argument("--with-output")
       .help("Enable beam D2H output (measures GPU+PCIe; default: GPU-only throughput)")
