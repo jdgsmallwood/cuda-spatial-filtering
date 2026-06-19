@@ -5144,90 +5144,91 @@ public:
       // follows uses `output_` (not PSRDADA) and is intentionally left
       // outside this guard.
       if (dada_key != 0) {
-      if (!header_written) {
-        std::cout << "writing header...\n";
-        uint64_t rfi_header_size = 0;
-        uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
-        char *header = ipcbuf_get_next_write(hdu->header_block);
-        cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
-                        b.stream);
+        if (!header_written) {
+          std::cout << "writing header...\n";
+          uint64_t rfi_header_size = 0;
+          uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
+          char *header = ipcbuf_get_next_write(hdu->header_block);
+          cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
+                          b.stream);
 
-        if constexpr (RFI_MITIGATE) {
+          if constexpr (RFI_MITIGATE) {
 
-          rfi_header_size = ipcbuf_get_bufsz(rfi_hdu->header_block);
-          char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
+            rfi_header_size = ipcbuf_get_bufsz(rfi_hdu->header_block);
+            char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
 
-          cudaMemcpyAsync(rfi_header, d_obs_header, header_size,
-                          cudaMemcpyDefault, b.stream);
-        }
+            cudaMemcpyAsync(rfi_header, d_obs_header, header_size,
+                            cudaMemcpyDefault, b.stream);
+          }
 
-        // // Enable EOD so that subsequent transfers will move to the next
-        // buffer
-        // // in the header block
-        // if (ipcbuf_enable_eod(hdu->header_block) < 0) {
-        //   multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
-        // }
+          // // Enable EOD so that subsequent transfers will move to the next
+          // buffer
+          // // in the header block
+          // if (ipcbuf_enable_eod(hdu->header_block) < 0) {
+          //   multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
+          // }
 
-        cudaDeviceSynchronize();
-        // flag the header block for this "observation" as filled
-        if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
-          multilog(log, LOG_ERR, "could not mark filled Header Block\n");
-          std::cout << "could not mark filled header block...\n";
-        }
-
-        if constexpr (RFI_MITIGATE) {
-          if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) < 0) {
+          cudaDeviceSynchronize();
+          // flag the header block for this "observation" as filled
+          if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
             multilog(log, LOG_ERR, "could not mark filled Header Block\n");
             std::cout << "could not mark filled header block...\n";
           }
-        }
-        header_written = true;
-      }
 
-      uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
-      // write 1 block worth of data block via the "block" method
-      {
-        uint64_t rfi_block_size = 0;
-        uint64_t block_id;
-        char *block = ipcio_open_block_write(hdu->data_block, &block_id);
-        if (!block) {
-          multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
-          std::cout << "open block write failed\n";
+          if constexpr (RFI_MITIGATE) {
+            if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) <
+                0) {
+              multilog(log, LOG_ERR, "could not mark filled Header Block\n");
+              std::cout << "could not mark filled header block...\n";
+            }
+          }
+          header_written = true;
         }
 
-        // control how much gets written using the block_size.
-        // can toggle polarization from outer to inner dimensions
-        // in order to control how many polarizations get written out.
-        cudaMemcpyAsync(block, (char *)b.beam_output.get(), block_size,
-                        cudaMemcpyDefault, b.stream);
-
-        if constexpr (RFI_MITIGATE) {
-
-          rfi_block_size = ipcbuf_get_bufsz((ipcbuf_t *)rfi_hdu->data_block);
-          uint64_t rfi_block_id;
-          char *rfi_block =
-              ipcio_open_block_write(rfi_hdu->data_block, &rfi_block_id);
-          if (!rfi_block) {
+        uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
+        // write 1 block worth of data block via the "block" method
+        {
+          uint64_t rfi_block_size = 0;
+          uint64_t block_id;
+          char *block = ipcio_open_block_write(hdu->data_block, &block_id);
+          if (!block) {
             multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
             std::cout << "open block write failed\n";
           }
-          // This is a big hack it will only take the X pol right now.
-          cudaMemcpyAsync(rfi_block, (char *)b.beam_output.get() + block_size,
-                          rfi_block_size, cudaMemcpyDefault, b.stream);
-        }
 
-        cudaDeviceSynchronize();
+          // control how much gets written using the block_size.
+          // can toggle polarization from outer to inner dimensions
+          // in order to control how many polarizations get written out.
+          cudaMemcpyAsync(block, (char *)b.beam_output.get(), block_size,
+                          cudaMemcpyDefault, b.stream);
 
-        if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
-          multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
-        }
-        if constexpr (RFI_MITIGATE) {
-          if (ipcio_close_block_write(rfi_hdu->data_block, rfi_block_size) <
-              0) {
+          if constexpr (RFI_MITIGATE) {
+
+            rfi_block_size = ipcbuf_get_bufsz((ipcbuf_t *)rfi_hdu->data_block);
+            uint64_t rfi_block_id;
+            char *rfi_block =
+                ipcio_open_block_write(rfi_hdu->data_block, &rfi_block_id);
+            if (!rfi_block) {
+              multilog(log, LOG_ERR, "ipcio_open_block_write failed\n");
+              std::cout << "open block write failed\n";
+            }
+            // This is a big hack it will only take the X pol right now.
+            cudaMemcpyAsync(rfi_block, (char *)b.beam_output.get() + block_size,
+                            rfi_block_size, cudaMemcpyDefault, b.stream);
+          }
+
+          cudaDeviceSynchronize();
+
+          if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
             multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
           }
+          if constexpr (RFI_MITIGATE) {
+            if (ipcio_close_block_write(rfi_hdu->data_block, rfi_block_size) <
+                0) {
+              multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
+            }
+          }
         }
-      }
       } // end PSRDADA beam streaming (dada_key != 0)
 
       if constexpr (RFI_MITIGATE) {
@@ -5281,6 +5282,8 @@ public:
               << ", NR_TIMES_PER_BLOCK: " << NR_TIMES_PER_BLOCK
               << ", NR_BLOCKS_FOR_FFT: " << NR_BLOCKS_FOR_CORRELATION
               << ", NR_BEAMS: " << num_beams << std::endl;
+    std::cout << "[PulsarFoldPipeline] beam output size is "
+              << sizeof(BeamOutput) << " bytes." << std::endl;
 
     const size_t NUM_TOTAL_BATCHES = num_beams * T::NR_CHANNELS *
                                      T::NR_POLARIZATIONS *
@@ -5490,7 +5493,9 @@ public:
     CUDA_CHECK(cudaMemcpy(dst, b.beam_output.get(), sizeof(BeamOutput),
                           cudaMemcpyDefault));
   }
-  static constexpr size_t beam_output_size_bytes() { return sizeof(BeamOutput); }
+  static constexpr size_t beam_output_size_bytes() {
+    return sizeof(BeamOutput);
+  }
   // Beam-output shape: [NUM_BEAMS][NR_TIMES][NR_CHANNELS][NR_POL][COMPLEX].
   static constexpr int beam_output_num_beams() { return num_beams; }
   static constexpr int beam_output_num_times() {
