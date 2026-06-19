@@ -39,6 +39,19 @@ using Pipeline = LambdaPulsarFoldPipeline<Config, false>;
 
 class PulsarFoldPipelineTest : public ::testing::Test {
 protected:
+  void SetUp() override {
+    // Force CUDA runtime+driver initialization before constructing the
+    // pipeline. LambdaPulsarFoldPipeline's first init-list member is
+    // `correlator(cu::Device(0), ...)`, a *driver-API* call (cudawrappers)
+    // that throws CUDA_ERROR_NOT_INITIALIZED ("initialization error") if the
+    // CUDA context hasn't been created yet. In production the context already
+    // exists because ProcessorState/Output allocate device memory before the
+    // pipeline is built; here the pipeline (with a null Output) is the first
+    // CUDA activity, so we initialize explicitly. cudaFree(0) is the idiomatic
+    // way to trigger lazy CUDA init.
+    cudaFree(0);
+  }
+
   void TearDown() override {
     cudaDeviceSynchronize();
     cudaDeviceReset();
