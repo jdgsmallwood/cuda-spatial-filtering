@@ -3221,8 +3221,7 @@ private:
 
   std::vector<typename T::InputPacketSamplesType *> d_samples_entry;
 
-  std::vector<typename T::HalfPacketSamplesType *> d_samples_half,
-      d_samples_padding;
+  std::vector<typename T::HalfPacketSamplesType *> d_samples_half;
   std::vector<typename T::PaddedPacketSamplesType *> d_samples_padded;
   std::vector<CorrelatorInput *> d_correlator_input;
   std::vector<CorrelatorOutput *> d_correlator_output;
@@ -3379,11 +3378,7 @@ public:
   void enqueue_main(int i) {
     tensor_16.runPermutation("packetToPadding", alpha,
                              (__half *)d_samples_half[i],
-                             (__half *)d_samples_padding[i], streams[i]);
-
-    CUDA_CHECK(cudaMemcpyAsync(d_samples_padded[i], d_samples_padding[i],
-                               sizeof(typename T::HalfPacketSamplesType),
-                               cudaMemcpyDefault, streams[i]));
+                             (__half *)d_samples_padded[i], streams[i]);
 
     tensor_16.runPermutation("paddedToCorrInput", alpha,
                              (__half *)d_samples_padded[i],
@@ -3508,7 +3503,6 @@ public:
     d_scales.resize(num_buffers);
     d_samples_half.resize(num_buffers);
     d_samples_padded.resize(num_buffers);
-    d_samples_padding.resize(num_buffers);
     d_samples_consolidated_col_maj.resize(num_buffers);
     d_correlator_input.resize(num_buffers);
     d_correlator_output.resize(num_buffers);
@@ -3543,8 +3537,6 @@ public:
       // one upfront zero is sufficient — no per-run cudaMemset needed.
       CUDA_CHECK(cudaMemset(d_samples_padded[i], 0,
                             sizeof(typename T::PaddedPacketSamplesType)));
-      CUDA_CHECK(cudaMalloc((void **)&d_samples_padding[i],
-                            sizeof(typename T::HalfPacketSamplesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_scales[i],
                             sizeof(typename T::PacketScalesType)));
       CUDA_CHECK(cudaMalloc((void **)&d_weights[i], sizeof(BeamWeights)));
@@ -3757,10 +3749,6 @@ public:
     }
     for (auto beamformer_output : d_beamformer_output) {
       cudaFree(beamformer_output);
-    }
-
-    for (auto samples_padding : d_samples_padding) {
-      cudaFree(samples_padding);
     }
 
     for (auto samples_half : d_samples_half) {

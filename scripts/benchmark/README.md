@@ -22,19 +22,19 @@ from 8 to 32 channels in steps of 8.
 
 | Config | runs/sec | input_GB/sec |
 |---|---|---|
-| 8ch/1fpga | 751 | 3.97 |
-| 16ch/1fpga | 369 | 3.90 |
-| 24ch/1fpga | 246 | 3.89 |
-| 32ch/1fpga | 183 | 3.86 |
-| 8ch/4fpga | 295 | 6.24 |
-| 16ch/4fpga | 147 | 6.20 |
-| 24ch/4fpga | 96 | 6.07 |
-| 32ch/4fpga | 71 | 5.96 |
+| 8ch/1fpga | 796 | 4.21 |
+| 16ch/1fpga | 396 | 4.18 |
+| 24ch/1fpga | 261 | 4.14 |
+| 32ch/1fpga | 195 | 4.11 |
+| 8ch/4fpga | 325 | 6.86 |
+| 16ch/4fpga | 162 | 6.87 |
+| 24ch/4fpga | 107 | 6.76 |
+| 32ch/4fpga | 78 | 6.56 |
 
 Key findings:
-- **1fpga (10 rx → 32 padded)**: ~3.9 GB/sec constant across 8–32 channels.
+- **1fpga (10 rx → 32 padded)**: ~4.1 GB/sec constant across 8–32 channels.
   Runs/sec halves each time channels double — GPU is compute-bound on TCC.
-- **4fpga (40 rx → 64 padded)**: ~6 GB/sec constant across 8–32 channels.
+- **4fpga (40 rx → 64 padded)**: ~6.6–6.9 GB/sec across 8–32 channels.
   Larger correlation matrices give better GPU SM utilization than 1fpga.
 - **3 pipeline buffers** is the sweet spot for 4fpga configs on 8 GB VRAM: 38%
   faster than 2 buffers (6.24 vs ~4.5 GB/sec for 8ch/4fpga) while avoiding OOM.
