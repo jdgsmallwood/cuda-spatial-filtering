@@ -66,8 +66,17 @@ namespace pipeline_factories {
 
 template <typename Config>
 std::unique_ptr<LambdaGPUPipeline<Config>>
-make_gpu_pipeline(int num_buffers, BeamWeightsT<Config> *weights) {
-  return std::make_unique<LambdaGPUPipeline<Config>>(num_buffers, weights);
+make_gpu_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
+                  int min_freq_channel = 0) {
+  // Inert beam steering (empty targets => maybe_refresh() is a permanent
+  // no-op, leaving the static `weights` untouched).
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     num_buffers);
+  return std::make_unique<LambdaGPUPipeline<Config>>(num_buffers, weights,
+                                                     std::move(beam_steering));
 }
 
 // Constructs a LambdaPulsarFoldPipeline with its PSRDADA sink disabled
