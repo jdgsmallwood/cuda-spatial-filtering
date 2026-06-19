@@ -5138,6 +5138,12 @@ public:
 
     if (output_ != nullptr && !dummy_run) {
 
+      // PSRDADA beam streaming -- the header/data block writes below all
+      // dereference `hdu`, which is null when the sink is disabled
+      // (dada_key == 0). Skip them in that case; the eigen-output block that
+      // follows uses `output_` (not PSRDADA) and is intentionally left
+      // outside this guard.
+      if (dada_key != 0) {
       if (!header_written) {
         std::cout << "writing header...\n";
         uint64_t rfi_header_size = 0;
@@ -5222,6 +5228,7 @@ public:
           }
         }
       }
+      } // end PSRDADA beam streaming (dada_key != 0)
 
       if constexpr (RFI_MITIGATE) {
         size_t eig_block_num = output_->register_eigendecomposition_data_block(
@@ -5279,47 +5286,60 @@ public:
                                      T::NR_POLARIZATIONS *
                                      T::NR_PACKETS_FOR_CORRELATION;
 
-    // set up PSRDADA ring buffer
-    log = multilog_open("pulsar_fold_writer", 0);
-    multilog_add(log, stderr);
-    hdu = dada_hdu_create(log);
-    dada_hdu_set_key(hdu, dada_key);
-    // connect to HDU
-    if (dada_hdu_connect(hdu) < 0) {
-      multilog(log, LOG_ERR, "could not connect to HDU\n");
-    }
-
-    // lock as writer on the HDU
-    if (dada_hdu_lock_write(hdu) < 0) {
-      multilog(log, LOG_ERR, "could not lock write on HDU\n");
-    }
-
-    if constexpr (RFI_MITIGATE) {
-      rfi_hdu = dada_hdu_create(log);
-      dada_hdu_set_key(rfi_hdu, rfi_dada_key);
-
-      if (dada_hdu_connect(rfi_hdu) < 0) {
-        multilog(log, LOG_ERR, "could not connect to RFI HDU\n");
+    // set up PSRDADA ring buffer. A zero dada_key disables the PSRDADA sink
+    // entirely (no connect/lock, no header read, no block writes) -- the
+    // pipeline then computes beams into b.beam_output but never streams them
+    // out. Production always passes a real key (DADA_DEFAULT_BLOCK_KEY); the
+    // zero-key path exists so tests can drive the full GPU compute without a
+    // running ring buffer. Kept in lockstep with the same guard in
+    // execute_pipeline's output block and in the destructor.
+    log = nullptr;
+    hdu = nullptr;
+    rfi_hdu = nullptr;
+    obs_header = nullptr;
+    d_obs_header = nullptr;
+    if (dada_key != 0) {
+      log = multilog_open("pulsar_fold_writer", 0);
+      multilog_add(log, stderr);
+      hdu = dada_hdu_create(log);
+      dada_hdu_set_key(hdu, dada_key);
+      // connect to HDU
+      if (dada_hdu_connect(hdu) < 0) {
+        multilog(log, LOG_ERR, "could not connect to HDU\n");
       }
 
       // lock as writer on the HDU
-      if (dada_hdu_lock_write(rfi_hdu) < 0) {
-        multilog(log, LOG_ERR, "could not lock write on RFI HDU\n");
+      if (dada_hdu_lock_write(hdu) < 0) {
+        multilog(log, LOG_ERR, "could not lock write on HDU\n");
       }
+
+      if constexpr (RFI_MITIGATE) {
+        rfi_hdu = dada_hdu_create(log);
+        dada_hdu_set_key(rfi_hdu, rfi_dada_key);
+
+        if (dada_hdu_connect(rfi_hdu) < 0) {
+          multilog(log, LOG_ERR, "could not connect to RFI HDU\n");
+        }
+
+        // lock as writer on the HDU
+        if (dada_hdu_lock_write(rfi_hdu) < 0) {
+          multilog(log, LOG_ERR, "could not lock write on RFI HDU\n");
+        }
+      }
+
+      obs_header = (char *)malloc(sizeof(char) * DADA_DEFAULT_HEADER_SIZE);
+
+      if (fileread(header_filename.c_str(), obs_header,
+                   DADA_DEFAULT_HEADER_SIZE) < 0) {
+        free(obs_header);
+        fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
+                header_filename);
+      }
+
+      cudaMalloc(&d_obs_header, DADA_DEFAULT_HEADER_SIZE);
+      cudaMemcpy(d_obs_header, obs_header, DADA_DEFAULT_HEADER_SIZE,
+                 cudaMemcpyDefault);
     }
-
-    obs_header = (char *)malloc(sizeof(char) * DADA_DEFAULT_HEADER_SIZE);
-
-    if (fileread(header_filename.c_str(), obs_header,
-                 DADA_DEFAULT_HEADER_SIZE) < 0) {
-      free(obs_header);
-      fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
-              header_filename);
-    }
-
-    cudaMalloc(&d_obs_header, DADA_DEFAULT_HEADER_SIZE);
-    cudaMemcpy(d_obs_header, obs_header, DADA_DEFAULT_HEADER_SIZE,
-               cudaMemcpyDefault);
     tensor_16.addTensor(modePacket, "packet");
     tensor_16.addTensor(modePacketPreAlign, "prealign");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
@@ -5423,6 +5443,11 @@ public:
   };
 
   ~LambdaPulsarFoldPipeline() {
+    // Mirror the constructor: nothing to tear down when the PSRDADA sink was
+    // disabled (dada_key == 0), and hdu/log are left null in that case.
+    if (dada_key == 0)
+      return;
+
     if (dada_hdu_unlock_write(hdu) < 0) {
       multilog(log, LOG_ERR, "dada_hdu_unlock_write failed\n");
     }
@@ -5451,5 +5476,24 @@ public:
     subpacket_delays_ = delays_subpacket;
     CUDA_CHECK(cudaMemcpy(d_subpacket_delays, subpacket_delays_,
                           sizeof(int) * T::NR_FPGA_SOURCES, cudaMemcpyDefault));
+  }
+
+  // Test/debug hook. After execute_pipeline() completes, copies the most
+  // recently computed beamformer output -- the exact device-side
+  // `b.beam_output` buffer that gets streamed to PSRDADA -- to a host
+  // destination (`dst` must have room for beam_output_size_bytes()). Lets
+  // tests inspect the beams without a PSRDADA sink (see the dada_key == 0
+  // path); not used on the production hot path.
+  void copy_latest_beam_output_to_host(void *dst) {
+    auto &b = buffers[current_buffer];
+    CUDA_CHECK(cudaStreamSynchronize(b.stream));
+    CUDA_CHECK(cudaMemcpy(dst, b.beam_output.get(), sizeof(BeamOutput),
+                          cudaMemcpyDefault));
+  }
+  static constexpr size_t beam_output_size_bytes() { return sizeof(BeamOutput); }
+  // Beam-output shape: [NUM_BEAMS][NR_TIMES][NR_CHANNELS][NR_POL][COMPLEX].
+  static constexpr int beam_output_num_beams() { return num_beams; }
+  static constexpr int beam_output_num_times() {
+    return NR_TIME_STEPS_FOR_CORRELATION;
   }
 };
