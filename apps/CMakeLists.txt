@@ -56,3 +56,15 @@ target_link_libraries(adaptive_beamformed_bandpass PRIVATE gpu_app_common)
 add_executable(pulsar_fold ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
 target_link_libraries(pulsar_fold PRIVATE gpu_app_common)
 
+# Microbenchmark binaries.
+# bench_processor feeds synthetic packets, so it needs the tests/support headers.
+add_executable(bench_capture ${PROJECT_SOURCE_DIR}/apps/bench_capture.cu)
+target_link_libraries(bench_capture PRIVATE gpu_app_common)
+
+add_executable(bench_processor ${PROJECT_SOURCE_DIR}/apps/bench_processor.cu)
+target_include_directories(bench_processor PRIVATE ${PROJECT_SOURCE_DIR}/tests/support)
+target_link_libraries(bench_processor PRIVATE gpu_app_common)
+
+add_executable(bench_writers ${PROJECT_SOURCE_DIR}/apps/bench_writers.cu)
+target_link_libraries(bench_writers PRIVATE gpu_app_common)
+

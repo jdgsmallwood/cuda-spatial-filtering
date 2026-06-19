@@ -5,6 +5,7 @@
 #include "spatial/pipeline.hpp"
 #include "spatial/spatial.hpp"
 #include "spatial/writers.hpp"
+#include <argparse/argparse.hpp>
 #include <chrono>
 #include <iostream>
 #include <spdlog/async.h>
@@ -88,7 +89,22 @@ struct FakeProcessorState : public ProcessorStateBase {
   void handle_buffer_completion(bool force_flush = false) override {};
 };
 
-int main() {
+int main(int argc, char *argv[]) {
+  argparse::ArgumentParser program("gpu_benchmark");
+  program.add_argument("--duration")
+      .help("Duration in seconds to run the GPU pipeline")
+      .default_value(60.0)
+      .scan<'g', double>();
+
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::exception &err) {
+    std::cerr << err.what() << std::endl;
+    std::cerr << program;
+    return 1;
+  }
+
+  const double duration_s = program.get<double>("--duration");
 
   static auto tp = std::make_shared<spdlog::details::thread_pool>(4 * 8192, 2);
   auto app_logger = std::make_shared<spdlog::async_logger>(
@@ -150,46 +166,42 @@ int main() {
   pipeline.set_state(&state);
   pipeline.set_output(output);
   unsigned long long pipeline_runs = 0;
-  auto start_time = std::chrono::steady_clock::now();
-  auto run_duration = std::chrono::seconds(60); // Run for 60 seconds
+  const auto start_time = std::chrono::steady_clock::now();
 
-  while (std::chrono::steady_clock::now() - start_time < run_duration) {
+  while (std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        start_time)
+             .count() < duration_s) {
     pipeline.execute_pipeline(&packet_data);
     pipeline_runs++;
   }
 
   cudaDeviceSynchronize();
-  auto end_time = std::chrono::steady_clock::now();
-  std::chrono::duration<double> elapsed = end_time - start_time;
-  double elapsed_seconds = elapsed.count();
+  const auto end_time = std::chrono::steady_clock::now();
+  const double elapsed_seconds =
+      std::chrono::duration<double>(end_time - start_time).count();
 
-  std::cout << "Finished running for 60 seconds." << std::endl;
-  std::cout << "Number of pipeline runs: " << pipeline_runs << std::endl;
-  std::cout << "Total time (s): " << elapsed_seconds << std::endl;
+  constexpr size_t size_input_bytes = sizeof(Config::InputPacketSamplesType);
+  constexpr size_t size_output_bytes = sizeof(Config::BeamOutputType);
+  const double input_GB_sec =
+      static_cast<double>(size_input_bytes) * pipeline_runs /
+      elapsed_seconds / 1e9;
+  const double output_GB_sec =
+      static_cast<double>(size_output_bytes) * pipeline_runs /
+      elapsed_seconds / 1e9;
+  const double GB_sec = static_cast<double>(size_input_bytes + size_output_bytes) *
+                         pipeline_runs / elapsed_seconds / 1e9;
+  const double runs_per_sec = pipeline_runs / elapsed_seconds;
 
-  // Example: sizeof some types (in MB)
-  size_t size_packet_data = sizeof(Config::InputPacketSamplesType);
-  size_t size_config = sizeof(Config::BeamOutputType);
-
-  double size_packet_data_MB =
-      static_cast<double>(size_packet_data) / (1024 * 1024);
-  double size_config_MB = static_cast<double>(size_config) / (1024 * 1024);
-
-  std::cout << "Size of PacketData: " << size_packet_data_MB << " MB"
-            << std::endl;
-  std::cout << "Size of Config: " << size_config_MB << " MB" << std::endl;
-
-  double input_GB_sec =
-      (size_packet_data_MB / 1024) * pipeline_runs / elapsed_seconds;
-  double output_GB_sec =
-      (size_config_MB / 1024) * pipeline_runs / elapsed_seconds;
-  double GB_sec = ((size_packet_data_MB + size_config_MB) / 1024) *
-                  pipeline_runs / elapsed_seconds;
-  std::cout << "Input GB/sec: " << input_GB_sec << std::endl;
-  std::cout << "Output GB/sec: " << output_GB_sec << std::endl;
-
-  std::cout << "GB/sec: " << GB_sec << std::endl;
-
-  std::cout << "Finished running for 60 seconds." << std::endl;
+  std::printf(
+      "[GPU Pipeline] config=ch%zu_fpga%zu_rx%zu "
+      "elapsed=%.3f runs=%llu "
+      "runs/sec=%.4f "
+      "input_bytes=%zu output_bytes=%zu "
+      "input_GB/sec=%.6f output_GB/sec=%.6f GB/sec=%.6f\n",
+      NR_CHANNELS, NR_FPGA_SOURCES, NR_RECEIVERS,
+      elapsed_seconds, (unsigned long long)pipeline_runs,
+      runs_per_sec,
+      size_input_bytes, size_output_bytes,
+      input_GB_sec, output_GB_sec, GB_sec);
   return 0;
 }

@@ -1306,8 +1306,15 @@ public:
       struct pollfd pfd = {sockfd, POLLIN, 0};
       const int pret = poll(&pfd, 1, 100);
       if (pret <= 0) {
-        if (pret < 0 && errno != EINTR && errno != EAGAIN)
+        if (pret < 0 && errno != EINTR && errno != EAGAIN) {
+          std::cerr << "poll error on ifname " << ifname
+                    << ": " << strerror(errno)
+                    << " (errno=" << errno << ") revents=" << pfd.revents
+                    << " — receiver thread exiting\n";
+          ERROR_LOG("poll error on ifname {}: {} (errno={}) — receiver thread exiting",
+                    ifname, strerror(errno), errno);
           break;
+        }
         continue;
       }
 
