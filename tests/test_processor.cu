@@ -120,7 +120,8 @@ public:
 
   // Helper to create a properly formatted Lambda packet
   virtual void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
-                                    uint16_t freq_channel, int val) {
+                                    uint16_t freq_channel, int val,
+                                    int /*desired_src_ip_third_octet*/ = 0) {
     // Get the current write pointer
     void *write_ptr = processor_state->get_current_write_pointer();
     uint8_t *data_ptr = (uint8_t *)write_ptr;
@@ -207,8 +208,10 @@ public:
 
   // Add packet and advance write pointer
   virtual void add_packet(uint64_t sample_count, uint32_t fpga_id,
-                          uint16_t freq_channel, int val = 1) {
-    create_lambda_packet(sample_count, fpga_id, freq_channel, val);
+                          uint16_t freq_channel, int val = 1,
+                          int desired_src_ip_third_octet = 0) {
+    create_lambda_packet(sample_count, fpga_id, freq_channel, val,
+                         desired_src_ip_third_octet);
     processor_state->get_next_write_pointer();
   }
 };
@@ -235,7 +238,8 @@ class ProcessorStateMultipleFPGATest : public ProcessorStateTest {
 
 public:
   void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
-                            uint16_t freq_channel, int val) {
+                            uint16_t freq_channel, int val,
+                            int /*desired_src_ip_third_octet*/ = 0) override {
     // Get the current write pointer
     void *write_ptr = processor_state->get_current_write_pointer();
     uint8_t *data_ptr = (uint8_t *)write_ptr;
@@ -300,7 +304,7 @@ public:
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    int desired_src_ip_third_octet = 0;
+    constexpr int desired_src_ip_third_octet = 0;
     uint32_t host_ip =
         0x0a000001; // This is (10 << 24) | (0 << 16) | (0 << 8) | 1
 
@@ -347,7 +351,7 @@ class ProcessorStateMultipleFPGAWithOctetTest
 public:
   void create_lambda_packet(uint64_t sample_count, uint32_t fpga_id,
                             uint16_t freq_channel, int val,
-                            int desired_src_ip_third_octet = 0) {
+                            int desired_src_ip_third_octet = 0) override {
     // Get the current write pointer
     void *write_ptr = processor_state->get_current_write_pointer();
     uint8_t *data_ptr = (uint8_t *)write_ptr;
@@ -428,9 +432,9 @@ public:
     processor_state->add_received_packet_metadata(total_length, addr);
   }
 
-  virtual void add_packet(uint64_t sample_count, uint32_t fpga_id,
-                          uint16_t freq_channel, int val = 1,
-                          int desired_src_ip_third_octet = 0) {
+  void add_packet(uint64_t sample_count, uint32_t fpga_id,
+                  uint16_t freq_channel, int val = 1,
+                  int desired_src_ip_third_octet = 0) override {
     create_lambda_packet(sample_count, fpga_id, freq_channel, val,
                          desired_src_ip_third_octet);
     processor_state->get_next_write_pointer();

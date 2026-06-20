@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include "spatial/packet_formats.hpp"
 #include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
@@ -1120,9 +1121,11 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         cusolver_jobz(CUSOLVER_EIG_MODE_VECTOR),
@@ -2910,9 +2913,11 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
@@ -3469,11 +3474,11 @@ public:
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
 
-        correlator(cu::Device(0),
-                   16, // tcc::Format::fp16,
-                   T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128)
@@ -4274,9 +4279,11 @@ public:
   LambdaProjectionPipeline(const int num_buffers_in)
       : num_buffers(num_buffers_in),
 
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128) {
@@ -5230,9 +5237,11 @@ public:
 
       : num_buffers(1), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors), header_written(false),
