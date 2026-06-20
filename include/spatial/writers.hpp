@@ -228,6 +228,7 @@ public:
   BeamWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~BeamWriter() = default;
   virtual const char *writer_name() const override { return "BeamWriter"; };
+  using Writer<BlockType>::register_block;
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num) {
     size_t block_idx = Writer<BlockType>::register_block();
@@ -262,6 +263,7 @@ public:
       : Writer<BlockType>(num_blocks) {};
   virtual ~VisibilitiesWriter() = default;
   virtual const char *writer_name() const override { return "VisWriter"; };
+  using Writer<BlockType>::register_block;
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num,
                                 const int num_missing_packets,
@@ -290,6 +292,7 @@ public:
   EigenWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~EigenWriter() = default;
   virtual const char *writer_name() const override { return "EigenWriter"; };
+  using Writer<BlockType>::register_block;
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num) {
     size_t block_idx = Writer<BlockType>::register_block();
@@ -319,6 +322,7 @@ public:
   FFTWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~FFTWriter() = default;
   virtual const char *writer_name() const override { return "FFTWriter"; };
+  using Writer<BlockType>::register_block;
   virtual size_t register_block(const size_t start_seq_num,
                                 const size_t end_seq_num) {
     size_t block_idx = Writer<BlockType>::register_block();

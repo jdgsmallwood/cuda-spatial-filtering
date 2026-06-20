@@ -173,7 +173,7 @@ GpuBenchResult run_gpu_bench(double duration_s, int num_buffers, bool with_outpu
 
 static void print_result(const GpuBenchResult &r) {
   std::printf(
-      "[GPU Pipeline ch=%zu fpga=%zu rx=%zu] "
+      "[CorrBeam ch=%zu fpga=%zu rx=%zu] "
       "elapsed=%.3f runs=%llu runs/sec=%.4f "
       "input_bytes=%zu output_bytes=%zu "
       "input_GB/sec=%.6f output_GB/sec=%.6f GB/sec=%.6f\n",
@@ -181,6 +181,86 @@ static void print_result(const GpuBenchResult &r) {
       r.elapsed, (unsigned long long)r.runs, r.runs_per_sec,
       r.input_bytes, r.output_bytes,
       r.input_gb_per_sec, r.output_gb_per_sec, r.total_gb_per_sec);
+  std::fflush(stdout);
+}
+
+// --------------------------------------------------------------------------
+// LambdaGPUPipeline benchmark (full pipeline: ingest → permute → correlate
+// → eigendecompose → beamform → FFT → downsample)
+// --------------------------------------------------------------------------
+
+struct LambdaGpuBenchResult {
+  size_t nr_channels;
+  size_t nr_fpga_sources;
+  size_t nr_receivers;
+  unsigned long long runs;
+  double elapsed;
+  double runs_per_sec;
+  double avg_gpu_ms;
+  double gpu_util;
+};
+
+template <typename T>
+LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
+  FakeProcessorState state;
+  DummyFinalPacketData<T> packet_data;
+
+  BeamWeightsT<T> h_weights{};
+  for (size_t ch = 0; ch < T::NR_CHANNELS; ++ch)
+    for (size_t rx = 0; rx < T::NR_RECEIVERS; ++rx)
+      for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol)
+        for (size_t bm = 0; bm < T::NR_BEAMS; ++bm)
+          h_weights.weights[ch][pol][bm][rx] =
+              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+
+  BeamSteering<T> beam_steering({}, {}, {}, FrequencyPlan{}, 0, ArrayLocation{},
+                                 180.0, 5);
+  LambdaGPUPipeline<T> pipeline(num_buffers, &h_weights, std::move(beam_steering));
+  pipeline.set_state(&state);
+
+  // Run exactly NR_BENCHMARKING_RUNS times (or until duration_s), so the
+  // event ring doesn't wrap and all start/stop pairs remain queryable.
+  constexpr unsigned long long MAX_RUNS = LambdaGPUPipeline<T>::NR_BENCHMARKING_RUNS;
+  unsigned long long pipeline_runs = 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  while (pipeline_runs < MAX_RUNS &&
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() <
+             duration_s) {
+    pipeline.execute_pipeline(&packet_data);
+    ++pipeline_runs;
+  }
+  cudaDeviceSynchronize();
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+  double total_gpu_ms = 0.0;
+  for (unsigned long long i = 0; i < pipeline_runs; ++i) {
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.stop_run[i]);
+    total_gpu_ms += ms;
+  }
+  const double avg_gpu_ms = pipeline_runs > 0 ? total_gpu_ms / pipeline_runs : 0.0;
+
+  LambdaGpuBenchResult r{};
+  r.nr_channels     = T::NR_CHANNELS;
+  r.nr_fpga_sources = T::NR_FPGA_SOURCES;
+  r.nr_receivers    = T::NR_RECEIVERS;
+  r.runs            = pipeline_runs;
+  r.elapsed         = elapsed;
+  r.runs_per_sec    = pipeline_runs / elapsed;
+  r.avg_gpu_ms      = avg_gpu_ms;
+  r.gpu_util        = avg_gpu_ms * r.runs_per_sec / 1000.0;
+  return r;
+}
+
+static void print_lambda_result(const LambdaGpuBenchResult &r) {
+  std::printf(
+      "[LambdaGPU ch=%zu fpga=%zu rx=%zu] "
+      "elapsed=%.3f runs=%llu runs/sec=%.4f "
+      "avg_gpu_ms=%.3f gpu_util=%.1f%%\n",
+      r.nr_channels, r.nr_fpga_sources, r.nr_receivers,
+      r.elapsed, (unsigned long long)r.runs, r.runs_per_sec,
+      r.avg_gpu_ms, r.gpu_util * 100.0);
   std::fflush(stdout);
 }
 
@@ -226,7 +306,7 @@ int main(int argc, char *argv[]) {
   logger->set_level(spdlog::level::info);
   spatial::Logger::set(logger);
 
-  std::cout << "bench_gpu: channel sweep (8 configs) + corr-packet sweep (10 configs)"
+  std::cout << "bench_gpu: CorrBeam channel/corr-packet sweeps + LambdaGPU channel sweep"
             << "\n  duration=" << duration_s << "s each"
             << "  num_buffers(1fpga)=" << num_buffers
             << "  num_buffers(4fpga)=" << num_buffers_4fpga
@@ -234,7 +314,7 @@ int main(int argc, char *argv[]) {
             << "\nNOTE: first run per config triggers TCC NVRTC JIT compilation "
                "(cached for subsequent runs)\n";
 
-  std::cout << "\n=== Channel sweep (NR_PACKETS_FOR_CORRELATION=256) ===\n";
+  std::cout << "\n=== CorrBeamOnly: channel sweep (NR_PACKETS_FOR_CORRELATION=256) ===\n";
   print_result(run_gpu_bench<Cfg8ch1fpga> (duration_s, num_buffers,       with_output));
   print_result(run_gpu_bench<Cfg16ch1fpga>(duration_s, num_buffers,       with_output));
   print_result(run_gpu_bench<Cfg24ch1fpga>(duration_s, num_buffers,       with_output));
@@ -244,7 +324,7 @@ int main(int argc, char *argv[]) {
   print_result(run_gpu_bench<Cfg24ch4fpga>(duration_s, num_buffers_4fpga, with_output));
   print_result(run_gpu_bench<Cfg32ch4fpga>(duration_s, num_buffers_4fpga, with_output));
 
-  std::cout << "\n=== Corr-packet sweep (8ch, corr=64..1024) ===\n";
+  std::cout << "\n=== CorrBeamOnly: corr-packet sweep (8ch, corr=64..1024) ===\n";
   print_result(run_gpu_bench<Cfg8ch1fpga_c64>  (duration_s, num_buffers,       with_output));
   print_result(run_gpu_bench<Cfg8ch1fpga_c128> (duration_s, num_buffers,       with_output));
   print_result(run_gpu_bench<Cfg8ch1fpga>      (duration_s, num_buffers,       with_output));
@@ -255,6 +335,16 @@ int main(int argc, char *argv[]) {
   print_result(run_gpu_bench<Cfg8ch4fpga>      (duration_s, num_buffers_4fpga, with_output));
   print_result(run_gpu_bench<Cfg8ch4fpga_c512> (duration_s, num_buffers_4fpga, with_output));
   print_result(run_gpu_bench<Cfg8ch4fpga_c1024>(duration_s, num_buffers_4fpga, with_output));
+
+  std::cout << "\n=== LambdaGPU (full: corr+beam+eigen+fft): channel sweep ===\n";
+  print_lambda_result(run_lambda_bench<Cfg8ch1fpga> (duration_s, num_buffers));
+  print_lambda_result(run_lambda_bench<Cfg16ch1fpga>(duration_s, num_buffers));
+  print_lambda_result(run_lambda_bench<Cfg24ch1fpga>(duration_s, num_buffers));
+  print_lambda_result(run_lambda_bench<Cfg32ch1fpga>(duration_s, num_buffers));
+  print_lambda_result(run_lambda_bench<Cfg8ch4fpga> (duration_s, num_buffers_4fpga));
+  print_lambda_result(run_lambda_bench<Cfg16ch4fpga>(duration_s, num_buffers_4fpga));
+  print_lambda_result(run_lambda_bench<Cfg24ch4fpga>(duration_s, num_buffers_4fpga));
+  print_lambda_result(run_lambda_bench<Cfg32ch4fpga>(duration_s, num_buffers_4fpga));
 
   return 0;
 }

@@ -67,22 +67,14 @@ int main(int argc, char *argv[]) {
   std::cout << "Creating FFT Writer" << std::endl;
   std::string filename = make_default_filename(
       "beam_fft", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
-  std::string beam_filename = make_default_filename(
-      "beam", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
 
   HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
-  //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
   //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
   //     "beam-fft:");
   auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
       fft_beam_file, args.min_freq_channel,
       args.min_freq_channel + num_lambda_channels - 1);
-
-  auto beam_writer = nullptr;
-  //   std::make_unique<
-  // BinaryRawBeamWriter<BeamOutputType, Config::ArrivalsOutputType>>(
-  // beam_filename, false);
 
   std::cout << "Creating Eigen Writer\n";
   std::string eigen_filename =

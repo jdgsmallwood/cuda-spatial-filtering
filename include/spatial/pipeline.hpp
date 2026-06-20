@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include "spatial/packet_formats.hpp"
 #include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
@@ -501,6 +502,10 @@ private:
                                                          'f', 'n', 's'};
   inline static const std::vector<int> modePlanarColMajCons = {'c', 'p', 'z',
                                                                's', 'f', 'n'};
+  // Flattened view of samples_aligned: o*u merged into s for direct fusion
+  // to planarColMajCons layout (alignedToColMajCons permutation).
+  inline static const std::vector<int> modePacketAlignedFlat{'f', 's', 'c',
+                                                              'n', 'p', 'z'};
   inline static const std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
   inline static const std::vector<int> modeVisCorrBaseline{'l', 'c', 'p', 'q',
                                                            'z'};
@@ -1006,16 +1011,16 @@ public:
                            (CUdeviceptr)b.correlator_output.get(),
                            (CUdeviceptr)b.correlator_input.get());
 
-    tensor_32.runPermutation("visCorrToBaseline", alpha_32,
-                             (float *)b.correlator_output.get(),
-                             (float *)b.visibilities_baseline.get(), b.stream);
-    CUDA_CHECK(cudaMemcpyAsync(
-        b.visibilities_trimmed_baseline.get(), b.visibilities_baseline.get(),
-        sizeof(TrimmedVisibilities), cudaMemcpyDefault, b.stream));
+    // Fuses visCorrToBaseline + D2D trim + visBaselineTrimmedToTrimmed into
+    // one kernel pass (saves 3 cuTensor launches + 1 D2D copy).  No atomic
+    // accumulation here -- accumulate_visibilities stays in enqueue_post_eigen
+    // where cuSOLVER naturally staggers concurrent buffer access to the shared
+    // accumulator and avoids contention.
+    corr_to_trimmed((float *)b.correlator_output.get(),
+                    (float *)b.visibilities_trimmed.get(), T::NR_CHANNELS,
+                    NR_BASELINES, NR_UNPADDED_BASELINES,
+                    T::NR_POLARIZATIONS * T::NR_POLARIZATIONS * 2, b.stream);
 
-    tensor_32.runPermutation("visBaselineTrimmedToTrimmed", alpha_32,
-                             (float *)b.visibilities_trimmed_baseline.get(),
-                             (float *)b.visibilities_trimmed.get(), b.stream);
     tensor_32.runPermutation("visCorrToDecomp", alpha_32,
                              (float *)b.visibilities_trimmed.get(),
                              (float *)b.visibilities_permuted.get(), b.stream);
@@ -1038,13 +1043,12 @@ public:
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             b.stream);
 
-    tensor_16.runPermutation("alignedToPlanar", alpha,
+    // Fuses alignedToPlanar + consToColMajCons into a single cuTensor launch
+    // using the flat mode alias (o*u → s) for the source descriptor.
+    tensor_16.runPermutation("alignedToColMajCons", alpha,
                              (__half *)b.samples_aligned.get(),
-                             (__half *)b.samples_consolidated.get(), b.stream);
-
-    tensor_16.runPermutation(
-        "consToColMajCons", alpha, (__half *)b.samples_consolidated.get(),
-        (__half *)b.samples_consolidated_col_maj.get(), b.stream);
+                             (__half *)b.samples_consolidated_col_maj.get(),
+                             b.stream);
 
     update_weights((__half *)b.weights.get(), (__half *)b.weights_updated.get(),
                    T::NR_BEAMS, T::NR_RECEIVERS, T::NR_CHANNELS,
@@ -1117,9 +1121,11 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         cusolver_jobz(CUSOLVER_EIG_MODE_VECTOR),
@@ -1179,6 +1185,7 @@ public:
     tensor_16.addTensor(modePacket, "packet");
     tensor_16.addTensor(modePacketPreAlign, "prealign");
     tensor_16.addTensor(modePacketAligned, "aligned");
+    tensor_16.addTensor(modePacketAlignedFlat, "alignedFlat");
     tensor_16.addTensor(modePacketPadding, "packet_padding");
     tensor_16.addTensor(modePacketPadded, "packet_padded");
     tensor_16.addTensor(modeCorrelatorInput, "corr_input");
@@ -1208,6 +1215,8 @@ public:
                              "alignedToPlanar");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
+    tensor_16.addPermutation("alignedFlat", "planarColMajCons",
+                             CUTENSOR_COMPUTE_DESC_16F, "alignedToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
                              CUTENSOR_COMPUTE_DESC_16F, "weightsInputToCCGLIB");
     tensor_32.addPermutation("visCorrTrimmed", "visDecomp",
@@ -2904,9 +2913,11 @@ public:
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
@@ -3463,11 +3474,11 @@ public:
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
 
-        correlator(cu::Device(0),
-                   16, // tcc::Format::fp16,
-                   T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128)
@@ -4268,9 +4279,11 @@ public:
   LambdaProjectionPipeline(const int num_buffers_in)
       : num_buffers(num_buffers_in),
 
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128) {
@@ -5224,9 +5237,11 @@ public:
 
       : num_buffers(1), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
-        correlator(cu::Device(0), 16, T::NR_PADDED_RECEIVERS, T::NR_CHANNELS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+                   T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
-                   T::NR_POLARIZATIONS, T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_POLARIZATIONS, std::nullopt,
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors), header_written(false),
