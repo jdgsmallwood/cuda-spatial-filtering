@@ -234,7 +234,7 @@ int main(int argc, char *argv[]) {
   std::cout << "Creating FFT Writer" << std::endl;
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
       Config::NR_CHANNELS, nr_lambda_beams, Config::NR_POLARIZATIONS,
-      "beam-fft:");
+      "beam-fft:", 100, args.redis_channels_per_write);
 
   std::cout << "Creating Output Handler\n";
 
