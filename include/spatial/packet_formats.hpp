@@ -131,11 +131,14 @@ struct LambdaFinalPacketData : public FinalPacketData {
     // allocate samples
     CUDA_CHECK(cudaHostAlloc((void **)&samples, sizeof(PacketSamplesType),
                              cudaHostAllocDefault));
+    std::memset(samples, 0, sizeof(PacketSamplesType));
     // allocate scales
     CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(PacketScalesType),
                              cudaHostAllocDefault));
+    std::memset(scales, 0, sizeof(PacketScalesType));
     CUDA_CHECK(cudaHostAlloc((void **)&arrivals, sizeof(ArrivalsType),
                              cudaHostAllocDefault));
+    std::memset(arrivals, 0, sizeof(ArrivalsType));
   };
   ~LambdaFinalPacketData() {
     CUDA_CHECK(cudaFreeHost(samples));

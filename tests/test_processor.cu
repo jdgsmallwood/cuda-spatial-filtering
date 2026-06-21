@@ -676,6 +676,166 @@ TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGAPlacementTest) {
   }
 }
 
+TEST_F(ProcessorStateTest, MissingPacketCountIsZeroForCompleteBuffer) {
+  // A fully-received buffer (all channels and FPGAs present) must not
+  // increment packets_missing.  release_buffer() resets the arrivals array
+  // immediately when the mock pipeline calls it, so we check the accumulated
+  // counter on the ProcessorState rather than calling get_num_missing_packets()
+  // directly on last_packet_data after execution.
+  const uint64_t start_sample = 1000;
+
+  for (int channel = 0; channel < TestConfig::NR_CHANNELS; channel++) {
+    for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
+      for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION + 1;
+           pkt++) {
+        uint64_t sample =
+            start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
+        add_packet(sample, fpga, channel);
+      }
+      for (int pkt = -1; pkt < 0; pkt++) {
+        uint64_t sample =
+            start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
+        add_packet(sample, fpga, channel);
+      }
+    }
+  }
+
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion(true);
+
+  EXPECT_EQ(mock_pipeline->get_execute_count(), 1);
+  EXPECT_EQ(processor_state->packets_missing, 0);
+}
+
+TEST_F(ProcessorStateTest, SequenceNumbersAreSetFromFirstFPGA) {
+  // start_seq_id and end_seq_id on the FinalPacketData passed to the pipeline
+  // must be the FPGA-0 window boundaries for the completed buffer.
+  // With start_sample=1000, NR_PACKETS_FOR_CORRELATION=10, NR_TIME_STEPS=8
+  // and no FPGA delays:
+  //   start_seq_id = 1000
+  //   end_seq_id   = 1000 + (10-1)*8 = 1072
+  const uint64_t start_sample = 1000;
+  const uint64_t expected_start =
+      start_sample; // buffer[0].start_seq[0] after initialize_buffers
+  const uint64_t expected_end =
+      start_sample +
+      (TestConfig::NR_PACKETS_FOR_CORRELATION - 1) *
+          TestConfig::NR_TIME_STEPS_PER_PACKET; // 1072
+
+  for (int channel = 0; channel < TestConfig::NR_CHANNELS; channel++) {
+    for (int fpga = 0; fpga < TestConfig::NR_FPGA_SOURCES; fpga++) {
+      for (int pkt = 0; pkt < TestConfig::NR_PACKETS_FOR_CORRELATION + 1;
+           pkt++) {
+        uint64_t sample =
+            start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
+        add_packet(sample, fpga, channel);
+      }
+      for (int pkt = -1; pkt < 0; pkt++) {
+        uint64_t sample =
+            start_sample + pkt * TestConfig::NR_TIME_STEPS_PER_PACKET;
+        add_packet(sample, fpga, channel);
+      }
+    }
+  }
+
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion(true);
+
+  ASSERT_EQ(mock_pipeline->get_execute_count(), 1);
+  EXPECT_EQ(mock_pipeline->start_seqs_received[0], expected_start);
+  EXPECT_EQ(mock_pipeline->end_seqs_received[0], expected_end);
+}
+
+// Helper: builds and submits one TestConfig-shaped wire packet directly into
+// an arbitrary ProcessorStateBase (not the fixture's processor_state).
+static void add_packet_to_state(ProcessorStateBase *state,
+                                uint64_t sample_count, uint32_t fpga_id,
+                                uint16_t freq_channel, int val = 1) {
+  void *write_ptr = state->get_current_write_pointer();
+  uint8_t *data_ptr = (uint8_t *)write_ptr;
+
+  EthernetHeader *eth = (EthernetHeader *)data_ptr;
+  memset(eth, 0, sizeof(EthernetHeader));
+  eth->ethertype = htons(0x0800);
+  data_ptr += sizeof(EthernetHeader);
+
+  IPHeader *ip = (IPHeader *)data_ptr;
+  memset(ip, 0, sizeof(IPHeader));
+  ip->version_ihl = 0x45;
+  data_ptr += sizeof(IPHeader);
+
+  UDPHeader *udp = (UDPHeader *)data_ptr;
+  memset(udp, 0, sizeof(UDPHeader));
+  data_ptr += sizeof(UDPHeader);
+
+  CustomHeader *custom = (CustomHeader *)data_ptr;
+  custom->sample_count = sample_count;
+  custom->fpga_id = fpga_id;
+  custom->freq_channel = freq_channel;
+  memset(custom->padding, 0, sizeof(custom->padding));
+  data_ptr += sizeof(CustomHeader);
+
+  auto *payload =
+      reinterpret_cast<typename TestConfig::PacketPayloadType *>(data_ptr);
+  for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++)
+    for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++)
+      payload->scales[r][p] = static_cast<int16_t>(1);
+  for (int t = 0; t < TestConfig::NR_TIME_STEPS_PER_PACKET; t++)
+    for (int r = 0; r < TestConfig::NR_RECEIVERS_PER_PACKET; r++)
+      for (int p = 0; p < TestConfig::NR_POLARIZATIONS; p++)
+        payload->data[t][r][p] =
+            std::complex<int8_t>(static_cast<int8_t>(val), static_cast<int8_t>(val));
+
+  const int total_length =
+      sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader) +
+      sizeof(CustomHeader) + sizeof(typename TestConfig::PacketPayloadType);
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  state->add_received_packet_metadata(total_length, addr);
+  state->get_next_write_pointer();
+}
+
+TEST(ProcessorStateChannelFilterTest, PacketsOutsideFreqRangeAreDiscarded) {
+  // With min_freq_channel=3 and NR_CHANNELS=2, only channels 3 (slot 0)
+  // and 4 (slot 1) are valid. Channels 2 (below min) and 5 (above max)
+  // must be discarded without incrementing packets_processed.
+  std::array<int64_t, TestConfig::NR_FPGA_SOURCES> delays = {0};
+  std::unordered_map<uint32_t, int> fpga_map;
+  fpga_map[0] = 0;
+
+  auto *state = new ProcessorState<TestConfig, NR_BUFFERS>(
+      TestConfig::NR_PACKETS_FOR_CORRELATION,
+      TestConfig::NR_TIME_STEPS_PER_PACKET,
+      3, // min_freq_channel
+      delays, fpga_map);
+
+  SimpleMockPipeline pipeline;
+  pipeline.set_state(state);
+  state->set_pipeline(&pipeline);
+  state->synchronous_pipeline = true;
+
+  // channel 2: 2 - 3 = -1 < 0 → discarded
+  add_packet_to_state(state, 1000, 0, 2);
+  // channel 5: 5 - 3 = 2 >= NR_CHANNELS=2 → discarded
+  add_packet_to_state(state, 1000, 0, 5);
+  // channel 3: 3 - 3 = 0, slot 0 → accepted
+  add_packet_to_state(state, 1000, 0, 3);
+  // channel 4: 4 - 3 = 1, slot 1 → accepted
+  add_packet_to_state(state, 1000, 0, 4);
+
+  state->process_all_available_packets();
+
+  EXPECT_EQ(state->packets_discarded, 2);
+  EXPECT_EQ(state->packets_processed, 2);
+
+  state->running = 0;
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  delete state;
+}
+
 TEST_F(ProcessorStateMultipleFPGAWithOctetTest,
        MultipleFPGAPlacementWithDifferentIDTest) {
   // This will give different values to different FPGAs.

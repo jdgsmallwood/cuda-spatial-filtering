@@ -45,4 +45,38 @@ using SmallMultiFPGAConfig =
                  10000  // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
                  >;
 
+// 2-channel variant -- exercises multi-channel output independence: tests can
+// feed distinct data per channel and assert on per-channel beam/visibility
+// output without cross-channel contamination.
+using SmallTwoChannelConfig =
+    LambdaConfig<2,     // NR_CHANNELS
+                 1,     // NR_FPGA_SOURCES
+                 8,     // NR_TIME_STEPS_PER_PACKET
+                 4,     // NR_RECEIVERS
+                 2,     // NR_POLARIZATIONS
+                 4,     // NR_RECEIVERS_PER_PACKET
+                 1,     // NR_PACKETS_FOR_CORRELATION
+                 1,     // NR_BEAMS
+                 32,    // NR_PADDED_RECEIVERS
+                 32,    // NR_PADDED_RECEIVERS_PER_BLOCK
+                 10000  // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                 >;
+
+// 2-packet variant -- exercises multi-packet accumulation: with constant
+// (2,-2) input and scale=1 the correlator integrates over 2*8=16 time steps,
+// giving autocorrelation power 128 (double the single-packet value of 64).
+using SmallTwoPacketConfig =
+    LambdaConfig<1,     // NR_CHANNELS
+                 1,     // NR_FPGA_SOURCES
+                 8,     // NR_TIME_STEPS_PER_PACKET
+                 4,     // NR_RECEIVERS
+                 2,     // NR_POLARIZATIONS
+                 4,     // NR_RECEIVERS_PER_PACKET
+                 2,     // NR_PACKETS_FOR_CORRELATION
+                 1,     // NR_BEAMS
+                 32,    // NR_PADDED_RECEIVERS
+                 32,    // NR_PADDED_RECEIVERS_PER_BLOCK
+                 10000  // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                 >;
+
 } // namespace test_support
