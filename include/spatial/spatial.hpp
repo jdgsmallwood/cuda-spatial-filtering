@@ -161,9 +161,8 @@ public:
 
   // Reserve up to max_n ring slots.  Fills slot_ptrs[0..n-1] with data[]
   // pointers and slot_indices[0..n-1] with ring indices.  Thread-safe without
-  // holding producer_mutex — implementations use CAS on write_index so
-  // concurrent NIC threads make independent progress.  Sets committed=false
-  // so the consumer waits for commit_write_batch() before processing.
+  // holding producer_mutex — implementations use CAS on write_index.  Sets
+  // committed=false so the consumer waits for commit_write_batch().
   virtual int reserve_write_batch(int max_n, void **slot_ptrs,
                                   int *slot_indices) = 0;
 
@@ -1070,7 +1069,7 @@ public:
         cur = write_index.load(std::memory_order_acquire);
         next = (cur + 1) % RING_BUFFER_SIZE;
         if (next == read_index.load(std::memory_order_acquire))
-          return reserved; // ring full — return however many we've claimed
+          return reserved;
         if (!running.load(std::memory_order_relaxed))
           return reserved;
       } while (!write_index.compare_exchange_weak(cur, next,
@@ -1320,12 +1319,6 @@ public:
                   << strerror(errno) << " — receiver thread exiting\n";
         break;
       }
-
-      // Adaptive batch size: track actual drain to avoid over-reserving slots.
-      // With 4 NIC threads, over-reserving (4 × 256 = 1024 > RING_BUFFER_SIZE)
-      // wastes most slots as abandoned. Converge toward actual + 25% headroom.
-      reserve_target = std::max(1, std::min((int)BATCH_SIZE,
-                                            ret_val + (ret_val >> 2)));
 
       for (int i = 0; i < ret_val; ++i) {
         lens_buf[i] = msgs[i].msg_len;
