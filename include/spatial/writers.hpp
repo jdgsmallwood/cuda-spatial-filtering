@@ -753,7 +753,11 @@ private:
 template <typename TVal, typename TVec>
 class RedisEigendataWriter : public EigenWriter<TVal, TVec> {
 public:
-  RedisEigendataWriter(const int num_blocks = 100)
+  // channels_per_write: how many channels to write per output block.
+  // 0 means write all channels every block (original behaviour).
+  // Values < NR_CHANNELS enable round-robin to cap per-block Redis payload.
+  RedisEigendataWriter(const int channels_per_write = 0,
+                       const int num_blocks = 100)
       : EigenWriter<TVal, TVec>(num_blocks),
         val_element_count_(
             sizeof(TVal) /
@@ -769,9 +773,17 @@ public:
     NR_POLARIZATIONS = eigen_dims_[1];
     NR_RECEIVERS = eigen_dims_[3];
 
+    channels_per_write_ = (channels_per_write <= 0)
+                              ? NR_CHANNELS
+                              : std::min(channels_per_write, NR_CHANNELS);
+    num_slots_ = (NR_CHANNELS + channels_per_write_ - 1) / channels_per_write_;
+    current_slot_ = 0;
+
     std::cout << "RedisEigendataWriter initialized with NR_CHANNELS: "
               << NR_CHANNELS << ", NR_POL: " << NR_POLARIZATIONS
-              << ", NR_RECEIVERS: " << NR_RECEIVERS << std::endl;
+              << ", NR_RECEIVERS: " << NR_RECEIVERS
+              << ", channels_per_write: " << channels_per_write_
+              << ", num_slots: " << num_slots_ << std::endl;
 
     create_all_timeseries_keys();
     preallocate_madd_args();
@@ -794,30 +806,31 @@ public:
       str.resize(ptr - str.data());
     };
 
+    auto &args = slot_madd_args_[current_slot_];
+    const int ch_start = current_slot_ * channels_per_write_;
+    const int ch_end = std::min(ch_start + channels_per_write_, NR_CHANNELS);
+
     size_t arg_idx = 0;
 
-    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
+    for (int ch_idx = ch_start; ch_idx < ch_end; ++ch_idx) {
       // Loop only over auto-polarizations (0-0, 1-1, etc.)
       for (int pol_idx = 0; pol_idx < NR_POLARIZATIONS; ++pol_idx) {
-        int pol_r_idx = pol_idx;
-        int pol_c_idx = pol_idx;
-
-        // Offset math stays the same because the memory array still has
-        // the cross-polarization data in it, we are just skipping it.
+        // Offset math uses global ch_idx because the memory array spans all
+        // channels; we are just writing a subset of channels this block.
         size_t val_base_offset =
             ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N) +
-            pol_r_idx * (NR_POLARIZATIONS * N) + pol_c_idx * N;
+            pol_idx * (NR_POLARIZATIONS * N) + pol_idx * N;
 
         size_t vec_base_offset =
             ch_idx * (NR_POLARIZATIONS * NR_POLARIZATIONS * N * N) +
-            pol_r_idx * (NR_POLARIZATIONS * N * N) + pol_c_idx * (N * N);
+            pol_idx * (NR_POLARIZATIONS * N * N) + pol_idx * (N * N);
 
         for (int k_idx = 0; k_idx < N; ++k_idx) {
 
           // --- Eigenvalue ---
           const float eigenvalue = val_ptr[val_base_offset + k_idx];
-          madd_args[1 + arg_idx * 3 + 1] = ts_str;
-          update_val(madd_args[1 + arg_idx * 3 + 2], eigenvalue);
+          args[1 + arg_idx * 3 + 1] = ts_str;
+          update_val(args[1 + arg_idx * 3 + 2], eigenvalue);
           arg_idx++;
 
           // --- Eigenvectors ---
@@ -825,21 +838,23 @@ public:
           for (int j_idx = 0; j_idx < N; ++j_idx) {
             const std::complex<float> &coeff = vec_ptr[vec_k_offset + j_idx];
 
-            madd_args[1 + arg_idx * 3 + 1] = ts_str;
-            update_val(madd_args[1 + arg_idx * 3 + 2], coeff.real());
+            args[1 + arg_idx * 3 + 1] = ts_str;
+            update_val(args[1 + arg_idx * 3 + 2], coeff.real());
             arg_idx++;
 
-            madd_args[1 + arg_idx * 3 + 1] = ts_str;
-            update_val(madd_args[1 + arg_idx * 3 + 2], coeff.imag());
+            args[1 + arg_idx * 3 + 1] = ts_str;
+            update_val(args[1 + arg_idx * 3 + 2], coeff.imag());
             arg_idx++;
           }
         }
       }
     }
 
-    if (madd_args.size() > 1) {
-      redis.command(madd_args.begin(), madd_args.end());
+    if (args.size() > 1) {
+      redis.command(args.begin(), args.end());
     }
+
+    current_slot_ = (current_slot_ + 1) % num_slots_;
   }
 
   void flush() override {}
@@ -853,46 +868,54 @@ private:
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
 
-  std::vector<std::string> madd_args;
+  int channels_per_write_;
+  int num_slots_;
+  int current_slot_;
+  std::vector<std::vector<std::string>> slot_madd_args_;
 
   void preallocate_madd_args() {
     const int N = NR_RECEIVERS;
+    const size_t data_points_per_k = 1 + (N * 2);
 
-    size_t data_points_per_k = 1 + (N * 2);
-    // Updated calculation: We only process NR_POLARIZATIONS pairs now
-    size_t total_data_points =
-        NR_CHANNELS * NR_POLARIZATIONS * N * data_points_per_k;
+    slot_madd_args_.resize(num_slots_);
 
-    madd_args.resize(1 + total_data_points * 3);
-    madd_args[0] = "TS.MADD";
+    for (int s = 0; s < num_slots_; ++s) {
+      const int ch_start = s * channels_per_write_;
+      const int ch_end = std::min(ch_start + channels_per_write_, NR_CHANNELS);
+      const int channels_in_slot = ch_end - ch_start;
+      const size_t total_data_points =
+          channels_in_slot * NR_POLARIZATIONS * N * data_points_per_k;
 
-    size_t arg_idx = 0;
+      auto &args = slot_madd_args_[s];
+      args.resize(1 + total_data_points * 3);
+      args[0] = "TS.MADD";
 
-    for (int ch_idx = 0; ch_idx < NR_CHANNELS; ++ch_idx) {
-      std::string channel_id = std::to_string(ch_idx);
+      size_t arg_idx = 0;
+      for (int ch_idx = ch_start; ch_idx < ch_end; ++ch_idx) {
+        std::string channel_id = std::to_string(ch_idx);
 
-      // Loop only over auto-polarizations
-      for (int pol_idx = 0; pol_idx < NR_POLARIZATIONS; ++pol_idx) {
-        std::string pol_pair =
-            std::to_string(pol_idx) + "-" + std::to_string(pol_idx);
+        for (int pol_idx = 0; pol_idx < NR_POLARIZATIONS; ++pol_idx) {
+          std::string pol_pair =
+              std::to_string(pol_idx) + "-" + std::to_string(pol_idx);
 
-        for (int k_idx = 0; k_idx < N; ++k_idx) {
-          std::string k_id = std::to_string(k_idx);
-          std::string key_prefix =
-              "ts:ch:" + channel_id + ":p:" + pol_pair + ":k:" + k_id;
+          for (int k_idx = 0; k_idx < N; ++k_idx) {
+            std::string k_id = std::to_string(k_idx);
+            std::string key_prefix =
+                "ts:ch:" + channel_id + ":p:" + pol_pair + ":k:" + k_id;
 
-          madd_args[1 + arg_idx * 3] = key_prefix + ":val";
-          arg_idx++;
-
-          for (int j_idx = 0; j_idx < N; ++j_idx) {
-            std::string vec_key_prefix =
-                key_prefix + ":vec:j:" + std::to_string(j_idx);
-
-            madd_args[1 + arg_idx * 3] = vec_key_prefix + ":re";
+            args[1 + arg_idx * 3] = key_prefix + ":val";
             arg_idx++;
 
-            madd_args[1 + arg_idx * 3] = vec_key_prefix + ":im";
-            arg_idx++;
+            for (int j_idx = 0; j_idx < N; ++j_idx) {
+              std::string vec_key_prefix =
+                  key_prefix + ":vec:j:" + std::to_string(j_idx);
+
+              args[1 + arg_idx * 3] = vec_key_prefix + ":re";
+              arg_idx++;
+
+              args[1 + arg_idx * 3] = vec_key_prefix + ":im";
+              arg_idx++;
+            }
           }
         }
       }
@@ -969,8 +992,12 @@ private:
 
 template <typename T> class RedisBeamFFTWriter : public FFTWriter<T> {
 public:
+  // channels_per_write: how many channels to write per output block.
+  // 0 means write all channels every block (original behaviour).
+  // Values < NR_CHANNELS enable round-robin to cap per-block Redis payload.
   RedisBeamFFTWriter(int num_channels, int num_beams, int num_polarizations,
-                     std::string prefix = "", const int num_blocks = 100)
+                     std::string prefix = "", const int num_blocks = 100,
+                     const int channels_per_write = 0)
       : FFTWriter<T>(num_blocks),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
@@ -979,6 +1006,12 @@ public:
         prefix(prefix) {
     fft_dims_ = get_array_dims<T>();
     NR_FREQS = fft_dims_[fft_dims_.size() - 1];
+
+    channels_per_write_ = (channels_per_write <= 0)
+                              ? NR_CHANNELS
+                              : std::min(channels_per_write, NR_CHANNELS);
+    num_slots_ = (NR_CHANNELS + channels_per_write_ - 1) / channels_per_write_;
+    current_slot_ = 0;
 
     std::cout << "FFT Dims are ";
     for (auto dim : fft_dims_) {
@@ -1026,23 +1059,30 @@ public:
 
     std::cout << "RedisBeamFFTWriter has NR_CHANNELS: " << NR_CHANNELS
               << ", NR_BEAMS:" << NR_BEAMS << ", NR_FREQS: " << NR_FREQS
-              << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS << std::endl;
+              << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS
+              << ", channels_per_write: " << channels_per_write_
+              << ", num_slots: " << num_slots_ << std::endl;
     create_all_timeseries_keys();
-    madd_args.resize(1 +
-                     NR_FREQS * NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS * 3);
-    madd_args[0] = "TS.MADD";
 
-    // pre seed the key names as these will never change.
-    const int F = NR_FREQS;
-    int current_idx = 0;
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
-      for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
-        for (int beam = 0; beam < NR_BEAMS; ++beam) {
-          for (int f = 0; f < F; ++f) {
-
-            madd_args[1 + 3 * current_idx] =
-                precomputed_keys[get_key_index(ch, pol, beam, f)];
-            current_idx += 1;
+    // Pre-allocate one madd_args vector per slot with keys pre-seeded.
+    slot_madd_args_.resize(num_slots_);
+    for (int s = 0; s < num_slots_; ++s) {
+      const int ch_start = s * channels_per_write_;
+      const int ch_end = std::min(ch_start + channels_per_write_, NR_CHANNELS);
+      const int channels_in_slot = ch_end - ch_start;
+      auto &args = slot_madd_args_[s];
+      args.resize(1 + channels_in_slot * NR_POLARIZATIONS * NR_BEAMS *
+                          NR_FREQS * 3);
+      args[0] = "TS.MADD";
+      int idx = 0;
+      for (int ch = ch_start; ch < ch_end; ++ch) {
+        for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
+          for (int beam = 0; beam < NR_BEAMS; ++beam) {
+            for (int f = 0; f < NR_FREQS; ++f) {
+              args[1 + 3 * idx] =
+                  precomputed_keys[get_key_index(ch, pol, beam, f)];
+              idx++;
+            }
           }
         }
       }
@@ -1055,16 +1095,19 @@ public:
                        .count();
     std::string ts_str = std::to_string(ts);
 
-    const int F = NR_FREQS;
+    auto &args = slot_madd_args_[current_slot_];
+    const int ch_start = current_slot_ * channels_per_write_;
+    const int ch_end = std::min(ch_start + channels_per_write_, NR_CHANNELS);
+
     int current_idx = 0;
-    for (int ch = 0; ch < NR_CHANNELS; ++ch) {
+    for (int ch = ch_start; ch < ch_end; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int beam = 0; beam < NR_BEAMS; ++beam) {
-          for (int f = 0; f < F; ++f) {
+          for (int f = 0; f < NR_FREQS; ++f) {
             const auto cval = block.fft_output[ch][pol][beam][f];
-            madd_args[1 + 3 * current_idx + 1] = ts_str;
+            args[1 + 3 * current_idx + 1] = ts_str;
 
-            std::string &val_str = madd_args[1 + 3 * current_idx + 2];
+            std::string &val_str = args[1 + 3 * current_idx + 2];
             val_str.resize(32);
             auto [ptr, ec] = std::to_chars(
                 val_str.data(), val_str.data() + val_str.size(), cval);
@@ -1074,7 +1117,8 @@ public:
         }
       }
     }
-    redis.command(madd_args.begin(), madd_args.end());
+    redis.command(args.begin(), args.end());
+    current_slot_ = (current_slot_ + 1) % num_slots_;
   }
 
   void flush() override {}
@@ -1087,7 +1131,10 @@ private:
   }
   std::string prefix;
 
-  std::vector<std::string> madd_args;
+  int channels_per_write_;
+  int num_slots_;
+  int current_slot_;
+  std::vector<std::vector<std::string>> slot_madd_args_;
   void create_all_timeseries_keys() {
     std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {

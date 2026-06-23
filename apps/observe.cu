@@ -122,7 +122,8 @@ int main(int argc, char *argv[]) {
   //      Config::EigenvectorOutputType>>(eigen_file);
 
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations);
+      num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations, "",
+      100, args.redis_channels_per_write);
   // auto fft_writer = nullptr;
 
   auto output = std::make_shared<BufferedOutput<Config>>(
