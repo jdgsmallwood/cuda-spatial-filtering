@@ -167,6 +167,9 @@ struct CommonArgs {
   // targets file is supplied, in which case callers fall back to static
   // beam_weights/uniform-default behaviour (steering is opt-in).
   std::vector<BeamTarget> beam_targets;
+  // How many channels to write to Redis per output block. 0 = all channels.
+  // Use a value < NR_CHANNELS to cap per-block payload (round-robin rotation).
+  int redis_channels_per_write = 8;
 };
 
 // Builds the per-NIC packet-capture objects for an app from the parsed args,
@@ -325,6 +328,14 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
             "tracked sources stay pointed at as the sky rotates")
       .default_value(180.0)
       .store_into(args.steering_update_interval_seconds);
+
+  program.add_argument("--redis-channels-per-write")
+      .help("Channels written to Redis per output block (0 = all). Smaller "
+            "values cap the TS.MADD payload via round-robin rotation, keeping "
+            "Redis write time constant regardless of total channel count.")
+      .default_value(8)
+      .scan<'i', int>()
+      .store_into(args.redis_channels_per_write);
 
   try {
     program.parse_args(argc, argv);

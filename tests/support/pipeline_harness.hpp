@@ -79,6 +79,22 @@ make_gpu_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
                                                      std::move(beam_steering));
 }
 
+// Constructs a LambdaCorrBeamOnlyGPUPipeline with inert beam steering
+// (no tracking, so the constructor's warmup maybe_refresh() is a permanent
+// no-op after the initial weight upload).
+template <typename Config>
+std::unique_ptr<LambdaCorrBeamOnlyGPUPipeline<Config>>
+make_corr_beam_only_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
+                              int min_freq_channel = 0) {
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     num_buffers);
+  return std::make_unique<LambdaCorrBeamOnlyGPUPipeline<Config>>(
+      num_buffers, weights, std::move(beam_steering));
+}
+
 // Constructs a LambdaPulsarFoldPipeline with its PSRDADA sink disabled
 // (dada_key == 0), so the full GPU compute (ingest/scale -> permute -> ccglib
 // beamform) runs without a running ring buffer or a header.hdr file. The

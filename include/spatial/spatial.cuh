@@ -39,6 +39,13 @@ void accumulate_visibilities_from_corr(const float *corr_out, float *accum,
                                        int n_unpadded, int inner_stride,
                                        cudaStream_t stream);
 
+// Fuses visCorrToBaseline + D2D trim + visBaselineTrimmedToTrimmed into one
+// kernel (no accumulation -- accumulate_visibilities stays in post_eigen so
+// cuSOLVER staggering prevents concurrent atomic contention on the accumulator).
+void corr_to_trimmed(const float *corr_out, float *trimmed, int n_channels,
+                     int n_baselines, int n_unpadded, int inner_stride,
+                     cudaStream_t stream);
+
 __global__ void convert_float_to_half_kernel(const float *input, __half *output,
                                              const int n);
 

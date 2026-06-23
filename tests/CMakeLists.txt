@@ -74,6 +74,12 @@ add_executable(
 target_link_libraries(PulsarFoldTests PRIVATE test_support)
 set_target_properties(PulsarFoldTests PROPERTIES CUDA_ARCHITECTURES "native")
 
+add_executable(
+  CorrBeamPipelineTests test_corr_beam_pipeline.cu
+)
+target_link_libraries(CorrBeamPipelineTests PRIVATE test_support)
+set_target_properties(CorrBeamPipelineTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
 # gettimeofday, and pool-alloc microbenchmarks for the six hot-path fixes.
@@ -90,3 +96,4 @@ gtest_discover_tests(ProcessorTests)
 gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
 gtest_discover_tests(PulsarFoldTests)
+gtest_discover_tests(CorrBeamPipelineTests)

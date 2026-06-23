@@ -148,3 +148,72 @@ TEST(PacketFormatTests, TestIPThirdOctetFPGAIDParsing) {
       processed_packet = test_packet.parse();
   ASSERT_EQ(processed_packet.fpga_id, desired_fpga_id);
 }
+
+TEST(PacketFormatTests, TestShortPacketHandledGracefully) {
+  // A packet shorter than MIN_PCAP_HEADER_SIZE must not dereference any
+  // payload pointer and must mark itself processed so the ring buffer can
+  // reclaim the slot without waiting for the consumer.
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  Config::PacketEntryType pkt{};
+  // Value-init leaves length=0, which satisfies length < MIN_PCAP_HEADER_SIZE.
+  pkt.processed.store(false);
+
+  auto result = pkt.parse();
+
+  EXPECT_EQ(result.payload, nullptr);
+  EXPECT_EQ(result.payload_size, 0u);
+  EXPECT_EQ(result.sample_count, 0u);
+  // Short-packet path must mark the slot as processed.
+  EXPECT_TRUE(pkt.processed.load());
+}
+
+TEST(PacketFormatTests, TestSampleDataAtMultiplePositions) {
+  // The builder fills data[t][r][p] = complex<int8_t>(t, r).
+  // Verify several scattered (t, r, p) positions to confirm the parse()
+  // pointer arithmetic reaches all layout positions, not just [0][0][0].
+  // Config: NR_TIME_STEPS_PER_PACKET=64, NR_RECEIVERS_PER_PACKET=10, NR_POLS=2.
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  Config::PacketEntryType pkt = create_valid_test_packet<Config>(1, 0, 0);
+  auto result = pkt.parse();
+  ASSERT_NE(result.payload, nullptr);
+
+  EXPECT_EQ(result.payload->data[0][0][0], std::complex<int8_t>(0, 0));
+  EXPECT_EQ(result.payload->data[1][0][0], std::complex<int8_t>(1, 0));
+  EXPECT_EQ(result.payload->data[0][2][1], std::complex<int8_t>(0, 2));
+  EXPECT_EQ(result.payload->data[3][5][0], std::complex<int8_t>(3, 5));
+  // Last valid indices: t=63, r=9, p=1
+  EXPECT_EQ(result.payload->data[63][9][1], std::complex<int8_t>(63, 9));
+}
+
+TEST(PacketFormatTests, TestPayloadSizeField) {
+  // payload_size must equal sizeof(scales + data) of the wire payload.
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  Config::PacketEntryType pkt = create_valid_test_packet<Config>(1, 0, 3);
+  auto result = pkt.parse();
+  ASSERT_NE(result.payload, nullptr);
+  EXPECT_EQ(result.payload_size,
+            static_cast<uint32_t>(sizeof(Config::PacketPayloadType)));
+}
+
+TEST(PacketFormatTests, TestHeaderFpgaIdPreservedWhenOctetOverrideIsOff) {
+  // When OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET==false (the default), the
+  // fpga_id must come from the CustomHeader field, not from the IP address.
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  constexpr int header_fpga_id = 7;
+  constexpr int ip_third_octet = 3; // deliberately different from header value
+
+  Config::PacketEntryType pkt =
+      create_valid_test_packet<Config>(1, header_fpga_id, 2, ip_third_octet);
+  auto result = pkt.parse();
+
+  EXPECT_EQ(result.fpga_id, static_cast<uint32_t>(header_fpga_id));
+}
+
+TEST(PacketFormatTests, TestFreqChannelPreserved) {
+  // freq_channel must survive the wire encoding for non-zero values.
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  constexpr int channel = 42;
+  Config::PacketEntryType pkt = create_valid_test_packet<Config>(1, 0, channel);
+  auto result = pkt.parse();
+  EXPECT_EQ(result.freq_channel, static_cast<uint16_t>(channel));
+}

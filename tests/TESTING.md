@@ -54,9 +54,17 @@ means something that matters to a real run broke.
 
 ## The pieces (`tests/support/`)
 
-- **`test_configs.hpp`** — canonical small `LambdaConfig` instantiations (`SmallSingleFPGAConfig`,
-  `SmallMultiFPGAConfig`) shared across tests, replacing the ad-hoc `Config`/`MultiFPGAConfig`/
-  `TestConfig`/`MockT` aliases that different test files previously each defined for themselves.
+- **`test_configs.hpp`** — canonical small `LambdaConfig` instantiations shared across tests,
+  replacing the ad-hoc `Config`/`MultiFPGAConfig`/`TestConfig`/`MockT` aliases that different test
+  files previously each defined for themselves:
+  - `SmallSingleFPGAConfig` — 1 channel, 1 FPGA, 4 receivers: the minimal layout that exercises
+    the full Tensor Core Correlator + ccglib GEMM path.
+  - `SmallMultiFPGAConfig` — 1 channel, 3 FPGAs (2 receivers/packet each): exercises FPGA-to-FPGA
+    delay alignment and multi-source reassembly.
+  - `SmallTwoChannelConfig` — 2 channels, 1 FPGA: exercises multi-channel output independence (feed
+    distinct data per channel, assert no cross-channel contamination).
+  - `SmallTwoPacketConfig` — 1 channel, 2 packets for correlation: exercises accumulation over
+    multiple packets (autocorrelation power doubles relative to single-packet).
 - **`synthetic_packets.hpp`** — `build_lambda_wire_packet<Config>(...)` /
   `feed_lambda_packet<Config>(...)`: builds a correctly-laid-out Ethernet+IP+UDP+Custom+Payload
   wire packet (and, for the latter, pushes it through a real `ProcessorStateBase`'s write-pointer
@@ -70,8 +78,8 @@ means something that matters to a real run broke.
   construction helpers. A single generic factory isn't realistic because the 7 pipeline classes
   take genuinely different constructor arguments (e.g. `LambdaGPUPipeline(int, BeamWeightsT<T>*)`
   vs `LambdaAntennaSpectraPipeline(int)` vs `LambdaProjectionPipeline<T, NR_EIG, NR_RUNS>(int)`).
-  Only `make_gpu_pipeline` exists so far; add the rest incrementally as tests for those variants
-  are written.
+  `make_gpu_pipeline` and `make_corr_beam_only_pipeline` are implemented; add the rest incrementally
+  as tests for those variants are written.
 - **`assertions.hpp`** — the property/invariant checks themselves:
   `assert_all_finite` (catches NaN/Inf from uninitialized memory, bad FFT plans, eigendecomposition
   blowups, ...), `assert_autocorrelation_invariants` (same-polarization autocorrelations are real
@@ -114,6 +122,20 @@ head start. Fixing it is real production-code work and out of scope for the test
 it's flagged here so whoever picks it up has the trace already done. (If/when it's fixed,
 `assert_all_packets_arrived`-style precondition checks — "did the synthetic feed actually produce
 a complete buffer before asserting on pipeline output" — would be worth re-adding.)
+
+## A gotcha this surfaced: uninitialized pinned memory across test lifecycles
+
+`LambdaFinalPacketData`'s constructor allocates pinned host memory via `cudaHostAlloc`, which does
+**not** zero-initialize. In production this is harmless — the object is created once at startup and
+the pipeline fills every slot before it's read. In tests, where many `ProcessorState` objects are
+created and destroyed in sequence, the CUDA pinned-memory pool recycles addresses; a subsequent
+allocation at the same address inherits stale bytes from the prior test.
+
+The symptom: `MultipleFPGAPlacementWithDifferentIDTest` failed non-deterministically when two
+other processor tests ran before it, leaving non-zero values in `samples` slots that should have
+been zero (delay-alignment padding). The fix — `memset(samples/scales/arrivals, 0, sizeof(...))` in
+the constructor (`include/spatial/packet_formats.hpp`) — makes the constructor's post-condition
+match production assumptions and eliminates the cross-test dependency.
 
 ## Adding a test for a new pipeline variant
 

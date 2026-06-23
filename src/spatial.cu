@@ -168,3 +168,33 @@ void accumulate_visibilities_from_corr(const float *corr_out, float *accum,
   accumulate_visibilities_from_corr_kernel<<<num_blocks, 1024, 0, stream>>>(
       corr_out, accum, n_channels, n_baselines, n_unpadded, inner_stride);
 }
+
+// Fuses visCorrToBaseline + D2D trim + visBaselineTrimmedToTrimmed into one
+// kernel pass (no accumulation -- accumulate_visibilities stays in post_eigen
+// so cuSOLVER naturally staggers concurrent buffer accesses to the shared
+// accumulator).  Writes trimmed[c][a][inner] = corr[c][a][inner] for a < n_up.
+__global__ void corr_to_trimmed_kernel(const float *corr_out, float *trimmed,
+                                       const int n_ch, const int n_bl,
+                                       const int n_up,
+                                       const int inner_stride) {
+  const int total = n_ch * n_up * inner_stride;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int grid_stride = blockDim.x * gridDim.x;
+  while (idx < total) {
+    const int inner = idx % inner_stride;
+    const int ca = idx / inner_stride;
+    const int a = ca % n_up;
+    const int c = ca / n_up;
+    trimmed[idx] = corr_out[(c * n_bl + a) * inner_stride + inner];
+    idx += grid_stride;
+  }
+}
+
+void corr_to_trimmed(const float *corr_out, float *trimmed, int n_channels,
+                     int n_baselines, int n_unpadded, int inner_stride,
+                     cudaStream_t stream) {
+  const int total = n_channels * n_unpadded * inner_stride;
+  const int num_blocks = elementwise_grid_size(total);
+  corr_to_trimmed_kernel<<<num_blocks, 1024, 0, stream>>>(
+      corr_out, trimmed, n_channels, n_baselines, n_unpadded, inner_stride);
+}
