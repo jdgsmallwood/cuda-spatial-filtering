@@ -969,6 +969,11 @@ public:
       //           -
       //                                                                 cpu_start)
       //               .count());
+      // Use FPGA-0's window boundaries as the canonical block identifier.
+      // release_buffer() will overwrite buffer.start_seq/end_seq for the next
+      // cycle, so capture them now before handing off to the pipeline.
+      d_samples[current_buf]->start_seq_id = buffer.start_seq[0];
+      d_samples[current_buf]->end_seq_id = buffer.end_seq[0];
       //  order here is important. As the pipeline can async update
       //  the start/end seqs we need to capture the
       //  start_seq, then execute the pipeline, then advance using

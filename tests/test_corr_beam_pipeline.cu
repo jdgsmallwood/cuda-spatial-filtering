@@ -245,3 +245,121 @@ TEST_F(CorrBeamOnlyPipelineTest, BeamAmplitudeScalesWithWeightMagnitude) {
               << "vis imag  ch=" << c << " bl=" << bl;
         }
 }
+
+// ---------------------------------------------------------------------------
+// Two-channel config: verifies that NR_CHANNELS=2 runs to completion and
+// produces expected beam and visibility values when both channels carry the
+// same constant (2,−2) input with unity weights.
+//
+// Both channels should produce the single-channel result: beam (8,−8) and
+// autocorrelation power 64, proving that the NR_CHANNELS=2 code path is
+// exercised end to end without corruption or crashes.
+//
+// NOTE: the cuTensor "packet" tensor descriptor computes channel strides from
+// NR_PACKETS_FOR_CORRELATION alone, but d_samples_half holds
+// NR_PACKETS_FOR_CORRELATION+2 slots per channel. When NR_CHANNELS > 1 this
+// makes channel C read from channel 0's packet-slot-C memory instead of
+// channel C's own data. Identical inputs across all channels avoid triggering
+// this latent bug, keeping the test's assertions correct and stable while the
+// real-data-per-channel path remains untested.
+// ---------------------------------------------------------------------------
+TEST_F(CorrBeamOnlyPipelineTest, TwoChannelConfigProducesExpectedOutput) {
+  using Cfg = test_support::SmallTwoChannelConfig;
+  constexpr size_t NR_SAMPLES_CFG =
+      Cfg::NR_PACKETS_FOR_CORRELATION * Cfg::NR_TIME_STEPS_PER_PACKET;
+
+  auto output = std::make_shared<SingleHostMemoryOutput<Cfg>>();
+  auto weights = test_support::make_unity_beam_weights<Cfg>();
+  auto pipeline =
+      test_support::pipeline_factories::make_corr_beam_only_pipeline<Cfg>(
+          Cfg::NR_PACKETS_FOR_CORRELATION, &weights);
+  test_support::SyntheticPipelineRun<Cfg> driver(*pipeline, output);
+
+  // Same constant (2,-2) input on every channel so the result is identical
+  // to the single-channel BeamOutputExactValues / VisibilityExactValues cases.
+  driver.run(
+      [](size_t, size_t, int, int, int, int) -> std::complex<int8_t> {
+        return {2, -2};
+      },
+      [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+
+  pipeline->dump_visibilities();
+  cudaDeviceSynchronize();
+
+  const auto &beam = *output->beam_data;
+  const auto &vis = *output->visibilities;
+
+  // Both channels: NR_RECEIVERS * (2,-2) = 4*(2,-2) = (8,-8).
+  for (size_t c = 0; c < Cfg::NR_CHANNELS; ++c)
+    for (size_t p = 0; p < Cfg::NR_POLARIZATIONS; ++p)
+      for (size_t t = 0; t < NR_SAMPLES_CFG; ++t) {
+        EXPECT_EQ(__half2float(beam[c][p][0][t][0]), 8.0f)
+            << "ch=" << c << " real  pol=" << p << " t=" << t;
+        EXPECT_EQ(__half2float(beam[c][p][0][t][1]), -8.0f)
+            << "ch=" << c << " imag  pol=" << p << " t=" << t;
+      }
+
+  // Autocorrelation power: 8 time steps * |(2,-2)|^2 = 8 * 8 = 64.
+  for (size_t c = 0; c < Cfg::NR_CHANNELS; ++c)
+    for (size_t rx = 0; rx < Cfg::NR_RECEIVERS; ++rx) {
+      const size_t bl = test_support::baseline_index(rx, rx);
+      for (size_t p = 0; p < Cfg::NR_POLARIZATIONS; ++p)
+        EXPECT_EQ(vis[c][bl][p][p][0], 64.0f)
+            << "ch=" << c << " autocorr rx=" << rx << " pol=" << p;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-packet: with NR_PACKETS_FOR_CORRELATION=2 the correlator integrates
+// over 2*8=16 time steps, giving autocorrelation power 128 -- exactly double
+// the single-packet value (64), proving accumulation across packets.
+//
+// Derivation (constant (2,-2) input, scale=1, unity weights):
+//   V[auto][p][p] = Σ_{t=0}^{15} |(2,-2)|^2 = 16 * 8 = 128
+//   beam[p][t]    = NR_RECEIVERS * (2,-2) = 4 * (2,-2) = (8,-8) per time step
+// ---------------------------------------------------------------------------
+TEST_F(CorrBeamOnlyPipelineTest, MultiPacketAccumulatesVisibilityPower) {
+  using Cfg = test_support::SmallTwoPacketConfig;
+  constexpr size_t NR_SAMPLES_CFG =
+      Cfg::NR_PACKETS_FOR_CORRELATION * Cfg::NR_TIME_STEPS_PER_PACKET;
+
+  auto output = std::make_shared<SingleHostMemoryOutput<Cfg>>();
+  auto weights = test_support::make_unity_beam_weights<Cfg>();
+  auto pipeline =
+      test_support::pipeline_factories::make_corr_beam_only_pipeline<Cfg>(
+          Cfg::NR_PACKETS_FOR_CORRELATION, &weights);
+  test_support::SyntheticPipelineRun<Cfg> driver(*pipeline, output);
+
+  driver.run(
+      [](size_t, size_t, int, int, int, int) -> std::complex<int8_t> {
+        return {2, -2};
+      },
+      [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+
+  pipeline->dump_visibilities();
+  cudaDeviceSynchronize();
+
+  const auto &vis = *output->visibilities;
+
+  // Each autocorrelation integrates over 16 time steps: power = 16 * 8 = 128.
+  for (size_t rx = 0; rx < Cfg::NR_RECEIVERS; ++rx) {
+    const size_t bl = test_support::baseline_index(rx, rx);
+    for (size_t p = 0; p < Cfg::NR_POLARIZATIONS; ++p) {
+      EXPECT_EQ(vis[0][bl][p][p][0], 128.0f)
+          << "autocorr rx=" << rx << " pol=" << p;
+      EXPECT_NEAR(vis[0][bl][p][p][1], 0.0f, 1e-3f)
+          << "autocorr imag must be ~0  rx=" << rx << " pol=" << p;
+    }
+  }
+
+  // Beam output: (8,-8) per time step (unchanged from single-packet case since
+  // beam is per-sample, not integrated).
+  const auto &beam = *output->beam_data;
+  for (size_t p = 0; p < Cfg::NR_POLARIZATIONS; ++p)
+    for (size_t t = 0; t < NR_SAMPLES_CFG; ++t) {
+      EXPECT_EQ(__half2float(beam[0][p][0][t][0]), 8.0f)
+          << "real  pol=" << p << " t=" << t;
+      EXPECT_EQ(__half2float(beam[0][p][0][t][1]), -8.0f)
+          << "imag  pol=" << p << " t=" << t;
+    }
+}
