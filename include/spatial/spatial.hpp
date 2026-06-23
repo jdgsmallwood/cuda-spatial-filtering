@@ -160,8 +160,9 @@ public:
                                             const sockaddr_in &client_addr) = 0;
 
   // Reserve up to max_n ring slots.  Fills slot_ptrs[0..n-1] with data[]
-  // pointers and slot_indices[0..n-1] with ring indices.  Must be called
-  // under producer_mutex (brief: index arithmetic only).  Sets committed=false
+  // pointers and slot_indices[0..n-1] with ring indices.  Thread-safe without
+  // holding producer_mutex — implementations use CAS on write_index so
+  // concurrent NIC threads make independent progress.  Sets committed=false
   // so the consumer waits for commit_write_batch() before processing.
   virtual int reserve_write_batch(int max_n, void **slot_ptrs,
                                   int *slot_indices) = 0;
@@ -1055,43 +1056,40 @@ public:
                                                 std::memory_order_release);
   }
 
-  // Reserve up to max_n ring slots.  Must be called under producer_mutex
-  // (brief: only index arithmetic, no data movement).  Sets committed=false on
-  // each claimed slot so the consumer waits for commit_write_batch().
+  // Reserve up to max_n ring slots without holding any lock.  Each slot is
+  // claimed by atomically advancing write_index via CAS, so concurrent NIC
+  // threads make independent progress instead of serialising through a mutex.
+  // Sets committed=false on each claimed slot so the consumer waits for
+  // commit_write_batch().
   int reserve_write_batch(int max_n, void **slot_ptrs,
                           int *slot_indices) override {
     int reserved = 0;
-    // Slot 0 uses the current write_index (caller positioned it via a prior
-    // get_next_write_pointer call, or this is the first batch).
-    int cur = write_index.load(std::memory_order_relaxed);
-    d_packet_data[cur]->committed.store(false, std::memory_order_relaxed);
-    slot_ptrs[reserved] = get_current_write_pointer();
-    slot_indices[reserved] = cur;
-    reserved++;
-    // Claim additional contiguous slots.
-    int next = (cur + 1) % RING_BUFFER_SIZE;
     while (reserved < max_n) {
-      if (next == read_index.load(std::memory_order_acquire)) {
-        // Ring full: wait for the consumer to free slots, but never spin
-        // past shutdown (the consumer is gone by then).
-        if (!running.load(std::memory_order_acquire)) {
-          break;
-        }
-        _mm_pause();
-        continue;
-      }
-      if (!d_packet_data[next]->processed.load(std::memory_order_relaxed)) {
-        next = (next + 1) % RING_BUFFER_SIZE; // slot still held by consumer
-        continue;
-      }
-      d_packet_data[next]->committed.store(false, std::memory_order_relaxed);
-      slot_ptrs[reserved] = (void *)&(d_packet_data[next]->data);
-      slot_indices[reserved] = next;
-      reserved++;
-      next = (next + 1) % RING_BUFFER_SIZE;
-    }
+      int cur, next;
+      do {
+        cur = write_index.load(std::memory_order_acquire);
+        next = (cur + 1) % RING_BUFFER_SIZE;
+        if (next == read_index.load(std::memory_order_acquire))
+          return reserved; // ring full — return however many we've claimed
+        if (!running.load(std::memory_order_relaxed))
+          return reserved;
+      } while (!write_index.compare_exchange_weak(cur, next,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_relaxed));
 
-    write_index.store(next, std::memory_order_release);
+      // We exclusively own slot `cur`.  In a healthy ring it is always
+      // processed==true here; the spin below fires only if the ring has lapped
+      // the consumer (i.e. RING_BUFFER_SIZE is too small for the load).
+      while (!d_packet_data[cur]->processed.load(std::memory_order_acquire)) {
+        if (!running.load(std::memory_order_relaxed))
+          return reserved;
+        _mm_pause();
+      }
+      d_packet_data[cur]->committed.store(false, std::memory_order_relaxed);
+      slot_ptrs[reserved] = (void *)&(d_packet_data[cur]->data);
+      slot_indices[reserved] = cur;
+      reserved++;
+    }
     return reserved;
   }
 
@@ -1301,12 +1299,8 @@ public:
         continue;
       }
 
-      int reserved;
-      {
-        std::lock_guard<std::mutex> lock(state.producer_mutex);
-        reserved =
-            state.reserve_write_batch(reserve_target, slot_ptrs, slot_indices);
-      }
+      int reserved =
+          state.reserve_write_batch(reserve_target, slot_ptrs, slot_indices);
       for (int i = 0; i < reserved; ++i) {
         iovecs[i].iov_base = slot_ptrs[i];
         iovecs[i].iov_len = slot_cap;
@@ -1326,6 +1320,12 @@ public:
                   << strerror(errno) << " — receiver thread exiting\n";
         break;
       }
+
+      // Adaptive batch size: track actual drain to avoid over-reserving slots.
+      // With 4 NIC threads, over-reserving (4 × 256 = 1024 > RING_BUFFER_SIZE)
+      // wastes most slots as abandoned. Converge toward actual + 25% headroom.
+      reserve_target = std::max(1, std::min((int)BATCH_SIZE,
+                                            ret_val + (ret_val >> 2)));
 
       for (int i = 0; i < ret_val; ++i) {
         lens_buf[i] = msgs[i].msg_len;
