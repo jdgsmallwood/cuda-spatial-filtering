@@ -154,6 +154,27 @@ public:
   std::atomic<uint64_t> packets_stuck_unprocessed = 0;
   uint64_t pipeline_runs_queued = 0;
   std::mutex producer_mutex;
+
+  // ── Strided multi-producer support ──────────────────────────────────────
+  // Set nr_capture_threads > 0 before starting capture threads to activate
+  // the lock-free strided path.  Each capture thread i is assigned slots
+  // i, i+N, i+2N, ... and claims them via reserve_write_batch_strided()
+  // without taking producer_mutex.  The consumer reads the per-thread claim
+  // watermarks to know how far to scan instead of using write_index.
+  //
+  // Legacy mode (nr_capture_threads == 0): reserve_write_batch() under
+  // producer_mutex, write_index watermark — unchanged.
+  static constexpr int MAX_CAPTURE_THREADS = 8;
+  struct alignas(64) ThreadClaim {
+    std::atomic<uint64_t> linear{0};
+  };
+  ThreadClaim per_thread_claim[MAX_CAPTURE_THREADS];
+  // Monotonically increasing read progress, published by the consumer so
+  // producers can check ring-full without needing the read_index ring math.
+  std::atomic<uint64_t> read_linear{0};
+  int nr_capture_threads{0};  // 0 = legacy mutex path
+  // ────────────────────────────────────────────────────────────────────────
+
   virtual void *get_next_write_pointer() = 0;
   virtual void *get_current_write_pointer() = 0;
   virtual void add_received_packet_metadata(const int length,
@@ -179,6 +200,24 @@ public:
   // on them.  Used by receive-into-ring producers that reserve a batch before
   // knowing how many datagrams arrive.
   virtual void abandon_write_batch(int n, const int *slot_indices) {}
+
+  // Lock-free strided slot reservation.  thread_id identifies which thread
+  // is calling (0..nr_capture_threads-1).  my_linear is the caller's LOCAL
+  // monotonic write counter (starts at thread_id, increments by
+  // nr_capture_threads per slot).  Pass by reference so the callee advances
+  // it.  Updates per_thread_claim[thread_id] so the consumer can compute the
+  // scan watermark.
+  //
+  // Default: falls back to reserve_write_batch() under producer_mutex — safe
+  // for stub implementations (BenchCaptureState, test fakes) that don't
+  // implement the full strided path.
+  virtual int reserve_write_batch_strided(int /*thread_id*/,
+                                          uint64_t & /*my_linear*/,
+                                          int max_n, void **slot_ptrs,
+                                          int *slot_indices) {
+    std::lock_guard<std::mutex> lk(producer_mutex);
+    return reserve_write_batch(max_n, slot_ptrs, slot_indices);
+  }
 
   // Usable bytes in one ring slot's data[] — producers that receive directly
   // into slots size their iovecs/copies with this.
@@ -751,19 +790,33 @@ public:
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
+    // Local linear read counter, mirrored to read_linear for producers in
+    // strided mode.  Starts at 0 aligned with per_thread_claim initialisation.
+    uint64_t my_read_linear = 0;
+
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     constexpr int REGULAR_BATCH_SIZE = 6000;
     while (running.load(std::memory_order_acquire)) [[likely]] {
-      const int current_write_index =
-          write_index.load(std::memory_order_acquire);
+      int available;
+      if (nr_capture_threads > 0) {
+        // Strided mode: producers use per_thread_claim instead of write_index.
+        // Take the minimum watermark across all capture threads — we can only
+        // scan up to the slot the slowest producer has claimed.
+        uint64_t wm = UINT64_MAX;
+        for (int i = 0; i < nr_capture_threads; ++i)
+          wm = std::min(
+              wm, per_thread_claim[i].linear.load(std::memory_order_acquire));
+        available = static_cast<int>(wm - my_read_linear);
+      } else {
+        // Legacy mode: single producer advances write_index under mutex.
+        const int current_write_index =
+            write_index.load(std::memory_order_acquire);
+        available =
+            (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
+            (int)RING_BUFFER_SIZE;
+      }
 
-      // Number of slots waiting to be processed, handling wrap-around
-      // correctly.
-      const int available =
-          (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
-          (int)RING_BUFFER_SIZE;
-
-      if (available == 0) [[unlikely]] {
+      if (available <= 0) [[unlikely]] {
         _mm_pause();
         continue;
       }
@@ -817,6 +870,12 @@ public:
 
       current_read_index = slice_end;
 
+      if (nr_capture_threads > 0) {
+        // Advance the linear read counter and publish it so strided producers
+        // can pass their ring-full check (my_linear - read_linear < RING_SIZE).
+        my_read_linear += to_process;
+        read_linear.store(my_read_linear, std::memory_order_release);
+      }
       read_index.store(current_read_index, std::memory_order_release);
 
       if (--packets_until_completion_check == 0) {
@@ -853,8 +912,6 @@ public:
     }
     std::cout << "Main processor thread is shutting down.";
     std::cout << " Waiting for sub-threads." << std::endl;
-    // shut down pipeline thread
-    buffer_ready_for_pipeline.notify_all();
     stop_processing_threads();
     std::cout << "Processor thread exiting\n";
   };
@@ -981,11 +1038,19 @@ public:
       // INFO_LOG("Enqueueing buffer {} for pipeline...", current_buffer);
       {
         if (!synchronous_pipeline) [[likely]] {
-          {
-            std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
-            buffers_ready_for_pipeline.push(current_buf);
+          // Lock-free SPSC push: producer is always this thread (processor),
+          // consumer is pipeline_feeder.  Spin on full only in the extremely
+          // rare case that the GPU falls behind by PIPELINE_Q_CAP buffers.
+          const uint64_t t =
+              pipeline_q_tail_.v.load(std::memory_order_relaxed);
+          while (t - pipeline_q_head_.v.load(std::memory_order_acquire) >=
+                 PIPELINE_Q_CAP) {
+            if (!running.load(std::memory_order_acquire))
+              return;
+            _mm_pause();
           }
-          buffer_ready_for_pipeline.notify_one();
+          pipeline_q_buf_[t % PIPELINE_Q_CAP] = current_buf;
+          pipeline_q_tail_.v.store(t + 1, std::memory_order_release);
         } else [[unlikely]] {
           pipeline_->execute_pipeline(d_samples[current_buf]);
           pipeline_runs_queued += 1;
@@ -1004,29 +1069,31 @@ public:
   };
 
   void shutdown() {
-    {
-      std::lock_guard<std::mutex> lock(buffers_ready_for_pipeline_lock);
-      running.store(0, std::memory_order_release);
-    };
-    buffer_ready_for_pipeline.notify_all();
-    // Workers check running in their spin loop and exit naturally.
+    // Workers and pipeline_feeder both spin-check running and exit naturally.
+    running.store(0, std::memory_order_release);
   };
 
   void pipeline_feeder() {
     std::cout << "Pipeline feeder starting up...\n";
+    // Lock-free SPSC consumer: spin briefly on empty, then sleep to avoid
+    // burning 100% CPU.  Buffer period ≈ 256/15500 s ≈ 16.5ms; a 200µs
+    // sleep wastes at most ~1.2% of that period in latency.
+    int spin_count = 0;
     while (running.load(std::memory_order_acquire) == 1) {
-      std::unique_lock<std::mutex> lock(buffers_ready_for_pipeline_lock);
-      buffer_ready_for_pipeline.wait(lock, [&] {
-        return !buffers_ready_for_pipeline.empty() ||
-               (running.load(std::memory_order_acquire) == 0);
-      });
-
-      if (running.load(std::memory_order_acquire) == 0) {
-        break;
+      const uint64_t h = pipeline_q_head_.v.load(std::memory_order_relaxed);
+      if (h == pipeline_q_tail_.v.load(std::memory_order_acquire)) {
+        if (++spin_count < 1000) {
+          _mm_pause();
+        } else {
+          spin_count = 0;
+          std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        continue;
       }
-      size_t buffer_index = buffers_ready_for_pipeline.front();
-      buffers_ready_for_pipeline.pop();
-      lock.unlock();
+      spin_count = 0;
+      const int buffer_index =
+          pipeline_q_buf_[h % PIPELINE_Q_CAP];
+      pipeline_q_head_.v.store(h + 1, std::memory_order_release);
       pipeline_->execute_pipeline(d_samples[buffer_index]);
       pipeline_runs_queued += 1;
     }
@@ -1126,6 +1193,47 @@ public:
     return T::PacketEntryType::DATA_CAPACITY;
   }
 
+  // Lock-free strided override: no mutex, no shared write_index.
+  // Thread thread_id owns slots thread_id, thread_id+N, thread_id+2N, ...
+  // my_linear is the caller's monotonic counter (local to the capture thread).
+  // per_thread_claim[thread_id] is published so the consumer can compute the
+  // min-watermark without taking any lock.
+  int reserve_write_batch_strided(int thread_id, uint64_t &my_linear,
+                                  int max_n, void **slot_ptrs,
+                                  int *slot_indices) override {
+    const int stride = (nr_capture_threads > 0) ? nr_capture_threads : 1;
+    int reserved = 0;
+    for (int b = 0; b < max_n; ++b) {
+      // Ring-full: spin until the consumer has advanced read_linear far
+      // enough to free this slot for reuse.
+      while (my_linear - read_linear.load(std::memory_order_acquire) >=
+             RING_BUFFER_SIZE) {
+        if (!running.load(std::memory_order_acquire))
+          return reserved;
+        _mm_pause();
+      }
+      const int slot = static_cast<int>(my_linear % RING_BUFFER_SIZE);
+      // Fine-grained check: wait until the consumer (or abandon_write_batch)
+      // has marked this specific slot as fully processed so we don't
+      // overwrite data still held by future_packet_queue.
+      while (!d_packet_data[slot]->processed.load(std::memory_order_acquire)) {
+        if (!running.load(std::memory_order_acquire))
+          return reserved;
+        _mm_pause();
+      }
+      d_packet_data[slot]->committed.store(false, std::memory_order_relaxed);
+      slot_ptrs[reserved] = &d_packet_data[slot]->data;
+      slot_indices[reserved] = slot;
+      ++reserved;
+      my_linear += stride;
+    }
+    // Publish watermark: consumer reads min(per_thread_claim) to know how
+    // far it can scan the ring.
+    per_thread_claim[thread_id].linear.store(my_linear,
+                                             std::memory_order_release);
+    return reserved;
+  }
+
 private:
   void cleanup() {
     if (d_packet_data_pool != nullptr) {
@@ -1163,9 +1271,15 @@ private:
     }
   };
 
-  std::queue<size_t> buffers_ready_for_pipeline;
-  mutable std::mutex buffers_ready_for_pipeline_lock;
-  std::condition_variable buffer_ready_for_pipeline;
+  // Lock-free SPSC ring for completed buffer indices.
+  // Producer: handle_buffer_completion (processor thread).
+  // Consumer: pipeline_feeder (feeder thread).
+  // Tail and head live on separate cache lines to prevent false sharing.
+  static constexpr size_t PIPELINE_Q_CAP = 64;  // power of two, >> NR_INPUT_BUFFERS
+  struct alignas(64) PipelineQPtr { std::atomic<uint64_t> v{0}; };
+  PipelineQPtr pipeline_q_tail_;  // written by producer
+  PipelineQPtr pipeline_q_head_;  // written by consumer
+  int pipeline_q_buf_[PIPELINE_Q_CAP]{};
   // This is for packets that arrive but their buffer is not yet created.
   // The read pointer moves on but keep these as things to process.
   // They will not be overwritten by the write pointer as it checks whether or
@@ -1223,6 +1337,10 @@ private:
 class PacketInput {
 public:
   virtual void get_packets(ProcessorStateBase &state) = 0;
+  // Cumulative drop counter — populated by implementations that track drops
+  // (KernelSocketPacketCapture via SO_RXQ_OVFL / VMA equivalent).  Returns 0
+  // for backends that don't track drops (PCAP, ibverbs).
+  virtual uint32_t get_drops() const { return 0; }
 
   virtual ~PacketInput() = default;
 };
@@ -1234,11 +1352,36 @@ public:
   // of CPU spin.  Leave at 0 on shared/virtual machines.
   KernelSocketPacketCapture(std::string &ifname, int port, int buffer_size,
                             int recv_buffer_size = 64 * 1024 * 1024,
-                            int busy_poll_us = 0);
+                            int busy_poll_us = 0,
+                            int thread_id = 0,
+                            int nr_threads = 1);
   ~KernelSocketPacketCapture();
 
   void get_packets(ProcessorStateBase &state) override {
-    std::cout << "Starting packet capture on ifname " << ifname << std::endl;
+    std::cout << "Starting packet capture on ifname " << ifname
+              << " (thread_id=" << thread_id_ << ")" << std::endl;
+
+    // Optional CPU affinity for this capture thread.  Set SPATIAL_CAPTURE_CPUS
+    // to a comma-separated list of CPU IDs (e.g. "0,1,2,3"), one per capture
+    // thread in order.  When unset, the OS schedules freely.
+    {
+      const int cpu =
+          nth_cpu_from_list(std::getenv("SPATIAL_CAPTURE_CPUS"), thread_id_);
+      if (cpu >= 0) {
+        cpu_set_t cs;
+        CPU_ZERO(&cs);
+        CPU_SET(cpu, &cs);
+        if (pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs) == 0)
+          INFO_LOG("Capture thread {} pinned to CPU {}", thread_id_, cpu);
+        else
+          INFO_LOG("Capture thread {}: failed to pin to CPU {}", thread_id_, cpu);
+      }
+    }
+
+    // Per-thread monotonic write counter for the lock-free strided path.
+    // Starts at thread_id_ so each thread owns non-overlapping slots:
+    // thread 0 → 0, N, 2N, ...   thread 1 → 1, N+1, 2N+1, ...  etc.
+    uint64_t my_linear = static_cast<uint64_t>(thread_id_);
 
     // Zero-copy variant: ring slots are reserved up front and recvmmsg
     // receives *directly into slot->data*, eliminating the staging buffer
@@ -1246,7 +1389,7 @@ public:
     // 5 Mpps).  Sequence per batch:
     //   1. poll() until the socket is readable — no ring slots are held
     //      while waiting, so consumers never spin on uncommitted slots.
-    //   2. reserve BATCH_SIZE slots (brief lock — index arithmetic only).
+    //   2. reserve BATCH_SIZE slots (lock-free strided, no producer_mutex).
     //   3. recvmmsg(MSG_DONTWAIT) straight into the reserved slots.
     //   4. commit the filled slots; abandon the rest as empty so neither
     //      side ever waits on them.
@@ -1261,6 +1404,10 @@ public:
     struct mmsghdr msgs[BATCH_SIZE];
     struct iovec iovecs[BATCH_SIZE];
     struct sockaddr_in client_addrs[BATCH_SIZE];
+    // Control buffer for SO_RXQ_OVFL ancillary data.  Only the last message
+    // in each batch needs it — the counter is cumulative on the socket, so
+    // reading it once per recvmmsg call is sufficient.
+    alignas(struct cmsghdr) char ctrl_buf[CMSG_SPACE(sizeof(uint32_t))];
 
     const size_t slot_cap = state.slot_data_capacity();
     memset(msgs, 0, sizeof(msgs));
@@ -1301,16 +1448,24 @@ public:
         continue;
       }
 
-      int reserved;
-      {
-        std::lock_guard<std::mutex> lock(state.producer_mutex);
-        reserved =
-            state.reserve_write_batch(reserve_target, slot_ptrs, slot_indices);
-      }
+      // Lock-free strided reservation: each capture thread claims its own
+      // non-overlapping slots (thread_id_, thread_id_+N, ...), so no mutex
+      // is needed and there is no ring-full spin inside a critical section.
+      const int reserved =
+          state.reserve_write_batch_strided(thread_id_, my_linear,
+                                            reserve_target, slot_ptrs,
+                                            slot_indices);
       for (int i = 0; i < reserved; ++i) {
         iovecs[i].iov_base = slot_ptrs[i];
         iovecs[i].iov_len = slot_cap;
         msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
+        msgs[i].msg_hdr.msg_control = nullptr;
+        msgs[i].msg_hdr.msg_controllen = 0;
+      }
+      // Attach control buffer to last slot to receive SO_RXQ_OVFL counter.
+      if (reserved > 0) {
+        msgs[reserved - 1].msg_hdr.msg_control = ctrl_buf;
+        msgs[reserved - 1].msg_hdr.msg_controllen = sizeof(ctrl_buf);
       }
 
       int ret_val = recvmmsg(sockfd, msgs, reserved, MSG_DONTWAIT, nullptr);
@@ -1327,6 +1482,19 @@ public:
         break;
       }
 
+      // Read cumulative drop counter from SO_RXQ_OVFL cmsg on the last slot.
+      // Works for both kernel sockets and VMA (which intercepts SO_RXQ_OVFL).
+      const int cmsg_slot = ret_val > 0 ? ret_val - 1 : reserved - 1;
+      struct msghdr *cmsg_hdr = &msgs[cmsg_slot].msg_hdr;
+      for (struct cmsghdr *cm = CMSG_FIRSTHDR(cmsg_hdr); cm;
+           cm = CMSG_NXTHDR(cmsg_hdr, cm)) {
+        if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SO_RXQ_OVFL) {
+          kernel_drops.store(*reinterpret_cast<uint32_t *>(CMSG_DATA(cm)),
+                             std::memory_order_relaxed);
+          break;
+        }
+      }
+
       for (int i = 0; i < ret_val; ++i) {
         lens_buf[i] = msgs[i].msg_len;
         addr_buf[i] = client_addrs[i];
@@ -1340,8 +1508,12 @@ public:
     std::cout << "Receiver thread exiting for ifname " << ifname << std::endl;
   };
 
-  // Kernel-drop counter populated from SO_RXQ_OVFL.  Read by the stats loop.
+  // Cumulative drop counter from SO_RXQ_OVFL ancillary data (works for both
+  // kernel sockets and VMA, which intercepts SO_RXQ_OVFL).
   std::atomic<uint32_t> kernel_drops{0};
+  uint32_t get_drops() const override {
+    return kernel_drops.load(std::memory_order_relaxed);
+  }
 
 private:
   int sockfd;
@@ -1350,6 +1522,8 @@ private:
   int buffer_size;
   int recv_buffer_size;
   std::string ifname;
+  int thread_id_{0};   // index of this capture thread (0..nr_threads_-1)
+  int nr_threads_{1};  // total number of concurrent capture threads
 };
 
 class PCAPPacketCapture : public PacketInput {

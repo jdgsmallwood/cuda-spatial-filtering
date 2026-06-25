@@ -327,12 +327,17 @@ void ccglib_mma_opt(__half *A, __half *B, float *C, const int n_row,
 KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
                                                      int port, int buffer_size,
                                                      int recv_buffer_size,
-                                                     int busy_poll_us)
+                                                     int busy_poll_us,
+                                                     int thread_id,
+                                                     int nr_threads)
     : ifname(ifname), port(port), buffer_size(buffer_size),
-      recv_buffer_size(recv_buffer_size) {
+      recv_buffer_size(recv_buffer_size),
+      thread_id_(thread_id), nr_threads_(nr_threads) {
 
-  INFO_LOG("UDP Server starting on port {} (recv_buf={} MB, busy_poll={}us)",
-           port, recv_buffer_size / (1024 * 1024), busy_poll_us);
+  INFO_LOG("UDP Server starting on port {} iface {} thread {}/{} "
+           "(recv_buf={} MB, busy_poll={}us)",
+           port, ifname, thread_id, nr_threads,
+           recv_buffer_size / (1024 * 1024), busy_poll_us);
 
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
   if (sockfd < 0) {
@@ -342,6 +347,13 @@ KernelSocketPacketCapture::KernelSocketPacketCapture(std::string &ifname,
 
   int reuse = 1;
   setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  // SO_REUSEPORT allows multiple sockets on the same port (one per capture
+  // thread).  With libVMA each such socket gets its own receive ring,
+  // eliminating internal VMA locking when threads receive concurrently.
+  if (nr_threads > 1) {
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+  }
 
   if (!ifname.empty()) {
     if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, ifname.c_str(),

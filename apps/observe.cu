@@ -190,10 +190,13 @@ int main(int argc, char *argv[]) {
   output->start_writer_loop();
 
   auto capture = make_packet_captures(args);
+  // Activate the lock-free strided producer path: each capture thread i owns
+  // ring slots i, i+N, i+2N, ... and claims them without producer_mutex.
+  state.nr_capture_threads = static_cast<int>(capture.size());
   INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;
-  for (auto i = 0; i < capture.size(); ++i) {
+  for (auto i = 0; i < (int)capture.size(); ++i) {
     receiver_threads.emplace_back(
         [&capture, &state, i]() { capture[i]->get_packets(state); });
   }
@@ -205,12 +208,15 @@ int main(int argc, char *argv[]) {
   while (state.running) {
     sleep(5);
     // This is nice to see outside of log files.
+    uint32_t total_drops = 0;
+    for (const auto &c : capture) total_drops += c->get_drops();
     std::cout << "Stats: Received=" << state.packets_received
               << ", Processed=" << state.packets_processed
               << ", Missing=" << state.packets_missing
               << ", Discarded=" << state.packets_discarded
               << ", FutureQueued=" << state.packets_future_queued
               << ", StuckUnprocessed=" << state.packets_stuck_unprocessed
+              << ", NICDrops=" << total_drops
               << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;

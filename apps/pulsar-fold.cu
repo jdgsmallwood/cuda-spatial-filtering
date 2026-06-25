@@ -193,10 +193,11 @@ int main(int argc, char *argv[]) {
   pipeline.set_output(output);
   std::cout << "Initializing packet capture...\n";
   auto capture = make_packet_captures(args, 512 * 1024 * 1024);
+  state.nr_capture_threads = static_cast<int>(capture.size());
   INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
   std::cout << "Starting threads...\n";
   std::vector<std::thread> receiver_threads;
-  for (auto i = 0; i < capture.size(); ++i) {
+  for (auto i = 0; i < (int)capture.size(); ++i) {
     receiver_threads.emplace_back(
         [&capture, &state, i]() { capture[i]->get_packets(state); });
   }
