@@ -203,7 +203,9 @@ make_packet_captures(const CommonArgs &args,
   }
 #endif
 
-  for (auto nic : args.fpga_names) {
+  const int nr_nics = static_cast<int>(args.fpga_names.size());
+  for (int i = 0; i < nr_nics; ++i) {
+    auto nic = args.fpga_names[i];
 #ifdef HAVE_IBVERBS
     if (use_ibverbs) {
       capture.push_back(std::make_unique<LibibverbsPacketCapture>(
@@ -213,7 +215,7 @@ make_packet_captures(const CommonArgs &args,
 #endif
     capture.push_back(std::make_unique<KernelSocketPacketCapture>(
         nic, args.port, BUFFER_SIZE, kernel_recv_buffer_size,
-        args.busy_poll_us));
+        args.busy_poll_us, /*thread_id=*/i, /*nr_threads=*/nr_nics));
   }
   return capture;
 }
