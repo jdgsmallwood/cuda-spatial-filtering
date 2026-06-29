@@ -169,8 +169,10 @@ public:
     std::atomic<uint64_t> linear{0};
   };
   ThreadClaim per_thread_claim[MAX_CAPTURE_THREADS];
-  // Monotonically increasing read progress, published by the consumer so
-  // producers can check ring-full without needing the read_index ring math.
+  // Per-thread read progress, published by the consumer so each producer can
+  // check its own ring-full condition independently of other threads.
+  ThreadClaim per_thread_read_linear[MAX_CAPTURE_THREADS];
+  // Monotonically increasing read progress for the legacy (non-strided) path.
   std::atomic<uint64_t> read_linear{0};
   int nr_capture_threads{0};  // 0 = legacy mutex path
   // ────────────────────────────────────────────────────────────────────────
@@ -790,93 +792,99 @@ public:
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
 
-    // Local linear read counter, mirrored to read_linear for producers in
-    // strided mode.  Starts at 0 aligned with per_thread_claim initialisation.
-    uint64_t my_read_linear = 0;
+    // Per-thread local read positions for the strided consumer path.
+    // Initialized to tid because thread tid's linear sequence starts at tid,
+    // not 0 (matches KernelSocketPacketCapture's my_linear = thread_id_).
+    uint64_t per_thread_my_read[ProcessorStateBase::MAX_CAPTURE_THREADS];
+    for (int tid = 0; tid < ProcessorStateBase::MAX_CAPTURE_THREADS; ++tid)
+      per_thread_my_read[tid] = static_cast<uint64_t>(tid);
 
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     constexpr int REGULAR_BATCH_SIZE = 6000;
-    while (running.load(std::memory_order_acquire)) [[likely]] {
-      int available;
-      if (nr_capture_threads > 0) {
-        // Strided mode: producers use per_thread_claim instead of write_index.
-        // Take the minimum watermark across all capture threads — we can only
-        // scan up to the slot the slowest producer has claimed.
-        uint64_t wm = UINT64_MAX;
-        for (int i = 0; i < nr_capture_threads; ++i)
-          wm = std::min(
-              wm, per_thread_claim[i].linear.load(std::memory_order_acquire));
-        available = static_cast<int>(wm - my_read_linear);
-      } else {
-        // Legacy mode: single producer advances write_index under mutex.
-        const int current_write_index =
-            write_index.load(std::memory_order_acquire);
-        available =
-            (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
-            (int)RING_BUFFER_SIZE;
+
+    // Distribute `slots` items (each `stride` ring-index steps apart, starting
+    // at `base_ring`) across WORKER_COUNT workers, signal, and spin-wait.
+    // Write all task ranges before any release store so workers see consistent
+    // state from their acquire load on worker_has_task.
+    auto dispatch_and_wait = [&](int base_ring, int slots, int stride) {
+      const int per_worker = (slots + WORKER_COUNT - 1) / WORKER_COUNT;
+      int items_done = 0;
+      int workers_with_tasks = 0;
+      for (int i = 0; i < WORKER_COUNT; ++i) {
+        const int items = std::min(per_worker, slots - items_done);
+        if (items == 0) break;
+        const int w_start =
+            (base_ring + items_done * stride) % (int)RING_BUFFER_SIZE;
+        const int w_end =
+            (base_ring + (items_done + items) * stride) % (int)RING_BUFFER_SIZE;
+        worker_tasks[i] = {w_start, w_end, stride};
+        ++workers_with_tasks;
+        items_done += items;
       }
-
-      if (available <= 0) [[unlikely]] {
-        _mm_pause();
-        continue;
-      }
-
-      // Clamp batch to available packets; slice_end handles wrap implicitly.
-      const int to_process = std::min(available, REGULAR_BATCH_SIZE);
-      const int slice_end =
-          (current_read_index + to_process) % (int)RING_BUFFER_SIZE;
-
-      const int slice_len = to_process;
-      int per_worker = (slice_len + WORKER_COUNT - 1) / WORKER_COUNT;
-      int start = current_read_index;
-
-      {
-        // Write task ranges and count before releasing any worker_has_task
-        // flag, so workers can't decrement num_workers_with_tasks before we've
-        // finished setting it.
-        int workers_with_tasks = 0;
-        for (auto i = 0; i < WORKER_COUNT; ++i) {
-          int worker_start = start;
-
-          const int slots_remaining =
-              (slice_end - worker_start + (int)RING_BUFFER_SIZE) %
-              (int)RING_BUFFER_SIZE;
-          const int slots_for_worker = std::min(per_worker, slots_remaining);
-          const int worker_end =
-              (worker_start + slots_for_worker) % (int)RING_BUFFER_SIZE;
-
-          if (worker_start != worker_end) {
-            worker_tasks[i] = {worker_start, worker_end};
-            workers_with_tasks++;
-          }
-          start = worker_end;
-        }
-        // Publish count first; the release fence below ensures workers that
-        // acquire their task flag also see this value.
-        num_workers_with_tasks.store(workers_with_tasks,
-                                     std::memory_order_relaxed);
-        // Signal workers: release store ensures worker_tasks[i] write is
-        // visible before any worker reads it via its acquire load below.
-        for (auto i = 0; i < workers_with_tasks; ++i) {
-          worker_has_task[i].store(true, std::memory_order_release);
-        }
-      }
-      // Spin-wait without mutex: lower latency than a CV round-trip for the
-      // short durations of a packet-processing batch.
+      num_workers_with_tasks.store(workers_with_tasks,
+                                   std::memory_order_relaxed);
+      for (int i = 0; i < workers_with_tasks; ++i)
+        worker_has_task[i].store(true, std::memory_order_release);
       while (num_workers_with_tasks.load(std::memory_order_acquire) > 0) {
         if (!running.load(std::memory_order_relaxed)) break;
         _mm_pause();
       }
+    };
 
-      current_read_index = slice_end;
-
+    while (running.load(std::memory_order_acquire)) [[likely]] {
       if (nr_capture_threads > 0) {
-        // Advance the linear read counter and publish it so strided producers
-        // can pass their ring-full check (my_linear - read_linear < RING_SIZE).
-        my_read_linear += to_process;
-        read_linear.store(my_read_linear, std::memory_order_release);
+        // Strided mode: each capture thread owns slots tid, tid+N, tid+2N, ...
+        // Process each thread's claimed range independently so a slow or idle
+        // thread never stalls the others.
+        const int stride = nr_capture_threads;
+        bool any_processed = false;
+
+        for (int tid = 0; tid < nr_capture_threads; ++tid) {
+          const uint64_t claim =
+              per_thread_claim[tid].linear.load(std::memory_order_acquire);
+          if (claim <= per_thread_my_read[tid]) continue;
+
+          const int slots = static_cast<int>(
+              std::min((claim - per_thread_my_read[tid]) / (uint64_t)stride,
+                       (uint64_t)REGULAR_BATCH_SIZE));
+          if (slots == 0) continue;
+
+          dispatch_and_wait(
+              static_cast<int>(per_thread_my_read[tid] % RING_BUFFER_SIZE),
+              slots, stride);
+
+          per_thread_my_read[tid] += (uint64_t)slots * stride;
+          per_thread_read_linear[tid].linear.store(per_thread_my_read[tid],
+                                                   std::memory_order_release);
+          any_processed = true;
+        }
+
+        if (!any_processed) [[unlikely]] {
+          _mm_pause();
+          continue;
+        }
+      } else {
+        // Legacy mode: single producer advances write_index under mutex.
+        const int current_write_index =
+            write_index.load(std::memory_order_acquire);
+        const int available =
+            (current_write_index - current_read_index + (int)RING_BUFFER_SIZE) %
+            (int)RING_BUFFER_SIZE;
+
+        if (available <= 0) [[unlikely]] {
+          _mm_pause();
+          continue;
+        }
+
+        const int to_process = std::min(available, REGULAR_BATCH_SIZE);
+        const int slice_end =
+            (current_read_index + to_process) % (int)RING_BUFFER_SIZE;
+
+        dispatch_and_wait(current_read_index, to_process, 1);
+
+        current_read_index = slice_end;
+        read_index.store(current_read_index, std::memory_order_release);
       }
-      read_index.store(current_read_index, std::memory_order_release);
 
       if (--packets_until_completion_check == 0) {
         // Before checking buffer completion drain any packets from the
@@ -944,7 +952,7 @@ public:
         _mm_pause();
       }
 
-      auto [start, end] = worker_tasks[worker_id];
+      auto [start, end, stride] = worker_tasks[worker_id];
 
       int idx = start;
 
@@ -952,10 +960,10 @@ public:
 
         auto *entry = d_packet_data[idx];
 
-        // Prefetch 8 slots ahead: at ~5 ns/packet an L3 miss (~40 ns) needs 8
-        // slots of runway.
+        // Prefetch ahead scaled by stride so the lookahead in real slots stays
+        // constant regardless of the striding factor.
         constexpr int PREFETCH_DIST = 8;
-        const int pre_idx = (idx + PREFETCH_DIST) % RING_BUFFER_SIZE;
+        const int pre_idx = (idx + PREFETCH_DIST * stride) % RING_BUFFER_SIZE;
         __builtin_prefetch(d_packet_data[pre_idx], 0, 1);
         __builtin_prefetch(d_packet_data[pre_idx]->data, 0, 1);
         __builtin_prefetch(d_packet_data[pre_idx]->data + 42, 0, 1);
@@ -970,7 +978,7 @@ public:
             !entry->processed.load(std::memory_order_relaxed)) {
           process_packet_data(entry, idx, global_max);
         }
-        idx = (idx + 1) % RING_BUFFER_SIZE;
+        idx = (idx + stride) % RING_BUFFER_SIZE;
       }
 
       // Clear flag BEFORE decrementing so the main thread can't re-signal this
@@ -1196,17 +1204,19 @@ public:
   // Lock-free strided override: no mutex, no shared write_index.
   // Thread thread_id owns slots thread_id, thread_id+N, thread_id+2N, ...
   // my_linear is the caller's monotonic counter (local to the capture thread).
-  // per_thread_claim[thread_id] is published so the consumer can compute the
-  // min-watermark without taking any lock.
+  // per_thread_claim[thread_id] is published so the consumer can independently
+  // track each thread's claimed slots without taking any lock.
   int reserve_write_batch_strided(int thread_id, uint64_t &my_linear,
                                   int max_n, void **slot_ptrs,
                                   int *slot_indices) override {
     const int stride = (nr_capture_threads > 0) ? nr_capture_threads : 1;
     int reserved = 0;
     for (int b = 0; b < max_n; ++b) {
-      // Ring-full: spin until the consumer has advanced read_linear far
-      // enough to free this slot for reuse.
-      while (my_linear - read_linear.load(std::memory_order_acquire) >=
+      // Ring-full: spin until the consumer has advanced this thread's
+      // per_thread_read_linear far enough to free this slot for reuse.
+      while (my_linear -
+                 per_thread_read_linear[thread_id].linear.load(
+                     std::memory_order_acquire) >=
              RING_BUFFER_SIZE) {
         if (!running.load(std::memory_order_acquire))
           return reserved;
@@ -1227,8 +1237,8 @@ public:
       ++reserved;
       my_linear += stride;
     }
-    // Publish watermark: consumer reads min(per_thread_claim) to know how
-    // far it can scan the ring.
+    // Publish watermark: consumer reads per_thread_claim[tid] per-thread
+    // to advance its own read cursor for this thread's slots.
     per_thread_claim[thread_id].linear.store(my_linear,
                                              std::memory_order_release);
     return reserved;
@@ -1306,6 +1316,7 @@ private:
   struct alignas(64) WorkRange {
     int start;
     int end;
+    int stride{1};
   };
 
   // Per-worker task signaling. Main writes worker_tasks[i] then stores true
