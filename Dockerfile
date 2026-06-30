@@ -182,9 +182,9 @@ WORKDIR ../psrchive-code
 RUN ./bootstrap
 RUN ./configure --prefix=/usr/local
 RUN make -j$(nproc)
-RUN ./packages/pgplot.csh
-RUN ./packages/tempo.csh
-RUN ./configure --prefix=/usr/local
+#RUN ./packages/pgplot.csh
+#RUN ./packages/tempo.csh
+#RUN ./configure --prefix=/usr/local
 RUN make -j$(nproc)
 RUN make install
 
@@ -215,6 +215,10 @@ WORKDIR /tmp
 ENV PATH="/usr/local/bin:/tmp/psrcat_tar/:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
 ENV PSRHOME="/usr/local"
+
+RUN apt update && apt install -y npm
+RUN npm install -g @anthropic-ai/claude-code
+
 
 SHELL ["/bin/bash", "--login", "-c"]
 
