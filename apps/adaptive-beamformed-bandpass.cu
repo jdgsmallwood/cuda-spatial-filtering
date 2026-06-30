@@ -98,9 +98,12 @@ int main(int argc, char *argv[]) {
           eigendata_file);
 
   std::cout << "Creating Output Handler\n";
-  std::string beam_filename =
-      make_default_filename("beam", args.min_freq_channel,
-                            num_lambda_channels, args.fpga_id_vec);
+  std::string beam_filename = args.beam_output_filename.empty()
+                                  ? make_default_filename("beam",
+                                                          args.min_freq_channel,
+                                                          num_lambda_channels,
+                                                          args.fpga_id_vec)
+                                  : args.beam_output_filename;
   HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   auto beam_writer =
       std::make_unique<HDF5BeamWriter<BeamOutputType,
