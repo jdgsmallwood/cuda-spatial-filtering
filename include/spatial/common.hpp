@@ -130,6 +130,7 @@ private:
 struct CommonArgs {
   std::string pcap_filename;
   std::string output_filename; // may be empty → caller picks a default
+  std::string beam_output_filename;
   std::string config_filename;
   std::string gains_filename;
   std::string beam_weights_filename;
@@ -249,6 +250,11 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
   program.add_argument("-v", "--vis_output_file")
       .help("specify a file name for the output")
       .store_into(args.output_filename);
+
+  program.add_argument("--beam-output-file")
+      .help("fully qualified or relative filename for beam HDF5 output")
+      .default_value(std::string(""))
+      .store_into(args.beam_output_filename);
 
   program.add_argument("-f", "--min_freq_channel")
       .help("specify the lowest frequency channel")
