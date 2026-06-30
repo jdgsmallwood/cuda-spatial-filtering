@@ -6,13 +6,13 @@
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
-#include <immintrin.h>
 #include <fitsio.h>
 #include <fstream>
 #include <hdf5.h>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
 #include <highfive/H5File.hpp>
+#include <immintrin.h>
 #include <memory>
 #include <string>
 #include <thread>
@@ -51,6 +51,14 @@ extern "C" {
 #include "ipcio.h"
 #include "multilog.h"
 }
+
+template <typename T> struct hdf5_storage_type {
+  using type = T;
+};
+
+template <> struct hdf5_storage_type<__half> {
+  using type = uint16_t;
+};
 
 template <typename BeamOutputType, typename ArrivalsOutputType>
 struct BeamBlock {
@@ -361,6 +369,7 @@ public:
       : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file) {
     using namespace HighFive;
     using beam_type = typename std::remove_all_extents<BeamT>::type;
+    using beam_storage_type = typename hdf5_storage_type<beam_type>::type;
     using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
@@ -394,8 +403,8 @@ public:
     beam_props.add(Chunking(beam_chunk));
     beam_props.add(Shuffle());
     beam_props.add(Deflate(1));
-    beam_dataset_ =
-        file_.createDataSet<beam_type>("beam_data", beam_space, beam_props);
+    beam_dataset_ = file_.createDataSet<beam_storage_type>(
+        "beam_data", beam_space, beam_props);
 
     // Create arrivals dataset
     DataSpace arrivals_space(arrivals_dataset_dims, arrivals_dataset_max_dims);
@@ -426,9 +435,13 @@ public:
     std::vector<size_t> beam_count = {1};
     beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
 
-    using beam_type = typename std::remove_all_extents<BeamT>::type;
-    beam_dataset_.select(beam_offset, beam_count)
-        .write_raw(&block.beam_data[0]);
+    if constexpr (std::is_same_v<beam_type, __half>) {
+      beam_dataset_.select(beam_offset, beam_count)
+          .write_raw(reinterpret_cast<const uint16_t *>(&block.beam_data[0]));
+    } else {
+      beam_dataset_.select(beam_offset, beam_count)
+          .write_raw(&block.beam_data[0]);
+    }
 
     std::vector<size_t> arrivals_new_dims = {n + 1};
     arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
@@ -569,8 +582,7 @@ public:
   HDF5VisibilitiesWriter(
       HighFive::File &file, const int min_channel, const int max_channel,
       const std::unordered_map<int, int> *antenna_map = nullptr,
-      const int num_blocks = 100,
-      const int deflate_level = 0)
+      const int num_blocks = 100, const int deflate_level = 0)
       : VisibilitiesWriter<T>(num_blocks), file_(file), batch_size_(num_blocks),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)) {
@@ -1472,7 +1484,8 @@ public:
     vec_offset.insert(vec_offset.end(), vec_dims_.size(), 0);
     std::vector<size_t> vec_count = {1};
     vec_count.insert(vec_count.end(), vec_dims_.begin(), vec_dims_.end());
-    vec_dataset_.select(vec_offset, vec_count).write_raw(&block.eigenvectors[0]);
+    vec_dataset_.select(vec_offset, vec_count)
+        .write_raw(&block.eigenvectors[0]);
 
     // ---- sequence numbers ---------------------------------------------------
     seq_dataset_.resize({n + 1, 2});
