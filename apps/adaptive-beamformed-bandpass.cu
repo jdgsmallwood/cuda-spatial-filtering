@@ -44,8 +44,10 @@ int main(int argc, char *argv[]) {
            [nr_lambda_time_steps_per_packet - 10];
 
   using BeamOutputType =
-      __half[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
-            [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
+      std::complex<__half>[NR_OBSERVING_CHANNELS][nr_lambda_polarizations]
+                           [2 * nr_lambda_beams]
+                           [NR_OBSERVING_PACKETS_FOR_CORRELATION *
+                            nr_lambda_time_steps_per_packet];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -96,11 +98,19 @@ int main(int argc, char *argv[]) {
           eigendata_file);
 
   std::cout << "Creating Output Handler\n";
+  std::string beam_filename =
+      make_default_filename("beam", args.min_freq_channel,
+                            num_lambda_channels, args.fpga_id_vec);
+  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
+  auto beam_writer =
+      std::make_unique<HDF5BeamWriter<BeamOutputType,
+                                      Config::ArrivalsOutputType>>(beam_file);
 
   auto output =
       std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
                                       Eigenvectors, BeamOutputType>>(
-          nullptr, nullptr, std::move(eigen_writer), std::move(fft_writer));
+          std::move(beam_writer), nullptr, std::move(eigen_writer),
+          std::move(fft_writer));
 
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;

@@ -2185,9 +2185,8 @@ private:
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
   using BeamOutput =
-      __half[2 * T::NR_BEAMS][T::NR_PACKETS_FOR_CORRELATION]
-            [T::NR_CHANNELS * (T::NR_TIME_STEPS_PER_PACKET -
-                               2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE)];
+      std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS]
+                           [2 * T::NR_BEAMS][NR_TIME_STEPS_FOR_CORRELATION];
   using ProjectionMatrix =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                           [T::NR_RECEIVERS];
@@ -2221,8 +2220,9 @@ private:
     DevicePtr<BeamOutput> beam_output;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output,
         samples_cufft_output_fine_channel;
-    DevicePtr<FineChannelRemovedType> samples_fine_channel_removed, beam_shape,
+    DevicePtr<FineChannelRemovedType> samples_fine_channel_removed,
         cufft_downsampled_input;
+    DevicePtr<BeamformerOutput> beam_output_float;
     DevicePtr<FFTOutputType> cufft_downsampled_output;
     DevicePtr<BeamWeights> weights;
     DevicePtr<BeamWeights> weights_permuted, weights_updated;
@@ -2277,8 +2277,8 @@ private:
           samples_padding(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
-          beam_shape(make_device_ptr<FineChannelRemovedType>()),
           beam_output(make_device_ptr<BeamOutput>()),
+          beam_output_float(make_device_ptr<BeamformerOutput>()),
           samples_cufft_output(make_device_ptr<FFTCUFFTOutputType>()),
           samples_cufft_output_fine_channel(
               make_device_ptr<FFTCUFFTOutputType>()),
@@ -2373,7 +2373,7 @@ private:
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
           beam_output(std::move(other.beam_output)),
-          beam_shape(std::move(other.beam_shape)),
+          beam_output_float(std::move(other.beam_output_float)),
           samples_cufft_input(std::move(other.samples_cufft_input)),
           samples_cufft_output(std::move(other.samples_cufft_output)),
           cufft_downsampled_output(std::move(other.cufft_downsampled_output)),
@@ -2427,7 +2427,7 @@ private:
         samples_consolidated_col_maj =
             std::move(other.samples_consolidated_col_maj);
         beam_output = std::move(other.beam_output);
-        beam_shape = std::move(other.beam_shape);
+        beam_output_float = std::move(other.beam_output_float);
         samples_cufft_input = std::move(other.samples_cufft_input);
         samples_cufft_output = std::move(other.samples_cufft_output);
         cufft_downsampled_output = std::move(other.cufft_downsampled_output);
@@ -2507,8 +2507,7 @@ private:
                                                                's', 'f', 'n'};
 
   inline static const std::vector<int> modeBeamCCGLIB{'c', 'p', 'z', 'e', 's'};
-  inline static const std::vector<int> modeBeamOutput{'e', 'o', 'c',
-                                                      'g', 'p', 'z'};
+  inline static const std::vector<int> modeBeamOutput{'c', 'p', 'e', 's', 'z'};
   inline static const std::vector<int> modeWeightsInput{'c', 'p', 'm', 'r',
                                                         'z'};
   inline static const std::vector<int> modeWeightsBeamMajor{'m', 'c', 'p', 'r',
@@ -2785,13 +2784,18 @@ public:
                        (CUdeviceptr)b.samples_consolidated_col_maj.get(),
                        (CUdeviceptr)b.beamformer_output.get());
 
+    tensor_32.runPermutation("beamCCGLIBToBeamOutput", alpha_32,
+                             (float *)b.beamformer_output.get(),
+                             (float *)b.beam_output_float.get(), b.stream);
+
+    convert_float_to_half((float *)b.beam_output_float.get(),
+                          (__half *)b.beam_output.get(),
+                          sizeof(BeamOutput) / sizeof(__half), b.stream);
+
     tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
                              (float *)b.beamformer_output.get(),
                              (float *)b.samples_cufft_input.get(), b.stream);
 
-    // convert_float_to_half((float *)b.beam_shape.get(),
-    //                       (__half *)b.beam_output.get(),
-    //                       sizeof(BeamOutput) / sizeof(__half), b.stream);
     CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
                             (void *)b.samples_cufft_output.get(),
                             CUFFT_FORWARD));
@@ -2815,10 +2819,6 @@ public:
     dest_ptr = (char *)b.samples_fine_channel_removed.get();
     cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
 
-    tensor_32.runPermutation("fineChannelRemovedToBeamOutput", alpha_32,
-                             (float *)b.samples_fine_channel_removed.get(),
-                             (float *)b.beam_shape.get(), b.stream);
-
     tensor_32.runPermutation("fineChannelRemovedToBeamFFTDownsample", alpha_32,
                              (float *)b.samples_fine_channel_removed.get(),
                              (float *)b.cufft_downsampled_input.get(),
@@ -2833,10 +2833,6 @@ public:
         T::NR_CHANNELS, T::NR_POLARIZATIONS,
         T::NR_TIME_STEPS_PER_PACKET - 2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE,
         T::NR_PACKETS_FOR_CORRELATION, b.stream);
-
-    detect_and_convert_to_half_launch(
-        (float4 *)b.beam_shape.get(), (__half *)b.beam_output.get(),
-        sizeof(BeamOutput) / sizeof(__half), b.stream);
 
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
@@ -3006,9 +3002,9 @@ public:
                              CUTENSOR_COMPUTE_DESC_32F,
                              "cufftOutputToFineChannelRemove");
 
-    tensor_32.addPermutation("fineChannelRemoved", "beamOutput",
+    tensor_32.addPermutation("beamCCGLIB", "beamOutput",
                              CUTENSOR_COMPUTE_DESC_32F,
-                             "fineChannelRemovedToBeamOutput");
+                             "beamCCGLIBToBeamOutput");
     tensor_32.addPermutation("fineChannelRemoved", "beamFFTDownsample",
                              CUTENSOR_COMPUTE_DESC_32F,
                              "fineChannelRemovedToBeamFFTDownsample");
