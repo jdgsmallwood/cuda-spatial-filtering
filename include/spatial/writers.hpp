@@ -380,7 +380,8 @@ class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
   using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
 
 public:
-  HDF5BeamWriter(HighFive::File &file, const int num_blocks = 100)
+  HDF5BeamWriter(HighFive::File &file, const int num_blocks = 100,
+                 const int deflate_level = 0)
       : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file),
         batch_size_(num_blocks) {
     using namespace HighFive;
@@ -421,8 +422,10 @@ public:
     DataSpace beam_space(beam_dataset_dims, beam_dataset_max_dims);
     DataSetCreateProps beam_props;
     beam_props.add(Chunking(beam_chunk));
-    beam_props.add(Shuffle());
-    beam_props.add(Deflate(1));
+    if (deflate_level > 0) {
+      beam_props.add(Shuffle());
+      beam_props.add(Deflate(deflate_level));
+    }
     beam_dataset_ = file_.createDataSet<beam_storage_type>(
         "beam_data", beam_space, beam_props);
 

@@ -35,8 +35,8 @@ int main(int argc, char *argv[]) {
       nr_lambda_receivers, nr_lambda_polarizations,
       nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
       nr_lambda_beams, nr_lambda_padded_receivers,
-      nr_lambda_padded_receivers_per_block,
-      nr_correlation_blocks_to_integrate, true, fft_downsample_factor>;
+      nr_lambda_padded_receivers_per_block, nr_correlation_blocks_to_integrate,
+      true, fft_downsample_factor>;
 
   // 2x as there will be original & RFI mitigated beams.
   using FFTOutputType =
@@ -45,9 +45,9 @@ int main(int argc, char *argv[]) {
 
   using BeamOutputType =
       std::complex<__half>[NR_OBSERVING_CHANNELS][nr_lambda_polarizations]
-                           [2 * nr_lambda_beams]
-                           [NR_OBSERVING_PACKETS_FOR_CORRELATION *
-                            nr_lambda_time_steps_per_packet];
+                          [2 * nr_lambda_beams]
+                          [NR_OBSERVING_PACKETS_FOR_CORRELATION *
+                           nr_lambda_time_steps_per_packet];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -93,21 +93,19 @@ int main(int argc, char *argv[]) {
   using Eigenvectors =
       std::complex<float>[Config::NR_CHANNELS][Config::NR_POLARIZATIONS]
                          [nr_lambda_receivers][nr_lambda_receivers];
-  auto eigen_writer =
-      std::make_unique<HDF5EigenWriter<Eigenvalues, Eigenvectors>>(
-          eigendata_file);
+  auto eigen_writer = nullptr;
+  // std::make_unique<HDF5EigenWriter<Eigenvalues, Eigenvectors>>(
+  //   eigendata_file);
 
   std::cout << "Creating Output Handler\n";
-  std::string beam_filename = args.beam_output_filename.empty()
-                                  ? make_default_filename("beam",
-                                                          args.min_freq_channel,
-                                                          num_lambda_channels,
-                                                          args.fpga_id_vec)
-                                  : args.beam_output_filename;
+  std::string beam_filename =
+      args.beam_output_filename.empty()
+          ? make_default_filename("beam", args.min_freq_channel,
+                                  num_lambda_channels, args.fpga_id_vec)
+          : args.beam_output_filename;
   HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  auto beam_writer =
-      std::make_unique<HDF5BeamWriter<BeamOutputType,
-                                      Config::ArrivalsOutputType>>(beam_file);
+  auto beam_writer = std::make_unique<
+      HDF5BeamWriter<BeamOutputType, Config::ArrivalsOutputType>>(beam_file);
 
   auto output =
       std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
