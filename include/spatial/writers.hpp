@@ -6,6 +6,9 @@
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
+#include <complex>
+#include <cstdint>
+#include <cuda_fp16.h>
 #include <fitsio.h>
 #include <fstream>
 #include <hdf5.h>
@@ -59,6 +62,14 @@ template <typename T> struct hdf5_storage_type {
 template <> struct hdf5_storage_type<__half> {
   using type = uint16_t;
 };
+
+template <> struct hdf5_storage_type<std::complex<__half>> {
+  using type = uint16_t;
+};
+
+template <typename T> struct is_complex_half : std::false_type {};
+
+template <> struct is_complex_half<std::complex<__half>> : std::true_type {};
 
 template <typename BeamOutputType, typename ArrivalsOutputType>
 struct BeamBlock {
@@ -370,12 +381,20 @@ class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 
 public:
   HDF5BeamWriter(HighFive::File &file, const int num_blocks = 100)
-      : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file) {
+      : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file),
+        batch_size_(num_blocks) {
     using namespace HighFive;
-    beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
+    beam_storage_element_count_ =
+        sizeof(BeamT) / sizeof(beam_storage_type);
     beam_dims_ = get_array_dims<BeamT>();
+    if constexpr (is_complex_half<beam_type>::value) {
+      beam_dims_.push_back(2);
+    }
     arrivals_dims_ = get_array_dims<ArrivalsT>();
+    beam_buffer_.reserve(batch_size_ * beam_storage_element_count_);
+    arrivals_buffer_.reserve(batch_size_ * arrivals_element_count_);
+    seq_buffer_.reserve(batch_size_ * 2);
 
     std::vector<size_t> beam_dataset_dims = {0};
     std::vector<size_t> beam_dataset_max_dims = {DataSpace::UNLIMITED};
@@ -384,7 +403,7 @@ public:
                              beam_dims_.end());
     beam_dataset_max_dims.insert(beam_dataset_max_dims.end(),
                                  beam_dims_.begin(), beam_dims_.end());
-    std::vector<hsize_t> beam_chunk = {1};
+    std::vector<hsize_t> beam_chunk = {static_cast<hsize_t>(batch_size_)};
     beam_chunk.insert(beam_chunk.end(), beam_dims_.begin(), beam_dims_.end());
 
     std::vector<size_t> arrivals_dataset_dims = {0};
@@ -395,7 +414,7 @@ public:
     arrivals_dataset_max_dims.insert(arrivals_dataset_max_dims.end(),
                                      arrivals_dims_.begin(),
                                      arrivals_dims_.end());
-    std::vector<hsize_t> arrivals_chunk = {1};
+    std::vector<hsize_t> arrivals_chunk = {static_cast<hsize_t>(batch_size_)};
     arrivals_chunk.insert(arrivals_chunk.end(), arrivals_dims_.begin(),
                           arrivals_dims_.end());
     // Create beam dataset
@@ -415,7 +434,8 @@ public:
         "arrivals", arrivals_space, arrivals_props);
 
     DataSetCreateProps beam_seq_props;
-    beam_seq_props.add(Chunking(std::vector<hsize_t>{1, 2}));
+    beam_seq_props.add(
+        Chunking(std::vector<hsize_t>{static_cast<hsize_t>(batch_size_), 2}));
     // Create sequence number dataset
     beam_seq_dataset_ = file_.createDataSet<size_t>(
         "beam_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
@@ -424,50 +444,72 @@ public:
 
   void process_block(
       const typename BeamWriter<BeamT, ArrivalsT>::BlockType &block) override {
-    INFO_LOG("Writing beam block...");
-    const size_t n = n_blocks_written_;
+    const auto *beam_ptr =
+        reinterpret_cast<const beam_storage_type *>(&block.beam_data);
+    beam_buffer_.insert(beam_buffer_.end(), beam_ptr,
+                        beam_ptr + beam_storage_element_count_);
 
-    std::vector<size_t> new_dims = {n + 1};
+    const auto *arrivals_ptr =
+        reinterpret_cast<const uint8_t *>(&block.arrivals_data);
+    arrivals_buffer_.insert(arrivals_buffer_.end(), arrivals_ptr,
+                            arrivals_ptr + arrivals_element_count_);
+
+    seq_buffer_.push_back(block.start_seq_num);
+    seq_buffer_.push_back(block.end_seq_num);
+
+    buffer_count_++;
+    if (buffer_count_ >= batch_size_) {
+      flush();
+    }
+  }
+
+  void flush() override {
+    if (buffer_count_ == 0) {
+      file_.flush();
+      return;
+    }
+
+    const size_t current_size = n_blocks_written_;
+    std::vector<size_t> new_dims = {current_size + buffer_count_};
     new_dims.insert(new_dims.end(), beam_dims_.begin(), beam_dims_.end());
     beam_dataset_.resize(new_dims);
 
-    std::vector<size_t> beam_offset = {n};
+    std::vector<size_t> beam_offset = {current_size};
     beam_offset.insert(beam_offset.end(), beam_dims_.size(), 0);
-    std::vector<size_t> beam_count = {1};
+    std::vector<size_t> beam_count = {buffer_count_};
     beam_count.insert(beam_count.end(), beam_dims_.begin(), beam_dims_.end());
+    beam_dataset_.select(beam_offset, beam_count)
+        .write_raw(beam_buffer_.data());
 
-    if constexpr (std::is_same_v<beam_type, __half>) {
-      beam_dataset_.select(beam_offset, beam_count)
-          .write_raw(reinterpret_cast<const uint16_t *>(&block.beam_data[0]));
-    } else {
-      beam_dataset_.select(beam_offset, beam_count)
-          .write_raw(&block.beam_data[0]);
-    }
-
-    std::vector<size_t> arrivals_new_dims = {n + 1};
+    std::vector<size_t> arrivals_new_dims = {current_size + buffer_count_};
     arrivals_new_dims.insert(arrivals_new_dims.end(), arrivals_dims_.begin(),
                              arrivals_dims_.end());
-    std::vector<size_t> arrivals_offset = {n};
+    arrivals_dataset_.resize(arrivals_new_dims);
+
+    std::vector<size_t> arrivals_offset = {current_size};
     arrivals_offset.insert(arrivals_offset.end(), arrivals_dims_.size(), 0);
-    std::vector<size_t> arrivals_count = {1};
+    std::vector<size_t> arrivals_count = {buffer_count_};
     arrivals_count.insert(arrivals_count.end(), arrivals_dims_.begin(),
                           arrivals_dims_.end());
-    arrivals_dataset_.resize(arrivals_new_dims);
     arrivals_dataset_.select(arrivals_offset, arrivals_count)
-        .write_raw(&block.arrivals_data[0]);
+        .write_raw(reinterpret_cast<const arrival_type *>(
+            arrivals_buffer_.data()));
 
-    beam_seq_dataset_.resize({n + 1, 2});
-    std::vector<size_t> seq_nums = {block.start_seq_num, block.end_seq_num};
-    beam_seq_dataset_.select({n, 0}, {1, 2}).write_raw(seq_nums.data());
+    beam_seq_dataset_.resize({current_size + buffer_count_, 2});
+    beam_seq_dataset_.select({current_size, 0}, {buffer_count_, 2})
+        .write_raw(seq_buffer_.data());
 
-    ++n_blocks_written_;
+    n_blocks_written_ += buffer_count_;
+    beam_buffer_.clear();
+    arrivals_buffer_.clear();
+    seq_buffer_.clear();
+    buffer_count_ = 0;
+    file_.flush();
   }
-
-  void flush() override { file_.flush(); }
 
 private:
   HighFive::File &file_;
-  size_t beam_element_count_;
+  size_t beam_storage_element_count_;
   std::vector<size_t> beam_dims_;
   size_t arrivals_element_count_;
   std::vector<size_t> arrivals_dims_;
@@ -475,6 +517,11 @@ private:
   HighFive::DataSet arrivals_dataset_;
   HighFive::DataSet beam_seq_dataset_;
   size_t n_blocks_written_ = 0;
+  size_t batch_size_;
+  size_t buffer_count_ = 0;
+  std::vector<beam_storage_type> beam_buffer_;
+  std::vector<uint8_t> arrivals_buffer_;
+  std::vector<size_t> seq_buffer_;
 };
 
 template <typename T> class HDF5FFTWriter : public FFTWriter<T> {
