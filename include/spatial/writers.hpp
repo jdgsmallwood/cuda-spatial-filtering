@@ -364,13 +364,14 @@ constexpr auto get_array_dims() {
 template <typename BeamT, typename ArrivalsT>
 class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 
+  using beam_type = typename std::remove_all_extents<BeamT>::type;
+  using beam_storage_type = typename hdf5_storage_type<beam_type>::type;
+  using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
+
 public:
   HDF5BeamWriter(HighFive::File &file, const int num_blocks = 100)
       : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file) {
     using namespace HighFive;
-    using beam_type = typename std::remove_all_extents<BeamT>::type;
-    using beam_storage_type = typename hdf5_storage_type<beam_type>::type;
-    using arrival_type = typename std::remove_all_extents<ArrivalsT>::type;
     beam_element_count_ = sizeof(BeamT) / sizeof(beam_type);
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
     beam_dims_ = get_array_dims<BeamT>();
