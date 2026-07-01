@@ -2701,88 +2701,110 @@ public:
         CUSOLVER_BATCH_SIZE));
 
     // ------------------------------------------------------------------
-    // 11. Build projection filter M = V_scaled * V^H and convert to fp16.
+    // 11. Build projection filter and convert to fp16.
     //
-    //     V_scaled is V with each column k multiplied by a scalar d[k]:
-    //       d[k] = 1                    for non-RFI eigenvectors (k < N-K)
-    //       d[k] = 0                    for RFI eigenvectors, null mode
-    //       d[k] = lambda_bar / lambda_k for RFI eigenvectors, shrink mode
-    //     where lambda_bar = mean of the non-RFI eigenvalues.
+    //  Null mode  (shrink_eigenvalues_=false, original behaviour):
+    //    P = U * U^H  (U = last K cols of V, the dominant RFI eigenvectors)
+    //    projection_matrix = I - P   (via computeIdentityMinusA, fp16)
+    //    Identical to the pre-shrinkage code path — no stream stall, no
+    //    extra D→H copies.
     //
-    //     Because V is unitary, V * diag([1,..,1,0,..,0]) * V^H = I - U*U^H,
-    //     so null mode (d_rfi=0) is algebraically identical to the previous
-    //     (I-P) path.  Shrink mode attenuates rather than zeros.
-    //
-    //     cusolverDnXsyevBatched is async on the handle stream; we must sync
-    //     before reading eigenvalues to the host for the CPU d[] computation.
+    //  Shrink mode (shrink_eigenvalues_=true):
+    //    d[k] = 1               for k < N-K  (non-RFI, keep)
+    //    d[k] = λ̄ / λ_k         for k ≥ N-K  (RFI, attenuate; λ̄=mean non-RFI)
+    //    projection_matrix = V_scaled * V^H  (fp16)
+    //    Requires eigenvalues on the CPU → sync + D→H copy before the loop.
     // ------------------------------------------------------------------
     {
       constexpr int N = T::NR_RECEIVERS;
+      const cuComplex gemm_alpha{1.0f, 0.0f};
+      const cuComplex gemm_beta{0.0f, 0.0f};
+      auto *V_base = reinterpret_cast<cuComplex *>(b.decomp_visibilities.get());
+      auto *P_base = reinterpret_cast<cuComplex *>(b.float_projection_matrix.get());
 
-      CUDA_CHECK(cudaStreamSynchronize(b.stream));
-      CUDA_CHECK(cudaMemcpy(b.h_eigenvalues_buf.data(), b.eigenvalues.get(),
-                            sizeof(Eigenvalues), cudaMemcpyDeviceToHost));
+      if (!shrink_eigenvalues_) {
+        // --- Original null path (bit-identical to pre-change behaviour) ---
+        for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
+          const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
+          const int col_offset = N - K;
+          for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+            int flat = channel * T::NR_POLARIZATIONS + pol;
+            cuComplex *V_batch = V_base + flat * N * N;
+            cuComplex *U = V_batch + col_offset * N;
+            cuComplex *P_batch = P_base + flat * N * N;
+            CUBLAS_CHECK(cublasGemmEx(b.cublas_handle,
+                                      CUBLAS_OP_N, CUBLAS_OP_C,
+                                      N, N, K, &gemm_alpha,
+                                      U, CUDA_C_32F, N,
+                                      U, CUDA_C_32F, N,
+                                      &gemm_beta, P_batch, CUDA_C_32F, N,
+                                      CUBLAS_COMPUTE_32F,
+                                      CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+          }
+        }
+        computeIdentityMinusA((float2 *)b.float_projection_matrix.get(),
+                              (__half2 *)b.projection_matrix.get(),
+                              T::NR_RECEIVERS,
+                              T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
+      } else {
+        // --- Shrink path: M = V_scaled * V^H, projection_matrix = M (fp16) ---
+        // cusolverDnXsyevBatched is async on the handle stream; sync first
+        // so the eigenvalues are available on the host.
+        CUDA_CHECK(cudaStreamSynchronize(b.stream));
+        CUDA_CHECK(cudaMemcpy(b.h_eigenvalues_buf.data(), b.eigenvalues.get(),
+                              sizeof(Eigenvalues), cudaMemcpyDeviceToHost));
 
-      for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
-        const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
-        for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
-          int flat = channel * T::NR_POLARIZATIONS + pol;
-          const float *eigs = b.h_eigenvalues_buf.data() + flat * N;
-          float *d = b.h_scale_factors_buf.data() + flat * N;
+        for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
+          const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
+          for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+            int flat = channel * T::NR_POLARIZATIONS + pol;
+            const float *eigs = b.h_eigenvalues_buf.data() + flat * N;
+            float *d = b.h_scale_factors_buf.data() + flat * N;
 
-          for (int k = 0; k < N - K; ++k)
-            d[k] = 1.0f;
-
-          if (shrink_eigenvalues_) {
             float lambda_bar = 0.0f;
             if (K < N) {
               for (int k = 0; k < N - K; ++k)
                 lambda_bar += eigs[k];
               lambda_bar /= static_cast<float>(N - K);
             }
+            for (int k = 0; k < N - K; ++k)
+              d[k] = 1.0f;
             for (int k = N - K; k < N; ++k)
               d[k] = (eigs[k] > 0.0f) ? lambda_bar / eigs[k] : 0.0f;
-          } else {
-            for (int k = N - K; k < N; ++k)
-              d[k] = 0.0f;
           }
         }
+
+        CUDA_CHECK(cudaMemcpyAsync(b.d_scale_factors.get(),
+                                   b.h_scale_factors_buf.data(),
+                                   sizeof(Eigenvalues), cudaMemcpyHostToDevice,
+                                   b.stream));
+
+        scaleEigenvectorColumns(
+            reinterpret_cast<const float2 *>(b.decomp_visibilities.get()),
+            reinterpret_cast<float2 *>(b.scaled_eigenvectors.get()),
+            reinterpret_cast<const float *>(b.d_scale_factors.get()),
+            N, CUSOLVER_BATCH_SIZE, b.stream);
+
+        auto *Vs_base = reinterpret_cast<cuComplex *>(b.scaled_eigenvectors.get());
+        auto *M_base  = reinterpret_cast<cuComplex *>(b.float_projection_matrix.get());
+
+        for (int i = 0; i < CUSOLVER_BATCH_SIZE; ++i) {
+          CUBLAS_CHECK(cublasGemmEx(b.cublas_handle,
+                                    CUBLAS_OP_N, CUBLAS_OP_C,
+                                    N, N, N, &gemm_alpha,
+                                    Vs_base + i * N * N, CUDA_C_32F, N,
+                                    V_base  + i * N * N, CUDA_C_32F, N,
+                                    &gemm_beta,
+                                    M_base  + i * N * N, CUDA_C_32F, N,
+                                    CUBLAS_COMPUTE_32F,
+                                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+        }
+
+        convert_float_to_half(
+            reinterpret_cast<float *>(b.float_projection_matrix.get()),
+            reinterpret_cast<__half *>(b.projection_matrix.get()),
+            sizeof(FloatProjectionMatrix) / sizeof(float), b.stream);
       }
-
-      CUDA_CHECK(cudaMemcpyAsync(b.d_scale_factors.get(),
-                                 b.h_scale_factors_buf.data(),
-                                 sizeof(Eigenvalues), cudaMemcpyHostToDevice,
-                                 b.stream));
-
-      scaleEigenvectorColumns(
-          reinterpret_cast<const float2 *>(b.decomp_visibilities.get()),
-          reinterpret_cast<float2 *>(b.scaled_eigenvectors.get()),
-          reinterpret_cast<const float *>(b.d_scale_factors.get()),
-          N, CUSOLVER_BATCH_SIZE, b.stream);
-
-      const cuComplex gemm_alpha{1.0f, 0.0f};
-      const cuComplex gemm_beta{0.0f, 0.0f};
-      auto *V_base  = reinterpret_cast<cuComplex *>(b.decomp_visibilities.get());
-      auto *Vs_base = reinterpret_cast<cuComplex *>(b.scaled_eigenvectors.get());
-      auto *M_base  = reinterpret_cast<cuComplex *>(b.float_projection_matrix.get());
-
-      for (int i = 0; i < CUSOLVER_BATCH_SIZE; ++i) {
-        CUBLAS_CHECK(cublasGemmEx(b.cublas_handle,
-                                  CUBLAS_OP_N, CUBLAS_OP_C,
-                                  N, N, N,
-                                  &gemm_alpha,
-                                  Vs_base + i * N * N, CUDA_C_32F, N,
-                                  V_base  + i * N * N, CUDA_C_32F, N,
-                                  &gemm_beta,
-                                  M_base  + i * N * N, CUDA_C_32F, N,
-                                  CUBLAS_COMPUTE_32F,
-                                  CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-      }
-
-      convert_float_to_half(
-          reinterpret_cast<float *>(b.float_projection_matrix.get()),
-          reinterpret_cast<__half *>(b.projection_matrix.get()),
-          sizeof(FloatProjectionMatrix) / sizeof(float), b.stream);
     }
 
     // conjugateMatrix((__half2 *)b.projection_matrix.get(),
