@@ -390,6 +390,35 @@ void computeIdentityMinusA(const float2 *d_A, __half2 *d_output, const int N,
                               0, stream>>>(d_A, d_output, N, batches);
 }
 
+// Copies V_in → V_out, scaling each column j by d[batch*N + j].
+// V is stored column-major (cuSOLVER convention): element (row, col) lives at
+// flat index col*N + row within a single NxN batch slice.
+__global__ void scaleEigenvectorColumnsKernel(const float2 *__restrict__ V_in,
+                                              float2 *__restrict__ V_out,
+                                              const float *__restrict__ d,
+                                              int N, int total_batches) {
+  int batch = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x; // flat index within N*N
+  int total_elements = N * N;
+  if (idx < total_elements && batch < total_batches) {
+    int col = idx / N;
+    float scale = d[batch * N + col];
+    int flat_idx = batch * total_elements + idx;
+    V_out[flat_idx] = make_float2(V_in[flat_idx].x * scale, V_in[flat_idx].y * scale);
+  }
+}
+
+void scaleEigenvectorColumns(const float2 *V_in, float2 *V_out,
+                              const float *d_scales, int N, int batches,
+                              cudaStream_t stream) {
+  int total_elements = N * N;
+  int threadsPerBlock = 256;
+  int blocksPerGrid = (total_elements + threadsPerBlock - 1) / threadsPerBlock;
+  scaleEigenvectorColumnsKernel<<<dim3(blocksPerGrid, batches, 1),
+                                   threadsPerBlock, 0, stream>>>(
+      V_in, V_out, d_scales, N, batches);
+}
+
 __global__ void weightsDebugKernel(const __half2 *d_in, int N) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 

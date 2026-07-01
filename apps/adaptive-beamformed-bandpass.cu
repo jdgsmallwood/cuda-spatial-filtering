@@ -148,7 +148,8 @@ int main(int argc, char *argv[]) {
   std::cout << "Initializing pipeline...\n";
   LambdaAdaptiveBeamformedSpectraPipeline<Config> pipeline(
       num_buffers, &h_weights, args.nr_signal_eigenvectors,
-      args.min_freq_channel, std::move(beam_steering));
+      args.min_freq_channel, std::move(beam_steering),
+      args.shrink_eigenvalues);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
@@ -173,6 +174,7 @@ int main(int argc, char *argv[]) {
   // Print statistics periodically
   int64_t packets_received = 0;
   int timeout = 0;
+  const auto start_time = std::chrono::steady_clock::now();
   while (state.running) {
     sleep(5);
     // This is nice to see outside of log files.
@@ -209,6 +211,15 @@ int main(int argc, char *argv[]) {
       std::cout << "Number of packets to observe reached...shutting down\n";
       state.running.store(0, std::memory_order_release);
       running = false;
+    }
+    if (args.run_duration_seconds > 0) {
+      const auto elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - start_time).count();
+      if (elapsed >= args.run_duration_seconds) {
+        std::cout << "Duration limit reached...shutting down\n";
+        state.running.store(0, std::memory_order_release);
+        running = false;
+      }
     }
   }
 

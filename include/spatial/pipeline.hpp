@@ -417,8 +417,7 @@ private:
   static constexpr int COMPLEX = 2;
   static constexpr int NR_EIGENVALUES =
       T::NR_PADDED_RECEIVERS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
-  static constexpr int NR_CORRELATED_BLOCKS_TO_ACCUMULATE =
-      T::NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
+  const int NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
 
   inline static const __half alpha = __float2half(1.0f);
   static constexpr float alpha_32 = 1.0f;
@@ -1117,9 +1116,12 @@ public:
   }
 
   LambdaGPUPipeline(const int num_buffers, BeamWeightsT<T> *h_weights,
-                    BeamSteering<T> beam_steering)
+                    BeamSteering<T> beam_steering,
+                    int nr_blocks_to_accumulate = T::NR_CORRELATED_BLOCKS_TO_ACCUMULATE)
 
-      : num_buffers(num_buffers), h_weights(h_weights),
+      : num_buffers(num_buffers),
+        NR_CORRELATED_BLOCKS_TO_ACCUMULATE(nr_blocks_to_accumulate),
+        h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
                    T::NR_CHANNELS,
@@ -2243,11 +2245,18 @@ private:
     // Per-block correlation matrix (input to cuSOLVER, overwritten in-place
     // with eigenvectors on output).
     DevicePtr<DecompositionVisibilities> decomp_visibilities;
+    // Eigenvectors scaled column-wise by d[] (see execute_pipeline).
+    DevicePtr<DecompositionVisibilities> scaled_eigenvectors;
     DevicePtr<ProjectionMatrix> projection_matrix;
     DevicePtr<FloatProjectionMatrix> float_projection_matrix;
 
     // Per-block eigenvalues (ascending order from cuSOLVER).
     DevicePtr<Eigenvalues> eigenvalues;
+    // Device copy of per-eigenvector scale factors d[channel][pol][k].
+    DevicePtr<Eigenvalues> d_scale_factors;
+    // Host staging buffers for eigenvalue D->H copy and scale-factor computation.
+    std::vector<float> h_eigenvalues_buf;
+    std::vector<float> h_scale_factors_buf;
 
     // cuSOLVER handles / workspace
     cusolverDnHandle_t cusolver_handle = nullptr;
@@ -2300,9 +2309,13 @@ private:
           visibilities_trimmed_baseline(make_device_ptr<TrimmedVisibilities>()),
           visibilities_trimmed(make_device_ptr<TrimmedVisibilities>()),
           decomp_visibilities(make_device_ptr<DecompositionVisibilities>()),
+          scaled_eigenvectors(make_device_ptr<DecompositionVisibilities>()),
           projection_matrix(make_device_ptr<ProjectionMatrix>()),
           float_projection_matrix(make_device_ptr<FloatProjectionMatrix>()),
           eigenvalues(make_device_ptr<Eigenvalues>()),
+          d_scale_factors(make_device_ptr<Eigenvalues>()),
+          h_eigenvalues_buf(CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS, 0.0f),
+          h_scale_factors_buf(CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS, 0.0f),
           cusolver_info(
               make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
           cufft_work_area(make_device_ptr<void>(work_size)) {
@@ -2460,6 +2473,7 @@ private:
 
   std::unordered_map<int, int> NR_SIGNAL_EIGENVECTORS;
   int min_freq_channel;
+  bool shrink_eigenvalues_;
 
   static constexpr float alpha_32 = 1.0f;
   // a = unpadded baselines
@@ -2687,64 +2701,89 @@ public:
         CUSOLVER_BATCH_SIZE));
 
     // ------------------------------------------------------------------
-    // 11. Form P_block = U U^H via batched cuBLAS cherk.
+    // 11. Build projection filter M = V_scaled * V^H and convert to fp16.
     //
-    //     After cuSOLVER, decomp_visibilities holds the full eigenvector
-    //     matrix V (NR_RECEIVERS × NR_RECEIVERS, column = eigenvector,
-    //     ascending order).  The signal subspace U consists of the last
-    //     NR_SIGNAL_EIGENVECTORS columns, i.e. the sub-matrix starting at
-    //     column offset (NR_RECEIVERS - NR_SIGNAL_EIGENVECTORS).
+    //     V_scaled is V with each column k multiplied by a scalar d[k]:
+    //       d[k] = 1                    for non-RFI eigenvectors (k < N-K)
+    //       d[k] = 0                    for RFI eigenvectors, null mode
+    //       d[k] = lambda_bar / lambda_k for RFI eigenvectors, shrink mode
+    //     where lambda_bar = mean of the non-RFI eigenvalues.
     //
-    //     cuSOLVER stores column-major (Fortran order), so column j starts
-    //     at row-offset 0 and the pointer to column j is:
-    //       V_ptr + j * NR_RECEIVERS    (in cuComplex elements)
+    //     Because V is unitary, V * diag([1,..,1,0,..,0]) * V^H = I - U*U^H,
+    //     so null mode (d_rfi=0) is algebraically identical to the previous
+    //     (I-P) path.  Shrink mode attenuates rather than zeros.
     //
-    //     cherk computes:  C ← alpha * A * A^H + beta * C
-    //       A = U  (NR_RECEIVERS × NR_SIGNAL_EIGENVECTORS, col-major)
-    //       C = P  (NR_RECEIVERS × NR_RECEIVERS, col-major)
-    //
-    //     We call it once per batch element in a simple loop.  A batched
-    //     cherk variant is not available in cuBLAS; the loop is over
-    //     CUSOLVER_BATCH_SIZE elements and is negligible CPU overhead
-    //     compared with the GPU kernels.
+    //     cusolverDnXsyevBatched is async on the handle stream; we must sync
+    //     before reading eigenvalues to the host for the CPU d[] computation.
     // ------------------------------------------------------------------
     {
       constexpr int N = T::NR_RECEIVERS;
-      const cuComplex herk_alpha{1.0f, 0.0f};
-      const cuComplex herk_beta{0.0f, 0.0f}; // overwrite projection_block
 
-      auto *V_base = reinterpret_cast<cuComplex *>(b.decomp_visibilities.get());
-      auto *P_base =
-          reinterpret_cast<cuComplex *>(b.float_projection_matrix.get());
-      const size_t CUBLAS_BATCH_SIZE_PER_CHANNEL = T::NR_POLARIZATIONS;
+      CUDA_CHECK(cudaStreamSynchronize(b.stream));
+      CUDA_CHECK(cudaMemcpy(b.h_eigenvalues_buf.data(), b.eigenvalues.get(),
+                            sizeof(Eigenvalues), cudaMemcpyDeviceToHost));
 
       for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
         const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
-        const int col_offset = N - K; // first signal-subspace column
-        // Pointer to signal-subspace U = last K columns of V_batch.
-        for (int batch = 0; batch < CUBLAS_BATCH_SIZE_PER_CHANNEL; batch++) {
-          // Pointer to the start of eigenvector matrix for this batch element.
-          cuComplex *V_batch =
-              V_base +
-              (channel * CUBLAS_BATCH_SIZE_PER_CHANNEL + batch) * N * N;
-          cuComplex *U = V_batch + col_offset * N;
-          // Pointer to output P for this batch element.
-          cuComplex *P_batch =
-              P_base +
-              (channel * CUBLAS_BATCH_SIZE_PER_CHANNEL + batch) * N * N;
+        for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+          int flat = channel * T::NR_POLARIZATIONS + pol;
+          const float *eigs = b.h_eigenvalues_buf.data() + flat * N;
+          float *d = b.h_scale_factors_buf.data() + flat * N;
 
-          CUBLAS_CHECK(cublasGemmEx(b.cublas_handle, CUBLAS_OP_N, CUBLAS_OP_C,
-                                    N, N, K, &herk_alpha, U, CUDA_C_32F, N, U,
-                                    CUDA_C_32F, N, &herk_beta, P_batch,
-                                    CUDA_C_32F, N, CUBLAS_COMPUTE_32F,
-                                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+          for (int k = 0; k < N - K; ++k)
+            d[k] = 1.0f;
+
+          if (shrink_eigenvalues_) {
+            float lambda_bar = 0.0f;
+            if (K < N) {
+              for (int k = 0; k < N - K; ++k)
+                lambda_bar += eigs[k];
+              lambda_bar /= static_cast<float>(N - K);
+            }
+            for (int k = N - K; k < N; ++k)
+              d[k] = (eigs[k] > 0.0f) ? lambda_bar / eigs[k] : 0.0f;
+          } else {
+            for (int k = N - K; k < N; ++k)
+              d[k] = 0.0f;
+          }
         }
       }
-    }
 
-    computeIdentityMinusA((float2 *)b.float_projection_matrix.get(),
-                          (__half2 *)b.projection_matrix.get(), T::NR_RECEIVERS,
-                          T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
+      CUDA_CHECK(cudaMemcpyAsync(b.d_scale_factors.get(),
+                                 b.h_scale_factors_buf.data(),
+                                 sizeof(Eigenvalues), cudaMemcpyHostToDevice,
+                                 b.stream));
+
+      scaleEigenvectorColumns(
+          reinterpret_cast<const float2 *>(b.decomp_visibilities.get()),
+          reinterpret_cast<float2 *>(b.scaled_eigenvectors.get()),
+          reinterpret_cast<const float *>(b.d_scale_factors.get()),
+          N, CUSOLVER_BATCH_SIZE, b.stream);
+
+      const cuComplex gemm_alpha{1.0f, 0.0f};
+      const cuComplex gemm_beta{0.0f, 0.0f};
+      auto *V_base  = reinterpret_cast<cuComplex *>(b.decomp_visibilities.get());
+      auto *Vs_base = reinterpret_cast<cuComplex *>(b.scaled_eigenvectors.get());
+      auto *M_base  = reinterpret_cast<cuComplex *>(b.float_projection_matrix.get());
+
+      for (int i = 0; i < CUSOLVER_BATCH_SIZE; ++i) {
+        CUBLAS_CHECK(cublasGemmEx(b.cublas_handle,
+                                  CUBLAS_OP_N, CUBLAS_OP_C,
+                                  N, N, N,
+                                  &gemm_alpha,
+                                  Vs_base + i * N * N, CUDA_C_32F, N,
+                                  V_base  + i * N * N, CUDA_C_32F, N,
+                                  &gemm_beta,
+                                  M_base  + i * N * N, CUDA_C_32F, N,
+                                  CUBLAS_COMPUTE_32F,
+                                  CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+      }
+
+      convert_float_to_half(
+          reinterpret_cast<float *>(b.float_projection_matrix.get()),
+          reinterpret_cast<__half *>(b.projection_matrix.get()),
+          sizeof(FloatProjectionMatrix) / sizeof(float), b.stream);
+    }
 
     // conjugateMatrix((__half2 *)b.projection_matrix.get(),
     //                 T::NR_RECEIVERS * T::NR_RECEIVERS * T::NR_CHANNELS *
@@ -2905,7 +2944,8 @@ public:
   LambdaAdaptiveBeamformedSpectraPipeline(
       const int num_buffers, BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
-      const int min_freq_channel, BeamSteering<T> beam_steering)
+      const int min_freq_channel, BeamSteering<T> beam_steering,
+      bool shrink_eigenvalues = false)
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
@@ -2917,7 +2957,8 @@ public:
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
-        min_freq_channel(min_freq_channel) {
+        min_freq_channel(min_freq_channel),
+        shrink_eigenvalues_(shrink_eigenvalues) {
     std::cout << "Beamformed Spectra instantiated with NR_CHANNELS: "
               << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS
@@ -3094,8 +3135,7 @@ private:
   static constexpr int NR_TIME_STEPS_FOR_CORRELATION =
       T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET;
   static constexpr int COMPLEX = 2;
-  static constexpr int NR_CORRELATED_BLOCKS_TO_ACCUMULATE =
-      T::NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
+  const int NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
 
   inline static const __half alpha = __float2half(1.0f);
   static constexpr float alpha_32 = 1.0f;
@@ -3465,9 +3505,12 @@ public:
 
   LambdaCorrBeamOnlyGPUPipeline(const int num_buffers,
                                 BeamWeightsT<T> *h_weights,
-                                BeamSteering<T> beam_steering)
+                                BeamSteering<T> beam_steering,
+                                int nr_blocks_to_accumulate = T::NR_CORRELATED_BLOCKS_TO_ACCUMULATE)
 
-      : num_buffers(num_buffers), h_weights(h_weights),
+      : num_buffers(num_buffers),
+        NR_CORRELATED_BLOCKS_TO_ACCUMULATE(nr_blocks_to_accumulate),
+        h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
 
         correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
