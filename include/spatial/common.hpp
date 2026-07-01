@@ -155,6 +155,7 @@ struct CommonArgs {
   std::unordered_map<uint32_t, int> fpga_ids;
   std::unordered_map<int, int> antenna_mapping;
   std::unordered_map<int, int> nr_signal_eigenvectors;
+  bool shrink_eigenvalues = false;
   std::vector<std::string> fpga_names;
   std::unordered_map<int, int64_t> fpga_delays;
   // Antenna ENU positions (metres), keyed by absolute antenna ID; from
@@ -171,6 +172,12 @@ struct CommonArgs {
   // How many channels to write to Redis per output block. 0 = all channels.
   // Use a value < NR_CHANNELS to cap per-block payload (round-robin rotation).
   int redis_channels_per_write = 8;
+  // Number of correlation blocks to integrate per visibility dump.
+  // 0 means "use the compile-time default baked into LambdaConfig".
+  int nr_integration_blocks = 0;
+  // Maximum wall-clock duration in seconds before the app shuts down.
+  // 0 means run indefinitely.
+  double run_duration_seconds = 0.0;
 };
 
 // Builds the per-NIC packet-capture objects for an app from the parsed args,
@@ -311,6 +318,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value("nr-signal-eigenvalues.json")
       .store_into(args.nr_signal_eigenvectors_filename);
 
+  program.add_argument("--shrink-eigenvalues")
+      .help("Shrink RFI eigenvalues to the mean of the non-RFI eigenvalues "
+            "instead of nulling them")
+      .default_value(false)
+      .implicit_value(true)
+      .store_into(args.shrink_eigenvalues);
+
   program.add_argument("-a", "--apply-gains-to-vis")
       .help("Apply the inverse of the gains to the raw data")
       .default_value(false)
@@ -344,6 +358,20 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(8)
       .scan<'i', int>()
       .store_into(args.redis_channels_per_write);
+
+  program.add_argument("--accumulation-length")
+      .help("Number of correlation blocks to integrate per visibility dump "
+            "(0 = use compile-time default)")
+      .default_value(0)
+      .scan<'i', int>()
+      .store_into(args.nr_integration_blocks);
+
+  program.add_argument("--obs-length")
+      .help("Maximum wall-clock run time in seconds before the app shuts down "
+            "(0 = run indefinitely)")
+      .default_value(0.0)
+      .scan<'g', double>()
+      .store_into(args.run_duration_seconds);
 
   try {
     program.parse_args(argc, argv);

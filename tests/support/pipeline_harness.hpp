@@ -139,6 +139,28 @@ make_tracked_pulsar_fold_pipeline(BeamWeightsT<Config> *weights,
       /*rfi_dada_key=*/0, std::move(beam_steering));
 }
 
+// Constructs a LambdaAdaptiveBeamformedSpectraPipeline with inert beam
+// steering. nr_signal_eigenvectors maps (min_freq_channel + channel_index)
+// → K; if the map is empty every channel defaults to K=1.
+template <typename Config>
+std::unique_ptr<LambdaAdaptiveBeamformedSpectraPipeline<Config>>
+make_adaptive_beamformed_spectra_pipeline(
+    int num_buffers, BeamWeightsT<Config> *weights,
+    std::unordered_map<int, int> nr_signal_eigenvectors = {},
+    bool shrink_eigenvalues = false,
+    int min_freq_channel = 0) {
+  if (nr_signal_eigenvectors.empty())
+    nr_signal_eigenvectors[min_freq_channel] = 1;
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     num_buffers);
+  return std::make_unique<LambdaAdaptiveBeamformedSpectraPipeline<Config>>(
+      num_buffers, weights, nr_signal_eigenvectors, min_freq_channel,
+      std::move(beam_steering), shrink_eigenvalues);
+}
+
 } // namespace pipeline_factories
 
 // Drives a complete synthetic correlation buffer through a real

@@ -164,8 +164,13 @@ int main(int argc, char *argv[]) {
       args.steering_update_interval_seconds, num_buffers,
       fold_calibration_into_steering ? &gains : nullptr);
 
+  const int integration_blocks =
+      args.nr_integration_blocks > 0 ? args.nr_integration_blocks
+                                     : nr_correlation_blocks_to_integrate;
+
   LambdaGPUPipeline<Config> pipeline(num_buffers, &h_weights,
-                                     std::move(beam_steering));
+                                     std::move(beam_steering),
+                                     integration_blocks);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
@@ -205,6 +210,7 @@ int main(int argc, char *argv[]) {
   // Print statistics periodically
   int64_t packets_received = 0;
   int timeout = 0;
+  const auto start_time = std::chrono::steady_clock::now();
   while (state.running) {
     sleep(5);
     // This is nice to see outside of log files.
@@ -247,6 +253,15 @@ int main(int argc, char *argv[]) {
       std::cout << "Number of packets to observe reached...shutting down\n";
       state.running.store(0, std::memory_order_release);
       running = false;
+    }
+    if (args.run_duration_seconds > 0) {
+      const auto elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - start_time).count();
+      if (elapsed >= args.run_duration_seconds) {
+        std::cout << "Duration limit reached...shutting down\n";
+        state.running.store(0, std::memory_order_release);
+        running = false;
+      }
     }
   }
 
