@@ -83,6 +83,15 @@ BenchResult run_processor_bench(double duration_s) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
 
+  // Synchronous mode: execute_pipeline() is called directly from
+  // handle_buffer_completion() (not via the async SPSC queue).  This means
+  // release_buffer() runs — and replenishes buffer_ordering_queue — BEFORE
+  // advance_to_next_buffer() is called, so the condition-variable wait in
+  // advance_to_next_buffer() never blocks.  Without this, pipeline_feeder()
+  // exits on shutdown() before draining pipeline_q, leaving buffers unreleased
+  // and advance_to_next_buffer() waiting on a cv that is never notified.
+  state.synchronous_pipeline = true;
+
   std::thread processor([&state]() { state.process_packets(); });
   std::thread feeder([&state]() { state.pipeline_feeder(); });
 
@@ -202,14 +211,25 @@ int main(int argc, char *argv[]) {
   std::cout << "bench_processor: 8 configs x " << duration_s << "s each"
             << std::endl;
 
-  print_result(run_processor_bench<Cfg1ch1fpga> (duration_s));
-  print_result(run_processor_bench<Cfg8ch1fpga> (duration_s));
-  print_result(run_processor_bench<Cfg16ch1fpga>(duration_s));
-  print_result(run_processor_bench<Cfg24ch1fpga>(duration_s));
-  print_result(run_processor_bench<Cfg32ch1fpga>(duration_s));
-  print_result(run_processor_bench<Cfg8ch4fpga> (duration_s));
-  print_result(run_processor_bench<Cfg16ch4fpga>(duration_s));
-  print_result(run_processor_bench<Cfg32ch4fpga>(duration_s));
+  // ProcessorState and its worker/feeder threads write chatter (startup,
+  // shutdown, worker IDs) directly to std::cout.  Redirect cout to /dev/null
+  // around each run so only the printf-based result lines reach the terminal.
+  auto run_silent = [](auto fn) {
+    std::ofstream devnull("/dev/null");
+    auto *saved = std::cout.rdbuf(devnull.rdbuf());
+    auto r = fn();
+    std::cout.rdbuf(saved);
+    return r;
+  };
+
+  print_result(run_silent([&]{ return run_processor_bench<Cfg1ch1fpga> (duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg8ch1fpga> (duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg16ch1fpga>(duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg24ch1fpga>(duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg32ch1fpga>(duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg8ch4fpga> (duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg16ch4fpga>(duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg32ch4fpga>(duration_s); }));
 
   return 0;
 }
