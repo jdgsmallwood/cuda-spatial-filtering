@@ -78,6 +78,20 @@ inline Result nearest_multiple(int64_t x, int64_t k) {
 // store that publishes the packet as processed.
 inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
                     size_t n) {
+#if defined(__AVX512F__)
+  // 64-byte NT stores (40 ops for 2560 B vs 160 SSE2 ops) — Zen 4 / Skylake-X+
+  if ((reinterpret_cast<uintptr_t>(dst) & 63) == 0 && (n & 63) == 0) {
+    char *d = static_cast<char *>(dst);
+    const char *s = static_cast<const char *>(src);
+    for (size_t i = 0; i < n; i += 64) {
+      _mm512_stream_si512(
+          reinterpret_cast<__m512i *>(d + i),
+          _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s + i)));
+    }
+    _mm_sfence();
+    return;
+  }
+#endif
 #if defined(__AVX2__)
   if ((reinterpret_cast<uintptr_t>(dst) & 31) == 0 && (n & 31) == 0) {
     char *d = static_cast<char *>(dst);
@@ -589,7 +603,11 @@ public:
       return;
     }
 
-    ProcessedPacket parsed = pkt->parse();
+    // Non-virtual call — allows the compiler to inline parse() which carries
+    // __attribute__((flatten)) and eliminates the vtable dispatch overhead.
+    using ConcreteEntry = typename T::PacketEntryType;
+    ProcessedPacket parsed =
+        static_cast<ConcreteEntry *>(pkt)->ConcreteEntry::parse();
     // DEBUG_LOG(
     //     "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
     //     "payload={} bytes",
@@ -962,11 +980,27 @@ public:
 
         // Prefetch ahead scaled by stride so the lookahead in real slots stays
         // constant regardless of the striding factor.
-        constexpr int PREFETCH_DIST = 8;
+        //
+        // Three regions to cover per slot:
+        //   [A] The slot pointer itself (pointer array → L3)
+        //   [B] data[0]: vptr + CustomHeader area — needed by parse()
+        //   [C] &committed: the metadata fields (length/processed/committed) live
+        //       AFTER data[] in memory (offset ~DATA_CAPACITY), so they are in
+        //       a completely separate cache line from the packet data.  Without
+        //       this prefetch the worker's first committed.load() is a DRAM miss
+        //       (~200 ns) because the previous two prefetches only cover the
+        //       start of data[].
+        //   [D-F] Stride into the payload so the hardware stream-prefetcher gets
+        //       an early start on the 40 cache lines of PacketDataStructure.
+        constexpr int PREFETCH_DIST = 12;
         const int pre_idx = (idx + PREFETCH_DIST * stride) % RING_BUFFER_SIZE;
-        __builtin_prefetch(d_packet_data[pre_idx], 0, 1);
-        __builtin_prefetch(d_packet_data[pre_idx]->data, 0, 1);
-        __builtin_prefetch(d_packet_data[pre_idx]->data + 42, 0, 1);
+        auto *pre_entry = d_packet_data[pre_idx];
+        __builtin_prefetch(pre_entry, 0, 1);                         // [A]
+        __builtin_prefetch(pre_entry->data, 0, 1);                   // [B] CL0
+        __builtin_prefetch(&pre_entry->committed, 0, 1);             // [C] metadata CL
+        __builtin_prefetch(pre_entry->data + 192, 0, 1);             // [D] ~3rd CL of payload
+        __builtin_prefetch(pre_entry->data + 768, 0, 1);             // [E] ~12th CL
+        __builtin_prefetch(pre_entry->data + 1536, 0, 1);            // [F] ~24th CL
 
         // Wait for the producer to commit this slot before processing.
         // In the common case (single-phase legacy path or fast producer) this
