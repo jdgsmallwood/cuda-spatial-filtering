@@ -32,6 +32,10 @@
 #define NR_OBSERVING_PACKET_WORKER_THREADS 3
 #endif
 
+#ifndef SPATIAL_PROCESSOR_REGULAR_BATCH_SIZE
+#define SPATIAL_PROCESSOR_REGULAR_BATCH_SIZE 6000
+#endif
+
 #include <cuda_fp16.h>
 
 // template <typename T>
@@ -74,10 +78,10 @@ inline Result nearest_multiple(int64_t x, int64_t k) {
 // a normal memcpy incurs, roughly halving memory traffic for data the CPU
 // never reads back — the GPU DMAs it out.  Falls back to memcpy when the
 // destination or size isn't vector-aligned.  The sfence is required: NT
-// stores are weakly ordered and must be globally visible before the release
-// store that publishes the packet as processed.
-inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
-                    size_t n) {
+// stores are weakly ordered and must be globally visible before the processor
+// publishes a completed worker batch to buffer-completion logic.
+inline bool copy_nt_unfenced(void *__restrict__ dst,
+                             const void *__restrict__ src, size_t n) {
 #if defined(__AVX512F__)
   // 64-byte NT stores (40 ops for 2560 B vs 160 SSE2 ops) — Zen 4 / Skylake-X+
   if ((reinterpret_cast<uintptr_t>(dst) & 63) == 0 && (n & 63) == 0) {
@@ -88,8 +92,7 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
           reinterpret_cast<__m512i *>(d + i),
           _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s + i)));
     }
-    _mm_sfence();
-    return;
+    return true;
   }
 #endif
 #if defined(__AVX2__)
@@ -101,8 +104,7 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
           reinterpret_cast<__m256i *>(d + i),
           _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s + i)));
     }
-    _mm_sfence();
-    return;
+    return true;
   }
 #elif defined(__SSE2__) || defined(__x86_64__)
   if ((reinterpret_cast<uintptr_t>(dst) & 15) == 0 && (n & 15) == 0) {
@@ -113,11 +115,18 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
           reinterpret_cast<__m128i *>(d + i),
           _mm_loadu_si128(reinterpret_cast<const __m128i *>(s + i)));
     }
-    _mm_sfence();
-    return;
+    return true;
   }
 #endif
   std::memcpy(dst, src, n);
+  return false;
+}
+
+inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
+                    size_t n) {
+  if (copy_nt_unfenced(dst, src, n)) {
+    _mm_sfence();
+  }
 }
 
 // Returns the n-th entry of a comma-separated CPU list ("4,5,6"), or -1 if
@@ -498,8 +507,8 @@ public:
         // Samples (2.5 KB for the default shape, always 64 B-aligned dest):
         // streamed past the cache — the CPU never reads this buffer, the GPU
         // DMAs it.  Scales are 40 B and stride-unaligned; plain memcpy.
-        copy_nt(&samples, pkt.payload->data,
-                sizeof(typename T::PacketDataStructure));
+        copy_nt_unfenced(&samples, pkt.payload->data,
+                         sizeof(typename T::PacketDataStructure));
         std::memcpy(&scales, pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
         arrival = true;
@@ -532,14 +541,124 @@ public:
     // *pkt.original_packet_processed stays false forever, and once enough of
     // these accumulate get_next_write_index() can no longer find a free slot.
     packets_stuck_unprocessed.fetch_add(1, std::memory_order_relaxed);
-    *pkt.original_packet_processed = true;
+    pkt.original_packet_processed->store(true, std::memory_order_release);
   };
+  __attribute__((hot)) bool ingest_packet_direct(
+      const uint64_t sample_count, const uint32_t fpga_id,
+      const uint16_t wire_freq_channel,
+      const typename T::PacketDataStructure *__restrict__ payload_data,
+      const typename T::PacketScaleStructure *__restrict__ payload_scales,
+      const bool update_tracking = true,
+      const int next_buffer_hint = -1) {
+    if (sample_count == 0) [[unlikely]] {
+      throw std::runtime_error(
+          "direct ingest sample count was zero - something has gone wrong!");
+    }
+
+    const int freq_channel = static_cast<int>(wire_freq_channel) -
+                             static_cast<int>(MIN_FREQ_CHANNEL);
+    if (freq_channel < 0 || freq_channel >= static_cast<int>(T::NR_CHANNELS))
+        [[unlikely]] {
+      packets_discarded.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+
+    if (!buffer_init_flag.load(std::memory_order_acquire)) [[unlikely]] {
+      static std::mutex init_mutex;
+      std::lock_guard<std::mutex> lock(init_mutex);
+      if (!buffer_init_flag.load(std::memory_order_relaxed)) {
+        INFO_LOG("Initializing buffers...");
+        initialize_buffers(sample_count, fpga_id);
+        buffer_init_flag.store(true, std::memory_order_release);
+      }
+    }
+
+    int fpga_index_i =
+        fpga_id < fpga_index_lut.size() ? fpga_index_lut[fpga_id] : -1;
+    if (fpga_index_i < 0) [[unlikely]] {
+      const auto fpga_it = fpga_ids.find(fpga_id);
+      if (fpga_it == fpga_ids.end()) {
+        ERROR_LOG("FPGA ID {} not found.", fpga_id);
+        throw std::out_of_range("FPGA ID not found. Check logs.");
+      }
+      fpga_index_i = fpga_it->second;
+    }
+    const size_t fpga_index = static_cast<size_t>(fpga_index_i);
+
+    if (update_tracking) {
+      atomic_max_u64(latest_packet_received[freq_channel][fpga_index],
+                     sample_count);
+    }
+
+    auto copy_to = [&](const int buffer_index, const int packet_index) {
+      const int receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
+      auto &buffer = d_samples[buffer_index];
+      auto &samples =
+          (*buffer->samples)[freq_channel][packet_index + 1][fpga_index];
+      auto &scales =
+          (*buffer->scales)[freq_channel][packet_index + 1][receiver_index];
+      auto &arrival =
+          buffer->arrivals[0][freq_channel][packet_index + 1][fpga_index];
+
+      copy_nt_unfenced(&samples, payload_data,
+                       sizeof(typename T::PacketDataStructure));
+      std::memcpy(&scales, payload_scales,
+                  sizeof(typename T::PacketScaleStructure));
+      arrival = true;
+    };
+
+    const int current_buf = current_buffer;
+    const uint64_t current_start = buffers[current_buf].start_seq[fpga_index];
+    const int64_t delta = static_cast<int64_t>(sample_count) -
+                          static_cast<int64_t>(current_start);
+    const int packet_index = static_cast<int>(
+        delta / static_cast<int64_t>(NR_BETWEEN_SAMPLES));
+
+    if (packet_index < -1) [[unlikely]] {
+      packets_discarded.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    if (packet_index > static_cast<int>(NR_PACKETS_FOR_CORRELATION))
+        [[unlikely]] {
+      packets_stuck_unprocessed.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+
+    copy_to(current_buf, packet_index);
+
+    if (packet_index == static_cast<int>(NR_PACKETS_FOR_CORRELATION) - 1 ||
+        packet_index == static_cast<int>(NR_PACKETS_FOR_CORRELATION)) {
+      int next_buffer_index = next_buffer_hint;
+      if (next_buffer_index < 0) [[unlikely]] {
+        std::lock_guard<std::mutex> lock(buffer_index_mutex);
+        if (buffer_ordering_queue.empty()) [[unlikely]] {
+          packets_stuck_unprocessed.fetch_add(1, std::memory_order_relaxed);
+          if (update_tracking) {
+            modified_since_last_completion_check[freq_channel].store(
+                true, std::memory_order_release);
+          }
+          return true;
+        }
+        next_buffer_index = buffer_ordering_queue.top().index;
+      }
+      copy_to(next_buffer_index,
+              packet_index - static_cast<int>(NR_PACKETS_FOR_CORRELATION));
+    }
+
+    if (update_tracking) {
+      modified_since_last_completion_check[freq_channel].store(
+          true, std::memory_order_release);
+    }
+    return true;
+  }
+
   void process_all_available_packets() {
     // Testing path — single-threaded drain of the ring.
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       global_max[i] = global_max_end_seq[i].load(std::memory_order_acquire);
     }
+    uint64_t processed_local = 0;
     while (read_index.load() != write_index.load()) {
       int current_read_index = read_index.load();
       auto *slot = d_packet_data[current_read_index];
@@ -548,9 +667,13 @@ public:
         _mm_pause();
         continue;
       }
-      process_packet_data(slot, current_read_index, global_max);
+      processed_local += process_packet_data(slot, current_read_index, global_max);
       read_index.store((current_read_index + 1) % RING_BUFFER_SIZE,
                        std::memory_order_release);
+    }
+    _mm_sfence();
+    if (processed_local > 0) {
+      packets_processed.fetch_add(processed_local, std::memory_order_relaxed);
     }
   }
 
@@ -592,7 +715,7 @@ public:
     }
   };
 
-  __attribute__((hot)) void process_packet_data(
+  __attribute__((hot)) bool process_packet_data(
       typename T::PacketEntryType *pkt, const int current_read_index,
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
 
@@ -600,14 +723,14 @@ public:
     // For now, just print the info and simulate some work
 
     if (pkt->processed.load(std::memory_order_relaxed)) [[unlikely]] {
-      return;
+      return false;
     }
 
     // Non-virtual call — allows the compiler to inline parse() which carries
     // __attribute__((flatten)) and eliminates the vtable dispatch overhead.
     using ConcreteEntry = typename T::PacketEntryType;
     ProcessedPacket parsed =
-        static_cast<ConcreteEntry *>(pkt)->ConcreteEntry::parse();
+        static_cast<ConcreteEntry *>(pkt)->ConcreteEntry::parse_for_processor();
     // DEBUG_LOG(
     //     "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
     //     "payload={} bytes",
@@ -635,7 +758,7 @@ public:
         [[unlikely]] {
       packets_discarded.fetch_add(1, std::memory_order_relaxed);
       parsed.original_packet_processed->store(true, std::memory_order_release);
-      return;
+      return false;
     }
 
     if (!buffer_init_flag.load(std::memory_order_acquire)) [[unlikely]] {
@@ -648,11 +771,9 @@ public:
       }
     };
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
-    if (*parsed.original_packet_processed) [[likely]] {
-      packets_processed.fetch_add(1, std::memory_order_relaxed);
-    }
     modified_since_last_completion_check[freq_channel].store(
         true, std::memory_order_release);
+    return parsed.original_packet_processed->load(std::memory_order_relaxed);
   };
 
   void
@@ -662,7 +783,71 @@ public:
     }
   }
 
+  int direct_ingest_next_buffer_index() {
+    std::lock_guard<std::mutex> lock(buffer_index_mutex);
+    if (buffer_ordering_queue.empty()) [[unlikely]] {
+      return -1;
+    }
+    return buffer_ordering_queue.top().index;
+  }
+
+  void mark_direct_ingest_round_complete(const uint64_t round_start_sample) {
+    const uint64_t latest_sample =
+        round_start_sample + NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
+    for (int channel = 0; channel < static_cast<int>(T::NR_CHANNELS);
+         ++channel) {
+      for (int fpga = 0; fpga < static_cast<int>(T::NR_FPGA_SOURCES); ++fpga) {
+        latest_packet_received[channel][fpga].store(
+            latest_sample, std::memory_order_release);
+      }
+      modified_since_last_completion_check[channel].store(
+          true, std::memory_order_release);
+    }
+  }
+
+  void handle_direct_ingest_ordered_buffer_complete() {
+    if (pipeline_ == nullptr) [[unlikely]] {
+      throw std::logic_error(
+          "Pipeline has not been set. Ensure that set_pipeline has been "
+          "called on ProcessorState class.");
+    }
+
+    _mm_sfence();
+    const int completed_buf = current_buffer;
+    auto &buffer = buffers[completed_buf];
+    buffer.is_ready = false;
+
+    d_samples[completed_buf]->start_seq_id = buffer.start_seq[0];
+    d_samples[completed_buf]->end_seq_id = buffer.end_seq[0];
+
+    if (!synchronous_pipeline) [[likely]] {
+      const uint64_t t = pipeline_q_tail_.v.load(std::memory_order_relaxed);
+      while (t - pipeline_q_head_.v.load(std::memory_order_acquire) >=
+             PIPELINE_Q_CAP) {
+        if (!running.load(std::memory_order_acquire)) {
+          return;
+        }
+        _mm_pause();
+      }
+      pipeline_q_buf_[t % PIPELINE_Q_CAP] = completed_buf;
+      pipeline_q_tail_.v.store(t + 1, std::memory_order_release);
+    } else [[unlikely]] {
+      pipeline_->execute_pipeline(d_samples[completed_buf]);
+      pipeline_runs_queued += 1;
+    }
+
+    advance_to_next_buffer();
+  }
+
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
+
+  void initialize_for_direct_ingest(const uint64_t first_count,
+                                    const uint32_t fpga_id) {
+    if (!buffer_init_flag.load(std::memory_order_acquire)) {
+      initialize_buffers(first_count, fpga_id);
+      buffer_init_flag.store(true, std::memory_order_release);
+    }
+  }
 
   __attribute__((hot)) void release_buffer(const int buffer_index) {
     // Zero arrivals before taking the lock. Safe: the GPU just finished with
@@ -818,7 +1003,12 @@ public:
       per_thread_my_read[tid] = static_cast<uint64_t>(tid);
 
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
-    constexpr int REGULAR_BATCH_SIZE = 6000;
+    constexpr int LIVE_WINDOW_PACKET_CAP =
+        NR_INPUT_BUFFERS * T::NR_CHANNELS * T::NR_FPGA_SOURCES *
+        T::NR_PACKETS_FOR_CORRELATION;
+    constexpr int REGULAR_BATCH_SIZE =
+        std::min<int>(SPATIAL_PROCESSOR_REGULAR_BATCH_SIZE,
+                      LIVE_WINDOW_PACKET_CAP);
 
     // Distribute `slots` items (each `stride` ring-index steps apart, starting
     // at `base_ring`) across WORKER_COUNT workers, signal, and spin-wait.
@@ -831,11 +1021,11 @@ public:
       for (int i = 0; i < WORKER_COUNT; ++i) {
         const int items = std::min(per_worker, slots - items_done);
         if (items == 0) break;
-        const int w_start =
-            (base_ring + items_done * stride) % (int)RING_BUFFER_SIZE;
-        const int w_end =
-            (base_ring + (items_done + items) * stride) % (int)RING_BUFFER_SIZE;
-        worker_tasks[i] = {w_start, w_end, stride};
+        worker_tasks[i] = {
+            (base_ring + items_done * stride) % (int)RING_BUFFER_SIZE,
+            (base_ring + (items_done + items) * stride) %
+                (int)RING_BUFFER_SIZE,
+            stride};
         ++workers_with_tasks;
         items_done += items;
       }
@@ -925,13 +1115,16 @@ public:
                 if (entry->length > 0 &&
                     entry->committed.load(std::memory_order_acquire) &&
                     !entry->processed.load(std::memory_order_relaxed)) {
-                  process_packet_data(entry, pkt.index, global_max);
+                  if (process_packet_data(entry, pkt.index, global_max)) {
+                    packets_processed.fetch_add(1, std::memory_order_relaxed);
+                  }
                 }
                 lock.lock();
               }
             }
           }
         }
+        _mm_sfence();
         handle_buffer_completion();
         packets_until_completion_check = num_loops_before_completion_check;
       }
@@ -971,8 +1164,10 @@ public:
       }
 
       auto [start, end, stride] = worker_tasks[worker_id];
+      get_global_max_packet_array(global_max);
 
       int idx = start;
+      uint64_t processed_local = 0;
 
       while (idx != end) {
 
@@ -1010,9 +1205,14 @@ public:
         }
         if (entry->length > 0 &&
             !entry->processed.load(std::memory_order_relaxed)) {
-          process_packet_data(entry, idx, global_max);
+          processed_local += process_packet_data(entry, idx, global_max);
         }
         idx = (idx + stride) % RING_BUFFER_SIZE;
+      }
+
+      _mm_sfence();
+      if (processed_local > 0) {
+        packets_processed.fetch_add(processed_local, std::memory_order_relaxed);
       }
 
       // Clear flag BEFORE decrementing so the main thread can't re-signal this

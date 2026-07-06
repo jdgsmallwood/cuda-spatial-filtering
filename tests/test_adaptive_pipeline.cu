@@ -20,19 +20,41 @@
 #include "support/pipeline_harness.hpp"
 #include "support/test_configs.hpp"
 
+#include <array>
 #include <complex>
+#include <cstdio>
 #include <cuda_fp16.h>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace {
 
 // LambdaConfig for the adaptive pipeline: 64 time steps to match CUFFT_FFT_SIZE.
 using AdaptiveConfig =
     LambdaConfig<1,   // NR_CHANNELS
+                 1,   // NR_FPGA_SOURCES
+                 64,  // NR_TIME_STEPS_PER_PACKET (= CUFFT_FFT_SIZE)
+                 4,   // NR_RECEIVERS
+                 2,   // NR_POLARIZATIONS
+                 4,   // NR_RECEIVERS_PER_PACKET
+                 1,   // NR_PACKETS_FOR_CORRELATION
+                 1,   // NR_BEAMS
+                 32,  // NR_PADDED_RECEIVERS
+                 32,  // NR_PADDED_RECEIVERS_PER_BLOCK
+                 1    // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                 >;
+
+using AdaptiveTwoChannelConfig =
+    LambdaConfig<2,   // NR_CHANNELS
                  1,   // NR_FPGA_SOURCES
                  64,  // NR_TIME_STEPS_PER_PACKET (= CUFFT_FFT_SIZE)
                  4,   // NR_RECEIVERS
@@ -119,23 +141,115 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Helper: total squared magnitude of the RFI-mitigated beam (beam index 1).
+// Helper: total squared magnitude of one output beam.
 // ---------------------------------------------------------------------------
 template <typename T>
-double rfi_beam_total_power(const AdaptiveTestOutput<T> &out) {
+double beam_total_power(const AdaptiveTestOutput<T> &out, size_t beam) {
   double total = 0.0;
   for (size_t c = 0; c < T::NR_CHANNELS; ++c)
     for (size_t p = 0; p < T::NR_POLARIZATIONS; ++p)
       for (size_t t = 0; t < T::NR_PACKETS_FOR_CORRELATION *
                                   T::NR_TIME_STEPS_PER_PACKET;
            ++t) {
-        // beam index 1 = the RFI-mitigated beam
-        const auto &s = out.beam_data[0][c][p][1][t];
+        const auto &s = out.beam_data[0][c][p][beam][t];
         float re = __half2float(s.real());
         float im = __half2float(s.imag());
         total += static_cast<double>(re * re + im * im);
       }
   return total;
+}
+
+template <typename T>
+double original_beam_total_power(const AdaptiveTestOutput<T> &out) {
+  return beam_total_power(out, 0);
+}
+
+template <typename T>
+double rfi_beam_total_power(const AdaptiveTestOutput<T> &out) {
+  return beam_total_power(out, 1);
+}
+
+template <typename T>
+void expect_beams_near_equal(const AdaptiveTestOutput<T> &out, size_t a,
+                             size_t b, float abs_tol) {
+  for (size_t c = 0; c < T::NR_CHANNELS; ++c)
+    for (size_t p = 0; p < T::NR_POLARIZATIONS; ++p)
+      for (size_t t = 0; t < T::NR_PACKETS_FOR_CORRELATION *
+                                  T::NR_TIME_STEPS_PER_PACKET;
+           ++t) {
+        const auto &lhs = out.beam_data[0][c][p][a][t];
+        const auto &rhs = out.beam_data[0][c][p][b][t];
+        EXPECT_NEAR(__half2float(lhs.real()), __half2float(rhs.real()),
+                    abs_tol)
+            << "real mismatch at c=" << c << " p=" << p << " t=" << t;
+        EXPECT_NEAR(__half2float(lhs.imag()), __half2float(rhs.imag()),
+                    abs_tol)
+            << "imag mismatch at c=" << c << " p=" << p << " t=" << t;
+      }
+}
+
+std::string find_python_reference_script() {
+  const std::array<std::string, 3> candidates = {
+      "tests/test_adaptive_nulling_reference.py",
+      "../tests/test_adaptive_nulling_reference.py",
+      "../../tests/test_adaptive_nulling_reference.py",
+  };
+  for (const auto &candidate : candidates) {
+    std::ifstream f(candidate);
+    if (f.good())
+      return candidate;
+  }
+  throw std::runtime_error("could not find test_adaptive_nulling_reference.py");
+}
+
+std::string run_command_capture_stdout(const std::string &command) {
+  FILE *pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr)
+    throw std::runtime_error("popen failed for command: " + command);
+
+  std::array<char, 4096> buffer{};
+  std::string output;
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+    output += buffer.data();
+
+  const int status = pclose(pipe);
+  if (status != 0)
+    throw std::runtime_error("command failed: " + command);
+  return output;
+}
+
+nlohmann::json python_strong_noise_nulling_reference() {
+  const std::string script = find_python_reference_script();
+  return nlohmann::json::parse(run_command_capture_stdout(
+      "python " + script + " --emit-pipeline-strong-noise-reference"));
+}
+
+template <typename T>
+void expect_beam_matches_python_reference(const AdaptiveTestOutput<T> &out,
+                                          size_t channel,
+                                          size_t beam,
+                                          const std::vector<nlohmann::json> &expected,
+                                          float abs_tol) {
+  ASSERT_EQ(expected.size(), T::NR_POLARIZATIONS);
+  ASSERT_EQ(expected[0].size(),
+            T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET);
+  for (size_t p = 0; p < T::NR_POLARIZATIONS; ++p) {
+    ASSERT_EQ(expected[p].size(),
+              T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET);
+    for (size_t t = 0; t < T::NR_PACKETS_FOR_CORRELATION *
+                                T::NR_TIME_STEPS_PER_PACKET;
+         ++t) {
+      const auto &actual = out.beam_data[0][channel][p][beam][t];
+      EXPECT_NEAR(__half2float(actual.real()), expected[p][t][0].get<float>(),
+                  abs_tol)
+          << "real mismatch at channel=" << channel << " beam=" << beam
+          << " p=" << p << " t=" << t;
+      EXPECT_NEAR(__half2float(actual.imag()), expected[p][t][1].get<float>(),
+                  abs_tol)
+          << "imag mismatch at channel=" << channel << " beam=" << beam
+          << " p=" << p << " t=" << t;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +283,39 @@ std::complex<int8_t> rank2_sample(size_t /*ch*/, size_t /*fpga*/, int /*pkt*/,
                          : std::complex<int8_t>{0, 0};
 }
 
+std::complex<int8_t> strong_noise_sample(size_t /*ch*/, size_t /*fpga*/,
+                                         int /*pkt*/, int time, int receiver,
+                                         int pol) {
+  constexpr int strong_re[8] = {18, -17, 15, -14, 12, -11, 9, -8};
+  constexpr int strong_im[8] = {7, 13, -9, -15, 11, 5, -13, -7};
+  const int noise_re = ((time * 17 + receiver * 13 + pol * 7) % 7) - 3;
+  const int noise_im = ((time * 11 + receiver * 5 + pol * 3) % 5) - 2;
+  return {static_cast<int8_t>(strong_re[time % 8] + noise_re),
+          static_cast<int8_t>(strong_im[(time * 3) % 8] + noise_im)};
+}
+
+std::complex<int8_t> multichannel_strong_noise_sample(size_t ch,
+                                                      size_t /*fpga*/,
+                                                      int /*pkt*/, int time,
+                                                      int receiver, int pol) {
+  constexpr int strong_re[2][8] = {
+      {18, -17, 15, -14, 12, -11, 9, -8},
+      {-13, 16, -15, 11, -10, 14, -9, 12},
+  };
+  constexpr int strong_im[2][8] = {
+      {7, 13, -9, -15, 11, 5, -13, -7},
+      {-12, 6, 14, -8, 10, -16, 4, 9},
+  };
+  const int channel = static_cast<int>(ch % 2);
+  const int noise_re =
+      ((time * 17 + receiver * 13 + pol * 7 + channel * 5) % 7) - 3;
+  const int noise_im =
+      ((time * 11 + receiver * 5 + pol * 3 + channel * 2) % 5) - 2;
+  return {static_cast<int8_t>(strong_re[channel][time % 8] + noise_re),
+          static_cast<int8_t>(
+              strong_im[channel][(time * 3 + channel) % 8] + noise_im)};
+}
+
 // ---------------------------------------------------------------------------
 // Run helper
 // ---------------------------------------------------------------------------
@@ -196,6 +343,37 @@ struct AdaptiveRun {
 
   void run_rank2() {
     driver->run(rank2_sample,
+                [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+    cudaDeviceSynchronize();
+  }
+
+  void run_strong_noise() {
+    driver->run(strong_noise_sample,
+                [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+    cudaDeviceSynchronize();
+  }
+};
+
+template <typename Config>
+struct AdaptiveRunForConfig {
+  std::shared_ptr<AdaptiveTestOutput<Config>> output;
+  BeamWeightsT<Config> weights;
+  std::unique_ptr<LambdaAdaptiveBeamformedSpectraPipeline<Config>> pipeline;
+  std::unique_ptr<test_support::SyntheticPipelineRun<Config>> driver;
+
+  explicit AdaptiveRunForConfig(bool shrink, std::unordered_map<int, int> eig_map) {
+    output = std::make_shared<AdaptiveTestOutput<Config>>();
+    weights = test_support::make_unity_beam_weights<Config>();
+    pipeline =
+        test_support::pipeline_factories::make_adaptive_beamformed_spectra_pipeline<
+            Config>(/*num_buffers=*/3, &weights, std::move(eig_map), shrink);
+    driver = std::make_unique<test_support::SyntheticPipelineRun<Config>>(
+        *pipeline, output);
+  }
+
+  template <typename SampleFn>
+  void run(SampleFn &&sample_fn) {
+    driver->run(std::forward<SampleFn>(sample_fn),
                 [](size_t, size_t, int, int, int) -> int16_t { return 1; });
     cudaDeviceSynchronize();
   }
@@ -233,6 +411,7 @@ TEST_F(AdaptivePipelineTest, NullingModeK0NoSuppression) {
   r.run_constant();
   EXPECT_GT(rfi_beam_total_power(*r.output), 0.0)
       << "K=0 should leave weights unchanged — RFI beam must have power";
+  expect_beams_near_equal(*r.output, /*a=*/0, /*b=*/1, /*abs_tol=*/1e-3f);
 }
 
 // With K=1 and constant (rank-1) input plus unity weights:
@@ -242,11 +421,63 @@ TEST_F(AdaptivePipelineTest, NullingModeZerosRFIBeamWithRankOneInput) {
   AdaptiveRun r(/*shrink=*/false, /*K=*/1);
   r.run_constant();
 
+  EXPECT_GT(original_beam_total_power(*r.output), 1.0)
+      << "Original beam should remain the unmitigated reference";
+
   const double power = rfi_beam_total_power(*r.output);
   // The theoretical result is exactly 0; allow floating-point tolerance.
   EXPECT_LT(power, 1.0)
       << "Null K=1 + rank-1 input: RFI beam should be near zero (power="
       << power << ")";
+}
+
+TEST_F(AdaptivePipelineTest,
+       NullingModeMatchesPythonProjectionForStrongSignalPlusNoise) {
+  AdaptiveRun r(/*shrink=*/false, /*K=*/1);
+  r.run_strong_noise();
+
+  const auto expected = python_strong_noise_nulling_reference();
+  std::vector<nlohmann::json> original_by_pol;
+  std::vector<nlohmann::json> nulled_by_pol;
+  for (const auto &pol : expected.at("channels").at(0).at("polarizations")) {
+    original_by_pol.push_back(pol.at("original"));
+    nulled_by_pol.push_back(pol.at("nulled"));
+  }
+
+  expect_beam_matches_python_reference(*r.output, /*channel=*/0, /*beam=*/0,
+                                       original_by_pol,
+                                       /*abs_tol=*/1e-3f);
+  expect_beam_matches_python_reference(*r.output, /*channel=*/0, /*beam=*/1,
+                                       nulled_by_pol,
+                                       /*abs_tol=*/2.5e-1f);
+}
+
+TEST_F(AdaptivePipelineTest,
+       NullingModeMatchesPythonProjectionForTwoDistinctChannels) {
+  AdaptiveRunForConfig<AdaptiveTwoChannelConfig> r(
+      /*shrink=*/false, /*eig_map=*/{{0, 1}, {1, 1}});
+  r.run(multichannel_strong_noise_sample);
+
+  const auto expected = python_strong_noise_nulling_reference();
+  ASSERT_EQ(expected.at("channels").size(), AdaptiveTwoChannelConfig::NR_CHANNELS);
+
+  for (size_t channel = 0; channel < AdaptiveTwoChannelConfig::NR_CHANNELS;
+       ++channel) {
+    std::vector<nlohmann::json> original_by_pol;
+    std::vector<nlohmann::json> nulled_by_pol;
+    for (const auto &pol :
+         expected.at("channels").at(channel).at("polarizations")) {
+      original_by_pol.push_back(pol.at("original"));
+      nulled_by_pol.push_back(pol.at("nulled"));
+    }
+
+    expect_beam_matches_python_reference(*r.output, channel, /*beam=*/0,
+                                         original_by_pol,
+                                         /*abs_tol=*/1e-3f);
+    expect_beam_matches_python_reference(*r.output, channel, /*beam=*/1,
+                                         nulled_by_pol,
+                                         /*abs_tol=*/2.5e-1f);
+  }
 }
 
 // ---------------------------------------------------------------------------

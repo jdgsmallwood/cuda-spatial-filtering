@@ -216,9 +216,10 @@ struct LambdaPacketEntry
   LambdaPacketEntry() = default;
   LambdaPacketEntry(LambdaPacketEntry &&o) noexcept : Base(std::move(o)) {}
 
+  template <bool IncludeTimestamp>
   __attribute__((hot)) __attribute__((flatten))
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
-  parse() noexcept override {
+  parse_impl() noexcept {
 
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
@@ -247,8 +248,10 @@ struct LambdaPacketEntry
 
     return ProcessedPacket<PacketScaleStructure, PacketDataStructure>{
         .sample_count = custom->sample_count,
-        .timestamp =
-            this->timestamp.tv_sec * 1000000ULL + this->timestamp.tv_usec,
+        .timestamp = IncludeTimestamp
+                         ? this->timestamp.tv_sec * 1000000ULL +
+                               this->timestamp.tv_usec
+                         : 0,
         .payload = reinterpret_cast<
             const PacketPayload<PacketScaleStructure, PacketDataStructure> *>(
             base + offset + sizeof(CustomHeader)),
@@ -260,6 +263,17 @@ struct LambdaPacketEntry
             static_cast<uint32_t>(length - (offset + sizeof(CustomHeader))),
         .freq_channel = custom->freq_channel};
   };
+
+  ProcessedPacket<PacketScaleStructure, PacketDataStructure>
+  parse() noexcept override {
+    return parse_impl<true>();
+  }
+
+  __attribute__((hot)) __attribute__((flatten))
+  ProcessedPacket<PacketScaleStructure, PacketDataStructure>
+  parse_for_processor() noexcept {
+    return parse_impl<false>();
+  }
 };
 
 template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,

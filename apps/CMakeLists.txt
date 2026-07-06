@@ -64,6 +64,16 @@ target_link_libraries(bench_capture PRIVATE gpu_app_common)
 add_executable(bench_processor ${PROJECT_SOURCE_DIR}/apps/bench_processor.cu)
 target_include_directories(bench_processor PRIVATE ${PROJECT_SOURCE_DIR}/tests/support)
 target_link_libraries(bench_processor PRIVATE gpu_app_common)
+set(BENCH_PROCESSOR_RING_BUFFER_SIZE "8192" CACHE STRING
+    "Ring slots used by apps/bench_processor")
+set(BENCH_PROCESSOR_WORKER_COUNT "6" CACHE STRING
+    "Processor worker threads used by apps/bench_processor")
+set(SPATIAL_PROCESSOR_REGULAR_BATCH_SIZE "6000" CACHE STRING
+    "Packet batch size dispatched by ProcessorState::process_packets")
+target_compile_definitions(bench_processor PRIVATE
+    BENCH_PROCESSOR_RING_BUFFER_SIZE=${BENCH_PROCESSOR_RING_BUFFER_SIZE}
+    BENCH_PROCESSOR_WORKER_COUNT=${BENCH_PROCESSOR_WORKER_COUNT}
+    SPATIAL_PROCESSOR_REGULAR_BATCH_SIZE=${SPATIAL_PROCESSOR_REGULAR_BATCH_SIZE})
 # Enable full native CPU ISA for the bench host code: unlocks AVX-512 in copy_nt
 # (40 NT stores per 2560-byte copy vs 160 SSE2), better autovectorisation, and
 # Zen 4 / Ice Lake scheduling.  Bench-only; production apps stay portable.
@@ -75,4 +85,3 @@ target_link_libraries(bench_writers PRIVATE gpu_app_common)
 
 add_executable(bench_gpu ${PROJECT_SOURCE_DIR}/apps/bench_gpu.cu)
 target_link_libraries(bench_gpu PRIVATE gpu_app_common)
-
