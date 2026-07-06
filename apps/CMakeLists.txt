@@ -64,6 +64,11 @@ target_link_libraries(bench_capture PRIVATE gpu_app_common)
 add_executable(bench_processor ${PROJECT_SOURCE_DIR}/apps/bench_processor.cu)
 target_include_directories(bench_processor PRIVATE ${PROJECT_SOURCE_DIR}/tests/support)
 target_link_libraries(bench_processor PRIVATE gpu_app_common)
+# Enable full native CPU ISA for the bench host code: unlocks AVX-512 in copy_nt
+# (40 NT stores per 2560-byte copy vs 160 SSE2), better autovectorisation, and
+# Zen 4 / Ice Lake scheduling.  Bench-only; production apps stay portable.
+target_compile_options(bench_processor PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
 
 add_executable(bench_writers ${PROJECT_SOURCE_DIR}/apps/bench_writers.cu)
 target_link_libraries(bench_writers PRIVATE gpu_app_common)

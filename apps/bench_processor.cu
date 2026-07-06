@@ -74,8 +74,12 @@ BenchResult run_processor_bench(double duration_s) {
   }
 
   constexpr size_t NR_INPUT_BUFFERS = 8;
-  constexpr size_t RING_BUFFER_SIZE = 200000;
-  ProcessorState<Config, NR_INPUT_BUFFERS, RING_BUFFER_SIZE> state(
+  // 8192 slots × ~2752 bytes = ~22 MB — fits within the machine's 32 MB L3,
+  // dramatically reducing LLC miss rate.  The ring provides ~1.4× the
+  // REGULAR_BATCH_SIZE (6000) of slack so the feeder very rarely stalls.
+  constexpr size_t RING_BUFFER_SIZE = 8192;
+  constexpr int WORKER_COUNT = 6;
+  ProcessorState<Config, NR_INPUT_BUFFERS, RING_BUFFER_SIZE, WORKER_COUNT> state(
       Config::NR_PACKETS_FOR_CORRELATION, Config::NR_TIME_STEPS_PER_PACKET,
       /*min_freq_channel=*/0, fpga_delays, fpga_ids);
 
