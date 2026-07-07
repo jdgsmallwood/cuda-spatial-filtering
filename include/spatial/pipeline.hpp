@@ -397,6 +397,8 @@ template <typename T> struct LambdaPipelineIngest {
   }
 };
 
+static constexpr unsigned TCC_THREAD_BLOCKS_PER_SM = 2;
+
 template <typename T> class LambdaGPUPipeline : public GPUPipeline {
 
 private:
@@ -1127,7 +1129,8 @@ public:
                    T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
-                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK,
+                   TCC_THREAD_BLOCKS_PER_SM),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         cusolver_jobz(CUSOLVER_EIG_MODE_VECTOR),
@@ -2975,7 +2978,8 @@ public:
                    T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
-                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK,
+                   TCC_THREAD_BLOCKS_PER_SM),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
@@ -3539,7 +3543,8 @@ public:
                    T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
-                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK,
+                   TCC_THREAD_BLOCKS_PER_SM),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128)
@@ -4344,7 +4349,8 @@ public:
                    T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
-                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK,
+                   TCC_THREAD_BLOCKS_PER_SM),
 
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128) {
@@ -5302,7 +5308,8 @@ public:
                    T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
-                   T::NR_PADDED_RECEIVERS_PER_BLOCK),
+                   T::NR_PADDED_RECEIVERS_PER_BLOCK,
+                   TCC_THREAD_BLOCKS_PER_SM),
         tensor_16(extent, CUTENSOR_R_16F, 128),
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors), header_written(false),

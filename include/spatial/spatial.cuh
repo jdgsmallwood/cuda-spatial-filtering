@@ -674,25 +674,49 @@ __global__ void apply_delays(const __half *__restrict__ d_input,
                              const size_t nr_time_samples_per_packet,
                              const size_t total_to_copy_per_fpga,
                              const size_t total_to_copy_per_time_step) {
-  __shared__ int fpga_delay;
+  static constexpr size_t HALVES_PER_VECTOR = sizeof(uint4) / sizeof(__half);
 
-  if (threadIdx.x == 0) {
-    fpga_delay = d_fpga_delays[blockIdx.y];
-  }
-  __syncthreads();
-
-  const int thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
+  const size_t vector_idx = blockDim.x * blockIdx.x + threadIdx.x;
+  const size_t vector_count = total_to_copy_per_fpga / HALVES_PER_VECTOR;
   const int fpga_idx = blockIdx.y;
+  const int fpga_delay = d_fpga_delays[fpga_idx];
 
-  const int base_pointer =
-      fpga_idx * input_stride_per_fpga +
-      (nr_time_samples_per_packet + fpga_delay) * total_to_copy_per_time_step +
-      thread_idx;
-  const int output_base_pointer =
-      fpga_idx * total_to_copy_per_fpga + thread_idx;
+  const size_t input_base =
+      static_cast<size_t>(fpga_idx) * input_stride_per_fpga +
+      (nr_time_samples_per_packet + fpga_delay) * total_to_copy_per_time_step;
+  const size_t output_base =
+      static_cast<size_t>(fpga_idx) * total_to_copy_per_fpga;
 
-  if (thread_idx < total_to_copy_per_fpga) {
-    d_output[output_base_pointer] = d_input[base_pointer];
+  const bool aligned =
+      (input_base % HALVES_PER_VECTOR == 0) &&
+      (output_base % HALVES_PER_VECTOR == 0);
+
+  if (aligned) {
+    const uint4 *__restrict__ input_vec =
+        reinterpret_cast<const uint4 *>(d_input + input_base);
+    uint4 *__restrict__ output_vec =
+        reinterpret_cast<uint4 *>(d_output + output_base);
+
+    if (vector_idx < vector_count) {
+      output_vec[vector_idx] = input_vec[vector_idx];
+    }
+
+  } else {
+    const size_t scalar_start = vector_idx * HALVES_PER_VECTOR;
+#pragma unroll
+    for (size_t i = 0; i < HALVES_PER_VECTOR; ++i) {
+      const size_t scalar_idx = scalar_start + i;
+      if (scalar_idx < total_to_copy_per_fpga) {
+        d_output[output_base + scalar_idx] = d_input[input_base + scalar_idx];
+      }
+    }
+  }
+
+  if (aligned && vector_idx == 0) {
+    for (size_t i = vector_count * HALVES_PER_VECTOR;
+         i < total_to_copy_per_fpga; ++i) {
+      d_output[output_base + i] = d_input[input_base + i];
+    }
   }
 };
 
@@ -717,11 +741,15 @@ apply_delays_launch(const __half *d_input, __half *d_output,
   const size_t total_to_copy_per_time_step =
       nr_receivers_per_packet * nr_channels * 2 * nr_polarizations;
 
-  const int blocks_needed = (total_to_copy_per_fpga + 1024 - 1) / 1024;
+  static constexpr int THREADS = 256;
+  static constexpr size_t HALVES_PER_VECTOR = sizeof(uint4) / sizeof(__half);
+  const size_t vector_count =
+      (total_to_copy_per_fpga + HALVES_PER_VECTOR - 1) / HALVES_PER_VECTOR;
+  const int blocks_needed = (vector_count + THREADS - 1) / THREADS;
 
   const dim3 grid(blocks_needed, nr_fpgas, 1);
 
-  apply_delays<<<grid, 1024, 0, stream>>>(
+  apply_delays<<<grid, THREADS, 0, stream>>>(
       d_input, d_output, d_fpga_delays, input_stride_per_fpga,
       nr_time_samples_per_packet, total_to_copy_per_fpga,
       total_to_copy_per_time_step);
