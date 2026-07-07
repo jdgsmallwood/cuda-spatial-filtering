@@ -54,51 +54,40 @@ void convert_float_to_half(const float *d_input, __half *d_output, const int n,
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
-          size_t NR_PACKETS, size_t TIME_STEPS_PER_THREAD>
+          size_t NR_PACKETS>
 __global__ void scale_and_convert_to_half_kernel(
     const char2 *__restrict__ d_input, const int16_t *__restrict__ d_scale,
-    const float2 *__restrict__ d_gains, __half2 *__restrict__ d_output,
-    const int n_per_pass, const int time_stride) {
+    const float2 *__restrict__ d_gains, __half2 *__restrict__ d_output) {
 
   // input format is
   // int8_t[channel][packet][fpga][time][receiver_in_pkt][pol][complex]
-  //
-  // shared is [RECEIVER][POL]
-  __shared__ int scale_factors[NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS];
-  __shared__ float2 gain_factors[NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS];
 
   int channel_idx = blockIdx.x % NR_CHANNELS;
   int packet_idx = blockIdx.x / NR_CHANNELS;
   int fpga_idx = blockIdx.y;
 
-  if (threadIdx.x < NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS) {
-    int scale_ptr = channel_idx * NR_PACKETS * NR_RECEIVERS * NR_POLARIZATIONS +
-                    packet_idx * NR_RECEIVERS * NR_POLARIZATIONS + threadIdx.x;
-    scale_factors[threadIdx.x] = static_cast<int>(d_scale[scale_ptr]);
-
-    int gain_ptr = channel_idx * NR_RECEIVERS * NR_POLARIZATIONS +
-                   fpga_idx * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
-                   threadIdx.x;
-    gain_factors[threadIdx.x] = __ldg(&d_gains[gain_ptr]);
-  }
-  __syncthreads();
-
   static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
                 "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
-  static_assert(
-      NR_TIME_STEPS_PER_PACKET % TIME_STEPS_PER_THREAD == 0,
-      "TIME_STEPS_PER_THREAD must evenly divide NR_TIME_STEPS_PER_PACKET");
 
   constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET;
 
-  int pol_idx = threadIdx.x % 2;
-  int recv_in_pkt =
-      (threadIdx.x % (NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS)) /
-      NR_POLARIZATIONS;
-  int time_base = (threadIdx.x / ELEMS_PER_TIME);
+  if (threadIdx.x >= ELEMS_PER_TIME) {
+    return;
+  }
 
-  int scale_val_int = scale_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
-  float2 gain = gain_factors[recv_in_pkt * NR_POLARIZATIONS + pol_idx];
+  int pol_idx = threadIdx.x % NR_POLARIZATIONS;
+  int recv_in_pkt = threadIdx.x / NR_POLARIZATIONS;
+  int receiver_pol_idx = recv_in_pkt * NR_POLARIZATIONS + pol_idx;
+
+  int scale_ptr = channel_idx * NR_PACKETS * NR_RECEIVERS * NR_POLARIZATIONS +
+                  packet_idx * NR_RECEIVERS * NR_POLARIZATIONS +
+                  receiver_pol_idx;
+  int scale_val_int = static_cast<int>(d_scale[scale_ptr]);
+
+  int gain_ptr = channel_idx * NR_RECEIVERS * NR_POLARIZATIONS +
+                 fpga_idx * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
+                 receiver_pol_idx;
+  float2 gain = __ldg(&d_gains[gain_ptr]);
 
   size_t nr_fpga = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
 
@@ -109,28 +98,24 @@ __global__ void scale_and_convert_to_half_kernel(
                        NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
                    fpga_idx * NR_TIME_STEPS_PER_PACKET *
                        NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
-                   time_base * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
-                   recv_in_pkt * NR_POLARIZATIONS + pol_idx;
+                   receiver_pol_idx;
 
-#pragma unroll
-  for (int t = 0; t < TIME_STEPS_PER_THREAD; ++t) {
-    int time_step = time_base + t * time_stride;
-    if (threadIdx.x < n_per_pass && time_step < NR_TIME_STEPS_PER_PACKET) {
-      int ptr = input_base +
-                (t * time_stride) * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
+#pragma unroll 4
+  for (int time_step = 0; time_step < NR_TIME_STEPS_PER_PACKET; ++time_step) {
+    int ptr = input_base +
+              time_step * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
 
-      char2 sample = d_input[ptr];
-      int val_real = static_cast<int>(sample.x) * scale_val_int;
-      int val_imag = static_cast<int>(sample.y) * scale_val_int;
+    char2 sample = d_input[ptr];
+    int val_real = static_cast<int>(sample.x) * scale_val_int;
+    int val_imag = static_cast<int>(sample.y) * scale_val_int;
 
-      float2 float_val{static_cast<float>(val_real),
-                       static_cast<float>(val_imag)};
+    float2 float_val{static_cast<float>(val_real),
+                     static_cast<float>(val_imag)};
 
-      float2 gain_applied_val{float_val.x * gain.x - float_val.y * gain.y,
-                              float_val.x * gain.y + float_val.y * gain.x};
+    float2 gain_applied_val{float_val.x * gain.x - float_val.y * gain.y,
+                            float_val.x * gain.y + float_val.y * gain.x};
 
-      d_output[ptr] = __float22half2_rn(gain_applied_val);
-    }
+    d_output[ptr] = __float22half2_rn(gain_applied_val);
   }
 };
 
@@ -144,22 +129,15 @@ void scale_and_convert_to_half(const char2 *d_input, const int16_t *d_scale,
                                cudaStream_t stream) {
 
   constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
-  constexpr size_t THREADS = 1024;
-
-  constexpr size_t nr_time_step_threads =
-      THREADS / (NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET);
-  constexpr size_t nr_time_steps_per_thread =
-      (NR_TIME_STEPS_PER_PACKET + nr_time_step_threads - 1) /
-      nr_time_step_threads;
-  constexpr int n_per_pass =
-      nr_time_step_threads * NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET;
+  constexpr size_t ELEMS_PER_TIME = NR_POLARIZATIONS * NR_RECEIVERS_PER_PACKET;
+  constexpr size_t THREADS = ((ELEMS_PER_TIME + 31) / 32) * 32;
 
   scale_and_convert_to_half_kernel<
       NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS, NR_RECEIVERS_PER_PACKET,
-      NR_TIME_STEPS_PER_PACKET, NR_PACKETS, nr_time_steps_per_thread>
+      NR_TIME_STEPS_PER_PACKET, NR_PACKETS>
       <<<dim3(NR_CHANNELS * NR_PACKETS, NR_FPGA_SOURCES, 1),
-         dim3(THREADS, 1, 1), 0, stream>>>(d_input, d_scale, d_gains, d_output,
-                                           n_per_pass, nr_time_step_threads);
+         dim3(THREADS, 1, 1), 0, stream>>>(d_input, d_scale, d_gains,
+                                           d_output);
 }
 
 template <typename T>
