@@ -556,12 +556,24 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   processor_state->handle_buffer_completion();
 
   INFO_LOG("Finished initial.");
-  // add two packets that are way further along, this will cause
-  // the pipeline to run w/ missing packets.
+  // add two packets that are way further along (beyond the buffer horizon),
+  // this will cause the pipeline to run w/ missing packets.  Beyond-horizon
+  // packets no longer advance the completion watermark at parse time (that
+  // raced concurrent capture -- see copy_data_to_input_buffer_if_able);
+  // recovery now runs through the drain stall safety net, which the tests
+  // trigger explicitly with a zero threshold instead of waiting out the
+  // production hysteresis (default 100 ms).
   add_packet(20000, 0, 0);
   add_packet(20000, 0, 1);
   INFO_LOG("Packets added");
   processor_state->process_all_available_packets();
+  auto *concrete_state =
+      static_cast<ProcessorState<TestConfig, NR_BUFFERS> *>(processor_state);
+  concrete_state->future_stall_force_threshold = std::chrono::milliseconds(0);
+  std::array<uint64_t, TestConfig::NR_FPGA_SOURCES> gmax{};
+  concrete_state->get_global_max_packet_array(gmax);
+  concrete_state->drain_future_packets(gmax); // arms the stall timer
+  concrete_state->drain_future_packets(gmax); // fires the safety net
   processor_state->handle_buffer_completion();
   INFO_LOG("Firing again...");
   EXPECT_EQ(processor_state->packets_missing, 2 * 20);
@@ -580,6 +592,54 @@ TEST_F(ProcessorStateTest, MissingPacketHandlingTest) {
   for (int i = 0; i < scales_length; ++i) {
     EXPECT_EQ(scales_last_packet[i], 0);
   }
+}
+
+// Regression test for the completion-watermark race: a packet deferred to
+// future_packet_queue (beyond the buffer horizon) must NOT advance
+// latest_packet_received at parse time.  The old parse-time bump let a
+// buffer complete off a deferred packet's sample count while the buffer
+// still had holes that in-flight packets were about to fill -- under
+// concurrent capture threads (nr_capture_threads > 0) or bounded stream
+// skew this silently zero-filled real data as "missing".
+TEST_F(ProcessorStateTest, FuturePacketDoesNotPrematurelyCompleteBuffer) {
+  const uint64_t start_sample = 1000;
+  constexpr int NTS = TestConfig::NR_TIME_STEPS_PER_PACKET;
+  constexpr int NPC = TestConfig::NR_PACKETS_FOR_CORRELATION;
+
+  // Channel 1: complete window (pkt 0..NPC then the -1 front packet),
+  // mirroring MissingPacketCountIsZeroForCompleteBuffer's fill.
+  for (int pkt = 0; pkt < NPC + 1; pkt++) {
+    add_packet(start_sample + pkt * NTS, 0, 1);
+  }
+  add_packet(start_sample - NTS, 0, 1);
+
+  // Channel 0: only the head of the window (pkt 0..4) -- the tail is still
+  // "in flight", so channel 0's watermark must hold the buffer open.
+  for (int pkt = 0; pkt <= 4; pkt++) {
+    add_packet(start_sample + pkt * NTS, 0, 0);
+  }
+  processor_state->process_all_available_packets();
+
+  // A far-future channel-0 packet (beyond the last buffer's window) gets
+  // deferred to future_packet_queue.  It must not complete the buffer.
+  add_packet(start_sample + 500 * NTS, 0, 0);
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion();
+
+  EXPECT_EQ(mock_pipeline->get_execute_count(), 0);
+  EXPECT_EQ(processor_state->packets_missing, 0);
+
+  // The in-flight tail (pkt 5..NPC and the -1 front packet) arrives; now the
+  // buffer completes with nothing missing.
+  for (int pkt = 5; pkt < NPC + 1; pkt++) {
+    add_packet(start_sample + pkt * NTS, 0, 0);
+  }
+  add_packet(start_sample - NTS, 0, 0);
+  processor_state->process_all_available_packets();
+  processor_state->handle_buffer_completion();
+
+  EXPECT_EQ(mock_pipeline->get_execute_count(), 1);
+  EXPECT_EQ(processor_state->packets_missing, 0);
 }
 
 TEST_F(ProcessorStateMultipleFPGATest, MultipleFPGABasicTest) {

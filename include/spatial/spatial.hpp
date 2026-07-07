@@ -441,8 +441,6 @@ public:
 
     const int freq_channel = pkt.freq_channel - MIN_FREQ_CHANNEL;
 
-    atomic_max_u64(latest_packet_received[freq_channel][fpga_index],
-                   pkt.sample_count);
     const int current_buf = current_buffer;
     const uint64_t sample_count = pkt.sample_count;
     // on the first run global_max will not be set initially so will be 0.
@@ -450,9 +448,25 @@ public:
     if (sample_count > global_max[fpga_index] && global_max[fpga_index] > 0) {
       packets_future_queued.fetch_add(1, std::memory_order_relaxed);
       std::lock_guard lock(future_packet_queue_mutex);
-      future_packet_queue[fpga_index].push({current_read_index, sample_count});
+      future_packet_queue[fpga_index].push(
+          {current_read_index, sample_count, freq_channel});
       return;
     }
+
+    // Completion watermark.  This bump must happen AFTER the future-queue
+    // deferral above, not before: a deferred packet's data is not in any
+    // buffer yet, and if it advanced the watermark here then the moment its
+    // window rotates into existence check_buffer_completion() could complete
+    // that buffer off the pre-bumped watermark -- before the periodic drain
+    // re-injects the packet -- and its data would be silently counted missing
+    // and zero-filled.  A single in-order producer never hits that race, but
+    // concurrent capture threads (nr_capture_threads > 0, live multi-queue
+    // NICs) and any bounded skew between streams do.  Deferred packets bump
+    // the watermark when the drain re-processes them through the copy path
+    // below; genuinely jumped streams (never drainable) are force-completed by
+    // the stall safety net in drain_future_packets().
+    atomic_max_u64(latest_packet_received[freq_channel][fpga_index],
+                   sample_count);
 
     bool is_extended = false;
     int num_copied = 0;
@@ -592,9 +606,17 @@ public:
     }
   };
 
+  // `processed_accum`, when non-null, receives the processed-packet count in a
+  // thread-local so concurrent workers don't each do a per-packet fetch_add on
+  // the single global `packets_processed` atomic (that cacheline ping-ponging
+  // across workers was capping useful worker scaling).  Workers pass a local
+  // and flush it to the atomic once per dispatched slice; the single-threaded
+  // callers (future-queue drain, process_all_available_packets) pass null and
+  // increment the atomic directly, keeping the exact counts the tests assert.
   __attribute__((hot)) void process_packet_data(
       typename T::PacketEntryType *pkt, const int current_read_index,
-      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
+      uint64_t *processed_accum = nullptr) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
@@ -649,7 +671,11 @@ public:
     };
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
     if (*parsed.original_packet_processed) [[likely]] {
-      packets_processed.fetch_add(1, std::memory_order_relaxed);
+      if (processed_accum) {
+        ++*processed_accum;
+      } else {
+        packets_processed.fetch_add(1, std::memory_order_relaxed);
+      }
     }
     modified_since_last_completion_check[freq_channel].store(
         true, std::memory_order_release);
@@ -758,7 +784,6 @@ public:
                 std::memory_order_acquire)) {
           continue;
         }
-        // INFO_LOG("Check if buffers are complete for channel {}", channel);
         bool all_fpgas_complete = true;
         for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
           // we wait for halfway through the next buffer to be complete to avoid
@@ -776,18 +801,8 @@ public:
         if (all_fpgas_complete) {
           buffer.is_populated[channel] = true;
         }
-        // INFO_LOG("Buffer is complete for channel {}", channel);
-        // else {
-        //  INFO_LOG("Buffer is not complete for channel {} as end_seq is {} and
-        //  "
-        //          "latest_packet_receives are:",
-        //         channel, buffers[current_buffer].end_seq);
-        // for (int check = 0; check < T::NR_FPGA_SOURCES; ++check) {
-        //   INFO_LOG("FPGA ID {} / Channel {}: {},", check, channel,
-        //            latest_packet_received[channel][check]);
-        // }
-        // }
       }
+      
       if (buffer.is_populated.all()) {
         buffers_complete.push_back(buf_idx);
       }
@@ -797,6 +812,90 @@ public:
           false, std::memory_order_relaxed);
     }
   };
+
+  // How long a stream's future-queued packets may sit stuck beyond the buffer
+  // horizon before the stall safety net force-completes (see
+  // handle_future_stall).  The delay is the hysteresis that distinguishes a
+  // genuine stream jump (sustained packet loss -- buffers stop completing, the
+  // queue stays undrainable) from benign bounded skew between capture threads,
+  // which resolves within microseconds as buffers release and the horizon
+  // advances.  Default ~6 production buffer periods (16.5 ms each).  Runtime
+  // member (not constexpr) so tests can shrink it to exercise the recovery
+  // path without real sleeps.
+  std::chrono::milliseconds future_stall_force_threshold{100};
+
+  // Stall safety net.  Requires future_packet_queue_mutex to be held.
+  // First sighting of a stuck-beyond-horizon queue arms a timer; if the queue
+  // is still stuck past future_stall_force_threshold, bump the completion
+  // watermark for every queued packet's (channel, fpga) so the stalled
+  // buffers complete (holes zero-filled), release, and the horizon chases the
+  // jumped stream until the queue becomes drainable -- the same loss-recovery
+  // outcome the old parse-time watermark bump provided, but gated so it can
+  // never race a benignly-skewed packet out of its buffer.
+  void handle_future_stall(const int fpga_index) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!future_stuck_since_valid[fpga_index]) {
+      future_stuck_since[fpga_index] = now;
+      future_stuck_since_valid[fpga_index] = true;
+      return;
+    }
+    if (now - future_stuck_since[fpga_index] < future_stall_force_threshold) {
+      return;
+    }
+    INFO_LOG("[FutureStall] FPGA {} future queue stuck beyond horizon with {} "
+             "packets -- force-advancing watermarks to recover",
+             fpga_index, future_packet_queue[fpga_index].size());
+    std::vector<PacketOrder> stashed;
+    stashed.reserve(future_packet_queue[fpga_index].size());
+    while (!future_packet_queue[fpga_index].empty()) {
+      stashed.push_back(future_packet_queue[fpga_index].top());
+      future_packet_queue[fpga_index].pop();
+    }
+    for (const auto &p : stashed) {
+      atomic_max_u64(latest_packet_received[p.freq_channel][fpga_index],
+                     p.packet_num);
+      modified_since_last_completion_check[p.freq_channel].store(
+          true, std::memory_order_release);
+      future_packet_queue[fpga_index].push(p);
+    }
+    future_stuck_since_valid[fpga_index] = false;
+  }
+
+  // Drain future-queued packets that have come into the horizon
+  // (packet_num <= global_max) back through process_packet_data(), and run
+  // the stall safety net for streams stuck beyond it.  Called from the
+  // processor loop every iteration; try_to_lock so it never blocks capture
+  // threads that are mid-deferral.
+  void drain_future_packets(
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
+    std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
+                                      std::try_to_lock);
+    if (!lock.owns_lock()) {
+      return;
+    }
+    for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+      while (!future_packet_queue[i].empty()) {
+        auto pkt = future_packet_queue[i].top();
+        if (pkt.packet_num > global_max[i]) {
+          handle_future_stall(i);
+          break;
+        }
+        future_stuck_since_valid[i] = false;
+        future_packet_queue[i].pop();
+        lock.unlock();
+        auto *entry = d_packet_data[pkt.index];
+        if (entry->length > 0 &&
+            entry->committed.load(std::memory_order_acquire) &&
+            !entry->processed.load(std::memory_order_relaxed)) {
+          process_packet_data(entry, pkt.index, global_max);
+        }
+        lock.lock();
+      }
+      if (future_packet_queue[i].empty()) {
+        future_stuck_since_valid[i] = false;
+      }
+    }
+  }
 
   __attribute__((hot)) void process_packets() {
 
@@ -809,6 +908,23 @@ public:
     constexpr int num_loops_before_completion_check = 1;
     int packets_until_completion_check = num_loops_before_completion_check;
     current_read_index = read_index.load(std::memory_order_relaxed);
+
+    // Strided slot ownership (thread t owns ring slots t, t+N, t+2N, ...) is
+    // only DISJOINT between capture threads when N divides the ring size:
+    // slot = linear % RING_BUFFER_SIZE, and for stride ∤ ring the residues
+    // interleave, so two threads whose claim rates drift more than a ring
+    // apart end up claiming the SAME slots and serialise on each other's
+    // processed flags (observed as multi-second stalls under uneven per-queue
+    // packet rates).  Warn loudly rather than assert: existing single-thread
+    // captures are unaffected.
+    if (nr_capture_threads > 0 &&
+        RING_BUFFER_SIZE % static_cast<size_t>(nr_capture_threads) != 0) {
+      ERROR_LOG("RING_BUFFER_SIZE ({}) is not divisible by nr_capture_threads "
+                "({}): strided capture threads will share ring slots and can "
+                "stall each other under uneven packet rates. Use a divisible "
+                "ring size.",
+                RING_BUFFER_SIZE, nr_capture_threads);
+    }
 
     // Per-thread local read positions for the strided consumer path.
     // Initialized to tid because thread tid's linear sequence starts at tid,
@@ -843,8 +959,20 @@ public:
                                    std::memory_order_relaxed);
       for (int i = 0; i < workers_with_tasks; ++i)
         worker_has_task[i].store(true, std::memory_order_release);
+      // Wait for the workers to actually FINISH the dispatched slices.
+      // Breaking out early on !running (the old behaviour) let the
+      // completion check below run concurrently with in-flight worker
+      // copies at shutdown, so a buffer could complete off one worker's
+      // watermark while another worker's arrival flags weren't written yet
+      // -- real arrivals then counted missing and zero-filled.  Workers are
+      // guaranteed to terminate their slices even at shutdown (their
+      // committed-spin bails on !running), so only stop waiting once every
+      // worker has exited (workers_alive == 0) and its pending decrements
+      // can no longer come.
       while (num_workers_with_tasks.load(std::memory_order_acquire) > 0) {
-        if (!running.load(std::memory_order_relaxed)) break;
+        if (!running.load(std::memory_order_relaxed) &&
+            workers_alive.load(std::memory_order_acquire) == 0)
+          break;
         _mm_pause();
       }
     };
@@ -908,30 +1036,7 @@ public:
         // Before checking buffer completion drain any packets from the
         // queue that should be in this buffer
         get_global_max_packet_array(global_max);
-
-        {
-          std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
-                                            std::try_to_lock);
-          if (lock.owns_lock()) {
-            for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
-              while (!future_packet_queue[i].empty()) {
-                auto pkt = future_packet_queue[i].top();
-                if (pkt.packet_num > global_max[i]) {
-                  break;
-                }
-                future_packet_queue[i].pop();
-                lock.unlock();
-                auto *entry = d_packet_data[pkt.index];
-                if (entry->length > 0 &&
-                    entry->committed.load(std::memory_order_acquire) &&
-                    !entry->processed.load(std::memory_order_relaxed)) {
-                  process_packet_data(entry, pkt.index, global_max);
-                }
-                lock.lock();
-              }
-            }
-          }
-        }
+        drain_future_packets(global_max);
         handle_buffer_completion();
         packets_until_completion_check = num_loops_before_completion_check;
       }
@@ -964,6 +1069,9 @@ public:
       // Spin-wait for a task signal from the main thread, or exit.
       while (!worker_has_task[worker_id].load(std::memory_order_acquire)) {
         if (!running.load(std::memory_order_relaxed)) {
+          // Publish the exit so dispatch_and_wait's shutdown path knows this
+          // worker can no longer decrement num_workers_with_tasks.
+          workers_alive.fetch_sub(1, std::memory_order_acq_rel);
           std::cout << "Worker " << worker_id << " exited\n";
           return;
         }
@@ -973,6 +1081,9 @@ public:
       auto [start, end, stride] = worker_tasks[worker_id];
 
       int idx = start;
+      // Accumulate this slice's processed count locally; flush once below so
+      // the global atomic isn't hammered per packet across all workers.
+      uint64_t local_processed = 0;
 
       while (idx != end) {
 
@@ -1005,14 +1116,28 @@ public:
         // Wait for the producer to commit this slot before processing.
         // In the common case (single-phase legacy path or fast producer) this
         // never spins; the acquire pairs with commit_write_batch's release.
+        // At shutdown a producer may have reserved (committed=false) and then
+        // bailed without committing -- break out so the slice always
+        // terminates and dispatch_and_wait can rely on workers finishing.
+        bool bailed = false;
         while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
+          if (!running.load(std::memory_order_relaxed)) {
+            bailed = true;
+            break;
+          }
           _mm_pause();
         }
+        if (bailed)
+          break;
         if (entry->length > 0 &&
             !entry->processed.load(std::memory_order_relaxed)) {
-          process_packet_data(entry, idx, global_max);
+          process_packet_data(entry, idx, global_max, &local_processed);
         }
         idx = (idx + stride) % RING_BUFFER_SIZE;
+      }
+
+      if (local_processed) {
+        packets_processed.fetch_add(local_processed, std::memory_order_relaxed);
       }
 
       // Clear flag BEFORE decrementing so the main thread can't re-signal this
@@ -1309,6 +1434,10 @@ private:
   struct PacketOrder {
     int index;
     uint64_t packet_num;
+    // MIN_FREQ_CHANNEL-adjusted channel index, recorded at deferral so the
+    // stall safety net in drain_future_packets() knows which watermark to
+    // force-bump without re-parsing the ring slot.
+    int freq_channel;
 
     bool operator>(const PacketOrder &other) const {
       return packet_num > other.packet_num;
@@ -1333,6 +1462,13 @@ private:
              T::NR_FPGA_SOURCES>
       future_packet_queue;
   std::mutex future_packet_queue_mutex;
+  // Stall-detection state for the drain safety net (handle_future_stall):
+  // when this fpga's queue head first got stuck beyond the horizon, and
+  // whether that timestamp is armed.  Only touched under
+  // future_packet_queue_mutex on the processor thread.
+  std::array<std::chrono::steady_clock::time_point, T::NR_FPGA_SOURCES>
+      future_stuck_since{};
+  std::array<bool, T::NR_FPGA_SOURCES> future_stuck_since_valid{};
   std::array<std::atomic<bool>, T::NR_CHANNELS> modified_since_last_completion_check;
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
@@ -1360,10 +1496,16 @@ private:
   std::array<std::atomic<bool>, WORKER_COUNT> worker_has_task;
   std::array<WorkRange, WORKER_COUNT> worker_tasks;
   std::atomic<int> num_workers_with_tasks = 0;
+  // Number of worker threads that have not yet exited; lets
+  // dispatch_and_wait distinguish "workers still finishing their slices"
+  // (keep waiting -- shutdown-correctness) from "workers gone, pending
+  // decrements will never arrive" (stop waiting).
+  std::atomic<int> workers_alive = 0;
 
   std::vector<std::thread> workers;
 
   void start_processing_threads() {
+    workers_alive.store(WORKER_COUNT, std::memory_order_release);
     for (int i = 0; i < WORKER_COUNT; i++) {
       worker_has_task[i].store(false);
       workers.emplace_back(&ProcessorState::worker_thread_fn, this, i);
