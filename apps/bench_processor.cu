@@ -4,10 +4,16 @@
 #include <chrono>
 #include <complex>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sched.h>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "spatial/logging.hpp"
 #include "spatial/pipeline_base.hpp"
@@ -15,6 +21,44 @@
 #include "synthetic_packets.hpp"
 #include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
+
+// Pin the whole process (and therefore every thread it later spawns, which
+// inherit the mask) to the CPUs of a single NUMA node.  This box is a
+// dual-socket Xeon with a *split* L3 (one ~14 MB slice per socket) and separate
+// memory controllers, so letting the scheduler scatter the producer / processor
+// / feeder / worker threads across both sockets means every ring-slot read and
+// every pinned-buffer write can cross the inter-socket link -- roughly halving
+// throughput.  Confining everything to one node keeps the ring hot in that
+// node's L3 and every access node-local (default first-touch policy then places
+// all the allocations there too, since the constructor runs on this thread).
+// Honours SPATIAL_BENCH_NODE (default 0); set to -1 to disable pinning.
+static void pin_to_numa_node(int node) {
+  if (node < 0)
+    return;
+  std::ifstream f("/sys/devices/system/node/node" + std::to_string(node) +
+                  "/cpulist");
+  std::string cpulist;
+  if (!std::getline(f, cpulist) || cpulist.empty())
+    return;
+
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  // cpulist is a comma-separated list of ranges, e.g. "0-9" or "0-4,10-14".
+  size_t i = 0;
+  while (i < cpulist.size()) {
+    size_t comma = cpulist.find(',', i);
+    if (comma == std::string::npos)
+      comma = cpulist.size();
+    std::string token = cpulist.substr(i, comma - i);
+    size_t dash = token.find('-');
+    int lo = std::stoi(token.substr(0, dash));
+    int hi = dash == std::string::npos ? lo : std::stoi(token.substr(dash + 1));
+    for (int c = lo; c <= hi; ++c)
+      CPU_SET(c, &set);
+    i = comma + 1;
+  }
+  sched_setaffinity(0, sizeof(set), &set);
+}
 
 // Fixed representative configs for the LAMBDA instrument.  These are
 // compile-time constants so the same binary benchmarks all shapes without
@@ -38,6 +82,8 @@ struct BenchResult {
   uint64_t packets_processed;
   uint64_t packets_missing;
   uint64_t packets_discarded;
+  uint64_t packets_future_queued;
+  uint64_t packets_stuck;
   uint64_t buffers_completed;
   double elapsed;
   double packets_per_sec;
@@ -74,10 +120,24 @@ BenchResult run_processor_bench(double duration_s) {
   }
 
   constexpr size_t NR_INPUT_BUFFERS = 8;
-  // 8192 slots × ~2752 bytes = ~22 MB — fits within the machine's 32 MB L3,
-  // dramatically reducing LLC miss rate.  The ring provides ~1.4× the
-  // REGULAR_BATCH_SIZE (6000) of slack so the feeder very rarely stalls.
-  constexpr size_t RING_BUFFER_SIZE = 8192;
+  // Ring sizing constraints (sweep in
+  // scripts/profiling/BENCH_PROCESSOR_TUNING.md):
+  //   1. Divisible by PRODUCER_COUNT -- strided slot ownership is only
+  //      disjoint between producers when the stride divides the ring;
+  //      otherwise producers share slots and stall on each other (the
+  //      processor loop warns about this).
+  //   2. RING / PRODUCER_COUNT <= the smallest config's buffer horizon
+  //      (NR_INPUT_BUFFERS * (NR_PACKETS_FOR_CORRELATION+1) ~= 2056 packets
+  //      for the 1-channel config) -- a producer that can run further ahead
+  //      than the horizon floods the future queue and trips the stall
+  //      safety net, force-completing buffers with holes.
+  //   6144 = 3 * 2048 satisfies both.  Cache-locality matters less than in
+  //   the single-producer round (6 striding workers prefetch well past L3).
+  constexpr size_t RING_BUFFER_SIZE = 6144;
+  // 3 producers + 6 workers + the processor thread = 10 busy threads on this
+  // 10-core-per-socket box (the feeder sleeps in synchronous mode).  More of
+  // either oversubscribes the socket and collapses throughput (12 busy
+  // threads measured ~0.7 GB/s: spin-waits get descheduled).
   constexpr int WORKER_COUNT = 6;
   ProcessorState<Config, NR_INPUT_BUFFERS, RING_BUFFER_SIZE, WORKER_COUNT> state(
       Config::NR_PACKETS_FOR_CORRELATION, Config::NR_TIME_STEPS_PER_PACKET,
@@ -96,8 +156,18 @@ BenchResult run_processor_bench(double duration_s) {
   // and advance_to_next_buffer() waiting on a cv that is never notified.
   state.synchronous_pipeline = true;
 
-  std::thread processor([&state]() { state.process_packets(); });
-  std::thread feeder([&state]() { state.pipeline_feeder(); });
+  // Multi-threaded strided producers (the same lock-free protocol live
+  // multi-queue capture uses: reserve_write_batch_strided -> fill ->
+  // commit_write_batch; producer t owns ring slots t, t+N, t+2N, ...).  A
+  // single producer building 2664 B/packet runs in lockstep with the
+  // reassembly workers (~one 2.2 GHz core of memcpy ≈ the consumer rate), so
+  // batches stay small and fork/join overhead caps worker scaling; several
+  // producers mirror real multi-queue NIC capture and let the workers see
+  // full batches.  Correct since the completion-watermark fix in
+  // copy_data_to_input_buffer_if_able (deferred packets no longer complete
+  // buffers prematurely) -- see scripts/profiling/BENCH_PROCESSOR_TUNING.md.
+  constexpr int PRODUCER_COUNT = 3;
+  state.nr_capture_threads = PRODUCER_COUNT;
 
   const auto sample_fn = [](int, int, int) {
     return std::complex<int8_t>(2, -2);
@@ -107,45 +177,159 @@ BenchResult run_processor_bench(double duration_s) {
   constexpr uint64_t NR_BETWEEN_SAMPLES = Config::NR_TIME_STEPS_PER_PACKET;
   const uint64_t start_sample = NR_BETWEEN_SAMPLES * 10;
 
-  uint64_t round = 0;
-  uint64_t packets_fed = 0;
-  const auto start = std::chrono::steady_clock::now();
-  while (std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                       start)
-             .count() < duration_s) {
-    const uint64_t round_start_sample =
-        start_sample +
-        round * Config::NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
+  // Prebuild one wire-format template ONCE (shared, read-only across the
+  // producers).  Per packet a producer just memcpy's it into its reserved
+  // ring slot and patches the CustomHeader (sample_count/fpga/channel),
+  // mirroring a real capture (NIC delivers wire bytes -> single memcpy)
+  // instead of rebuilding 1280 samples with per-element lambda calls.
+  std::vector<uint8_t> tmpl(PKT_BYTES);
+  const size_t tmpl_len = test_support::build_lambda_wire_packet<Config>(
+      tmpl.data(), /*sample_count=*/1, /*fpga_id=*/0, /*freq_channel=*/0,
+      sample_fn, scale_fn);
+  constexpr size_t CUSTOM_OFF =
+      sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader);
 
-    for (size_t channel = 0; channel < Config::NR_CHANNELS; ++channel) {
-      for (size_t fpga = 0; fpga < Config::NR_FPGA_SOURCES; ++fpga) {
-        for (int pkt = 0;
-             pkt <= static_cast<int>(Config::NR_PACKETS_FOR_CORRELATION);
-             ++pkt) {
-          const uint64_t sample_count =
-              round_start_sample +
-              static_cast<uint64_t>(pkt) * NR_BETWEEN_SAMPLES;
-          test_support::feed_lambda_packet<Config>(
-              state, sample_count, static_cast<uint32_t>(fpga),
-              static_cast<uint16_t>(channel), sample_fn, scale_fn);
-          packets_fed++;
+  std::thread processor([&state]() { state.process_packets(); });
+  std::thread feeder([&state]() { state.pipeline_feeder(); });
+
+  // Bounded-skew throttle.  Real FPGA streams stay roughly sequence-aligned
+  // over time, and the reassembler's slack (NR_INPUT_BUFFERS windows plus the
+  // half-window completion margin) absorbs bounded skew -- but not unbounded
+  // drift, so producers must not run away from each other.  Each producer
+  // publishes its completed-round count; nobody starts round R until the
+  // slowest producer has completed round R - MAX_ROUND_SKEW.  Unlike the
+  // hard per-round barrier this doesn't serialise the producers, it only
+  // clamps their drift.
+  constexpr uint64_t MAX_ROUND_SKEW = 2;
+  struct alignas(64) RoundCounter {
+    std::atomic<uint64_t> v{0};
+  };
+  std::array<RoundCounter, PRODUCER_COUNT> completed_rounds;
+
+  std::array<uint64_t, PRODUCER_COUNT> fed_counts{};
+
+  // Producer `tid` feeds every (channel, fpga) stream whose flat index is
+  // congruent to tid mod PRODUCER_COUNT, so each stream's packets stay
+  // in-order within one producer.  Batches of descriptors are staged and
+  // flushed through reserve/fill/commit so the ring sees large contiguous
+  // claims.
+  auto producer_fn = [&](int tid) {
+    constexpr int RBATCH = 128;
+    void *slot_ptrs[RBATCH];
+    int slot_indices[RBATCH];
+    int lens[RBATCH];
+    sockaddr_in addrs[RBATCH];
+    sockaddr_in base_addr{};
+    base_addr.sin_family = AF_INET;
+    base_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    uint64_t sc_buf[RBATCH];
+    uint32_t fp_buf[RBATCH];
+    uint16_t ch_buf[RBATCH];
+    int pend = 0;
+    uint64_t my_linear = static_cast<uint64_t>(tid);
+    uint64_t fed = 0;
+
+    auto flush = [&]() {
+      int done = 0;
+      while (done < pend) {
+        const int got = state.reserve_write_batch_strided(
+            tid, my_linear, pend - done, slot_ptrs, slot_indices);
+        if (got <= 0) {
+          if (!state.running.load(std::memory_order_acquire)) {
+            pend = 0;
+            return;
+          }
+          continue;
         }
-        // The "-1" packet (one before the buffer start) is fed last, mirroring
-        // SyntheticPipelineRun's proven fill order.
-        const uint64_t sample_count_m1 =
-            round_start_sample - NR_BETWEEN_SAMPLES;
-        test_support::feed_lambda_packet<Config>(
-            state, sample_count_m1, static_cast<uint32_t>(fpga),
-            static_cast<uint16_t>(channel), sample_fn, scale_fn);
-        packets_fed++;
+        for (int i = 0; i < got; ++i) {
+          uint8_t *dst = reinterpret_cast<uint8_t *>(slot_ptrs[i]);
+          std::memcpy(dst, tmpl.data(), tmpl_len);
+          CustomHeader *custom =
+              reinterpret_cast<CustomHeader *>(dst + CUSTOM_OFF);
+          custom->sample_count = sc_buf[done + i];
+          custom->fpga_id = fp_buf[done + i];
+          custom->freq_channel = ch_buf[done + i];
+          lens[i] = static_cast<int>(tmpl_len);
+          addrs[i] = base_addr;
+        }
+        state.commit_write_batch(got, slot_indices, lens, addrs);
+        done += got;
       }
+      pend = 0;
+    };
+    auto emit = [&](uint64_t sc, uint32_t fp, uint16_t ch) {
+      sc_buf[pend] = sc;
+      fp_buf[pend] = fp;
+      ch_buf[pend] = ch;
+      ++pend;
+      ++fed;
+      if (pend == RBATCH)
+        flush();
+    };
+
+    uint64_t round = 0;
+    while (state.running.load(std::memory_order_acquire)) {
+      // Bounded-skew wait: don't start round R until the slowest producer
+      // has completed round R - MAX_ROUND_SKEW.
+      while (state.running.load(std::memory_order_acquire)) {
+        uint64_t min_done = UINT64_MAX;
+        for (int j = 0; j < PRODUCER_COUNT; ++j) {
+          min_done = std::min(
+              min_done, completed_rounds[j].v.load(std::memory_order_acquire));
+        }
+        if (round <= min_done + MAX_ROUND_SKEW)
+          break;
+        _mm_pause();
+      }
+
+      const uint64_t round_start_sample =
+          start_sample +
+          round * Config::NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
+      int stream = 0;
+      for (size_t channel = 0; channel < Config::NR_CHANNELS; ++channel) {
+        for (size_t fpga = 0; fpga < Config::NR_FPGA_SOURCES;
+             ++fpga, ++stream) {
+          if (stream % PRODUCER_COUNT != tid)
+            continue;
+          for (int pkt = 0;
+               pkt <= static_cast<int>(Config::NR_PACKETS_FOR_CORRELATION);
+               ++pkt) {
+            emit(round_start_sample +
+                     static_cast<uint64_t>(pkt) * NR_BETWEEN_SAMPLES,
+                 static_cast<uint32_t>(fpga), static_cast<uint16_t>(channel));
+          }
+          // The "-1" packet (one before the buffer start) is emitted last,
+          // mirroring SyntheticPipelineRun's proven per-stream fill order.
+          emit(round_start_sample - NR_BETWEEN_SAMPLES,
+               static_cast<uint32_t>(fpga), static_cast<uint16_t>(channel));
+        }
+      }
+      flush(); // publish this round's packets before advancing the counter
+      ++round;
+      completed_rounds[tid].v.store(round, std::memory_order_release);
     }
-    round++;
-  }
+    flush();
+    fed_counts[tid] = fed;
+  };
+
+  const auto start = std::chrono::steady_clock::now();
+  std::vector<std::thread> producers;
+  producers.reserve(PRODUCER_COUNT);
+  for (int t = 0; t < PRODUCER_COUNT; ++t)
+    producers.emplace_back(producer_fn, t);
+
+  std::this_thread::sleep_for(std::chrono::duration<double>(duration_s));
 
   state.shutdown();
+  for (auto &p : producers)
+    p.join();
   processor.join();
   feeder.join();
+
+  uint64_t packets_fed = 0;
+  for (auto c : fed_counts)
+    packets_fed += c;
 
   const auto end = std::chrono::steady_clock::now();
   const double elapsed = std::chrono::duration<double>(end - start).count();
@@ -160,6 +344,8 @@ BenchResult run_processor_bench(double duration_s) {
   r.packets_processed = packets_processed;
   r.packets_missing = state.packets_missing;
   r.packets_discarded = state.packets_discarded.load();
+  r.packets_future_queued = state.packets_future_queued.load();
+  r.packets_stuck = state.packets_stuck_unprocessed.load();
   r.buffers_completed = pipeline.buffers_completed.load();
   r.elapsed = elapsed;
   r.packets_per_sec = packets_processed / elapsed;
@@ -172,7 +358,8 @@ static void print_result(const BenchResult &r) {
   std::printf(
       "[Processor ch=%zu fpga=%zu rx=%zu] "
       "packets_fed=%llu packets_processed=%llu packets_missing=%llu "
-      "packets_discarded=%llu buffers_completed=%llu "
+      "packets_discarded=%llu future_queued=%llu stuck=%llu "
+      "buffers_completed=%llu "
       "elapsed=%.3f bytes_per_packet=%zu "
       "packets/sec=%.2f GB/sec=%.6f\n",
       r.nr_channels, r.nr_fpga_sources, r.nr_receivers,
@@ -180,12 +367,19 @@ static void print_result(const BenchResult &r) {
       (unsigned long long)r.packets_processed,
       (unsigned long long)r.packets_missing,
       (unsigned long long)r.packets_discarded,
+      (unsigned long long)r.packets_future_queued,
+      (unsigned long long)r.packets_stuck,
       (unsigned long long)r.buffers_completed, r.elapsed, r.bytes_per_packet,
       r.packets_per_sec, r.gb_per_sec);
   std::fflush(stdout);
 }
 
 int main(int argc, char *argv[]) {
+  // Confine the benchmark to a single NUMA node before any allocation so the
+  // ring/pinned buffers first-touch node-local memory and stay in one L3.
+  const char *node_env = std::getenv("SPATIAL_BENCH_NODE");
+  pin_to_numa_node(node_env ? std::atoi(node_env) : 0);
+
   argparse::ArgumentParser program("bench_processor");
   program.add_argument("--duration")
       .help("Duration in seconds to feed synthetic packets per config")
