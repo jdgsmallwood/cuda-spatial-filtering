@@ -88,7 +88,7 @@ echo
 run_bench "bench_processor" \
   "$APPS/bench_processor" --duration "$DURATION"
 run_bench "bench_gpu" \
-  "$APPS/bench_gpu" --duration "$DURATION" --lambda-only
+  "$APPS/bench_gpu" --duration "$DURATION"
 
 echo "All benchmarks complete."
 echo
