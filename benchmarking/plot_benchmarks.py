@@ -211,6 +211,13 @@ def plot_gpu_channel_sweep_combined(rows: list[dict], out_dir: Path, suffix: str
 
 COMPARISON_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd"]
 
+# Comparison charts overlay multiple datasets (machines/CPUs) on one axes.
+# Color alone doesn't survive grayscale printing/colorblind viewing, so every
+# dataset also gets its own linestyle -- readable in black & white from dash
+# pattern alone, with color as a bonus for those who have it.
+COMPARISON_LINESTYLES = ["-", "--", "-.", ":"]
+COMPARISON_MARKERS = ["o", "s", "^", "D", "v", "P"]
+
 
 def plot_gpu_comparison(datasets: list[tuple[str, list[dict]]], out_dir: Path):
     """Overlay the CorrBeam channel-sweep and LambdaGPU charts across machines.
@@ -221,16 +228,18 @@ def plot_gpu_comparison(datasets: list[tuple[str, list[dict]]], out_dir: Path):
     """
     colors = {label: COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
               for i, (label, _) in enumerate(datasets)}
+    linestyles = {label: COMPARISON_LINESTYLES[i % len(COMPARISON_LINESTYLES)]
+                  for i, (label, _) in enumerate(datasets)}
 
     # --- CorrBeam (GB/s) + LambdaGPU (input GB/s) overlaid on one chart ---
-    # Machine → color, pipeline → marker/linestyle, so both dimensions read
-    # clearly on the same axes.
+    # Machine → color + linestyle, pipeline → marker, so both dimensions read
+    # clearly even in black & white (marker shape + dash pattern alone).
     fig, ax = plt.subplots(figsize=(8, 5.5))
     fig.suptitle("GPU Throughput — Channel Sweep (4 FPGA)")
 
-    for tag, metric, style, marker in [
-        ("CorrBeam", "GB/sec", "-", "o"),
-        ("LambdaGPU", "input_GB/sec", "-", "s"),
+    for tag, metric, marker in [
+        ("CorrBeam", "GB/sec", "o"),
+        ("LambdaGPU", "input_GB/sec", "s"),
     ]:
         for label, rows in datasets:
             data = [r for r in rows if r["tag"] == tag and r["fpga"] == 4
@@ -241,8 +250,8 @@ def plot_gpu_comparison(datasets: list[tuple[str, list[dict]]], out_dir: Path):
             xs = [r["ch"] for r in data]
             ys = [r.get(metric, 0) for r in data]
             pipeline_name = "CorrBeam-only" if tag == "CorrBeam" else "RFIMit"
-            ax.plot(xs, ys, marker + style, label=f"{label} — {pipeline_name}",
-                    color=colors[label])
+            ax.plot(xs, ys, marker=marker, linestyle=linestyles[label],
+                    label=f"{label} — {pipeline_name}", color=colors[label])
 
     any_rows = next((rows for _, rows in datasets if rows), [])
     xs = sorted({r["ch"] for r in any_rows if r["fpga"] == 4}) or [8, 16, 24, 32]
@@ -323,6 +332,10 @@ def plot_processor_comparison(datasets: list[tuple[str, list[dict]]], out_dir: P
     """
     colors = {label: COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
               for i, (label, _) in enumerate(datasets)}
+    linestyles = {label: COMPARISON_LINESTYLES[i % len(COMPARISON_LINESTYLES)]
+                  for i, (label, _) in enumerate(datasets)}
+    markers = {label: COMPARISON_MARKERS[i % len(COMPARISON_MARKERS)]
+               for i, (label, _) in enumerate(datasets)}
 
     fig, ax = plt.subplots(figsize=(7, 5.5))
     fig.suptitle("Processor (packet ring-buffer / reassembly) — Channel Sweep")
@@ -335,7 +348,8 @@ def plot_processor_comparison(datasets: list[tuple[str, list[dict]]], out_dir: P
             continue
         xs = [r["ch"] for r in data]
         ys = [r.get("GB/sec", 0) for r in data]
-        ax.plot(xs, ys, "o-", label=label, color=colors[label])
+        ax.plot(xs, ys, marker=markers[label], linestyle=linestyles[label],
+                label=label, color=colors[label])
 
     ax.set_xlabel("NR_CHANNELS")
     ax.set_ylabel("GB/s")

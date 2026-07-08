@@ -2801,21 +2801,24 @@ public:
     //                     T::NR_POLARIZATIONS,
     //                 b.stream);
 
-    {
-      size_t CUBLAS_STRIDE_A = T::NR_RECEIVERS * T::NR_RECEIVERS;
-      size_t CUBLAS_STRIDE_B = T::NR_RECEIVERS * T::NR_BEAMS;
-      size_t CUBLAS_STRIDE_C = T::NR_RECEIVERS * T::NR_BEAMS;
+    // Slot 0 of weights_rfi_mitigated holds the original (un-projected) beam
+    // weights. It was initialised once in the constructor, but
+    // beam_steering_.maybe_refresh() above may have just written new steered
+    // weights into b.weights -- leaving slot 0 frozen at the construction-time
+    // (un-steered) direction. After steering fires, beam[0] points at the
+    // initial uniform direction while beam[1] points at the steered+projected
+    // target, making the RFI-mitigated beam appear to have MORE power than the
+    // "original" beam. Update slot 0 from b.weights every frame so both beams
+    // always use the same current steering.
+    tensor_16.runPermutation("weightsToBeamMajor", alpha,
+                             (__half *)b.weights.get(),
+                             (__half *)b.weights_rfi_mitigated.get(), b.stream);
 
+    {
       b.gemm_weight_projection_handle->Run(
           (CUdeviceptr)b.weights.get(), (CUdeviceptr)b.projection_matrix.get(),
           (CUdeviceptr)b.weights_updated.get());
     }
-
-    // weightsDebugLaunch((__half2 *)b.weights_updated.get(),
-    //                    T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_RECEIVERS
-    //                    *
-    //                        T::NR_BEAMS,
-    //                    b.stream);
 
     tensor_16.runPermutation("weightsToBeamMajor", alpha,
                              (__half *)b.weights_updated.get(),

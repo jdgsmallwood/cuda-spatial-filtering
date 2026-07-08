@@ -15,6 +15,7 @@
 #include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline.hpp"
+#include "spatial/writers.hpp"
 
 #include "support/assertions.hpp"
 #include "support/pipeline_harness.hpp"
@@ -22,6 +23,7 @@
 
 #include <complex>
 #include <cuda_fp16.h>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -33,6 +35,20 @@ namespace {
 // LambdaConfig for the adaptive pipeline: 64 time steps to match CUFFT_FFT_SIZE.
 using AdaptiveConfig =
     LambdaConfig<1,   // NR_CHANNELS
+                 1,   // NR_FPGA_SOURCES
+                 64,  // NR_TIME_STEPS_PER_PACKET (= CUFFT_FFT_SIZE)
+                 4,   // NR_RECEIVERS
+                 2,   // NR_POLARIZATIONS
+                 4,   // NR_RECEIVERS_PER_PACKET
+                 1,   // NR_PACKETS_FOR_CORRELATION
+                 1,   // NR_BEAMS
+                 32,  // NR_PADDED_RECEIVERS
+                 32,  // NR_PADDED_RECEIVERS_PER_BLOCK
+                 1    // NR_CORRELATED_BLOCKS_TO_ACCUMULATE
+                 >;
+
+using MultiChannelAdaptiveConfig =
+    LambdaConfig<2,   // NR_CHANNELS
                  1,   // NR_FPGA_SOURCES
                  64,  // NR_TIME_STEPS_PER_PACKET (= CUFFT_FFT_SIZE)
                  4,   // NR_RECEIVERS
@@ -138,6 +154,43 @@ double rfi_beam_total_power(const AdaptiveTestOutput<T> &out) {
   return total;
 }
 
+std::string make_temp_hdf5_file() {
+  namespace fs = std::filesystem;
+  auto tmpl = fs::temp_directory_path() / "adaptive_beam_output_XXXXXX.h5";
+  std::string s = tmpl.string();
+  int fd = mkstemps(s.data(), 3);
+  if (fd >= 0)
+    close(fd);
+  return s;
+}
+
+template <typename BeamT>
+std::vector<uint16_t> beam_bits(const BeamT &beam_data) {
+  const auto *ptr = reinterpret_cast<const uint16_t *>(&beam_data);
+  return std::vector<uint16_t>(ptr, ptr + sizeof(BeamT) / sizeof(uint16_t));
+}
+
+template <typename Config>
+std::complex<int8_t> tagged_single_receiver_sample(size_t channel, size_t,
+                                                   int, int time,
+                                                   int receiver, int pol) {
+  if (receiver != 0) {
+    return {0, 0};
+  }
+  const int8_t real = static_cast<int8_t>(time + 1);
+  const int8_t imag =
+      static_cast<int8_t>(-(1 + 10 * pol + 20 * static_cast<int>(channel)));
+  return {real, imag};
+}
+
+template <typename Config>
+std::complex<float> expected_tagged_beam_value(size_t channel, int pol,
+                                               int time) {
+  const auto sample =
+      tagged_single_receiver_sample<Config>(channel, 0, 0, time, 0, pol);
+  return {static_cast<float>(sample.real()), static_cast<float>(sample.imag())};
+}
+
 // ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
@@ -235,6 +288,35 @@ TEST_F(AdaptivePipelineTest, NullingModeK0NoSuppression) {
       << "K=0 should leave weights unchanged — RFI beam must have power";
 }
 
+// With K=0 (projection = I) both beams must be bit-identical at every element:
+// they use the same weights (adapted_weights = weights * I = weights) on the
+// same samples. This is the K=0 invariant and a direct regression test for the
+// "stale original-beam weights" bug: if slot 0 of weights_rfi_mitigated were
+// ever allowed to drift from the current b.weights (e.g. because a BeamSteering
+// refresh fired after construction but slot 0 was only initialised once), then
+// beam[0] would use a different set of weights than beam[1] and this test would
+// fail even under K=0.
+TEST_F(AdaptivePipelineTest, NullingModeK0OriginalAndMitigatedBeamsAreIdentical) {
+  AdaptiveRun r(/*shrink=*/false, /*K=*/0);
+  r.run_constant();
+
+  const auto &beam = *r.output->beam_data;
+  for (size_t c = 0; c < AdaptiveConfig::NR_CHANNELS; ++c)
+    for (size_t p = 0; p < AdaptiveConfig::NR_POLARIZATIONS; ++p)
+      for (size_t t = 0; t < AdaptiveConfig::NR_PACKETS_FOR_CORRELATION *
+                                 AdaptiveConfig::NR_TIME_STEPS_PER_PACKET;
+           ++t) {
+        EXPECT_EQ(__half2float(beam[c][p][0][t].real()),
+                  __half2float(beam[c][p][1][t].real()))
+            << "beam[0].real != beam[1].real at c=" << c << " p=" << p
+            << " t=" << t;
+        EXPECT_EQ(__half2float(beam[c][p][0][t].imag()),
+                  __half2float(beam[c][p][1][t].imag()))
+            << "beam[0].imag != beam[1].imag at c=" << c << " p=" << p
+            << " t=" << t;
+      }
+}
+
 // With K=1 and constant (rank-1) input plus unity weights:
 // w = (1,...,1) is parallel to the dominant eigenvector (1,...,1)/√N.
 // Nulling zeroes that direction → adapted weights ≈ 0 → RFI beam power ≈ 0.
@@ -247,6 +329,94 @@ TEST_F(AdaptivePipelineTest, NullingModeZerosRFIBeamWithRankOneInput) {
   EXPECT_LT(power, 1.0)
       << "Null K=1 + rank-1 input: RFI beam should be near zero (power="
       << power << ")";
+}
+
+TEST_F(AdaptivePipelineTest, NullingModePreservesTaggedBeamLayoutWhenKIsZero) {
+  AdaptiveRun r(/*shrink=*/false, /*K=*/0);
+  r.driver->run(tagged_single_receiver_sample<AdaptiveConfig>,
+                [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+  cudaDeviceSynchronize();
+
+  const auto &beam = *r.output->beam_data;
+  for (int pol = 0; pol < static_cast<int>(AdaptiveConfig::NR_POLARIZATIONS);
+       ++pol) {
+    for (int time = 0;
+         time < static_cast<int>(AdaptiveConfig::NR_TIME_STEPS_PER_PACKET);
+         ++time) {
+      const auto expected =
+          expected_tagged_beam_value<AdaptiveConfig>(/*channel=*/0, pol, time);
+      for (int beam_idx = 0; beam_idx < 2 * static_cast<int>(AdaptiveConfig::NR_BEAMS);
+           ++beam_idx) {
+        EXPECT_EQ(__half2float(beam[0][pol][beam_idx][time].real()),
+                  expected.real())
+            << "beam real mismatch at pol=" << pol << " beam=" << beam_idx
+            << " time=" << time;
+        EXPECT_EQ(__half2float(beam[0][pol][beam_idx][time].imag()),
+                  expected.imag())
+            << "beam imag mismatch at pol=" << pol << " beam=" << beam_idx
+            << " time=" << time;
+      }
+    }
+  }
+}
+
+TEST_F(AdaptivePipelineTest, NullingModePreservesTaggedChannelLayoutWhenKIsZero) {
+  using Config = MultiChannelAdaptiveConfig;
+  auto output = std::make_shared<AdaptiveTestOutput<Config>>();
+  auto weights = test_support::make_unity_beam_weights<Config>();
+  std::unordered_map<int, int> eig_map{{0, 0}, {1, 0}};
+  auto pipeline =
+      test_support::pipeline_factories::make_adaptive_beamformed_spectra_pipeline<Config>(
+          /*num_buffers=*/3, &weights, eig_map, /*shrink_eigenvalues=*/false);
+  test_support::SyntheticPipelineRun<Config> driver(*pipeline, output);
+  driver.run(tagged_single_receiver_sample<Config>,
+             [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+  cudaDeviceSynchronize();
+
+  const auto &beam = *output->beam_data;
+  for (int channel = 0; channel < static_cast<int>(Config::NR_CHANNELS);
+       ++channel) {
+    for (int pol = 0; pol < static_cast<int>(Config::NR_POLARIZATIONS); ++pol) {
+      for (int time = 0; time < static_cast<int>(Config::NR_TIME_STEPS_PER_PACKET);
+           ++time) {
+        const auto expected =
+            expected_tagged_beam_value<Config>(channel, pol, time);
+        for (int beam_idx = 0; beam_idx < 2 * static_cast<int>(Config::NR_BEAMS);
+             ++beam_idx) {
+          EXPECT_EQ(__half2float(beam[channel][pol][beam_idx][time].real()),
+                    expected.real())
+              << "channel-mapped beam real mismatch at channel=" << channel
+              << " pol=" << pol << " beam=" << beam_idx << " time=" << time;
+          EXPECT_EQ(__half2float(beam[channel][pol][beam_idx][time].imag()),
+                    expected.imag())
+              << "channel-mapped beam imag mismatch at channel=" << channel
+              << " pol=" << pol << " beam=" << beam_idx << " time=" << time;
+        }
+      }
+    }
+  }
+}
+
+TEST_F(AdaptivePipelineTest, NullingModeKeepsOriginalBeamAndZerosMitigatedBeam) {
+  AdaptiveRun r(/*shrink=*/false, /*K=*/1);
+  r.run_constant();
+
+  const auto &beam = *r.output->beam_data;
+  for (int pol = 0; pol < static_cast<int>(AdaptiveConfig::NR_POLARIZATIONS);
+       ++pol) {
+    for (int time = 0;
+         time < static_cast<int>(AdaptiveConfig::NR_TIME_STEPS_PER_PACKET);
+         ++time) {
+      EXPECT_EQ(__half2float(beam[0][pol][0][time].real()), 8.0f)
+          << "original beam real mismatch at pol=" << pol << " time=" << time;
+      EXPECT_EQ(__half2float(beam[0][pol][0][time].imag()), -8.0f)
+          << "original beam imag mismatch at pol=" << pol << " time=" << time;
+      EXPECT_NEAR(__half2float(beam[0][pol][1][time].real()), 0.0f, 0.25f)
+          << "mitigated beam real mismatch at pol=" << pol << " time=" << time;
+      EXPECT_NEAR(__half2float(beam[0][pol][1][time].imag()), 0.0f, 0.25f)
+          << "mitigated beam imag mismatch at pol=" << pol << " time=" << time;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +439,91 @@ TEST_F(AdaptivePipelineTest, ShrinkingModePhysicalInvariants) {
     }
 
   test_support::assert_all_finite(*r.output->fft_output, "fft_output");
+}
+
+// With K=0 in shrink mode: N-K = N, so lambda_bar = mean of all N eigenvalues
+// and d[k] = 1.0 for every k.  V_scaled = V → M = V * V^H = I →
+// projection_matrix = I → weights unchanged.  Both beams must match the
+// unmodified beamformed value, identical to the null-mode K=0 result.
+TEST_F(AdaptivePipelineTest, ShrinkingModeK0PreservesTaggedBeamLayout) {
+  AdaptiveRun r(/*shrink=*/true, /*K=*/0);
+  r.driver->run(tagged_single_receiver_sample<AdaptiveConfig>,
+                [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+  cudaDeviceSynchronize();
+
+  const auto &beam = *r.output->beam_data;
+  for (int pol = 0; pol < static_cast<int>(AdaptiveConfig::NR_POLARIZATIONS);
+       ++pol) {
+    for (int time = 0;
+         time < static_cast<int>(AdaptiveConfig::NR_TIME_STEPS_PER_PACKET);
+         ++time) {
+      const auto expected =
+          expected_tagged_beam_value<AdaptiveConfig>(/*channel=*/0, pol, time);
+      for (int beam_idx = 0;
+           beam_idx < 2 * static_cast<int>(AdaptiveConfig::NR_BEAMS);
+           ++beam_idx) {
+        EXPECT_EQ(__half2float(beam[0][pol][beam_idx][time].real()),
+                  expected.real())
+            << "shrink K=0 beam real mismatch at pol=" << pol
+            << " beam=" << beam_idx << " time=" << time;
+        EXPECT_EQ(__half2float(beam[0][pol][beam_idx][time].imag()),
+                  expected.imag())
+            << "shrink K=0 beam imag mismatch at pol=" << pol
+            << " beam=" << beam_idx << " time=" << time;
+      }
+    }
+  }
+}
+
+TEST_F(AdaptivePipelineTest, WritesAdaptiveBeamOutputToHDF5WithSameLogicalLayout) {
+  using BeamOut = AdaptiveTestOutput<AdaptiveConfig>::BeamOut;
+  using ArrivalsT = AdaptiveConfig::ArrivalsOutputType;
+
+  AdaptiveRun reference(/*shrink=*/false, /*K=*/0);
+  reference.driver->run(tagged_single_receiver_sample<AdaptiveConfig>,
+                        [](size_t, size_t, int, int, int) -> int16_t {
+                          return 1;
+                        });
+  cudaDeviceSynchronize();
+
+  const std::string filename = make_temp_hdf5_file();
+  {
+    HighFive::File file(filename, HighFive::File::Truncate);
+    auto beam_writer = std::make_unique<HDF5BeamWriter<BeamOut, ArrivalsT>>(file);
+    auto output = std::make_shared<
+        BufferedOutput<AdaptiveConfig, typename AdaptiveConfig::FFTOutputType,
+                       typename AdaptiveConfig::EigenvalueOutputType,
+                       typename AdaptiveConfig::EigenvectorOutputType, BeamOut>>(
+        std::move(beam_writer), nullptr, nullptr, nullptr);
+    output->start_writer_loop();
+
+    auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+    std::unordered_map<int, int> eig_map{{0, 0}};
+    auto pipeline =
+        test_support::pipeline_factories::make_adaptive_beamformed_spectra_pipeline<AdaptiveConfig>(
+            /*num_buffers=*/3, &weights, eig_map, /*shrink_eigenvalues=*/false);
+    test_support::SyntheticPipelineRun<AdaptiveConfig> driver(*pipeline, output);
+    driver.run(tagged_single_receiver_sample<AdaptiveConfig>,
+               [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+    cudaDeviceSynchronize();
+  }
+
+  HighFive::File verify_file(filename, HighFive::File::ReadOnly);
+  auto beam_ds = verify_file.getDataSet("beam_data");
+  const auto dims = beam_ds.getDimensions();
+  ASSERT_EQ(dims.size(), 6u);
+  EXPECT_EQ(dims[0], 1u);
+  EXPECT_EQ(dims[1], AdaptiveConfig::NR_CHANNELS);
+  EXPECT_EQ(dims[2], AdaptiveConfig::NR_POLARIZATIONS);
+  EXPECT_EQ(dims[3], 2 * AdaptiveConfig::NR_BEAMS);
+  EXPECT_EQ(dims[4], AdaptiveConfig::NR_PACKETS_FOR_CORRELATION *
+                         AdaptiveConfig::NR_TIME_STEPS_PER_PACKET);
+  EXPECT_EQ(dims[5], 2u);
+
+  std::vector<uint16_t> stored_bits(
+      sizeof(BeamOut) / sizeof(uint16_t));
+  beam_ds.read_raw(stored_bits.data());
+  EXPECT_EQ(stored_bits, beam_bits(*reference.output->beam_data));
 }
 
 // With rank-1 input λ̄ = mean(λ_0..λ_{N-2}) = 0, so d[N-1] = 0/λ = 0.
@@ -367,6 +622,63 @@ TEST_F(AdaptivePipelineTest, ScaleKernelScalesColumnsCorrectly) {
             << " col=" << col << " row=" << row;
         EXPECT_NEAR(h_Vs[idx].y, h_V[idx].y * scale, 1e-5f)
             << "imag part mismatch at batch=" << batch
+            << " col=" << col << " row=" << row;
+      }
+}
+
+// Multi-batch variant: each batch has distinct inputs and scales so that any
+// bug in the batch-stride computation (flat_idx = batch*N*N + idx) or the
+// scale lookup (d[batch*N + col]) would produce wrong values in at least one
+// batch and be caught by the per-element checks below.
+TEST_F(AdaptivePipelineTest, ScaleKernelMultiBatchIndexingIsCorrect) {
+  constexpr int N = 4;
+  constexpr int BATCHES = 3;
+
+  std::vector<float2> h_V(BATCHES * N * N);
+  std::vector<float2> h_Vs(BATCHES * N * N, {0.0f, 0.0f});
+  std::vector<float>  h_d(BATCHES * N);
+
+  // Give each batch a distinguishably different input and scale vector
+  for (int batch = 0; batch < BATCHES; ++batch)
+    for (int col = 0; col < N; ++col)
+      for (int row = 0; row < N; ++row) {
+        int idx = batch * N * N + col * N + row;
+        h_V[idx] = {static_cast<float>(batch * 100 + col + 1),
+                    -static_cast<float>(row + 1)};
+      }
+  for (int b = 0; b < BATCHES; ++b)
+    for (int k = 0; k < N; ++k)
+      h_d[b * N + k] = static_cast<float>(b + 1) * (k + 1) * 0.5f;
+
+  float2 *d_V = nullptr, *d_Vs = nullptr;
+  float  *d_d = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_V,  sizeof(float2) * BATCHES * N * N));
+  CUDA_CHECK(cudaMalloc(&d_Vs, sizeof(float2) * BATCHES * N * N));
+  CUDA_CHECK(cudaMalloc(&d_d,  sizeof(float)  * BATCHES * N));
+  CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), sizeof(float2) * BATCHES * N * N,
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_d, h_d.data(), sizeof(float)  * BATCHES * N,
+                        cudaMemcpyHostToDevice));
+
+  scaleEigenvectorColumns(d_V, d_Vs, d_d, N, BATCHES, /*stream=*/nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  CUDA_CHECK(cudaMemcpy(h_Vs.data(), d_Vs, sizeof(float2) * BATCHES * N * N,
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_V);
+  cudaFree(d_Vs);
+  cudaFree(d_d);
+
+  for (int batch = 0; batch < BATCHES; ++batch)
+    for (int col = 0; col < N; ++col)
+      for (int row = 0; row < N; ++row) {
+        int idx = batch * N * N + col * N + row;
+        float scale = h_d[batch * N + col];
+        EXPECT_NEAR(h_Vs[idx].x, h_V[idx].x * scale, 1e-5f)
+            << "real mismatch at batch=" << batch
+            << " col=" << col << " row=" << row;
+        EXPECT_NEAR(h_Vs[idx].y, h_V[idx].y * scale, 1e-5f)
+            << "imag mismatch at batch=" << batch
             << " col=" << col << " row=" << row;
       }
 }
