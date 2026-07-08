@@ -13,32 +13,23 @@
 #include <spdlog/sinks/basic_file_sink.h>
 
 // Fixed representative GPU pipeline configs -- 8..32 channels in steps of 8
-// for both 1-FPGA (10 rx) and 4-FPGA (40 rx) layouts.  Each config is a
-// separate template instantiation so a single binary benchmarks all shapes
-// without needing different -DNR_OBSERVING_* CMake builds.
+// for the production 4-FPGA (40 rx) layout. Each config is a separate
+// template instantiation so a single binary benchmarks all shapes without
+// needing different -DNR_OBSERVING_* CMake builds.
 //
 // NR_PADDED_RECEIVERS must be the next multiple of 32 ≥ NR_RECEIVERS:
-//   10 rx  → 32 padded   (1 fpga)
 //   40 rx  → 64 padded   (4 fpga)
 //
 //                                     ch  fp   ts   rx  pol rxpp corr  bm  pad  blk       acc
-using Cfg8ch1fpga  = LambdaConfig<     8,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg16ch1fpga = LambdaConfig<    16,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg24ch1fpga = LambdaConfig<    24,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
-using Cfg32ch1fpga = LambdaConfig<    32,  1,   64,  10,  2,  10, 256,  1,  32,  32, 10000000>;
 using Cfg8ch4fpga  = LambdaConfig<     8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg16ch4fpga = LambdaConfig<    16,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg24ch4fpga = LambdaConfig<    24,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg32ch4fpga = LambdaConfig<    32,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 
-// Correlation-packet sweep: 8ch/1fpga and 8ch/4fpga held fixed while
-// NR_PACKETS_FOR_CORRELATION varies 64→1024 (powers of 2).  The 256-packet
-// case reuses the configs above.
+// Correlation-packet sweep: 8ch/4fpga held fixed while
+// NR_PACKETS_FOR_CORRELATION varies 64→1024 (powers of 2). The 256-packet
+// case reuses the config above.
 //                                       ch  fp   ts   rx  pol rxpp  corr   bm  pad  blk       acc
-using Cfg8ch1fpga_c64   = LambdaConfig<  8,  1,   64,  10,  2,  10,   64,  1,  32,  32, 10000000>;
-using Cfg8ch1fpga_c128  = LambdaConfig<  8,  1,   64,  10,  2,  10,  128,  1,  32,  32, 10000000>;
-using Cfg8ch1fpga_c512  = LambdaConfig<  8,  1,   64,  10,  2,  10,  512,  1,  32,  32, 10000000>;
-using Cfg8ch1fpga_c1024 = LambdaConfig<  8,  1,   64,  10,  2,  10, 1024,  1,  32,  32, 10000000>;
 using Cfg8ch4fpga_c64   = LambdaConfig<  8,  4,   64,  40,  2,  10,   64,  1,  64,  32, 10000000>;
 using Cfg8ch4fpga_c128  = LambdaConfig<  8,  4,   64,  40,  2,  10,  128,  1,  64,  32, 10000000>;
 using Cfg8ch4fpga_c512  = LambdaConfig<  8,  4,   64,  40,  2,  10,  512,  1,  64,  32, 10000000>;
@@ -278,7 +269,7 @@ int main(int argc, char *argv[]) {
       .default_value(30.0)
       .scan<'g', double>();
   program.add_argument("--num-buffers")
-      .help("Pipeline double-buffer slots for 1-FPGA (small) configs")
+      .help("Deprecated; accepted for compatibility, 4-FPGA sweeps use --num-buffers-4fpga")
       .default_value(5)
       .scan<'i', int>();
   program.add_argument("--num-buffers-4fpga")
@@ -307,7 +298,7 @@ int main(int argc, char *argv[]) {
   }
 
   const double duration_s        = program.get<double>("--duration");
-  const int    num_buffers       = program.get<int>("--num-buffers");
+  (void)program.get<int>("--num-buffers"); // accepted for CLI compatibility
   const int    num_buffers_4fpga = program.get<int>("--num-buffers-4fpga");
   const bool   with_output       = program.get<bool>("--with-output");
   const bool   lambda_only       = program.get<bool>("--lambda-only");
@@ -323,31 +314,21 @@ int main(int argc, char *argv[]) {
   logger->set_level(spdlog::level::info);
   spatial::Logger::set(logger);
 
-  std::cout << "bench_gpu: CorrBeam channel/corr-packet sweeps + LambdaGPU channel sweep"
+  std::cout << "bench_gpu: 4-FPGA CorrBeam channel/corr-packet sweeps + 4-FPGA LambdaGPU channel sweep"
             << "\n  duration=" << duration_s << "s each"
-            << "  num_buffers(1fpga)=" << num_buffers
             << "  num_buffers(4fpga)=" << num_buffers_4fpga
             << "  with_output=" << (with_output ? "yes" : "no")
             << "\nNOTE: first run per config triggers TCC NVRTC JIT compilation "
                "(cached for subsequent runs)\n";
 
   if (!lambda_only) {
-    std::cout << "\n=== CorrBeamOnly: channel sweep (NR_PACKETS_FOR_CORRELATION=256) ===\n";
-    print_result(run_gpu_bench<Cfg8ch1fpga> (duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg16ch1fpga>(duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg24ch1fpga>(duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg32ch1fpga>(duration_s, num_buffers,       with_output));
+    std::cout << "\n=== CorrBeamOnly: 4-FPGA channel sweep (NR_PACKETS_FOR_CORRELATION=256) ===\n";
     print_result(run_gpu_bench<Cfg8ch4fpga> (duration_s, num_buffers_4fpga, with_output));
     print_result(run_gpu_bench<Cfg16ch4fpga>(duration_s, num_buffers_4fpga, with_output));
     print_result(run_gpu_bench<Cfg24ch4fpga>(duration_s, num_buffers_4fpga, with_output));
     print_result(run_gpu_bench<Cfg32ch4fpga>(duration_s, num_buffers_4fpga, with_output));
 
-    std::cout << "\n=== CorrBeamOnly: corr-packet sweep (8ch, corr=64..1024) ===\n";
-    print_result(run_gpu_bench<Cfg8ch1fpga_c64>  (duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg8ch1fpga_c128> (duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg8ch1fpga>      (duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg8ch1fpga_c512> (duration_s, num_buffers,       with_output));
-    print_result(run_gpu_bench<Cfg8ch1fpga_c1024>(duration_s, num_buffers,       with_output));
+    std::cout << "\n=== CorrBeamOnly: 4-FPGA corr-packet sweep (8ch, corr=64..1024) ===\n";
     print_result(run_gpu_bench<Cfg8ch4fpga_c64>  (duration_s, num_buffers_4fpga, with_output));
     print_result(run_gpu_bench<Cfg8ch4fpga_c128> (duration_s, num_buffers_4fpga, with_output));
     print_result(run_gpu_bench<Cfg8ch4fpga>      (duration_s, num_buffers_4fpga, with_output));
@@ -356,11 +337,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (!corrbeam_only) {
-    std::cout << "\n=== LambdaGPU (full: corr+beam+eigen+fft): channel sweep ===\n";
-    print_lambda_result(run_lambda_bench<Cfg8ch1fpga> (duration_s, num_buffers));
-    print_lambda_result(run_lambda_bench<Cfg16ch1fpga>(duration_s, num_buffers));
-    print_lambda_result(run_lambda_bench<Cfg24ch1fpga>(duration_s, num_buffers));
-    print_lambda_result(run_lambda_bench<Cfg32ch1fpga>(duration_s, num_buffers));
+    std::cout << "\n=== LambdaGPU (full: corr+beam+eigen+fft): 4-FPGA channel sweep ===\n";
     print_lambda_result(run_lambda_bench<Cfg8ch4fpga> (duration_s, num_buffers_4fpga));
     print_lambda_result(run_lambda_bench<Cfg16ch4fpga>(duration_s, num_buffers_4fpga));
     print_lambda_result(run_lambda_bench<Cfg24ch4fpga>(duration_s, num_buffers_4fpga));

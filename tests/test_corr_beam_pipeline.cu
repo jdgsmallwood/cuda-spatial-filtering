@@ -247,21 +247,9 @@ TEST_F(CorrBeamOnlyPipelineTest, BeamAmplitudeScalesWithWeightMagnitude) {
 }
 
 // ---------------------------------------------------------------------------
-// Two-channel config: verifies that NR_CHANNELS=2 runs to completion and
-// produces expected beam and visibility values when both channels carry the
-// same constant (2,−2) input with unity weights.
-//
-// Both channels should produce the single-channel result: beam (8,−8) and
-// autocorrelation power 64, proving that the NR_CHANNELS=2 code path is
-// exercised end to end without corruption or crashes.
-//
-// NOTE: the cuTensor "packet" tensor descriptor computes channel strides from
-// NR_PACKETS_FOR_CORRELATION alone, but d_samples_half holds
-// NR_PACKETS_FOR_CORRELATION+2 slots per channel. When NR_CHANNELS > 1 this
-// makes channel C read from channel 0's packet-slot-C memory instead of
-// channel C's own data. Identical inputs across all channels avoid triggering
-// this latent bug, keeping the test's assertions correct and stable while the
-// real-data-per-channel path remains untested.
+// Two-channel config: channels carry different constant samples, so both the
+// correlator input path and the beamformer input path must use the real
+// channel stride of the half sample buffer.
 // ---------------------------------------------------------------------------
 TEST_F(CorrBeamOnlyPipelineTest, TwoChannelConfigProducesExpectedOutput) {
   using Cfg = test_support::SmallTwoChannelConfig;
@@ -275,11 +263,10 @@ TEST_F(CorrBeamOnlyPipelineTest, TwoChannelConfigProducesExpectedOutput) {
           Cfg::NR_PACKETS_FOR_CORRELATION, &weights);
   test_support::SyntheticPipelineRun<Cfg> driver(*pipeline, output);
 
-  // Same constant (2,-2) input on every channel so the result is identical
-  // to the single-channel BeamOutputExactValues / VisibilityExactValues cases.
   driver.run(
-      [](size_t, size_t, int, int, int, int) -> std::complex<int8_t> {
-        return {2, -2};
+      [](size_t channel, size_t, int, int, int, int) -> std::complex<int8_t> {
+        return channel == 0 ? std::complex<int8_t>{2, -2}
+                            : std::complex<int8_t>{3, 1};
       },
       [](size_t, size_t, int, int, int) -> int16_t { return 1; });
 
@@ -289,24 +276,64 @@ TEST_F(CorrBeamOnlyPipelineTest, TwoChannelConfigProducesExpectedOutput) {
   const auto &beam = *output->beam_data;
   const auto &vis = *output->visibilities;
 
-  // Both channels: NR_RECEIVERS * (2,-2) = 4*(2,-2) = (8,-8).
+  const float expected_beam_real[Cfg::NR_CHANNELS] = {8.0f, 12.0f};
+  const float expected_beam_imag[Cfg::NR_CHANNELS] = {-8.0f, 4.0f};
+  const float expected_auto_power[Cfg::NR_CHANNELS] = {64.0f, 80.0f};
+
   for (size_t c = 0; c < Cfg::NR_CHANNELS; ++c)
     for (size_t p = 0; p < Cfg::NR_POLARIZATIONS; ++p)
       for (size_t t = 0; t < NR_SAMPLES_CFG; ++t) {
-        EXPECT_EQ(__half2float(beam[c][p][0][t][0]), 8.0f)
+        EXPECT_EQ(__half2float(beam[c][p][0][t][0]), expected_beam_real[c])
             << "ch=" << c << " real  pol=" << p << " t=" << t;
-        EXPECT_EQ(__half2float(beam[c][p][0][t][1]), -8.0f)
+        EXPECT_EQ(__half2float(beam[c][p][0][t][1]), expected_beam_imag[c])
             << "ch=" << c << " imag  pol=" << p << " t=" << t;
       }
 
-  // Autocorrelation power: 8 time steps * |(2,-2)|^2 = 8 * 8 = 64.
   for (size_t c = 0; c < Cfg::NR_CHANNELS; ++c)
     for (size_t rx = 0; rx < Cfg::NR_RECEIVERS; ++rx) {
       const size_t bl = test_support::baseline_index(rx, rx);
       for (size_t p = 0; p < Cfg::NR_POLARIZATIONS; ++p)
-        EXPECT_EQ(vis[c][bl][p][p][0], 64.0f)
+        EXPECT_EQ(vis[c][bl][p][p][0], expected_auto_power[c])
             << "ch=" << c << " autocorr rx=" << rx << " pol=" << p;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Non-unit ingest scales must survive through both fused CorrBeamOnly paths.
+// With real unit samples and unity beam weights, beam[p] is the sum of receiver
+// scales for polarization p, and autocorrelation power is N * scale^2.
+// ---------------------------------------------------------------------------
+TEST_F(CorrBeamOnlyPipelineTest, NonUnitScalesAffectBeamAndVisibilities) {
+  auto r = do_run(
+      test_support::make_unity_beam_weights<Config>(),
+      [](size_t, size_t, int, int, int, int) -> std::complex<int8_t> {
+        return {1, 0};
+      },
+      [](size_t, size_t, int, int receiver, int pol) -> int16_t {
+        return static_cast<int16_t>((receiver + 1) * (pol + 1));
+      });
+  const auto &beam = *r.output->beam_data;
+  const auto &vis = *r.output->visibilities;
+
+  const float expected_beam_real[Config::NR_POLARIZATIONS] = {10.0f, 20.0f};
+  for (size_t p = 0; p < Config::NR_POLARIZATIONS; ++p)
+    for (size_t t = 0; t < NR_SAMPLES; ++t) {
+      EXPECT_EQ(__half2float(beam[0][p][0][t][0]), expected_beam_real[p])
+          << "pol=" << p << " t=" << t;
+      EXPECT_EQ(__half2float(beam[0][p][0][t][1]), 0.0f)
+          << "pol=" << p << " t=" << t;
+    }
+
+  for (size_t rx = 0; rx < Config::NR_RECEIVERS; ++rx) {
+    const size_t bl = test_support::baseline_index(rx, rx);
+    for (size_t p = 0; p < Config::NR_POLARIZATIONS; ++p) {
+      const float scale = static_cast<float>((rx + 1) * (p + 1));
+      EXPECT_EQ(vis[0][bl][p][p][0], NR_SAMPLES * scale * scale)
+          << "autocorr rx=" << rx << " pol=" << p;
+      EXPECT_EQ(vis[0][bl][p][p][1], 0.0f)
+          << "autocorr imag rx=" << rx << " pol=" << p;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

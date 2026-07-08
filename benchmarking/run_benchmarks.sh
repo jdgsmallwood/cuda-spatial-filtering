@@ -67,10 +67,6 @@ check_binary() {
 
 check_binary "$APPS/bench_gpu"
 check_binary "$APPS/bench_processor"
-check_binary "$APPS/bench_writers"
-
-SCRATCH="$OUTPUT_DIR/scratch_writers"
-mkdir -p "$SCRATCH"
 
 run_bench() {
   local name="$1"; shift
@@ -93,10 +89,6 @@ run_bench "bench_processor" \
   "$APPS/bench_processor" --duration "$DURATION"
 run_bench "bench_gpu" \
   "$APPS/bench_gpu" --duration "$DURATION" --lambda-only
-
-
-run_bench "bench_writers" \
-  "$APPS/bench_writers" --duration "$DURATION" -o "$SCRATCH"
 
 echo "All benchmarks complete."
 echo
