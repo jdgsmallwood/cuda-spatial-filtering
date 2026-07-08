@@ -54,6 +54,371 @@ void convert_float_to_half(const float *d_input, __half *d_output, const int n,
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION, size_t NR_PADDED_RECEIVERS,
+          size_t NR_TIMES_PER_BLOCK>
+__global__ void aligned_to_corr_input_kernel(const __half *input,
+                                             __half *corr_input) {
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_BLOCKS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET /
+      NR_TIMES_PER_BLOCK;
+
+  const size_t total = NR_CHANNELS * NR_PACKETS_FOR_CORRELATION *
+                       NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS *
+                       NR_POLARIZATIONS * COMPLEX;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t p = rem % NR_POLARIZATIONS;
+    rem /= NR_POLARIZATIONS;
+    const size_t receiver = rem % NR_RECEIVERS;
+    rem /= NR_RECEIVERS;
+    const size_t sample = rem % (NR_PACKETS_FOR_CORRELATION *
+                                 NR_TIME_STEPS_PER_PACKET);
+    const size_t c = rem / (NR_PACKETS_FOR_CORRELATION *
+                            NR_TIME_STEPS_PER_PACKET);
+
+    const size_t packet = sample / NR_TIME_STEPS_PER_PACKET;
+    const size_t time_in_packet = sample % NR_TIME_STEPS_PER_PACKET;
+    const size_t block = sample / NR_TIMES_PER_BLOCK;
+    const size_t time_in_block = sample % NR_TIMES_PER_BLOCK;
+    const size_t fpga = receiver / NR_RECEIVERS_PER_PACKET;
+    const size_t receiver_in_packet = receiver % NR_RECEIVERS_PER_PACKET;
+
+    const size_t input_idx =
+        ((((((fpga * NR_PACKETS_FOR_CORRELATION + packet) *
+                 NR_TIME_STEPS_PER_PACKET +
+             time_in_packet) *
+                NR_CHANNELS +
+            c) *
+               NR_RECEIVERS_PER_PACKET +
+           receiver_in_packet) *
+              NR_POLARIZATIONS +
+          p) *
+             COMPLEX +
+         z);
+
+    const size_t output_idx =
+        ((((((c * NR_BLOCKS_FOR_CORRELATION + block) * NR_PADDED_RECEIVERS +
+             receiver) *
+                NR_POLARIZATIONS +
+            p) *
+               NR_TIMES_PER_BLOCK +
+           time_in_block) *
+              COMPLEX) +
+         z);
+
+    corr_input[output_idx] = input[input_idx];
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION, size_t NR_PADDED_RECEIVERS,
+          size_t NR_TIMES_PER_BLOCK>
+void aligned_to_corr_input(const __half *input, __half *corr_input,
+                           cudaStream_t stream) {
+  static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
+                "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
+  static_assert((NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET) %
+                        NR_TIMES_PER_BLOCK ==
+                    0,
+                "correlation samples must divide evenly into blocks");
+
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t total = NR_CHANNELS * NR_PACKETS_FOR_CORRELATION *
+                           NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS *
+                           NR_POLARIZATIONS * COMPLEX;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  aligned_to_corr_input_kernel<
+      NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS, NR_RECEIVERS_PER_PACKET,
+      NR_TIME_STEPS_PER_PACKET, NR_PACKETS_FOR_CORRELATION, NR_PADDED_RECEIVERS,
+      NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(input, corr_input);
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION>
+__global__ void aligned_to_col_maj_cons_kernel(const __half *input,
+                                               __half *output) {
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_SAMPLES =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+  const size_t total = NR_CHANNELS * NR_POLARIZATIONS * COMPLEX * NR_SAMPLES *
+                       NR_FPGA_SOURCES * NR_RECEIVERS_PER_PACKET;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t receiver_in_packet = rem % NR_RECEIVERS_PER_PACKET;
+    rem /= NR_RECEIVERS_PER_PACKET;
+    const size_t fpga = rem % NR_FPGA_SOURCES;
+    rem /= NR_FPGA_SOURCES;
+    const size_t sample = rem % NR_SAMPLES;
+    rem /= NR_SAMPLES;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t p = rem % NR_POLARIZATIONS;
+    const size_t c = rem / NR_POLARIZATIONS;
+
+    const size_t packet = sample / NR_TIME_STEPS_PER_PACKET;
+    const size_t time_in_packet = sample % NR_TIME_STEPS_PER_PACKET;
+
+    const size_t input_idx =
+        ((((((fpga * NR_PACKETS_FOR_CORRELATION + packet) *
+                 NR_TIME_STEPS_PER_PACKET +
+             time_in_packet) *
+                NR_CHANNELS +
+            c) *
+               NR_RECEIVERS_PER_PACKET +
+           receiver_in_packet) *
+              NR_POLARIZATIONS +
+          p) *
+             COMPLEX +
+         z);
+
+    output[idx] = input[input_idx];
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION>
+void aligned_to_col_maj_cons(const __half *input, __half *output,
+                             cudaStream_t stream) {
+  static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
+                "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t total =
+      NR_CHANNELS * NR_POLARIZATIONS * COMPLEX *
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET * NR_FPGA_SOURCES *
+      NR_RECEIVERS_PER_PACKET;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  aligned_to_col_maj_cons_kernel<NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
+                                 NR_RECEIVERS_PER_PACKET,
+                                 NR_TIME_STEPS_PER_PACKET,
+                                 NR_PACKETS_FOR_CORRELATION>
+      <<<blocks, threads, 0, stream>>>(input, output);
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION, size_t NR_PADDED_RECEIVERS,
+          size_t NR_TIMES_PER_BLOCK>
+__global__ void packet_to_corr_input_kernel(const __half *input,
+                                            __half *corr_input) {
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_BLOCKS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET /
+      NR_TIMES_PER_BLOCK;
+
+  const size_t total = NR_CHANNELS * NR_PACKETS_FOR_CORRELATION *
+                       NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS *
+                       NR_POLARIZATIONS * COMPLEX;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t p = rem % NR_POLARIZATIONS;
+    rem /= NR_POLARIZATIONS;
+    const size_t receiver = rem % NR_RECEIVERS;
+    rem /= NR_RECEIVERS;
+    const size_t sample = rem % (NR_PACKETS_FOR_CORRELATION *
+                                 NR_TIME_STEPS_PER_PACKET);
+    const size_t c = rem / (NR_PACKETS_FOR_CORRELATION *
+                            NR_TIME_STEPS_PER_PACKET);
+
+    const size_t packet = sample / NR_TIME_STEPS_PER_PACKET;
+    const size_t time_in_packet = sample % NR_TIME_STEPS_PER_PACKET;
+    const size_t block = sample / NR_TIMES_PER_BLOCK;
+    const size_t time_in_block = sample % NR_TIMES_PER_BLOCK;
+    const size_t fpga = receiver / NR_RECEIVERS_PER_PACKET;
+    const size_t receiver_in_packet = receiver % NR_RECEIVERS_PER_PACKET;
+
+    const size_t input_idx =
+        ((((((c * (NR_PACKETS_FOR_CORRELATION + 2) + packet) *
+                 NR_FPGA_SOURCES +
+             fpga) *
+                NR_TIME_STEPS_PER_PACKET +
+            time_in_packet) *
+               NR_RECEIVERS_PER_PACKET +
+           receiver_in_packet) *
+              NR_POLARIZATIONS +
+          p) *
+             COMPLEX +
+         z);
+
+    const size_t output_idx =
+        ((((((c * NR_BLOCKS_FOR_CORRELATION + block) * NR_PADDED_RECEIVERS +
+             receiver) *
+                NR_POLARIZATIONS +
+            p) *
+               NR_TIMES_PER_BLOCK +
+           time_in_block) *
+              COMPLEX) +
+         z);
+
+    corr_input[output_idx] = input[input_idx];
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION, size_t NR_PADDED_RECEIVERS,
+          size_t NR_TIMES_PER_BLOCK>
+void packet_to_corr_input(const __half *input, __half *corr_input,
+                          cudaStream_t stream) {
+  static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
+                "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
+  static_assert((NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET) %
+                        NR_TIMES_PER_BLOCK ==
+                    0,
+                "correlation samples must divide evenly into blocks");
+
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t total = NR_CHANNELS * NR_PACKETS_FOR_CORRELATION *
+                           NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS *
+                           NR_POLARIZATIONS * COMPLEX;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  packet_to_corr_input_kernel<
+      NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS, NR_RECEIVERS_PER_PACKET,
+      NR_TIME_STEPS_PER_PACKET, NR_PACKETS_FOR_CORRELATION, NR_PADDED_RECEIVERS,
+      NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(input, corr_input);
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION>
+__global__ void packet_to_col_maj_cons_kernel(const __half *input,
+                                              __half *output) {
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_SAMPLES =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+  const size_t total = NR_CHANNELS * NR_POLARIZATIONS * COMPLEX * NR_SAMPLES *
+                       NR_FPGA_SOURCES * NR_RECEIVERS_PER_PACKET;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t receiver_in_packet = rem % NR_RECEIVERS_PER_PACKET;
+    rem /= NR_RECEIVERS_PER_PACKET;
+    const size_t fpga = rem % NR_FPGA_SOURCES;
+    rem /= NR_FPGA_SOURCES;
+    const size_t sample = rem % NR_SAMPLES;
+    rem /= NR_SAMPLES;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t p = rem % NR_POLARIZATIONS;
+    const size_t c = rem / NR_POLARIZATIONS;
+
+    const size_t packet = sample / NR_TIME_STEPS_PER_PACKET;
+    const size_t time_in_packet = sample % NR_TIME_STEPS_PER_PACKET;
+
+    const size_t input_idx =
+        ((((((c * (NR_PACKETS_FOR_CORRELATION + 2) + packet) *
+                 NR_FPGA_SOURCES +
+             fpga) *
+                NR_TIME_STEPS_PER_PACKET +
+            time_in_packet) *
+               NR_RECEIVERS_PER_PACKET +
+           receiver_in_packet) *
+              NR_POLARIZATIONS +
+          p) *
+             COMPLEX +
+         z);
+
+    output[idx] = input[input_idx];
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION>
+void packet_to_col_maj_cons(const __half *input, __half *output,
+                            cudaStream_t stream) {
+  static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
+                "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t total =
+      NR_CHANNELS * NR_POLARIZATIONS * COMPLEX *
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET * NR_FPGA_SOURCES *
+      NR_RECEIVERS_PER_PACKET;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  packet_to_col_maj_cons_kernel<NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
+                                NR_RECEIVERS_PER_PACKET,
+                                NR_TIME_STEPS_PER_PACKET,
+                                NR_PACKETS_FOR_CORRELATION>
+      <<<blocks, threads, 0, stream>>>(input, output);
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_BEAMS,
+          size_t NR_TIME_STEPS_FOR_CORRELATION>
+__global__ void beam_ccglib_to_half_output_kernel(const float *input,
+                                                  __half *output) {
+  constexpr size_t COMPLEX = 2;
+  const size_t total = NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS *
+                       NR_TIME_STEPS_FOR_CORRELATION * COMPLEX;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t s = rem % NR_TIME_STEPS_FOR_CORRELATION;
+    rem /= NR_TIME_STEPS_FOR_CORRELATION;
+    const size_t m = rem % NR_BEAMS;
+    rem /= NR_BEAMS;
+    const size_t p = rem % NR_POLARIZATIONS;
+    const size_t c = rem / NR_POLARIZATIONS;
+
+    const size_t input_idx =
+        (((((c * NR_POLARIZATIONS + p) * COMPLEX + z) * NR_BEAMS + m) *
+              NR_TIME_STEPS_FOR_CORRELATION) +
+         s);
+    output[idx] = __float2half(input[input_idx]);
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_BEAMS,
+          size_t NR_TIME_STEPS_FOR_CORRELATION>
+void beam_ccglib_to_half_output(const float *input, __half *output,
+                                cudaStream_t stream) {
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t total = NR_CHANNELS * NR_POLARIZATIONS * NR_BEAMS *
+                           NR_TIME_STEPS_FOR_CORRELATION * COMPLEX;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  beam_ccglib_to_half_output_kernel<NR_CHANNELS, NR_POLARIZATIONS, NR_BEAMS,
+                                    NR_TIME_STEPS_FOR_CORRELATION>
+      <<<blocks, threads, 0, stream>>>(input, output);
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
           size_t NR_PACKETS>
 __global__ void scale_and_convert_to_half_kernel(
     const char2 *__restrict__ d_input, const int16_t *__restrict__ d_scale,
