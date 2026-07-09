@@ -24,7 +24,7 @@ target_link_directories(test_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 target_compile_options(test_app_common INTERFACE
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=128,2417>)
 target_link_libraries(test_app_common INTERFACE GTest::gtest_main spatial CUDA::cudart ccglib
-HighFive::HighFive CUDA::cufft CUDA::cusolver cutensor tcc psrdada ${CASACORE_LIBRARIES} redis++ hiredis)
+HighFive::HighFive CUDA::cufft CUDA::cusolver cutensor tcc psrdada ${CASACORE_LIBRARIES} redis++ hiredis argparse)
 
 set_target_properties(test_app_common PROPERTIES CUDA_ARCHITECTURES "native")
 add_executable(
