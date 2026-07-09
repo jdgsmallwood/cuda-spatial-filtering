@@ -91,25 +91,96 @@ struct BenchResult {
   double gb_per_sec;
 };
 
-// Stands in for the GPU pipeline: immediately hands the buffer straight back
-// to the processor, so this benchmark measures only the
-// capture-ring -> reassembly path (ProcessorState::process_packets +
-// pipeline_feeder), not GPU execution time.
+// Local equivalent of pipeline/common.hpp's BufferReleaseContext.
+// We can't include that header (it pulls in libtcc, ccglib, PSRDADA, etc.).
+struct H2DReleaseContext {
+  ProcessorStateBase *state;
+  size_t buffer_index;
+  std::atomic<uint64_t> *buffers_completed;
+};
+
+static void h2d_release_host_func(void *data) {
+  auto *ctx = static_cast<H2DReleaseContext *>(data);
+  ctx->buffers_completed->fetch_add(1, std::memory_order_relaxed);
+  ctx->state->release_buffer(ctx->buffer_index);
+  delete ctx;
+}
+
+// Stands in for the GPU pipeline.  Without --with-h2d it immediately hands
+// the buffer straight back to the processor, so this benchmark measures only
+// the capture-ring -> reassembly path.  With --with-h2d it performs an async
+// H2D cudaMemcpyAsync of the samples buffer (source is cudaHostAlloc pinned
+// memory — a true PCIe DMA) and releases via a cudaLaunchHostFunc callback
+// after the transfer completes, mirroring LambdaGPUPipeline's ingest path.
 class NullPipeline : public GPUPipeline {
+  // One CUDA stream per input-buffer slot.  H2D copy and the release callback
+  // are enqueued on the same stream so the callback always fires after the
+  // transfer — no cross-stream events needed.  NUM_BUFS matches NR_INPUT_BUFFERS
+  // used in run_processor_bench.
+  static constexpr int NUM_BUFS = 8;
+  void *d_bufs_[NUM_BUFS]{};
+  cudaStream_t streams_[NUM_BUFS]{};
+  const bool with_h2d_;
+
 public:
   std::atomic<uint64_t> buffers_completed{0};
 
+  explicit NullPipeline(bool with_h2d = false) : with_h2d_(with_h2d) {
+    if (with_h2d_) {
+      for (int i = 0; i < NUM_BUFS; ++i)
+        CUDA_CHECK(
+            cudaStreamCreateWithFlags(&streams_[i], cudaStreamNonBlocking));
+    }
+  }
+
+  ~NullPipeline() {
+    if (with_h2d_) {
+      for (int i = 0; i < NUM_BUFS; ++i) {
+        // Synchronize before destroying: ensures the release callback has
+        // called state_->release_buffer() before we return.  ProcessorState
+        // outlives NullPipeline (reverse construction order in
+        // run_processor_bench), so state_ is still valid during the callback.
+        if (streams_[i]) {
+          cudaStreamSynchronize(streams_[i]);
+          cudaStreamDestroy(streams_[i]);
+        }
+        if (d_bufs_[i])
+          cudaFree(d_bufs_[i]);
+      }
+    }
+  }
+
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool = false) override {
-    buffers_completed.fetch_add(1, std::memory_order_relaxed);
-    state_->release_buffer(static_cast<int>(packet_data->buffer_index));
+    if (with_h2d_) {
+      const int idx = static_cast<int>(packet_data->buffer_index);
+      // Lazy device-buffer allocation on first use (size only known here).
+      if (!d_bufs_[idx])
+        CUDA_CHECK(cudaMalloc(&d_bufs_[idx],
+                              packet_data->get_samples_elements_size()));
+      // Async H2D from pinned host (cudaHostAlloc in LambdaFinalPacketData
+      // constructor) — a true PCIe DMA with no internal staging copy.
+      CUDA_CHECK(cudaMemcpyAsync(d_bufs_[idx], packet_data->get_samples_ptr(),
+                                 packet_data->get_samples_elements_size(),
+                                 cudaMemcpyHostToDevice, streams_[idx]));
+      // Release callback on the SAME stream — fires after H2D completes.
+      auto *ctx =
+          new H2DReleaseContext{.state = state_,
+                                .buffer_index = packet_data->buffer_index,
+                                .buffers_completed = &buffers_completed};
+      CUDA_CHECK(
+          cudaLaunchHostFunc(streams_[idx], h2d_release_host_func, ctx));
+    } else {
+      buffers_completed.fetch_add(1, std::memory_order_relaxed);
+      state_->release_buffer(static_cast<int>(packet_data->buffer_index));
+    }
   }
 
   void dump_visibilities(const uint64_t = 0) override {}
 };
 
 template <typename Config>
-BenchResult run_processor_bench(double duration_s) {
+BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
   constexpr size_t PKT_BYTES =
       sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader) +
       sizeof(CustomHeader) + sizeof(typename Config::PacketPayloadType);
@@ -145,17 +216,19 @@ BenchResult run_processor_bench(double duration_s) {
             Config::NR_TIME_STEPS_PER_PACKET,
             /*min_freq_channel=*/0, fpga_delays, fpga_ids);
 
-  NullPipeline pipeline;
+  NullPipeline pipeline(with_h2d);
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
 
   // Synchronous mode: execute_pipeline() is called directly from
-  // handle_buffer_completion() (not via the async SPSC queue).  This means
-  // release_buffer() runs — and replenishes buffer_ordering_queue — BEFORE
-  // advance_to_next_buffer() is called, so the condition-variable wait in
-  // advance_to_next_buffer() never blocks.  Without this, pipeline_feeder()
-  // exits on shutdown() before draining pipeline_q, leaving buffers unreleased
-  // and advance_to_next_buffer() waiting on a cv that is never notified.
+  // handle_buffer_completion() (not via the async SPSC queue), avoiding the
+  // pipeline_feeder shutdown race where the feeder exits before draining
+  // pipeline_q.  Without --with-h2d, release_buffer() fires inside
+  // execute_pipeline so the cv wait in advance_to_next_buffer never blocks.
+  // With --with-h2d, execute_pipeline enqueues the H2D + callback and returns
+  // immediately; advance_to_next_buffer then blocks briefly (~microseconds for
+  // 2.5 KB at PCIe speeds) until the cudaLaunchHostFunc callback fires and
+  // calls release_buffer.
   state.synchronous_pipeline = true;
 
   // Multi-threaded strided producers (the same lock-free protocol live
@@ -387,6 +460,12 @@ int main(int argc, char *argv[]) {
       .help("Duration in seconds to feed synthetic packets per config")
       .default_value(10.0)
       .scan<'g', double>();
+  program.add_argument("--with-h2d")
+      .help("Async H2D cudaMemcpyAsync of each samples buffer before release "
+            "(verifies writes are not dead-stored; exercises PCIe bandwidth; "
+            "mirrors LambdaGPUPipeline's ingest path)")
+      .default_value(false)
+      .implicit_value(true);
 
   try {
     program.parse_args(argc, argv);
@@ -397,6 +476,7 @@ int main(int argc, char *argv[]) {
   }
 
   const double duration_s = program.get<double>("--duration");
+  const bool with_h2d = program.get<bool>("--with-h2d");
 
   // Redirect the default stdout spdlog logger to a file so INFO_LOG calls
   // from ProcessorState don't pollute the benchmark's stdout output.
@@ -408,8 +488,10 @@ int main(int argc, char *argv[]) {
   logger->set_level(spdlog::level::warn);
   spatial::Logger::set(logger);
 
-  std::cout << "bench_processor: 8 configs x " << duration_s << "s each"
-            << std::endl;
+  std::cout << "bench_processor: 8 configs x " << duration_s << "s each";
+  if (with_h2d)
+    std::cout << "  [--with-h2d: async H2D transfer + callback enabled]";
+  std::cout << std::endl;
 
   // ProcessorState and its worker/feeder threads write chatter (startup,
   // shutdown, worker IDs) directly to std::cout.  Redirect cout to /dev/null
@@ -422,14 +504,14 @@ int main(int argc, char *argv[]) {
     return r;
   };
 
-  print_result(run_silent([&]{ return run_processor_bench<Cfg1ch1fpga> (duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg8ch1fpga> (duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg16ch1fpga>(duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg24ch1fpga>(duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg32ch1fpga>(duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg8ch4fpga> (duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg16ch4fpga>(duration_s); }));
-  print_result(run_silent([&]{ return run_processor_bench<Cfg32ch4fpga>(duration_s); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg1ch1fpga> (duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg8ch1fpga> (duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg16ch1fpga>(duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg24ch1fpga>(duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg32ch1fpga>(duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg8ch4fpga> (duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg16ch4fpga>(duration_s, with_h2d); }));
+  print_result(run_silent([&]{ return run_processor_bench<Cfg32ch4fpga>(duration_s, with_h2d); }));
 
   return 0;
 }

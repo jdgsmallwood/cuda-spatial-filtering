@@ -465,4 +465,4 @@ template <typename T> struct LambdaPipelineIngest {
   }
 };
 
-static constexpr unsigned TCC_THREAD_BLOCKS_PER_SM = 2;
+static constexpr unsigned TCC_THREAD_BLOCKS_PER_SM = 4;

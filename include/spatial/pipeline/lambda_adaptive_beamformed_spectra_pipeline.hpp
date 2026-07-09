@@ -215,10 +215,9 @@ private:
           eigenvalues(make_device_ptr<Eigenvalues>()),
           d_scale_factors(make_device_ptr<Eigenvalues>()),
           d_fixed_detected_counts(
-              make_device_ptr<int32_t>(CUSOLVER_BATCH_SIZE *
-                                       sizeof(int32_t))),
-          d_detected_counts(make_device_ptr<int32_t>(CUSOLVER_BATCH_SIZE *
-                                                     sizeof(int32_t))),
+              make_device_ptr<int32_t>(CUSOLVER_BATCH_SIZE * sizeof(int32_t))),
+          d_detected_counts(
+              make_device_ptr<int32_t>(CUSOLVER_BATCH_SIZE * sizeof(int32_t))),
           cusolver_info(
               make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
           cufft_work_area(make_device_ptr<void>(work_size)) {
@@ -864,10 +863,9 @@ public:
           const int32_t *counts_ptr = detect_signal_eigenmodes_
                                           ? b.d_detected_counts.get()
                                           : b.d_fixed_detected_counts.get();
-          CUDA_CHECK(cudaMemcpyAsync(
-              b.h_detected_counts_staging, counts_ptr,
-              sizeof(int32_t) * CUSOLVER_BATCH_SIZE, cudaMemcpyDeviceToHost,
-              b.stream));
+          CUDA_CHECK(cudaMemcpyAsync(b.h_detected_counts_staging, counts_ptr,
+                                     sizeof(int32_t) * CUSOLVER_BATCH_SIZE,
+                                     cudaMemcpyDeviceToHost, b.stream));
         }
 
         auto *ctx = new EigenOutputTransferWithCountsContext{
@@ -913,8 +911,8 @@ public:
       return;
     }
 
-    std::cout << "Eigenmode nulling stats over last "
-              << sample_count << " samples" << std::endl;
+    std::cout << "Eigenmode nulling stats over last " << sample_count
+              << " samples" << std::endl;
     for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
       for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
         const size_t flat = channel * T::NR_POLARIZATIONS + pol;
@@ -1076,8 +1074,7 @@ public:
     std::vector<int32_t> fixed_detected_counts(CUSOLVER_BATCH_SIZE, 0);
     for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
       const auto it = NR_SIGNAL_EIGENVECTORS.find(min_freq_channel + channel);
-      const int fixed_k =
-          (it != NR_SIGNAL_EIGENVECTORS.end()) ? it->second : 0;
+      const int fixed_k = (it != NR_SIGNAL_EIGENVECTORS.end()) ? it->second : 0;
       for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
         fixed_detected_counts[channel * T::NR_POLARIZATIONS + pol] = fixed_k;
       }
@@ -1102,10 +1099,10 @@ public:
                                (__half *)b.weights_permuted.get(), b.stream);
       cudaMemcpyAsync(b.weights_rfi_mitigated.get(), b.weights_permuted.get(),
                       sizeof(BeamWeights), cudaMemcpyDefault, b.stream);
-      CUDA_CHECK(cudaMemcpyAsync(
-          b.d_fixed_detected_counts.get(), fixed_detected_counts.data(),
-          sizeof(int32_t) * CUSOLVER_BATCH_SIZE, cudaMemcpyHostToDevice,
-          b.stream));
+      CUDA_CHECK(cudaMemcpyAsync(b.d_fixed_detected_counts.get(),
+                                 fixed_detected_counts.data(),
+                                 sizeof(int32_t) * CUSOLVER_BATCH_SIZE,
+                                 cudaMemcpyHostToDevice, b.stream));
       // Registered before the warmup run below, so the first (always-overdue)
       // maybe_refresh() steers every buffer in one shot.
       beam_steering_.register_buffer(b.weights.get(), b.stream);
