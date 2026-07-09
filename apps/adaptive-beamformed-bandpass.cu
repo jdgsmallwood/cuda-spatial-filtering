@@ -146,10 +146,15 @@ int main(int argc, char *argv[]) {
       fold_calibration_into_steering ? &calibration_gains : nullptr);
 
   std::cout << "Initializing pipeline...\n";
+  std::cout << "Adaptive mode: "
+            << (args.detect_signal_eigenmodes ? "auto-detect" : "fixed-count")
+            << ", shrink=" << (args.shrink_eigenvalues ? "true" : "false")
+            << ", delta=" << args.detection_threshold_delta << std::endl;
   LambdaAdaptiveBeamformedSpectraPipeline<Config> pipeline(
       num_buffers, &h_weights, args.nr_signal_eigenvectors,
       args.min_freq_channel, std::move(beam_steering),
-      args.shrink_eigenvalues);
+      args.shrink_eigenvalues, args.detect_signal_eigenmodes,
+      args.detection_threshold_delta);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
