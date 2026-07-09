@@ -25,6 +25,7 @@
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <sched.h>
 #include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <sstream>
@@ -79,6 +80,69 @@ inline std::vector<std::string> split_ifnames(const std::string &ifname) {
     }
   }
   return result;
+}
+
+// Returns the NUMA node the given CUDA device's PCI device is attached to, or
+// -1 if it couldn't be determined (no such sysfs entry, device not present).
+inline int gpu_numa_node(int device = 0) {
+  char pci_bus_id[16];
+  if (cudaDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), device) !=
+      cudaSuccess)
+    return -1;
+  std::string bus(pci_bus_id);
+  std::transform(bus.begin(), bus.end(), bus.begin(), ::tolower);
+  std::ifstream f("/sys/bus/pci/devices/" + bus + "/numa_node");
+  int node = -1;
+  if (f >> node && node >= 0)
+    return node;
+  return -1;
+}
+
+// Returns the NUMA node the given network interface's PCI device is attached
+// to, or -1 if it couldn't be determined (interface missing, no sysfs entry).
+inline int nic_numa_node(const std::string &ifname) {
+  std::ifstream f("/sys/class/net/" + ifname + "/device/numa_node");
+  int node = -1;
+  if (f >> node && node >= 0)
+    return node;
+  return -1;
+}
+
+// Pins the calling thread to the CPUs of `node`. Since CPU affinity masks are
+// inherited across clone(), calling this on the main thread before any other
+// threads are spawned pins the whole process. This box is a dual-socket Xeon
+// with a *split* L3 (one slice per socket) and separate memory controllers,
+// so letting the scheduler scatter ring-buffer/pipeline threads across both
+// sockets means every ring-slot read/write and every pinned-buffer access can
+// cross the inter-socket link -- confining everything to the GPU's node keeps
+// it node-local. node < 0 disables pinning (e.g. topology couldn't be
+// determined).
+inline void pin_current_thread_to_numa_node(int node) {
+  if (node < 0)
+    return;
+  std::ifstream f("/sys/devices/system/node/node" + std::to_string(node) +
+                  "/cpulist");
+  std::string cpulist;
+  if (!std::getline(f, cpulist) || cpulist.empty())
+    return;
+
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  // cpulist is a comma-separated list of ranges, e.g. "0-9" or "0-4,10-14".
+  size_t i = 0;
+  while (i < cpulist.size()) {
+    size_t comma = cpulist.find(',', i);
+    if (comma == std::string::npos)
+      comma = cpulist.size();
+    std::string token = cpulist.substr(i, comma - i);
+    size_t dash = token.find('-');
+    int lo = std::stoi(token.substr(0, dash));
+    int hi = dash == std::string::npos ? lo : std::stoi(token.substr(dash + 1));
+    for (int c = lo; c <= hi; ++c)
+      CPU_SET(c, &set);
+    i = comma + 1;
+  }
+  sched_setaffinity(0, sizeof(set), &set);
 }
 
 class AntennaMapRegistry {
@@ -506,6 +570,39 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
   } catch (const std::exception &err) {
     std::cerr << err.what() << "\n" << program;
     std::exit(1);
+  }
+
+  // Pin this thread (and, via clone() inheritance, every thread the app
+  // later spawns that doesn't self-override -- capture threads can via
+  // SPATIAL_CAPTURE_CPUS) to the GPU's NUMA node, so the ring buffer /
+  // pipeline stay node-local to the GPU DMA target. SPATIAL_NUMA_NODE
+  // overrides the auto-detected node; set it to a negative number to
+  // disable pinning entirely.
+  int numa_node;
+  if (const char *node_env = std::getenv("SPATIAL_NUMA_NODE")) {
+    numa_node = std::atoi(node_env);
+  } else {
+    numa_node = gpu_numa_node();
+  }
+
+  if (numa_node >= 0) {
+    pin_current_thread_to_numa_node(numa_node);
+    INFO_LOG("Pinned main thread to NUMA node {} (GPU's node)", numa_node);
+
+    if (std::getenv("SPATIAL_CAPTURE_CPUS") == nullptr) {
+      for (const auto &nic : args.fpga_names) {
+        int nic_node = nic_numa_node(nic);
+        if (nic_node >= 0 && nic_node != numa_node) {
+          WARN_LOG("NIC {} is on NUMA node {} but the pipeline is pinned to "
+                    "node {} (the GPU's node); consider setting "
+                    "SPATIAL_CAPTURE_CPUS to keep this NIC's capture thread "
+                    "node-local",
+                    nic, nic_node, numa_node);
+        }
+      }
+    }
+  } else {
+    INFO_LOG("Could not determine GPU NUMA node; not pinning to a NUMA node");
   }
 
   return args;

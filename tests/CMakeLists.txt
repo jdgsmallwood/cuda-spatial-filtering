@@ -1,5 +1,21 @@
 message(STATUS "Adding Tests for CUDASpatialFiltering")
 set(CTEST_OUTPUT_ON_FAILURE ON)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(TEST_CUDA_ENV "")
+if(CUDAToolkit_INCLUDE_DIRS)
+  list(GET CUDAToolkit_INCLUDE_DIRS 0 FIRST_CUDA_INCLUDE_DIR)
+  cmake_path(NORMAL_PATH FIRST_CUDA_INCLUDE_DIR OUTPUT_VARIABLE FIRST_CUDA_INCLUDE_DIR)
+  if(FIRST_CUDA_INCLUDE_DIR MATCHES "/targets/[^/]+/include$")
+    cmake_path(GET FIRST_CUDA_INCLUDE_DIR PARENT_PATH TEST_CUDA_ROOT)
+  elseif(FIRST_CUDA_INCLUDE_DIR MATCHES "/include$")
+    cmake_path(GET FIRST_CUDA_INCLUDE_DIR PARENT_PATH TEST_CUDA_ROOT)
+  endif()
+  if(TEST_CUDA_ROOT)
+    set(TEST_CUDA_ENV
+        "CUDA_HOME=${TEST_CUDA_ROOT};CUDA_PATH=${TEST_CUDA_ROOT}")
+  endif()
+endif()
 
 add_library(test_app_common INTERFACE)
 target_include_directories(test_app_common INTERFACE ${PSRDADA_ROOT}/include)
@@ -101,6 +117,23 @@ gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
 gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
-gtest_discover_tests(PulsarFoldTests)
-gtest_discover_tests(CorrBeamPipelineTests)
-gtest_discover_tests(AdaptivePipelineTests)
+gtest_discover_tests(PulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(CorrBeamPipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+
+add_test(
+  NAME AdaptiveDetectionReferencePythonTests
+  COMMAND ${Python3_EXECUTABLE}
+          ${PROJECT_SOURCE_DIR}/scripts/adaptive_detection_reference.py
+          --self-test)
+
+add_test(
+  NAME AdaptiveDetectionParityPythonCheck
+  COMMAND ${Python3_EXECUTABLE}
+          ${PROJECT_SOURCE_DIR}/scripts/check_adaptive_detection_parity.py
+          --adaptive-test-bin $<TARGET_FILE:AdaptivePipelineTests>)
+if(TEST_CUDA_ENV)
+  set_tests_properties(
+    AdaptiveDetectionParityPythonCheck
+    PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+endif()

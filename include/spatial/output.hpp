@@ -15,7 +15,7 @@
 
 template <typename BeamT, typename ArrivalsT> class BeamWriter;
 template <typename T> class VisibilitiesWriter;
-template <typename TVal, typename TVec> class EigenWriter;
+template <typename TVal, typename TVec, typename TCount> class EigenWriter;
 template <typename T> class FFTWriter;
 
 class Output {
@@ -40,6 +40,8 @@ public:
   get_eigenvalues_data_landing_pointer(const size_t block_num) = 0;
   virtual void *
   get_eigenvectors_data_landing_pointer(const size_t block_num) = 0;
+  virtual void *
+  get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) = 0;
   virtual void *get_fft_landing_pointer(const size_t block_num) = 0;
 
   virtual void register_beam_data_transfer_complete(const size_t block_num) = 0;
@@ -65,12 +67,14 @@ public:
                        [T::NR_FPGA_SOURCES];
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;
+  using EigenmodeCounts = int32_t[T::NR_CHANNELS][T::NR_POLARIZATIONS];
   using FFTOutput = typename T::FFTOutputType;
   BeamOutput *beam_data;
   Visibilities *visibilities;
   Arrivals *arrivals;
   Eigenvalues *eigenvalues;
   Eigenvectors *eigenvectors;
+  EigenmodeCounts *nulled_eigenmode_counts;
   FFTOutput *fft_output;
 
   size_t register_beam_data_block(const size_t start_seq_num,
@@ -113,6 +117,10 @@ public:
   void *get_eigenvectors_data_landing_pointer(const size_t block_num) override {
     return (void *)eigenvectors;
   }
+  void *
+  get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) override {
+    return (void *)nulled_eigenmode_counts;
+  }
   void *get_fft_landing_pointer(const size_t block_num) override {
     return (void *)fft_output;
   }
@@ -131,6 +139,8 @@ public:
     CUDA_CHECK(cudaMallocHost((void **)&arrivals, sizeof(Arrivals)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvalues, sizeof(Eigenvalues)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvectors, sizeof(Eigenvectors)));
+    CUDA_CHECK(cudaMallocHost((void **)&nulled_eigenmode_counts,
+                              sizeof(EigenmodeCounts)));
     CUDA_CHECK(cudaMallocHost((void **)&fft_output, sizeof(FFTOutput)));
   };
   ~SingleHostMemoryOutput() {
@@ -139,6 +149,7 @@ public:
     CUDA_CHECK(cudaFreeHost(arrivals));
     CUDA_CHECK(cudaFreeHost(eigenvalues));
     CUDA_CHECK(cudaFreeHost(eigenvectors));
+    CUDA_CHECK(cudaFreeHost(nulled_eigenmode_counts));
     CUDA_CHECK(cudaFreeHost(fft_output));
   };
 };
@@ -146,7 +157,8 @@ public:
 template <typename T, typename FFTOutput = typename T::FFTOutputType,
           typename Eigenvalues = typename T::EigenvalueOutputType,
           typename Eigenvectors = typename T::EigenvectorOutputType,
-          typename BeamOutputType = typename T::BeamOutputType>
+          typename BeamOutputType = typename T::BeamOutputType,
+          typename EigenmodeCounts = std::nullptr_t>
 class BufferedOutput : public Output {
 public:
   BufferedOutput(
@@ -155,7 +167,9 @@ public:
           beam_writer,
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
-      std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer,
+      std::unique_ptr<
+          EigenWriter<Eigenvalues, Eigenvectors, EigenmodeCounts>>
+          eigen_writer,
       std::unique_ptr<FFTWriter<FFTOutput>> fft_writer)
       : beam_writer_(std::move(beam_writer)),
         vis_writer_(std::move(vis_writer)),
@@ -250,6 +264,15 @@ public:
       return nullptr;
     }
     return eigen_writer_->get_eigenvalues_landing_pointer(block_num);
+  }
+
+  void *
+  get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) override {
+    if (eigen_writer_ == nullptr) {
+      return nullptr;
+    }
+    return eigen_writer_->get_nulled_eigenmode_counts_landing_pointer(
+        block_num);
   }
 
   void *get_fft_landing_pointer(const size_t block_num) override {
@@ -347,6 +370,7 @@ private:
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;
-  std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors>> eigen_writer_;
+  std::unique_ptr<EigenWriter<Eigenvalues, Eigenvectors, EigenmodeCounts>>
+      eigen_writer_;
   std::unique_ptr<FFTWriter<FFTOutput>> fft_writer_;
 };
