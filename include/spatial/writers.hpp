@@ -108,9 +108,12 @@ template <typename VisibilitiesOutputType> struct VisBlock {
   void reset_state() { transfer_complete = false; }
 };
 
-template <typename Eigenvalues, typename Eigenvectors> struct EigenBlock {
+template <typename Eigenvalues, typename Eigenvectors,
+          typename EigenmodeCounts = std::nullptr_t>
+struct EigenBlock {
   Eigenvalues eigenvalues;
   Eigenvectors eigenvectors;
+  EigenmodeCounts nulled_eigenmode_counts;
   size_t start_seq_num;
   size_t end_seq_num;
   bool transfer_complete;
@@ -304,10 +307,10 @@ public:
   virtual void flush() = 0;
 };
 
-template <typename TVal, typename TVec>
-class EigenWriter : public Writer<EigenBlock<TVal, TVec>> {
+template <typename TVal, typename TVec, typename TCount = std::nullptr_t>
+class EigenWriter : public Writer<EigenBlock<TVal, TVec, TCount>> {
 public:
-  using BlockType = EigenBlock<TVal, TVec>;
+  using BlockType = EigenBlock<TVal, TVec, TCount>;
   EigenWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~EigenWriter() = default;
   virtual const char *writer_name() const override { return "EigenWriter"; };
@@ -326,6 +329,16 @@ public:
 
   virtual void *get_eigenvalues_landing_pointer(const size_t block_num) {
     return (void *)&this->blocks_[block_num].eigenvalues;
+  }
+
+  virtual void *
+  get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) {
+    if constexpr (std::is_same_v<TCount, std::nullptr_t>) {
+      (void)block_num;
+      return nullptr;
+    } else {
+      return (void *)&this->blocks_[block_num].nulled_eigenmode_counts;
+    }
   }
 
   void register_eigendecomposition_transfer_complete(const size_t block_num) {
@@ -813,15 +826,15 @@ private:
   std::vector<size_t> seq_buffer_;
 };
 
-template <typename TVal, typename TVec>
-class RedisEigendataWriter : public EigenWriter<TVal, TVec> {
+template <typename TVal, typename TVec, typename TCount = std::nullptr_t>
+class RedisEigendataWriter : public EigenWriter<TVal, TVec, TCount> {
 public:
   // channels_per_write: how many channels to write per output block.
   // 0 means write all channels every block (original behaviour).
   // Values < NR_CHANNELS enable round-robin to cap per-block Redis payload.
   RedisEigendataWriter(const int channels_per_write = 0,
                        const int num_blocks = 100)
-      : EigenWriter<TVal, TVec>(num_blocks),
+      : EigenWriter<TVal, TVec, TCount>(num_blocks),
         val_element_count_(
             sizeof(TVal) /
             sizeof(typename std::remove_all_extents<TVal>::type)),
@@ -852,7 +865,7 @@ public:
     preallocate_madd_args();
   }
 
-  void process_block(const EigenBlock<TVal, TVec> &block) override {
+  void process_block(const EigenBlock<TVal, TVec, TCount> &block) override {
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
@@ -1441,12 +1454,12 @@ private:
   char *header_file;
 };
 
-template <typename TVal, typename TVec>
-class HDF5ProjectionEigenWriter : public EigenWriter<TVal, TVec> {
+template <typename TVal, typename TVec, typename TCount = std::nullptr_t>
+class HDF5ProjectionEigenWriter : public EigenWriter<TVal, TVec, TCount> {
 public:
   explicit HDF5ProjectionEigenWriter(HighFive::File &file,
                                      const int num_blocks = 100)
-      : EigenWriter<TVal, TVec>(num_blocks), file_(file) {
+      : EigenWriter<TVal, TVec, TCount>(num_blocks), file_(file) {
     using namespace HighFive;
 
     vec_dims_ = get_array_dims<TVec>();
@@ -1512,7 +1525,7 @@ public:
   // val_data — always nullptr for this pipeline, ignored.
   // vec_data — pointer to one TVec worth of eigenvector data.
   // -------------------------------------------------------------------------
-  void process_block(const EigenBlock<TVal, TVec> &block) override {
+  void process_block(const EigenBlock<TVal, TVec, TCount> &block) override {
     const size_t n = n_blocks_written_;
 
     // ---- eigenvalues -------------------------------------------------------
@@ -1673,14 +1686,16 @@ private:
   std::vector<size_t> seq_buffer_;
 };
 
-template <typename TVal, typename TVec>
-class HDF5EigenWriter : public EigenWriter<TVal, TVec> {
+template <typename TVal, typename TVec, typename TCount = std::nullptr_t>
+class HDF5EigenWriter : public EigenWriter<TVal, TVec, TCount> {
+  using CountType = std::remove_all_extents_t<TCount>;
+
 public:
   // deflate_level: 0 = no compression (fast, recommended for real-time writes),
   //               1-9 = zlib level (smaller files, slower).
   explicit HDF5EigenWriter(HighFive::File &file, int deflate_level = 0,
                            const int num_blocks = 100)
-      : EigenWriter<TVal, TVec>(num_blocks), file_(file),
+      : EigenWriter<TVal, TVec, TCount>(num_blocks), file_(file),
         batch_size_(num_blocks) {
     using namespace HighFive;
 
@@ -1693,6 +1708,12 @@ public:
       val_elements_ *= d;
     for (auto d : vec_dims_)
       vec_elements_ *= d;
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      count_dims_ = get_array_dims<TCount>();
+      for (auto d : count_dims_)
+        count_elements_ *= d;
+      count_buffer_.reserve(batch_size_ * count_elements_);
+    }
 
     val_buffer_.reserve(batch_size_ * val_elements_);
     vec_buffer_.reserve(batch_size_ * vec_elements_);
@@ -1754,6 +1775,25 @@ public:
           "description", std::string("start_seq, end_seq per block"));
     }
 
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      std::vector<size_t> dims = {0};
+      std::vector<size_t> max_dims = {DataSpace::UNLIMITED};
+      dims.insert(dims.end(), count_dims_.begin(), count_dims_.end());
+      max_dims.insert(max_dims.end(), count_dims_.begin(), count_dims_.end());
+
+      std::vector<hsize_t> chunk = {static_cast<hsize_t>(batch_size_)};
+      chunk.insert(chunk.end(), count_dims_.begin(), count_dims_.end());
+
+      DataSetCreateProps props;
+      props.add(Chunking(chunk));
+      props.add(Deflate(deflate_level));
+
+      count_dataset_ = file_.createDataSet<CountType>(
+          "nulled_eigenmode_counts", DataSpace(dims, max_dims), props);
+      count_dataset_.createAttribute<std::string>(
+          "DIMENSION_LABELS", std::string("time,channel,polarization"));
+    }
+
     // ---- Store shape metadata as attributes for easy introspection ---
     file_.createAttribute<int>("eigenvalue_channels",
                                static_cast<int>(val_dims_[0]));
@@ -1761,12 +1801,19 @@ public:
                                static_cast<int>(val_dims_.back()));
   }
 
-  void process_block(const EigenBlock<TVal, TVec> &block) override {
+  void process_block(const EigenBlock<TVal, TVec, TCount> &block) override {
     const float *val_ptr = reinterpret_cast<const float *>(&block.eigenvalues);
     val_buffer_.insert(val_buffer_.end(), val_ptr, val_ptr + val_elements_);
 
     const float *vec_ptr = reinterpret_cast<const float *>(block.eigenvectors);
     vec_buffer_.insert(vec_buffer_.end(), vec_ptr, vec_ptr + vec_elements_);
+
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      const CountType *count_ptr =
+          reinterpret_cast<const CountType *>(&block.nulled_eigenmode_counts);
+      count_buffer_.insert(count_buffer_.end(), count_ptr,
+                           count_ptr + count_elements_);
+    }
 
     seq_buffer_.push_back(block.start_seq_num);
     seq_buffer_.push_back(block.end_seq_num);
@@ -1807,6 +1854,21 @@ public:
 
     vec_dataset_.select(vec_offset, vec_count).write_raw(vec_buffer_.data());
 
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      std::vector<size_t> count_new_dims = {t + buffer_count_};
+      count_new_dims.insert(count_new_dims.end(), count_dims_.begin(),
+                            count_dims_.end());
+      count_dataset_.resize(count_new_dims);
+
+      std::vector<size_t> count_offset = {t};
+      count_offset.insert(count_offset.end(), count_dims_.size(), 0);
+      std::vector<size_t> count_count = {buffer_count_};
+      count_count.insert(count_count.end(), count_dims_.begin(),
+                         count_dims_.end());
+      count_dataset_.select(count_offset, count_count)
+          .write_raw(count_buffer_.data());
+    }
+
     seq_dataset_.resize({t + buffer_count_, 2});
     seq_dataset_.select({t, 0}, {buffer_count_, 2})
         .write_raw(seq_buffer_.data());
@@ -1814,6 +1876,7 @@ public:
     n_blocks_written_ += buffer_count_;
     val_buffer_.clear();
     vec_buffer_.clear();
+    count_buffer_.clear();
     seq_buffer_.clear();
     buffer_count_ = 0;
   }
@@ -1822,18 +1885,22 @@ private:
   HighFive::File &file_;
   HighFive::DataSet val_dataset_;
   HighFive::DataSet vec_dataset_;
+  HighFive::DataSet count_dataset_;
   HighFive::DataSet seq_dataset_;
   std::vector<size_t> val_dims_; // inner shape of TVal, e.g. {CH, POL, POL, N}
   std::vector<size_t>
       vec_dims_; // inner shape of TVec + [2], e.g. {CH, POL, POL, N, N, 2}
+  std::vector<size_t> count_dims_;
   //
   size_t batch_size_;
   size_t buffer_count_ = 0;
   size_t n_blocks_written_ = 0;
   size_t val_elements_ = 1;
   size_t vec_elements_ = 1;
+  size_t count_elements_ = 1;
 
   std::vector<float> val_buffer_;
   std::vector<float> vec_buffer_;
+  std::vector<CountType> count_buffer_;
   std::vector<size_t> seq_buffer_;
 };

@@ -3,8 +3,11 @@
 #include "spatial/packet_formats.hpp"
 #include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <complex>
+#include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cufftXt.h>
@@ -353,6 +356,42 @@ static void fft_output_transfer_complete_host_func(void *data) {
 
   ctx->output->register_fft_transfer_complete(ctx->block_index);
   delete ctx;
+}
+
+inline float sorted_percentile_linear(const float *sorted_values, int count,
+                                      float quantile) {
+  if (count <= 0) {
+    return 0.0f;
+  }
+  if (count == 1) {
+    return sorted_values[0];
+  }
+  const float clamped = std::max(0.0f, std::min(1.0f, quantile));
+  const float position = clamped * static_cast<float>(count - 1);
+  const int lower = static_cast<int>(std::floor(position));
+  const int upper = static_cast<int>(std::ceil(position));
+  if (lower == upper) {
+    return sorted_values[lower];
+  }
+  const float fraction = position - static_cast<float>(lower);
+  return sorted_values[lower] +
+         fraction * (sorted_values[upper] - sorted_values[lower]);
+}
+
+inline int detect_signal_eigenmode_count(const float *sorted_eigenvalues, int n,
+                                         float delta) {
+  const float p20 = sorted_percentile_linear(sorted_eigenvalues, n, 0.2f);
+  const float p50 = sorted_percentile_linear(sorted_eigenvalues, n, 0.5f);
+  const float p80 = sorted_percentile_linear(sorted_eigenvalues, n, 0.8f);
+  const float sigma_noise = (p80 - p20) / (2.0f * 0.8416f);
+  const float threshold = p50 + delta * sigma_noise;
+  int detected = 0;
+  for (int i = 0; i < n; ++i) {
+    if (sorted_eigenvalues[i] > threshold) {
+      ++detected;
+    }
+  }
+  return detected;
 }
 
 template <size_t NR_CHANNELS, size_t NR_RECEIVERS, size_t NR_POLARIZATIONS>
@@ -2246,6 +2285,7 @@ private:
     // Host staging buffers for eigenvalue D->H copy and scale-factor computation.
     std::vector<float> h_eigenvalues_buf;
     std::vector<float> h_scale_factors_buf;
+    std::vector<int32_t> h_detected_counts_buf;
 
     // cuSOLVER handles / workspace
     cusolverDnHandle_t cusolver_handle = nullptr;
@@ -2305,6 +2345,7 @@ private:
           d_scale_factors(make_device_ptr<Eigenvalues>()),
           h_eigenvalues_buf(CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS, 0.0f),
           h_scale_factors_buf(CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS, 0.0f),
+          h_detected_counts_buf(CUSOLVER_BATCH_SIZE, 0),
           cusolver_info(
               make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
           cufft_work_area(make_device_ptr<void>(work_size)) {
@@ -2463,6 +2504,8 @@ private:
   std::unordered_map<int, int> NR_SIGNAL_EIGENVECTORS;
   int min_freq_channel;
   bool shrink_eigenvalues_;
+  bool detect_signal_eigenmodes_;
+  float detection_threshold_delta_;
 
   static constexpr float alpha_32 = 1.0f;
   // a = unpadded baselines
@@ -2710,14 +2753,37 @@ public:
       const cuComplex gemm_beta{0.0f, 0.0f};
       auto *V_base = reinterpret_cast<cuComplex *>(b.decomp_visibilities.get());
       auto *P_base = reinterpret_cast<cuComplex *>(b.float_projection_matrix.get());
+      const bool need_host_eigenvalues =
+          shrink_eigenvalues_ || detect_signal_eigenmodes_;
+
+      if (need_host_eigenvalues) {
+        CUDA_CHECK(cudaStreamSynchronize(b.stream));
+        CUDA_CHECK(cudaMemcpy(b.h_eigenvalues_buf.data(), b.eigenvalues.get(),
+                              sizeof(Eigenvalues), cudaMemcpyDeviceToHost));
+      }
+
+      for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
+        const int fixed_k = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
+        for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+          const int flat = channel * T::NR_POLARIZATIONS + pol;
+          b.h_detected_counts_buf[flat] = detect_signal_eigenmodes_
+                                              ? detect_signal_eigenmode_count(
+                                                    b.h_eigenvalues_buf.data() +
+                                                        flat * N,
+                                                    N,
+                                                    detection_threshold_delta_)
+                                              : fixed_k;
+        }
+      }
 
       if (!shrink_eigenvalues_) {
-        // --- Original null path (bit-identical to pre-change behaviour) ---
+        // Fixed-K mode preserves the original no-sync path. Detection mode
+        // reuses the host eigenvalue staging buffer to derive K per batch.
         for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
-          const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
-          const int col_offset = N - K;
           for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
             int flat = channel * T::NR_POLARIZATIONS + pol;
+            const int K = b.h_detected_counts_buf[flat];
+            const int col_offset = N - K;
             cuComplex *V_batch = V_base + flat * N * N;
             cuComplex *U = V_batch + col_offset * N;
             cuComplex *P_batch = P_base + flat * N * N;
@@ -2737,16 +2803,10 @@ public:
                               T::NR_CHANNELS * T::NR_POLARIZATIONS, b.stream);
       } else {
         // --- Shrink path: M = V_scaled * V^H, projection_matrix = M (fp16) ---
-        // cusolverDnXsyevBatched is async on the handle stream; sync first
-        // so the eigenvalues are available on the host.
-        CUDA_CHECK(cudaStreamSynchronize(b.stream));
-        CUDA_CHECK(cudaMemcpy(b.h_eigenvalues_buf.data(), b.eigenvalues.get(),
-                              sizeof(Eigenvalues), cudaMemcpyDeviceToHost));
-
         for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
-          const int K = NR_SIGNAL_EIGENVECTORS[min_freq_channel + channel];
           for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
             int flat = channel * T::NR_POLARIZATIONS + pol;
+            const int K = b.h_detected_counts_buf[flat];
             const float *eigs = b.h_eigenvalues_buf.data() + flat * N;
             float *d = b.h_scale_factors_buf.data() + flat * N;
 
@@ -2935,6 +2995,8 @@ public:
             output_->get_eigenvalues_data_landing_pointer(eig_block_num);
         void *eigvec_ptr =
             output_->get_eigenvectors_data_landing_pointer(eig_block_num);
+        void *eigcount_ptr =
+            output_->get_nulled_eigenmode_counts_landing_pointer(eig_block_num);
         CUDA_CHECK(cudaMemcpyAsync(eigvec_ptr, b.decomp_visibilities.get(),
                                    sizeof(DecompositionVisibilities),
                                    cudaMemcpyDefault, b.stream));
@@ -2942,6 +3004,10 @@ public:
         CUDA_CHECK(cudaMemcpyAsync(eigval_ptr, b.eigenvalues.get(),
                                    sizeof(Eigenvalues), cudaMemcpyDefault,
                                    b.stream));
+        if (eigcount_ptr != nullptr) {
+          std::memcpy(eigcount_ptr, b.h_detected_counts_buf.data(),
+                      sizeof(int32_t) * CUSOLVER_BATCH_SIZE);
+        }
 
         auto *ctx = new OutputTransferCompleteContext{
             .output = this->output_, .block_index = eig_block_num};
@@ -2959,7 +3025,9 @@ public:
       const int num_buffers, BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
       const int min_freq_channel, BeamSteering<T> beam_steering,
-      bool shrink_eigenvalues = false)
+      bool shrink_eigenvalues = false,
+      bool detect_signal_eigenmodes = false,
+      float detection_threshold_delta = 3.0f)
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
@@ -2973,7 +3041,9 @@ public:
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors),
         min_freq_channel(min_freq_channel),
-        shrink_eigenvalues_(shrink_eigenvalues) {
+        shrink_eigenvalues_(shrink_eigenvalues),
+        detect_signal_eigenmodes_(detect_signal_eigenmodes),
+        detection_threshold_delta_(detection_threshold_delta) {
     std::cout << "Beamformed Spectra instantiated with NR_CHANNELS: "
               << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS

@@ -24,7 +24,9 @@
 #include <complex>
 #include <cuda_fp16.h>
 #include <filesystem>
+#include <functional>
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -81,6 +83,7 @@ public:
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS];
   using EigVecs = std::complex<float>[T::NR_CHANNELS][T::NR_POLARIZATIONS]
                                      [T::NR_RECEIVERS][T::NR_RECEIVERS];
+  using NullCounts = int32_t[T::NR_CHANNELS][T::NR_POLARIZATIONS];
   using FFTOut = float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
                       [NR_FINE_CHANS];
   using ArrivalsT = bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION + 2]
@@ -89,22 +92,25 @@ public:
   BeamOut    *beam_data;
   EigVals    *eigenvalues;
   EigVecs    *eigenvectors;
+  NullCounts *nulled_eigenmode_counts;
   FFTOut     *fft_output;
   ArrivalsT  *arrivals;
 
   AdaptiveTestOutput() {
-    CUDA_CHECK(cudaMallocHost((void **)&beam_data, sizeof(BeamOut)));
-    CUDA_CHECK(cudaMallocHost((void **)&eigenvalues, sizeof(EigVals)));
-    CUDA_CHECK(cudaMallocHost((void **)&eigenvectors, sizeof(EigVecs)));
-    CUDA_CHECK(cudaMallocHost((void **)&fft_output, sizeof(FFTOut)));
-    CUDA_CHECK(cudaMallocHost((void **)&arrivals, sizeof(ArrivalsT)));
+    beam_data = new BeamOut[1]{};
+    eigenvalues = new EigVals[1]{};
+    eigenvectors = new EigVecs[1]{};
+    nulled_eigenmode_counts = new NullCounts[1]{};
+    fft_output = new FFTOut[1]{};
+    arrivals = new ArrivalsT[1]{};
   }
   ~AdaptiveTestOutput() {
-    cudaFreeHost(beam_data);
-    cudaFreeHost(eigenvalues);
-    cudaFreeHost(eigenvectors);
-    cudaFreeHost(fft_output);
-    cudaFreeHost(arrivals);
+    delete[] beam_data;
+    delete[] eigenvalues;
+    delete[] eigenvectors;
+    delete[] nulled_eigenmode_counts;
+    delete[] fft_output;
+    delete[] arrivals;
   }
 
   size_t register_beam_data_block(size_t, size_t) override { return 1; }
@@ -124,6 +130,9 @@ public:
   }
   void *get_eigenvectors_data_landing_pointer(size_t) override {
     return eigenvectors;
+  }
+  void *get_nulled_eigenmode_counts_landing_pointer(size_t) override {
+    return nulled_eigenmode_counts;
   }
   void *get_fft_landing_pointer(size_t) override { return fft_output; }
 
@@ -196,6 +205,8 @@ std::complex<float> expected_tagged_beam_value(size_t channel, int pol,
 // ---------------------------------------------------------------------------
 class AdaptivePipelineTest : public ::testing::Test {
 protected:
+  void SetUp() override { cudaFree(0); }
+
   void TearDown() override {
     cudaDeviceSynchronize();
     cudaDeviceReset();
@@ -222,6 +233,79 @@ std::complex<int8_t> rank2_sample(size_t /*ch*/, size_t /*fpga*/, int /*pkt*/,
                          : std::complex<int8_t>{0, 0};
 }
 
+std::complex<int8_t> multimode_detect_sample(size_t, size_t, int, int time,
+                                             int receiver, int pol) {
+  if (pol == 1) {
+    return {0, 0};
+  }
+  const int mode_a = ((time / 8) % 2 == 0) ? 20 : -20;
+  const int mode_b = ((time / 4) % 2 == 0) ? 18 : -18;
+  const int receiver_sign = (receiver % 2 == 0) ? 1 : -1;
+  return {static_cast<int8_t>(mode_a + receiver_sign * mode_b), 0};
+}
+
+template <typename Config> struct SampleDump {
+  int8_t data[Config::NR_CHANNELS][Config::NR_POLARIZATIONS]
+            [Config::NR_RECEIVERS]
+            [Config::NR_PACKETS_FOR_CORRELATION *
+             Config::NR_TIME_STEPS_PER_PACKET][2];
+};
+
+template <typename Config>
+SampleDump<Config> make_sample_dump(
+    const std::function<std::complex<int8_t>(size_t, size_t, int, int, int,
+                                             int)> &sample_fn) {
+  SampleDump<Config> samples{};
+  for (size_t c = 0; c < Config::NR_CHANNELS; ++c)
+    for (size_t p = 0; p < Config::NR_POLARIZATIONS; ++p)
+      for (size_t r = 0; r < Config::NR_RECEIVERS; ++r)
+        for (size_t t = 0;
+             t < Config::NR_PACKETS_FOR_CORRELATION *
+                     Config::NR_TIME_STEPS_PER_PACKET;
+             ++t) {
+          const auto sample = sample_fn(c, 0, 0, static_cast<int>(t),
+                                        static_cast<int>(r), static_cast<int>(p));
+          samples.data[c][p][r][t][0] = sample.real();
+          samples.data[c][p][r][t][1] = sample.imag();
+        }
+  return samples;
+}
+
+template <typename Config> struct WeightDump {
+  float data[Config::NR_CHANNELS][Config::NR_POLARIZATIONS][Config::NR_BEAMS]
+            [Config::NR_RECEIVERS][2];
+};
+
+template <typename Config>
+WeightDump<Config> make_weight_dump(const BeamWeightsT<Config> &weights) {
+  WeightDump<Config> dump{};
+  for (size_t c = 0; c < Config::NR_CHANNELS; ++c)
+    for (size_t p = 0; p < Config::NR_POLARIZATIONS; ++p)
+      for (size_t b = 0; b < Config::NR_BEAMS; ++b)
+        for (size_t r = 0; r < Config::NR_RECEIVERS; ++r) {
+          dump.data[c][p][b][r][0] =
+              __half2float(weights.weights[c][p][b][r].real());
+          dump.data[c][p][b][r][1] =
+              __half2float(weights.weights[c][p][b][r].imag());
+        }
+  return dump;
+}
+
+template <typename Config>
+double rfi_beam_power_for_pol(const AdaptiveTestOutput<Config> &out, int pol) {
+  double total = 0.0;
+  for (size_t c = 0; c < Config::NR_CHANNELS; ++c)
+    for (size_t t = 0; t < Config::NR_PACKETS_FOR_CORRELATION *
+                                Config::NR_TIME_STEPS_PER_PACKET;
+         ++t) {
+      const auto &s = out.beam_data[0][c][pol][1][t];
+      const float re = __half2float(s.real());
+      const float im = __half2float(s.imag());
+      total += static_cast<double>(re * re + im * im);
+    }
+  return total;
+}
+
 // ---------------------------------------------------------------------------
 // Run helper
 // ---------------------------------------------------------------------------
@@ -231,12 +315,14 @@ struct AdaptiveRun {
   std::unique_ptr<LambdaAdaptiveBeamformedSpectraPipeline<AdaptiveConfig>> pipeline;
   std::unique_ptr<test_support::SyntheticPipelineRun<AdaptiveConfig>> driver;
 
-  explicit AdaptiveRun(bool shrink, int K = 1) {
+  explicit AdaptiveRun(bool shrink, int K = 1, bool detect = false,
+                       float detection_delta = 3.0f) {
     output = std::make_shared<AdaptiveTestOutput<AdaptiveConfig>>();
     weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
     std::unordered_map<int, int> eig_map{{0, K}};
     pipeline = test_support::pipeline_factories::make_adaptive_beamformed_spectra_pipeline<AdaptiveConfig>(
-        /*num_buffers=*/3, &weights, eig_map, shrink);
+        /*num_buffers=*/3, &weights, eig_map, shrink, /*min_freq_channel=*/0,
+        detect, detection_delta);
     driver = std::make_unique<test_support::SyntheticPipelineRun<AdaptiveConfig>>(
         *pipeline, output);
   }
@@ -563,6 +649,87 @@ TEST_F(AdaptivePipelineTest, ShrinkingWithRankTwoInputDiffersFromNulling) {
   EXPECT_GT(shrink_power, null_power + 1e-6)
       << "Shrink mode should produce more power than null mode with rank-2 "
          "input (null=" << null_power << ", shrink=" << shrink_power << ")";
+}
+
+TEST_F(AdaptivePipelineTest, DetectionModeTracksPerPolarizationCounts) {
+  AdaptiveRun r(/*shrink=*/false, /*K=*/0, /*detect=*/true,
+                /*detection_delta=*/0.5f);
+  r.driver->run(multimode_detect_sample,
+                [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+  cudaDeviceSynchronize();
+
+  const auto &counts = *r.output->nulled_eigenmode_counts;
+  EXPECT_EQ(counts[0][0], 2);
+  EXPECT_EQ(counts[0][1], 0);
+
+  EXPECT_LT(rfi_beam_power_for_pol(*r.output, /*pol=*/0), 1.0)
+      << "nulling should suppress the interfered polarization";
+  EXPECT_EQ(rfi_beam_power_for_pol(*r.output, /*pol=*/1), 0.0)
+      << "clean zero-input polarization should remain zero";
+}
+
+TEST_F(AdaptivePipelineTest, DetectionModeWritesParityFixtureToHDF5) {
+  const char *path = std::getenv("ADAPTIVE_PARITY_OUTPUT");
+  if (path == nullptr || path[0] == '\0') {
+    GTEST_SKIP() << "ADAPTIVE_PARITY_OUTPUT not set";
+  }
+
+  const float detection_delta = 0.5f;
+  AdaptiveRun run(/*shrink=*/false, /*K=*/0, /*detect=*/true,
+                  detection_delta);
+  auto sample_dump = make_sample_dump<AdaptiveConfig>(multimode_detect_sample);
+  auto weight_dump = make_weight_dump<AdaptiveConfig>(run.weights);
+  run.driver->run(multimode_detect_sample,
+                  [](size_t, size_t, int, int, int) -> int16_t { return 1; });
+  cudaDeviceSynchronize();
+
+  {
+    HighFive::File file(path, HighFive::File::Truncate);
+    file.createAttribute<std::string>("adaptive_projection_mode", "null");
+    file.createAttribute<std::string>("adaptive_detection_mode", "threshold");
+    file.createAttribute<float>("adaptive_detection_delta", detection_delta);
+    file.createAttribute<std::string>("synthetic_case",
+                                      "rank2_pol0_zero_pol1");
+    auto eigenvalues_ds = file.createDataSet<float>(
+        "eigenvalues", HighFive::DataSpace::From(*run.output->eigenvalues));
+    eigenvalues_ds.write(*run.output->eigenvalues);
+
+    std::vector<size_t> eigenvector_dims = {
+        AdaptiveConfig::NR_CHANNELS, AdaptiveConfig::NR_POLARIZATIONS,
+        AdaptiveConfig::NR_RECEIVERS, AdaptiveConfig::NR_RECEIVERS, 2};
+    auto eigenvectors_ds =
+        file.createDataSet<float>("eigenvectors", HighFive::DataSpace(eigenvector_dims));
+    eigenvectors_ds.write_raw(
+        reinterpret_cast<const float *>(run.output->eigenvectors));
+
+    auto counts_ds = file.createDataSet<int32_t>(
+        "nulled_eigenmode_counts",
+        HighFive::DataSpace::From(*run.output->nulled_eigenmode_counts));
+    counts_ds.write(*run.output->nulled_eigenmode_counts);
+
+    std::vector<size_t> beam_dims = {
+        AdaptiveConfig::NR_CHANNELS, AdaptiveConfig::NR_POLARIZATIONS,
+        2 * AdaptiveConfig::NR_BEAMS,
+        AdaptiveConfig::NR_PACKETS_FOR_CORRELATION *
+            AdaptiveConfig::NR_TIME_STEPS_PER_PACKET,
+        2};
+    auto beam_ds =
+        file.createDataSet<uint16_t>("beam_data", HighFive::DataSpace(beam_dims));
+    beam_ds.write_raw(reinterpret_cast<const uint16_t *>(run.output->beam_data));
+    auto input_ds = file.createDataSet<int8_t>(
+        "input_samples", HighFive::DataSpace::From(sample_dump.data));
+    input_ds.write(sample_dump.data);
+    auto weights_ds = file.createDataSet<float>(
+        "beam_weights", HighFive::DataSpace::From(weight_dump.data));
+    weights_ds.write(weight_dump.data);
+  }
+
+  HighFive::File verify_file(path, HighFive::File::ReadOnly);
+  auto counts_ds = verify_file.getDataSet("nulled_eigenmode_counts");
+  const auto dims = counts_ds.getDimensions();
+  ASSERT_EQ(dims.size(), 2u);
+  EXPECT_EQ(dims[0], AdaptiveConfig::NR_CHANNELS);
+  EXPECT_EQ(dims[1], AdaptiveConfig::NR_POLARIZATIONS);
 }
 
 // ---------------------------------------------------------------------------
