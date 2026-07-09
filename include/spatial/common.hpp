@@ -227,6 +227,7 @@ struct CommonArgs {
   bool shrink_eigenvalues = false;
   bool detect_signal_eigenmodes = false;
   float detection_threshold_delta = 3.0f;
+  double eigenmode_stats_interval_seconds = 10.0;
   std::vector<std::string> fpga_names;
   std::unordered_map<int, int64_t> fpga_delays;
   // Antenna ENU positions (metres), keyed by absolute antenna ID; from
@@ -509,6 +510,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(3.0f)
       .scan<'g', float>()
       .store_into(args.detection_threshold_delta);
+
+  program.add_argument("--eigenmode-stats-interval-seconds")
+      .help("Print min/max/median/mean of nulled eigenmodes to stdout every "
+            "N seconds in adaptive mode (0 disables)")
+      .default_value(10.0)
+      .scan<'g', double>()
+      .store_into(args.eigenmode_stats_interval_seconds);
 
   program.add_argument("-a", "--apply-gains-to-vis")
       .help("Apply the inverse of the gains to the raw data")

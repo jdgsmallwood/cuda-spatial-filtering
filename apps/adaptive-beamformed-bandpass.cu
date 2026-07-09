@@ -151,7 +151,8 @@ int main(int argc, char *argv[]) {
       num_buffers, &h_weights, args.nr_signal_eigenvectors,
       args.min_freq_channel, std::move(beam_steering),
       args.shrink_eigenvalues, args.detect_signal_eigenmodes,
-      args.detection_threshold_delta);
+      args.detection_threshold_delta,
+      args.eigenmode_stats_interval_seconds);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
