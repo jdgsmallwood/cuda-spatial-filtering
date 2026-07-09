@@ -323,6 +323,80 @@ make_packet_captures(const CommonArgs &args,
   return capture;
 }
 
+template <typename CaptureContainer>
+inline uint32_t get_total_capture_drops(const CaptureContainer &capture) {
+  uint32_t total_drops = 0;
+  for (const auto &c : capture) {
+    total_drops += c->get_drops();
+  }
+  return total_drops;
+}
+
+template <typename CaptureContainer>
+inline void monitor_app_stats(ProcessorStateBase &state,
+                              const CaptureContainer &capture,
+                              const CommonArgs &args) {
+  uint64_t last_packets_received = 0;
+  int stagnant_intervals = 0;
+  const auto start_time = std::chrono::steady_clock::now();
+
+  while (state.running) {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    const uint64_t packets_received = state.packets_received.load();
+    std::cout << "Stats: Received=" << packets_received
+              << ", Processed=" << state.packets_processed.load()
+              << ", Missing=" << state.packets_missing
+              << ", Discarded=" << state.packets_discarded.load()
+              << ", FutureQueued=" << state.packets_future_queued.load()
+              << ", StuckUnprocessed="
+              << state.packets_stuck_unprocessed.load()
+              << ", NICDrops=" << get_total_capture_drops(capture)
+              << std::endl;
+    std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
+              << std::endl;
+
+    state.running.store((int)running, std::memory_order_release);
+
+    if (last_packets_received != 0) {
+      if (last_packets_received == packets_received) {
+        std::cout
+            << "Packets received is same as state... adding to timeout.\n";
+        stagnant_intervals += 1;
+      } else {
+        std::cout << "Packets received is " << last_packets_received
+                  << " and state.packets_received is " << packets_received
+                  << ".\n";
+        stagnant_intervals = 0;
+      }
+      if (stagnant_intervals > 4) {
+        std::cout << "Timeout reached...shutting down\n";
+        state.running.store(0, std::memory_order_release);
+        running = false;
+      }
+    }
+    last_packets_received = packets_received;
+
+    if (args.packets_to_receive > 0 &&
+        packets_received >= (uint64_t)args.packets_to_receive) {
+      std::cout << "Number of packets to observe reached...shutting down\n";
+      state.running.store(0, std::memory_order_release);
+      running = false;
+    }
+    if (args.run_duration_seconds > 0) {
+      const auto elapsed =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        start_time)
+              .count();
+      if (elapsed >= args.run_duration_seconds) {
+        std::cout << "Duration limit reached...shutting down\n";
+        state.running.store(0, std::memory_order_release);
+        running = false;
+      }
+    }
+  }
+}
+
 // Registers and parses the arguments that are common to every pipeline
 // binary. Extra arguments (e.g. --pulsar-period-samples) can be added to
 // `program` before calling this function; they will be parsed in the same
