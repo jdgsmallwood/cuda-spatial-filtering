@@ -733,6 +733,142 @@ void computeIdentityMinusA(const float2 *d_A, __half2 *d_output, const int N,
                               0, stream>>>(d_A, d_output, N, batches);
 }
 
+__device__ inline float
+sorted_percentile_linear_device(const float *sorted_values, int count,
+                                float quantile) {
+  if (count <= 0) {
+    return 0.0f;
+  }
+  if (count == 1) {
+    return sorted_values[0];
+  }
+  const float clamped = fminf(1.0f, fmaxf(0.0f, quantile));
+  const float position = clamped * static_cast<float>(count - 1);
+  const int lower = static_cast<int>(floorf(position));
+  const int upper = static_cast<int>(ceilf(position));
+  if (lower == upper) {
+    return sorted_values[lower];
+  }
+  const float fraction = position - static_cast<float>(lower);
+  return sorted_values[lower] +
+         fraction * (sorted_values[upper] - sorted_values[lower]);
+}
+
+__global__ void detectSignalEigenmodeCountsKernel(
+    const float *__restrict__ d_eigenvalues, int32_t *__restrict__ d_counts,
+    int N, int total_batches, float delta) {
+  const int batch = blockIdx.x;
+  if (batch >= total_batches || threadIdx.x != 0) {
+    return;
+  }
+
+  const float *eigs = d_eigenvalues + batch * N;
+  const float p20 = sorted_percentile_linear_device(eigs, N, 0.2f);
+  const float p50 = sorted_percentile_linear_device(eigs, N, 0.5f);
+  const float p80 = sorted_percentile_linear_device(eigs, N, 0.8f);
+  const float sigma_noise = (p80 - p20) / (2.0f * 0.8416f);
+  const float threshold = p50 + delta * sigma_noise;
+
+  int detected = 0;
+  for (int i = 0; i < N; ++i) {
+    if (eigs[i] > threshold) {
+      ++detected;
+    }
+  }
+  d_counts[batch] = detected;
+}
+
+void detectSignalEigenmodeCounts(const float *d_eigenvalues, int32_t *d_counts,
+                                 int N, int batches, float delta,
+                                 cudaStream_t stream) {
+  detectSignalEigenmodeCountsKernel<<<batches, 32, 0, stream>>>(
+      d_eigenvalues, d_counts, N, batches, delta);
+}
+
+__global__ void computeShrinkScaleFactorsKernel(
+    const float *__restrict__ d_eigenvalues,
+    const int32_t *__restrict__ d_counts, float *__restrict__ d_scales, int N,
+    int total_batches) {
+  const int batch = blockIdx.x;
+  const int k = threadIdx.x;
+  if (batch >= total_batches || k >= N) {
+    return;
+  }
+
+  const float *eigs = d_eigenvalues + batch * N;
+  float *scales = d_scales + batch * N;
+  const int detected = max(0, min(N, static_cast<int>(d_counts[batch])));
+
+  __shared__ float lambda_bar;
+  if (k == 0) {
+    lambda_bar = 0.0f;
+    if (detected < N) {
+      for (int i = 0; i < N - detected; ++i) {
+        lambda_bar += eigs[i];
+      }
+      lambda_bar /= static_cast<float>(N - detected);
+    }
+  }
+  __syncthreads();
+
+  if (k < N - detected) {
+    scales[k] = 1.0f;
+  } else {
+    const float eig = eigs[k];
+    scales[k] = (eig > 0.0f) ? lambda_bar / eig : 0.0f;
+  }
+}
+
+void computeShrinkScaleFactors(const float *d_eigenvalues,
+                               const int32_t *d_counts, float *d_scales, int N,
+                               int batches, cudaStream_t stream) {
+  computeShrinkScaleFactorsKernel<<<batches, N, 0, stream>>>(
+      d_eigenvalues, d_counts, d_scales, N, batches);
+}
+
+__global__ void buildIdentityMinusProjectionKernel(
+    const float2 *__restrict__ d_eigenvectors,
+    const int32_t *__restrict__ d_counts, __half2 *__restrict__ d_output, int N,
+    int total_batches) {
+  const int batch = blockIdx.y;
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total_elements = N * N;
+  if (batch >= total_batches || idx >= total_elements) {
+    return;
+  }
+
+  const int row = idx % N;
+  const int col = idx / N;
+  const int detected = max(0, min(N, static_cast<int>(d_counts[batch])));
+  const int col_offset = N - detected;
+  const int base = batch * total_elements;
+
+  float2 sum = make_float2(0.0f, 0.0f);
+  for (int k = 0; k < detected; ++k) {
+    const int eig_col = col_offset + k;
+    const float2 u_row = d_eigenvectors[base + eig_col * N + row];
+    const float2 u_col = d_eigenvectors[base + eig_col * N + col];
+    sum.x += u_row.x * u_col.x + u_row.y * u_col.y;
+    sum.y += u_row.y * u_col.x - u_row.x * u_col.y;
+  }
+
+  const float real = ((row == col) ? 1.0f : 0.0f) - sum.x;
+  const float imag = -sum.y;
+  d_output[base + idx] = __float22half2_rn(make_float2(real, imag));
+}
+
+void buildIdentityMinusProjectionFromEigenvectors(
+    const float2 *d_eigenvectors, const int32_t *d_counts, __half2 *d_output,
+    int N, int batches, cudaStream_t stream) {
+  const int total_elements = N * N;
+  const int threadsPerBlock = 256;
+  const int blocksPerGrid =
+      (total_elements + threadsPerBlock - 1) / threadsPerBlock;
+  buildIdentityMinusProjectionKernel<<<dim3(blocksPerGrid, batches, 1),
+                                       threadsPerBlock, 0, stream>>>(
+      d_eigenvectors, d_counts, d_output, N, batches);
+}
+
 // Copies V_in → V_out, scaling each column j by d[batch*N + j].
 // V is stored column-major (cuSOLVER convention): element (row, col) lives at
 // flat index col*N + row within a single NxN batch slice.

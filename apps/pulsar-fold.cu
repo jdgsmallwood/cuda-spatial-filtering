@@ -203,57 +203,7 @@ int main(int argc, char *argv[]) {
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
   std::cout << "Setup completed. Ready to receive!" << std::endl;
-  // Print statistics periodically
-  int64_t packets_received = 0;
-  int timeout = 0;
-  const auto start_time = std::chrono::steady_clock::now();
-  while (state.running) {
-    sleep(5);
-    // This is nice to see outside of log files.
-    std::cout << "Stats: Received=" << state.packets_received
-              << ", Processed=" << state.packets_processed
-              << ", Missing=" << state.packets_missing
-              << ", Discarded=" << state.packets_discarded << std::endl;
-    std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
-              << std::endl;
-    state.running.store((int)running, std::memory_order_release);
-    // This is my attempt at a rudimentary shutdown procedure
-    // when there are no more packets running through in a 20sec period.
-    if (packets_received != 0) {
-      if (packets_received == state.packets_received) {
-        std::cout
-            << "Packets received is same as state... adding to timeout.\n";
-        timeout += 1;
-      } else {
-        std::cout << "Packets received is " << packets_received
-                  << " and state.packets_received is " << state.packets_received
-                  << ".\n";
-        timeout = 0;
-      }
-      if (timeout > 4) {
-        std::cout << "Timeout reached...shutting down\n";
-        state.running.store(0, std::memory_order_release);
-        running = false;
-      }
-    }
-    packets_received = state.packets_received;
-
-    if (args.packets_to_receive > 0 &&
-        packets_received >= args.packets_to_receive) {
-      std::cout << "Number of packets to observe reached...shutting down\n";
-      state.running.store(0, std::memory_order_release);
-      running = false;
-    }
-    if (args.run_duration_seconds > 0) {
-      const auto elapsed = std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - start_time).count();
-      if (elapsed >= args.run_duration_seconds) {
-        std::cout << "Duration limit reached...shutting down\n";
-        state.running.store(0, std::memory_order_release);
-        running = false;
-      }
-    }
-  }
+  monitor_app_stats(state, capture, args);
 
   // Cleanup
   INFO_LOG("\nShutting down...\n");

@@ -149,7 +149,8 @@ make_adaptive_beamformed_spectra_pipeline(
     std::unordered_map<int, int> nr_signal_eigenvectors = {},
     bool shrink_eigenvalues = false,
     int min_freq_channel = 0, bool detect_signal_eigenmodes = false,
-    float detection_threshold_delta = 3.0f) {
+    float detection_threshold_delta = 3.0f,
+    double eigenmode_stats_interval_seconds = 10.0) {
   if (nr_signal_eigenvectors.empty())
     nr_signal_eigenvectors[min_freq_channel] = 1;
   BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
@@ -160,7 +161,7 @@ make_adaptive_beamformed_spectra_pipeline(
   return std::make_unique<LambdaAdaptiveBeamformedSpectraPipeline<Config>>(
       num_buffers, weights, nr_signal_eigenvectors, min_freq_channel,
       std::move(beam_steering), shrink_eigenvalues, detect_signal_eigenmodes,
-      detection_threshold_delta);
+      detection_threshold_delta, eigenmode_stats_interval_seconds);
 }
 
 } // namespace pipeline_factories
