@@ -173,14 +173,17 @@ int main(int argc, char *argv[]) {
   std::thread eigenmode_stats_thread;
   if (args.eigenmode_stats_interval_seconds > 0.0) {
     eigenmode_stats_thread = std::thread([&pipeline, &args]() {
-      const auto interval =
-          std::chrono::duration<double>(args.eigenmode_stats_interval_seconds);
+      const auto interval = std::chrono::duration_cast<
+          std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(args.eigenmode_stats_interval_seconds));
+      auto next_deadline = std::chrono::steady_clock::now();
       while (running) {
-        std::this_thread::sleep_for(interval);
+        pipeline.print_eigenmode_stats();
+        next_deadline += interval;
+        std::this_thread::sleep_until(next_deadline);
         if (!running) {
           break;
         }
-        pipeline.print_eigenmode_stats();
       }
     });
   }
