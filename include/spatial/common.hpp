@@ -44,6 +44,11 @@
 
 using json = nlohmann::json;
 inline std::atomic<bool> running{true};
+inline constexpr size_t DEFAULT_PACKET_RING_BUFFER_SIZE = 6144;
+static_assert(DEFAULT_PACKET_RING_BUFFER_SIZE % 1 == 0);
+static_assert(DEFAULT_PACKET_RING_BUFFER_SIZE % 2 == 0);
+static_assert(DEFAULT_PACKET_RING_BUFFER_SIZE % 3 == 0);
+static_assert(DEFAULT_PACKET_RING_BUFFER_SIZE % 4 == 0);
 
 inline void signal_handler(int signal) {
   INFO_LOG("Caught CTRL+C, shutting down...");

@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "spatial/common.hpp"
 #include "spatial/logging.hpp"
 #include "spatial/pipeline_base.hpp"
 #include "spatial/spatial.hpp"
@@ -133,15 +134,16 @@ BenchResult run_processor_bench(double duration_s) {
   //      safety net, force-completing buffers with holes.
   //   6144 = 3 * 2048 satisfies both.  Cache-locality matters less than in
   //   the single-producer round (6 striding workers prefetch well past L3).
-  constexpr size_t RING_BUFFER_SIZE = 6144;
   // 3 producers + 6 workers + the processor thread = 10 busy threads on this
   // 10-core-per-socket box (the feeder sleeps in synchronous mode).  More of
   // either oversubscribes the socket and collapses throughput (12 busy
   // threads measured ~0.7 GB/s: spin-waits get descheduled).
   constexpr int WORKER_COUNT = 6;
-  ProcessorState<Config, NR_INPUT_BUFFERS, RING_BUFFER_SIZE, WORKER_COUNT> state(
-      Config::NR_PACKETS_FOR_CORRELATION, Config::NR_TIME_STEPS_PER_PACKET,
-      /*min_freq_channel=*/0, fpga_delays, fpga_ids);
+  ProcessorState<Config, NR_INPUT_BUFFERS, DEFAULT_PACKET_RING_BUFFER_SIZE,
+                 WORKER_COUNT>
+      state(Config::NR_PACKETS_FOR_CORRELATION,
+            Config::NR_TIME_STEPS_PER_PACKET,
+            /*min_freq_channel=*/0, fpga_delays, fpga_ids);
 
   NullPipeline pipeline;
   state.set_pipeline(&pipeline);

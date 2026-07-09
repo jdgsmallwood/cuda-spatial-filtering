@@ -25,7 +25,6 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
-  constexpr size_t PACKET_RING_BUFFER_SIZE = 50000;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -45,7 +44,8 @@ int main(int argc, char *argv[]) {
   for (auto i = 0; i < nr_fpga_sources; ++i) {
     fpga_delays[i] = 0;
   }
-  ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
+  ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
+      state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       args.min_freq_channel, fpga_delays, args.fpga_ids);
 
@@ -80,7 +80,7 @@ int main(int argc, char *argv[]) {
 
   auto capture = make_packet_captures(args);
   state.nr_capture_threads = static_cast<int>(capture.size());
-  INFO_LOG("Ring buffer size: {} packets\n", PACKET_RING_BUFFER_SIZE);
+  INFO_LOG("Ring buffer size: {} packets\n", DEFAULT_PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < (int)capture.size(); ++i) {
