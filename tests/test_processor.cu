@@ -1,3 +1,4 @@
+#include "spatial/common.hpp"
 #include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline_base.hpp"
@@ -11,6 +12,19 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+
+TEST(CommonArgsTest, BuildFpgaDelayArrayMapsBySourceIndexUsingFpgaIds) {
+  CommonArgs args;
+  args.fpga_id_vec = {0, 2, 3};
+  args.fpga_ids = {{0, 0}, {2, 1}, {3, 2}};
+  args.fpga_delays = {{0, -1000}, {1, 0}, {2, 0}, {3, 1000}};
+
+  const auto delays = build_fpga_delay_array<3>(args);
+
+  EXPECT_EQ(delays[0], -1000);
+  EXPECT_EQ(delays[1], 0);
+  EXPECT_EQ(delays[2], 1000);
+}
 
 // Mock configuration for testing
 using TestConfig = LambdaConfig<2,  // NR_CHANNELS

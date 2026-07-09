@@ -67,12 +67,7 @@ int main(int argc, char *argv[]) {
     throw std::runtime_error("The number of network interfaces does not match "
                              "number of FPGA sources.");
   }
-  std::array<int64_t, nr_fpga_sources> fpga_delays;
-  for (auto i : args.fpga_id_vec) {
-    fpga_delays[i] = args.fpga_delays[i];
-    std::cout << "FPGA delay for ALVEO " << i << " is " << fpga_delays[i]
-              << std::endl;
-  }
+  auto fpga_delays = build_fpga_delay_array<nr_fpga_sources>(args, true);
 
   auto gains = get_gains_structure<Config>(args);
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(

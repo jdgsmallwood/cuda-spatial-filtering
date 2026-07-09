@@ -246,6 +246,30 @@ struct CommonArgs {
   double run_duration_seconds = 0.0;
 };
 
+template <size_t N>
+inline std::array<int64_t, N>
+build_fpga_delay_array(const CommonArgs &args, bool log_assignments = false) {
+  if (args.fpga_id_vec.size() != N || args.fpga_ids.size() != N) {
+    throw std::runtime_error("The number of FPGA sources does not match the "
+                             "configured network interfaces.");
+  }
+
+  std::array<int64_t, N> fpga_delays{};
+  for (size_t source_index = 0; source_index < N; ++source_index) {
+    const int fpga_id = args.fpga_id_vec[source_index];
+    const auto delay_it = args.fpga_delays.find(fpga_id);
+    const int64_t delay = delay_it != args.fpga_delays.end() ? delay_it->second
+                                                             : 0;
+    fpga_delays[source_index] = delay;
+    if (log_assignments) {
+      std::cout << "FPGA source index " << source_index << " (ALVEO "
+                << fpga_id << ") delay is " << delay << std::endl;
+    }
+  }
+
+  return fpga_delays;
+}
+
 // Builds the per-NIC packet-capture objects for an app from the parsed args,
 // centralizing the pcap-vs-live and kernel-vs-ibverbs backend choice so every
 // binary selects backends identically: offline pcap replay when --pcap-filename

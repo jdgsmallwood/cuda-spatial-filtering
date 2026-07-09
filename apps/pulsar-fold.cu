@@ -55,10 +55,7 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
 
-  std::array<int64_t, nr_fpga_sources> fpga_delays;
-  for (auto i : args.fpga_id_vec) {
-    fpga_delays[i] = args.fpga_delays[i];
-  }
+  auto fpga_delays = build_fpga_delay_array<nr_fpga_sources>(args);
 
   ProcessorState<Config, num_packet_buffers, PACKET_RING_BUFFER_SIZE> state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
