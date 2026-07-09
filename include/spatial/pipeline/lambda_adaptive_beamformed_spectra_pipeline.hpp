@@ -153,7 +153,10 @@ private:
     DevicePtr<int32_t> d_fixed_detected_counts;
     DevicePtr<int32_t> d_detected_counts;
     int32_t *h_detected_counts_staging = nullptr;
-    std::chrono::steady_clock::time_point last_eigenmode_stats_time;
+    std::shared_ptr<std::mutex> eigenmode_stats_mutex =
+        std::make_shared<std::mutex>();
+    std::shared_ptr<std::vector<int32_t>> eigenmode_stats_history =
+        std::make_shared<std::vector<int32_t>>();
 
     // cuSOLVER handles / workspace
     cusolverDnHandle_t cusolver_handle = nullptr;
@@ -218,8 +221,7 @@ private:
                                                      sizeof(int32_t))),
           cusolver_info(
               make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
-          cufft_work_area(make_device_ptr<void>(work_size)),
-          last_eigenmode_stats_time(std::chrono::steady_clock::now()) {
+          cufft_work_area(make_device_ptr<void>(work_size)) {
       // Stream Creation
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
@@ -323,7 +325,8 @@ private:
           cusolver_work_host_size(other.cusolver_work_host_size),
           cusolver_info(std::move(other.cusolver_info)),
           h_detected_counts_staging(other.h_detected_counts_staging),
-          last_eigenmode_stats_time(other.last_eigenmode_stats_time)
+          eigenmode_stats_mutex(std::move(other.eigenmode_stats_mutex)),
+          eigenmode_stats_history(std::move(other.eigenmode_stats_history))
 
     {
       other.stream = nullptr;
@@ -383,7 +386,8 @@ private:
         cusolver_work_host_size = other.cusolver_work_host_size;
         cusolver_info = std::move(other.cusolver_info);
         h_detected_counts_staging = other.h_detected_counts_staging;
-        last_eigenmode_stats_time = other.last_eigenmode_stats_time;
+        eigenmode_stats_mutex = std::move(other.eigenmode_stats_mutex);
+        eigenmode_stats_history = std::move(other.eigenmode_stats_history);
 
         other.stream = nullptr;
 
@@ -866,61 +870,16 @@ public:
               b.stream));
         }
 
-        if (eigcount_ptr != nullptr) {
-          auto *ctx = new EigenOutputTransferWithCountsContext{
-              .output = this->output_,
-              .block_index = eig_block_num,
-              .counts_dst = eigcount_ptr,
-              .counts_src = b.h_detected_counts_staging,
-              .counts_size_bytes = sizeof(int32_t) * CUSOLVER_BATCH_SIZE};
-          CUDA_CHECK(cudaLaunchHostFunc(
-              b.stream, eigen_output_transfer_with_counts_host_func, ctx));
-        } else {
-          auto *ctx = new OutputTransferCompleteContext{
-              .output = this->output_, .block_index = eig_block_num};
-          CUDA_CHECK(cudaLaunchHostFunc(
-              b.stream, eigen_output_transfer_complete_host_func, ctx));
-        }
-      }
-    }
-
-    if (eigenmode_stats_interval_seconds_ > 0.0) {
-      const auto now = std::chrono::steady_clock::now();
-      const double elapsed_seconds =
-          std::chrono::duration<double>(now - b.last_eigenmode_stats_time)
-              .count();
-      if (elapsed_seconds >= eigenmode_stats_interval_seconds_) {
-        const int32_t *counts_ptr = detect_signal_eigenmodes_
-                                        ? b.d_detected_counts.get()
-                                        : b.d_fixed_detected_counts.get();
-        std::vector<int32_t> counts(CUSOLVER_BATCH_SIZE);
-        CUDA_CHECK(cudaMemcpyAsync(
-            counts.data(), counts_ptr,
-            sizeof(int32_t) * CUSOLVER_BATCH_SIZE, cudaMemcpyDeviceToHost,
-            b.stream));
-        CUDA_CHECK(cudaStreamSynchronize(b.stream));
-
-        std::sort(counts.begin(), counts.end());
-        const int32_t min_count = counts.front();
-        const int32_t max_count = counts.back();
-        double sum = 0.0;
-        for (int32_t count : counts) {
-          sum += static_cast<double>(count);
-        }
-        const double mean = sum / static_cast<double>(counts.size());
-        const double median =
-            (counts.size() % 2 == 0)
-                ? 0.5 * (static_cast<double>(counts[counts.size() / 2 - 1]) +
-                         static_cast<double>(counts[counts.size() / 2]))
-                : static_cast<double>(counts[counts.size() / 2]);
-
-        std::cout << "Eigenmode nulling stats"
-                  << " ["
-                  << (detect_signal_eigenmodes_ ? "auto-detect" : "fixed")
-                  << "]: min=" << min_count << " max=" << max_count
-                  << " median=" << median << " mean=" << mean << std::endl;
-        std::fflush(stdout);
-        b.last_eigenmode_stats_time = now;
+        auto *ctx = new EigenOutputTransferWithCountsContext{
+            .output = this->output_,
+            .block_index = eig_block_num,
+            .counts_dst = eigcount_ptr,
+            .counts_src = b.h_detected_counts_staging,
+            .counts_size_bytes = sizeof(int32_t) * CUSOLVER_BATCH_SIZE,
+            .stats_mutex = b.eigenmode_stats_mutex.get(),
+            .stats_history = b.eigenmode_stats_history.get()};
+        CUDA_CHECK(cudaLaunchHostFunc(
+            b.stream, eigen_output_transfer_with_counts_host_func, ctx));
       }
     }
 
@@ -928,6 +887,62 @@ public:
     if (!dummy_run) {
       current_buffer = (current_buffer + 1) % num_buffers;
     }
+  }
+
+  void print_eigenmode_stats() {
+    std::vector<int32_t> samples;
+    for (auto &buffer : buffers) {
+      if (!buffer.eigenmode_stats_mutex || !buffer.eigenmode_stats_history) {
+        continue;
+      }
+      std::lock_guard<std::mutex> lock(*buffer.eigenmode_stats_mutex);
+      if (buffer.eigenmode_stats_history->empty()) {
+        continue;
+      }
+      samples.insert(samples.end(), buffer.eigenmode_stats_history->begin(),
+                     buffer.eigenmode_stats_history->end());
+      buffer.eigenmode_stats_history->clear();
+    }
+
+    const size_t per_sample = CUSOLVER_BATCH_SIZE;
+    if (samples.size() % per_sample != 0) {
+      return;
+    }
+    const size_t sample_count = samples.size() / per_sample;
+    if (sample_count == 0) {
+      return;
+    }
+
+    std::cout << "Eigenmode nulling stats over last "
+              << sample_count << " samples" << std::endl;
+    for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
+      for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+        const size_t flat = channel * T::NR_POLARIZATIONS + pol;
+        std::vector<int32_t> series;
+        series.reserve(sample_count);
+        for (size_t sample = 0; sample < sample_count; ++sample) {
+          series.push_back(samples[sample * per_sample + flat]);
+        }
+        std::sort(series.begin(), series.end());
+        const int32_t min_count = series.front();
+        const int32_t max_count = series.back();
+        double sum = 0.0;
+        for (int32_t count : series) {
+          sum += static_cast<double>(count);
+        }
+        const double mean = sum / static_cast<double>(series.size());
+        const double median =
+            (series.size() % 2 == 0)
+                ? 0.5 * (static_cast<double>(series[series.size() / 2 - 1]) +
+                         static_cast<double>(series[series.size() / 2]))
+                : static_cast<double>(series[series.size() / 2]);
+
+        std::cout << "  ch=" << channel << " pol=" << pol
+                  << " min=" << min_count << " max=" << max_count
+                  << " median=" << median << " mean=" << mean << std::endl;
+      }
+    }
+    std::fflush(stdout);
   }
   LambdaAdaptiveBeamformedSpectraPipeline(
       const int num_buffers, BeamWeightsT<T> *h_weights,

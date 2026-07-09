@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 #include <cufftXt.h>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 #include "ccglib/common/precision.h"
@@ -323,6 +324,8 @@ struct EigenOutputTransferWithCountsContext {
   void *counts_dst;
   const int32_t *counts_src;
   size_t counts_size_bytes;
+  std::mutex *stats_mutex = nullptr;
+  std::vector<int32_t> *stats_history = nullptr;
 };
 
 // Static function to be called by cudaLaunchHostFunc
@@ -361,9 +364,19 @@ static void eigen_output_transfer_complete_host_func(void *data) {
 
 static void eigen_output_transfer_with_counts_host_func(void *data) {
   auto *ctx = static_cast<EigenOutputTransferWithCountsContext *>(data);
-  std::memcpy(ctx->counts_dst, ctx->counts_src, ctx->counts_size_bytes);
-  ctx->output->register_eigendecomposition_data_transfer_complete(
-      ctx->block_index);
+  if (ctx->counts_dst != nullptr) {
+    std::memcpy(ctx->counts_dst, ctx->counts_src, ctx->counts_size_bytes);
+  }
+  if (ctx->stats_mutex != nullptr && ctx->stats_history != nullptr) {
+    std::lock_guard<std::mutex> lock(*ctx->stats_mutex);
+    const size_t count_elements = ctx->counts_size_bytes / sizeof(int32_t);
+    ctx->stats_history->insert(ctx->stats_history->end(), ctx->counts_src,
+                               ctx->counts_src + count_elements);
+  }
+  if (ctx->output != nullptr) {
+    ctx->output->register_eigendecomposition_data_transfer_complete(
+        ctx->block_index);
+  }
   delete ctx;
 }
 

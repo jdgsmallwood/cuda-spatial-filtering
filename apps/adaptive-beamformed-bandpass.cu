@@ -170,6 +170,20 @@ int main(int argc, char *argv[]) {
 
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
+  std::thread eigenmode_stats_thread;
+  if (args.eigenmode_stats_interval_seconds > 0.0) {
+    eigenmode_stats_thread = std::thread([&pipeline, &args]() {
+      const auto interval =
+          std::chrono::duration<double>(args.eigenmode_stats_interval_seconds);
+      while (running) {
+        std::this_thread::sleep_for(interval);
+        if (!running) {
+          break;
+        }
+        pipeline.print_eigenmode_stats();
+      }
+    });
+  }
 
   // Start writer thread
   output->start_writer_loop();
@@ -192,6 +206,9 @@ int main(int argc, char *argv[]) {
   processor.join();
   std::cout << "Waiting for pipeline feeder to finish...\n";
   pipeline_feeder.join();
+  if (eigenmode_stats_thread.joinable()) {
+    eigenmode_stats_thread.join();
+  }
   std::cout << "Dumping visibilities....\n";
   cudaDeviceSynchronize();
   pipeline.dump_visibilities();
