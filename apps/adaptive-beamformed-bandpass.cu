@@ -90,6 +90,8 @@ int main(int argc, char *argv[]) {
   using Eigenvectors =
       std::complex<float>[Config::NR_CHANNELS][Config::NR_POLARIZATIONS]
                          [nr_lambda_receivers][nr_lambda_receivers];
+  using EigenmodeCounts =
+      int32_t[Config::NR_CHANNELS][Config::NR_POLARIZATIONS];
   auto eigen_writer = nullptr;
   // std::make_unique<HDF5EigenWriter<Eigenvalues, Eigenvectors>>(
   //   eigendata_file);
@@ -102,11 +104,13 @@ int main(int argc, char *argv[]) {
           : args.beam_output_filename;
   HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   auto beam_writer = std::make_unique<
-      HDF5BeamWriter<BeamOutputType, Config::ArrivalsOutputType>>(beam_file);
+      HDF5BeamWriter<BeamOutputType, Config::ArrivalsOutputType,
+                     EigenmodeCounts>>(beam_file);
 
   auto output =
       std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
-                                      Eigenvectors, BeamOutputType>>(
+                                      Eigenvectors, BeamOutputType,
+                                      EigenmodeCounts>>(
           std::move(beam_writer), nullptr, std::move(eigen_writer),
           std::move(fft_writer));
 

@@ -13,7 +13,8 @@
 
 // forward declarations
 
-template <typename BeamT, typename ArrivalsT> class BeamWriter;
+template <typename BeamT, typename ArrivalsT, typename TCount = std::nullptr_t>
+class BeamWriter;
 template <typename T> class VisibilitiesWriter;
 template <typename TVal, typename TVec, typename TCount> class EigenWriter;
 template <typename T> class FFTWriter;
@@ -42,6 +43,7 @@ public:
   get_eigenvectors_data_landing_pointer(const size_t block_num) = 0;
   virtual void *
   get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) = 0;
+  virtual void *get_beam_counts_landing_pointer(const size_t block_num) = 0;
   virtual void *get_fft_landing_pointer(const size_t block_num) = 0;
 
   virtual void register_beam_data_transfer_complete(const size_t block_num) = 0;
@@ -50,6 +52,8 @@ public:
   virtual void register_arrivals_transfer_complete(const size_t block_num) = 0;
   virtual void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) = 0;
+  virtual void
+  register_beam_counts_transfer_complete(const size_t block_num) = 0;
   virtual void register_fft_transfer_complete(const size_t block_num) = 0;
 };
 
@@ -121,6 +125,9 @@ public:
   get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) override {
     return (void *)nulled_eigenmode_counts;
   }
+  void *get_beam_counts_landing_pointer(const size_t block_num) override {
+    return (void *)nulled_eigenmode_counts;
+  }
   void *get_fft_landing_pointer(const size_t block_num) override {
     return (void *)fft_output;
   }
@@ -131,6 +138,8 @@ public:
   void register_arrivals_transfer_complete(const size_t block_num) override {};
   void register_eigendecomposition_data_transfer_complete(
       const size_t block_num) override {};
+  void
+  register_beam_counts_transfer_complete(const size_t block_num) override {};
   void register_fft_transfer_complete(const size_t block_num) override {};
 
   SingleHostMemoryOutput() {
@@ -163,7 +172,8 @@ class BufferedOutput : public Output {
 public:
   BufferedOutput(
       std::unique_ptr<
-          BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
+          BeamWriter<BeamOutputType, typename T::ArrivalsOutputType,
+                     EigenmodeCounts>>
           beam_writer,
       std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
           vis_writer,
@@ -275,6 +285,13 @@ public:
         block_num);
   }
 
+  void *get_beam_counts_landing_pointer(const size_t block_num) override {
+    if (beam_writer_ == nullptr) {
+      return nullptr;
+    }
+    return beam_writer_->get_nulled_eigenmode_counts_landing_pointer(block_num);
+  }
+
   void *get_fft_landing_pointer(const size_t block_num) override {
     if (fft_writer_ == nullptr) {
       return nullptr;
@@ -314,6 +331,15 @@ public:
     }
     eigen_writer_->register_eigendecomposition_transfer_complete(block_num);
     eigen_writer_->notify();
+  }
+
+  void
+  register_beam_counts_transfer_complete(const size_t block_num) override {
+    if (beam_writer_ == nullptr) {
+      return;
+    }
+    beam_writer_->register_counts_transfer_complete(block_num);
+    beam_writer_->notify();
   }
 
   void register_fft_transfer_complete(const size_t block_num) override {
@@ -366,7 +392,8 @@ public:
   std::atomic<bool> running_{true};
 
 private:
-  std::unique_ptr<BeamWriter<BeamOutputType, typename T::ArrivalsOutputType>>
+  std::unique_ptr<BeamWriter<BeamOutputType, typename T::ArrivalsOutputType,
+                             EigenmodeCounts>>
       beam_writer_;
   std::unique_ptr<VisibilitiesWriter<typename T::VisibilitiesOutputType>>
       vis_writer_;

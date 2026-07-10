@@ -71,23 +71,28 @@ template <typename T> struct is_complex_half : std::false_type {};
 
 template <> struct is_complex_half<std::complex<__half>> : std::true_type {};
 
-template <typename BeamOutputType, typename ArrivalsOutputType>
+template <typename BeamOutputType, typename ArrivalsOutputType,
+          typename TCount = std::nullptr_t>
 struct BeamBlock {
   BeamOutputType beam_data;
   ArrivalsOutputType arrivals_data;
+  TCount nulled_eigenmode_counts;
   size_t start_seq_num = 0;
   size_t end_seq_num = 0;
 
   bool beam_transfer_complete = false;
   bool arrival_transfer_complete = false;
+  // True immediately when TCount == nullptr_t (no counts to wait for).
+  bool counts_transfer_complete = std::is_same_v<TCount, std::nullptr_t>;
 
-  // Standardized interface for the base Writer class
   bool is_ready() const {
-    return beam_transfer_complete && arrival_transfer_complete;
+    return beam_transfer_complete && arrival_transfer_complete &&
+           counts_transfer_complete;
   }
   void reset_state() {
     beam_transfer_complete = false;
     arrival_transfer_complete = false;
+    counts_transfer_complete = std::is_same_v<TCount, std::nullptr_t>;
   }
 };
 
@@ -243,10 +248,10 @@ private:
   std::thread drain_thread_;
 };
 
-template <typename BeamT, typename ArrivalsT>
-class BeamWriter : public Writer<BeamBlock<BeamT, ArrivalsT>> {
+template <typename BeamT, typename ArrivalsT, typename TCount = std::nullptr_t>
+class BeamWriter : public Writer<BeamBlock<BeamT, ArrivalsT, TCount>> {
 public:
-  using BlockType = BeamBlock<BeamT, ArrivalsT>;
+  using BlockType = BeamBlock<BeamT, ArrivalsT, TCount>;
   BeamWriter(const int num_blocks = 100) : Writer<BlockType>(num_blocks) {};
   virtual ~BeamWriter() = default;
   virtual const char *writer_name() const override { return "BeamWriter"; };
@@ -266,12 +271,25 @@ public:
     return (void *)&this->blocks_[block_idx].arrivals_data;
   }
 
+  void *get_nulled_eigenmode_counts_landing_pointer(const size_t block_num) {
+    if constexpr (std::is_same_v<TCount, std::nullptr_t>) {
+      (void)block_num;
+      return nullptr;
+    } else {
+      return (void *)&this->blocks_[block_num].nulled_eigenmode_counts;
+    }
+  }
+
   void register_beam_data_transfer_complete(const size_t block_num) {
     this->blocks_[block_num].beam_transfer_complete = true;
   }
 
   void register_arrivals_transfer_complete(const size_t block_num) {
     this->blocks_[block_num].arrival_transfer_complete = true;
+  }
+
+  void register_counts_transfer_complete(const size_t block_num) {
+    this->blocks_[block_num].counts_transfer_complete = true;
   }
 
   virtual void flush() = 0;
@@ -385,8 +403,8 @@ constexpr auto get_array_dims() {
   }
 }
 
-template <typename BeamT, typename ArrivalsT>
-class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
+template <typename BeamT, typename ArrivalsT, typename TCount = std::nullptr_t>
+class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT, TCount> {
 
   using beam_type = typename std::remove_all_extents<BeamT>::type;
   using beam_storage_type = typename hdf5_storage_type<beam_type>::type;
@@ -395,7 +413,7 @@ class HDF5BeamWriter : public BeamWriter<BeamT, ArrivalsT> {
 public:
   HDF5BeamWriter(HighFive::File &file, const int num_blocks = 100,
                  const int deflate_level = 0)
-      : BeamWriter<BeamT, ArrivalsT>(num_blocks), file_(file),
+      : BeamWriter<BeamT, ArrivalsT, TCount>(num_blocks), file_(file),
         batch_size_(num_blocks) {
     using namespace HighFive;
     arrivals_element_count_ = sizeof(ArrivalsT) / sizeof(bool);
@@ -456,10 +474,33 @@ public:
     beam_seq_dataset_ = file_.createDataSet<size_t>(
         "beam_seq_nums", DataSpace({0, 2}, {DataSpace::UNLIMITED, 2}),
         beam_seq_props);
+
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      count_dims_ = get_array_dims<TCount>();
+      count_elements_ = sizeof(TCount) / sizeof(int32_t);
+      count_buffer_.reserve(batch_size_ * count_elements_);
+
+      std::vector<size_t> count_dataset_dims = {0};
+      std::vector<size_t> count_dataset_max_dims = {DataSpace::UNLIMITED};
+      count_dataset_dims.insert(count_dataset_dims.end(), count_dims_.begin(),
+                                count_dims_.end());
+      count_dataset_max_dims.insert(count_dataset_max_dims.end(),
+                                    count_dims_.begin(), count_dims_.end());
+      std::vector<hsize_t> count_chunk = {static_cast<hsize_t>(batch_size_)};
+      count_chunk.insert(count_chunk.end(), count_dims_.begin(),
+                         count_dims_.end());
+      DataSetCreateProps count_props;
+      count_props.add(Chunking(count_chunk));
+      count_dataset_ = file_.createDataSet<int32_t>(
+          "nulled_eigenmode_counts",
+          DataSpace(count_dataset_dims, count_dataset_max_dims), count_props);
+      count_dataset_.createAttribute<std::string>("DIMENSION_LABELS",
+                                                  std::string("time,channel,polarization"));
+    }
   }
 
   void process_block(
-      const typename BeamWriter<BeamT, ArrivalsT>::BlockType &block) override {
+      const typename BeamWriter<BeamT, ArrivalsT, TCount>::BlockType &block) override {
     const auto *beam_ptr =
         reinterpret_cast<const beam_storage_type *>(&block.beam_data);
     beam_buffer_.insert(beam_buffer_.end(), beam_ptr,
@@ -472,6 +513,13 @@ public:
 
     seq_buffer_.push_back(block.start_seq_num);
     seq_buffer_.push_back(block.end_seq_num);
+
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      const auto *count_ptr =
+          reinterpret_cast<const int32_t *>(&block.nulled_eigenmode_counts);
+      count_buffer_.insert(count_buffer_.end(), count_ptr,
+                           count_ptr + count_elements_);
+    }
 
     buffer_count_++;
     if (buffer_count_ >= batch_size_) {
@@ -515,6 +563,21 @@ public:
     beam_seq_dataset_.select({current_size, 0}, {buffer_count_, 2})
         .write_raw(seq_buffer_.data());
 
+    if constexpr (!std::is_same_v<TCount, std::nullptr_t>) {
+      std::vector<size_t> count_new_dims = {current_size + buffer_count_};
+      count_new_dims.insert(count_new_dims.end(), count_dims_.begin(),
+                            count_dims_.end());
+      count_dataset_.resize(count_new_dims);
+      std::vector<size_t> count_offset = {current_size};
+      count_offset.insert(count_offset.end(), count_dims_.size(), 0);
+      std::vector<size_t> count_count = {buffer_count_};
+      count_count.insert(count_count.end(), count_dims_.begin(),
+                         count_dims_.end());
+      count_dataset_.select(count_offset, count_count)
+          .write_raw(count_buffer_.data());
+      count_buffer_.clear();
+    }
+
     n_blocks_written_ += buffer_count_;
     beam_buffer_.clear();
     arrivals_buffer_.clear();
@@ -532,6 +595,11 @@ private:
   HighFive::DataSet beam_dataset_;
   HighFive::DataSet arrivals_dataset_;
   HighFive::DataSet beam_seq_dataset_;
+  // Counts (populated only when TCount != nullptr_t)
+  std::vector<size_t> count_dims_;
+  size_t count_elements_ = 0;
+  HighFive::DataSet count_dataset_;
+  std::vector<int32_t> count_buffer_;
   size_t n_blocks_written_ = 0;
   size_t batch_size_;
   size_t buffer_count_ = 0;

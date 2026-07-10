@@ -826,6 +826,30 @@ public:
         std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
                     packet_data->get_arrivals_size());
         output_->register_arrivals_transfer_complete(beam_block_num);
+
+        // Route nulled eigenmode counts into the beam block if the beam writer
+        // supports them (get_beam_counts_landing_pointer returns non-null).
+        void *beam_counts_ptr =
+            output_->get_beam_counts_landing_pointer(beam_block_num);
+        if (beam_counts_ptr != nullptr) {
+          const int32_t *counts_dev_ptr =
+              detect_signal_eigenmodes_ ? b.d_detected_counts.get()
+                                       : b.d_fixed_detected_counts.get();
+          CUDA_CHECK(cudaMemcpyAsync(b.h_detected_counts_staging, counts_dev_ptr,
+                                     sizeof(int32_t) * CUSOLVER_BATCH_SIZE,
+                                     cudaMemcpyDeviceToHost, b.stream));
+          auto *beam_counts_ctx = new BeamCountsTransferCompleteContext{
+              .output = this->output_,
+              .block_index = beam_block_num,
+              .counts_dst = beam_counts_ptr,
+              .counts_src = b.h_detected_counts_staging,
+              .counts_size_bytes = sizeof(int32_t) * CUSOLVER_BATCH_SIZE,
+              .stats_mutex = b.eigenmode_stats_mutex.get(),
+              .stats_history = b.eigenmode_stats_history.get()};
+          CUDA_CHECK(cudaLaunchHostFunc(b.stream,
+                                        beam_counts_transfer_complete_host_func,
+                                        beam_counts_ctx));
+        }
       }
 
       size_t fft_block_num =

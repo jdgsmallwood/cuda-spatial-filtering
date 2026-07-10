@@ -328,6 +328,16 @@ struct EigenOutputTransferWithCountsContext {
   std::vector<int32_t> *stats_history = nullptr;
 };
 
+struct BeamCountsTransferCompleteContext {
+  std::shared_ptr<Output> output;
+  size_t block_index;
+  void *counts_dst;
+  const int32_t *counts_src;
+  size_t counts_size_bytes;
+  std::mutex *stats_mutex = nullptr;
+  std::vector<int32_t> *stats_history = nullptr;
+};
+
 // Static function to be called by cudaLaunchHostFunc
 static void release_buffer_host_func(void *data) {
 
@@ -377,6 +387,21 @@ static void eigen_output_transfer_with_counts_host_func(void *data) {
     ctx->output->register_eigendecomposition_data_transfer_complete(
         ctx->block_index);
   }
+  delete ctx;
+}
+
+static void beam_counts_transfer_complete_host_func(void *data) {
+  auto *ctx = static_cast<BeamCountsTransferCompleteContext *>(data);
+  if (ctx->counts_dst != nullptr) {
+    std::memcpy(ctx->counts_dst, ctx->counts_src, ctx->counts_size_bytes);
+  }
+  if (ctx->stats_mutex != nullptr && ctx->stats_history != nullptr) {
+    std::lock_guard<std::mutex> lock(*ctx->stats_mutex);
+    const size_t n = ctx->counts_size_bytes / sizeof(int32_t);
+    ctx->stats_history->insert(ctx->stats_history->end(), ctx->counts_src,
+                               ctx->counts_src + n);
+  }
+  ctx->output->register_beam_counts_transfer_complete(ctx->block_index);
   delete ctx;
 }
 
