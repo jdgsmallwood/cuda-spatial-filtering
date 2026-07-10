@@ -13,7 +13,7 @@
 
 // forward declarations
 
-template <typename BeamT, typename ArrivalsT, typename TCount = std::nullptr_t>
+template <typename BeamT, typename ArrivalsT, typename TCount>
 class BeamWriter;
 template <typename T> class VisibilitiesWriter;
 template <typename TVal, typename TVec, typename TCount> class EigenWriter;
