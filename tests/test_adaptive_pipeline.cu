@@ -140,7 +140,12 @@ public:
   void register_visibilities_transfer_complete(size_t) override {}
   void register_arrivals_transfer_complete(size_t) override {}
   void register_eigendecomposition_data_transfer_complete(size_t) override {}
+  void register_beam_counts_transfer_complete(size_t) override {}
   void register_fft_transfer_complete(size_t) override {}
+
+  void *get_beam_counts_landing_pointer(size_t) override {
+    return nulled_eigenmode_counts;
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -878,6 +883,249 @@ TEST_F(AdaptivePipelineTest, ZeroInputNullModeFinite) {
 
 TEST_F(AdaptivePipelineTest, ZeroInputShrinkModeFinite) {
   check_zero_input_finite(true);
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: diagonalWhiten kernel
+// ---------------------------------------------------------------------------
+
+// After whitening, every diagonal element must equal (1 + 0i) since
+// C_ii = V_ii / (sqrt(V_ii) * sqrt(V_ii)) = 1.
+TEST_F(AdaptivePipelineTest, DiagonalWhitenProducesUnitDiagonal) {
+  constexpr int N = 4;
+  constexpr int BATCHES = 2;
+
+  // Build two distinct Hermitian PSD matrices with non-unit diagonal.
+  // V_ij = (i+1)*(j+1) for real part; imag upper-tri = 0.5, lower-tri = -0.5
+  std::vector<float2> h_V(BATCHES * N * N, {0.0f, 0.0f});
+  for (int b = 0; b < BATCHES; ++b) {
+    for (int col = 0; col < N; ++col)
+      for (int row = 0; row < N; ++row) {
+        float re = static_cast<float>((b + 1) * (row + 1) * (col + 1));
+        float im = (row < col) ? 0.5f : (row > col ? -0.5f : 0.0f);
+        h_V[b * N * N + col * N + row] = {re, im};
+      }
+  }
+
+  float2 *d_V = nullptr;
+  float  *d_sqrt_diag = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_V, sizeof(float2) * BATCHES * N * N));
+  CUDA_CHECK(cudaMalloc(&d_sqrt_diag, sizeof(float) * BATCHES * N));
+  CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), sizeof(float2) * BATCHES * N * N,
+                        cudaMemcpyHostToDevice));
+
+  diagonalWhiten(d_V, d_sqrt_diag, N, BATCHES, /*stream=*/nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float2> h_C(BATCHES * N * N);
+  CUDA_CHECK(cudaMemcpy(h_C.data(), d_V, sizeof(float2) * BATCHES * N * N,
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_V);
+  cudaFree(d_sqrt_diag);
+
+  for (int b = 0; b < BATCHES; ++b)
+    for (int k = 0; k < N; ++k) {
+      const float2 diag = h_C[b * N * N + k * N + k];
+      EXPECT_NEAR(diag.x, 1.0f, 1e-5f)
+          << "diagonal real != 1 at batch=" << b << " k=" << k;
+      EXPECT_NEAR(diag.y, 0.0f, 1e-5f)
+          << "diagonal imag != 0 at batch=" << b << " k=" << k;
+    }
+}
+
+// Off-diagonal elements of the whitened matrix equal V_ij / sqrt(V_ii * V_jj).
+TEST_F(AdaptivePipelineTest, DiagonalWhitenNormalizesOffDiagonal) {
+  constexpr int N = 3;
+  constexpr int BATCHES = 1;
+
+  // Simple diagonal-dominant Hermitian matrix: real diagonal, complex off-diag.
+  // V = [[9, 3+1i, 6-2i],
+  //      [3-1i,  4,  2+0i],
+  //      [6+2i, 2+0i, 16]]   (stored column-major)
+  const float diag[3] = {9.0f, 4.0f, 16.0f};
+  std::vector<float2> h_V(N * N, {0.0f, 0.0f});
+  h_V[0*N+0] = {9,   0};   // (0,0)
+  h_V[1*N+0] = {3,  -1};   // (0,1) col=1, row=0
+  h_V[2*N+0] = {6,  -2};   // (0,2) wait, this is col=2, row=0? No: col*N+row
+  // col-major: element (row,col) at col*N+row
+  // Let me redo:
+  h_V[0*N+0] = {9,   0};  // (row=0,col=0)
+  h_V[0*N+1] = {3,  +1};  // (row=1,col=0): lower triangle
+  h_V[0*N+2] = {6,  +2};  // (row=2,col=0): lower triangle
+  h_V[1*N+0] = {3,  -1};  // (row=0,col=1): upper triangle
+  h_V[1*N+1] = {4,   0};  // (row=1,col=1)
+  h_V[1*N+2] = {2,   0};  // (row=2,col=1): lower triangle
+  h_V[2*N+0] = {6,  -2};  // (row=0,col=2): upper triangle
+  h_V[2*N+1] = {2,   0};  // (row=1,col=2): upper triangle
+  h_V[2*N+2] = {16,  0};  // (row=2,col=2)
+
+  float2 *d_V = nullptr;
+  float  *d_sqrt_diag = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_V, sizeof(float2) * N * N));
+  CUDA_CHECK(cudaMalloc(&d_sqrt_diag, sizeof(float) * N));
+  CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), sizeof(float2) * N * N,
+                        cudaMemcpyHostToDevice));
+
+  diagonalWhiten(d_V, d_sqrt_diag, N, BATCHES, /*stream=*/nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float2> h_C(N * N);
+  CUDA_CHECK(cudaMemcpy(h_C.data(), d_V, sizeof(float2) * N * N,
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_V);
+  cudaFree(d_sqrt_diag);
+
+  for (int col = 0; col < N; ++col)
+    for (int row = 0; row < N; ++row) {
+      const float2 orig = h_V[col * N + row];
+      const float expected_re = orig.x / (sqrtf(diag[row]) * sqrtf(diag[col]));
+      const float expected_im = orig.y / (sqrtf(diag[row]) * sqrtf(diag[col]));
+      EXPECT_NEAR(h_C[col * N + row].x, expected_re, 1e-5f)
+          << "off-diag real mismatch at row=" << row << " col=" << col;
+      EXPECT_NEAR(h_C[col * N + row].y, expected_im, 1e-5f)
+          << "off-diag imag mismatch at row=" << row << " col=" << col;
+    }
+}
+
+// All-zero input must not produce NaN or Inf (zero guard must fire).
+TEST_F(AdaptivePipelineTest, DiagonalWhitenHandlesZeroDiagonalSafely) {
+  constexpr int N = 4;
+  constexpr int BATCHES = 1;
+
+  std::vector<float2> h_V(N * N, {0.0f, 0.0f});
+  float2 *d_V = nullptr;
+  float  *d_sqrt_diag = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_V, sizeof(float2) * N * N));
+  CUDA_CHECK(cudaMalloc(&d_sqrt_diag, sizeof(float) * N));
+  CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), sizeof(float2) * N * N,
+                        cudaMemcpyHostToDevice));
+
+  diagonalWhiten(d_V, d_sqrt_diag, N, BATCHES, /*stream=*/nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float2> h_C(N * N);
+  std::vector<float>  h_sqrt(N);
+  CUDA_CHECK(cudaMemcpy(h_C.data(), d_V, sizeof(float2) * N * N,
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_sqrt.data(), d_sqrt_diag, sizeof(float) * N,
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_V);
+  cudaFree(d_sqrt_diag);
+
+  for (int i = 0; i < N; ++i)
+    EXPECT_TRUE(std::isfinite(h_sqrt[i])) << "sqrt_diag[" << i << "] is not finite";
+  for (int i = 0; i < N * N; ++i) {
+    EXPECT_TRUE(std::isfinite(h_C[i].x)) << "whitened re[" << i << "] is NaN/Inf";
+    EXPECT_TRUE(std::isfinite(h_C[i].y)) << "whitened im[" << i << "] is NaN/Inf";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: unwhitenEigenvectors kernel
+// ---------------------------------------------------------------------------
+
+// After un-whitening + normalization, every column must have unit L2 norm.
+TEST_F(AdaptivePipelineTest, UnwhitenEigenvectorsProducesUnitNormColumns) {
+  constexpr int N = 4;
+  constexpr int BATCHES = 2;
+
+  // Arbitrary eigenvector matrix (columns need not be unit norm before the call).
+  std::vector<float2> h_V(BATCHES * N * N);
+  for (int b = 0; b < BATCHES; ++b)
+    for (int col = 0; col < N; ++col)
+      for (int row = 0; row < N; ++row) {
+        h_V[b * N * N + col * N + row] = {
+            static_cast<float>((b + 1) * (row + 1)),
+            static_cast<float>(-(col + 1))};
+      }
+
+  std::vector<float> h_sqrt_diag(BATCHES * N);
+  for (int b = 0; b < BATCHES; ++b)
+    for (int k = 0; k < N; ++k)
+      h_sqrt_diag[b * N + k] = static_cast<float>(b + 1) * (k + 1) * 0.5f;
+
+  float2 *d_V = nullptr;
+  float  *d_sqrt_diag = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_V, sizeof(float2) * BATCHES * N * N));
+  CUDA_CHECK(cudaMalloc(&d_sqrt_diag, sizeof(float) * BATCHES * N));
+  CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), sizeof(float2) * BATCHES * N * N,
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_sqrt_diag, h_sqrt_diag.data(),
+                        sizeof(float) * BATCHES * N, cudaMemcpyHostToDevice));
+
+  unwhitenEigenvectors(d_V, d_sqrt_diag, N, BATCHES, /*stream=*/nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float2> h_out(BATCHES * N * N);
+  CUDA_CHECK(cudaMemcpy(h_out.data(), d_V, sizeof(float2) * BATCHES * N * N,
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_V);
+  cudaFree(d_sqrt_diag);
+
+  for (int b = 0; b < BATCHES; ++b)
+    for (int col = 0; col < N; ++col) {
+      double norm_sq = 0.0;
+      for (int row = 0; row < N; ++row) {
+        const float2 e = h_out[b * N * N + col * N + row];
+        norm_sq += e.x * e.x + e.y * e.y;
+      }
+      EXPECT_NEAR(static_cast<float>(norm_sq), 1.0f, 1e-5f)
+          << "column norm != 1 at batch=" << b << " col=" << col;
+    }
+}
+
+// When all sqrt_diag entries are equal (uniform diagonal), un-whitening is
+// a uniform scaling followed by re-normalisation, so column directions are
+// unchanged.  Verify by checking the normalised output matches the input
+// column normalised to unit length.
+TEST_F(AdaptivePipelineTest, UnwhitenEigenvectorsIsNopForUniformDiagonal) {
+  constexpr int N = 4;
+  constexpr int BATCHES = 1;
+  const float uniform_scale = 3.0f;
+
+  std::vector<float2> h_V(N * N);
+  for (int col = 0; col < N; ++col)
+    for (int row = 0; row < N; ++row)
+      h_V[col * N + row] = {static_cast<float>(col + 1),
+                             static_cast<float>(-(row + 1))};
+
+  std::vector<float> h_sqrt_diag(N, uniform_scale);
+
+  float2 *d_V = nullptr;
+  float  *d_sqrt_diag = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_V, sizeof(float2) * N * N));
+  CUDA_CHECK(cudaMalloc(&d_sqrt_diag, sizeof(float) * N));
+  CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), sizeof(float2) * N * N,
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_sqrt_diag, h_sqrt_diag.data(), sizeof(float) * N,
+                        cudaMemcpyHostToDevice));
+
+  unwhitenEigenvectors(d_V, d_sqrt_diag, N, BATCHES, /*stream=*/nullptr);
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float2> h_out(N * N);
+  CUDA_CHECK(cudaMemcpy(h_out.data(), d_V, sizeof(float2) * N * N,
+                        cudaMemcpyDeviceToHost));
+  cudaFree(d_V);
+  cudaFree(d_sqrt_diag);
+
+  for (int col = 0; col < N; ++col) {
+    // Compute expected: normalise the input column independently.
+    double norm_sq = 0.0;
+    for (int row = 0; row < N; ++row) {
+      const float2 e = h_V[col * N + row];
+      norm_sq += e.x * e.x + e.y * e.y;
+    }
+    const float inv_norm = 1.0f / sqrtf(static_cast<float>(norm_sq));
+    for (int row = 0; row < N; ++row) {
+      const float exp_re = h_V[col * N + row].x * inv_norm;
+      const float exp_im = h_V[col * N + row].y * inv_norm;
+      EXPECT_NEAR(h_out[col * N + row].x, exp_re, 1e-5f)
+          << "direction mismatch real at col=" << col << " row=" << row;
+      EXPECT_NEAR(h_out[col * N + row].y, exp_im, 1e-5f)
+          << "direction mismatch imag at col=" << col << " row=" << row;
+    }
+  }
 }
 
 } // namespace

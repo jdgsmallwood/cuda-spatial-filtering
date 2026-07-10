@@ -149,6 +149,8 @@ private:
     DevicePtr<Eigenvalues> eigenvalues;
     // Device copy of per-eigenvector scale factors d[channel][pol][k].
     DevicePtr<Eigenvalues> d_scale_factors;
+    // sqrt(diag(V)) captured before whitening; used to un-whiten eigenvectors.
+    DevicePtr<Eigenvalues> d_whitening_diag;
     // Per-batch signal-subspace counts, fixed and detected variants.
     DevicePtr<int32_t> d_fixed_detected_counts;
     DevicePtr<int32_t> d_detected_counts;
@@ -214,6 +216,7 @@ private:
           float_projection_matrix(make_device_ptr<FloatProjectionMatrix>()),
           eigenvalues(make_device_ptr<Eigenvalues>()),
           d_scale_factors(make_device_ptr<Eigenvalues>()),
+          d_whitening_diag(make_device_ptr<Eigenvalues>()),
           d_fixed_detected_counts(
               make_device_ptr<int32_t>(CUSOLVER_BATCH_SIZE * sizeof(int32_t))),
           d_detected_counts(
@@ -308,6 +311,7 @@ private:
           float_projection_matrix(std::move(other.float_projection_matrix)),
           projection_matrix(std::move(other.projection_matrix)),
           d_scale_factors(std::move(other.d_scale_factors)),
+          d_whitening_diag(std::move(other.d_whitening_diag)),
           d_fixed_detected_counts(std::move(other.d_fixed_detected_counts)),
           d_detected_counts(std::move(other.d_detected_counts)),
           visibilities_baseline(std::move(other.visibilities_baseline)),
@@ -369,6 +373,7 @@ private:
         float_projection_matrix = std::move(other.float_projection_matrix);
         projection_matrix = std::move(other.projection_matrix);
         d_scale_factors = std::move(other.d_scale_factors);
+        d_whitening_diag = std::move(other.d_whitening_diag);
         d_fixed_detected_counts = std::move(other.d_fixed_detected_counts);
         d_detected_counts = std::move(other.d_detected_counts);
         visibilities_baseline = std::move(other.visibilities_baseline);
@@ -635,6 +640,10 @@ public:
         reinterpret_cast<cuComplex *>(b.decomp_visibilities.get()),
         T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, T::NR_CHANNELS, b.stream);
 
+    diagonalWhiten(reinterpret_cast<float2 *>(b.decomp_visibilities.get()),
+                   reinterpret_cast<float *>(b.d_whitening_diag.get()),
+                   T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, b.stream);
+
     CUSOLVER_CHECK(cusolverDnXsyevBatched(
         b.cusolver_handle, b.cusolver_params, cusolver_jobz, cusolver_uplo,
         T::NR_RECEIVERS, CUDA_C_32F,
@@ -674,6 +683,10 @@ public:
       }
 
       if (!shrink_eigenvalues_) {
+        unwhitenEigenvectors(
+            reinterpret_cast<float2 *>(b.decomp_visibilities.get()),
+            reinterpret_cast<const float *>(b.d_whitening_diag.get()),
+            N, CUSOLVER_BATCH_SIZE, b.stream);
         buildIdentityMinusProjectionFromEigenvectors(
             reinterpret_cast<const float2 *>(b.decomp_visibilities.get()),
             counts_ptr, reinterpret_cast<__half2 *>(b.projection_matrix.get()),

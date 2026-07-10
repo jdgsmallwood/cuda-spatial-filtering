@@ -898,6 +898,91 @@ void scaleEigenvectorColumns(const float2 *V_in, float2 *V_out,
       V_in, V_out, d_scales, N, batches);
 }
 
+// Extracts sqrt(diag(V)) per batch into d_sqrt_diag[batch*N + k].
+// Guards against zero or negative diagonal with a floor of 1e-10.
+// Column-major layout: diagonal element (k,k) lives at batch*N*N + k*N + k.
+__global__ void extractDiagonalSqrtKernel(const float2 *__restrict__ V,
+                                           float *__restrict__ d_sqrt_diag,
+                                           int N, int total_batches) {
+  const int batch = blockIdx.x;
+  const int k = threadIdx.x;
+  if (batch >= total_batches || k >= N)
+    return;
+  const float diag_re = V[batch * N * N + k * N + k].x;
+  d_sqrt_diag[batch * N + k] = sqrtf(fmaxf(diag_re, 1e-10f));
+}
+
+// Whitens V in-place: V_ij /= d_sqrt_diag[i] * d_sqrt_diag[j].
+__global__ void applyDiagonalWhiteningKernel(float2 *__restrict__ V,
+                                              const float *__restrict__ d_sqrt_diag,
+                                              int N, int total_batches) {
+  const int batch = blockIdx.y;
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total_elements = N * N;
+  if (batch >= total_batches || idx >= total_elements)
+    return;
+  const int row = idx % N;
+  const int col = idx / N;
+  const float denom = d_sqrt_diag[batch * N + row] * d_sqrt_diag[batch * N + col];
+  const float2 v = V[batch * total_elements + idx];
+  V[batch * total_elements + idx] = make_float2(v.x / denom, v.y / denom);
+}
+
+// Transforms V in-place by D^{1/2} then re-normalises each column to unit norm.
+// Used after eigendecomposition of the whitened matrix to restore eigenvectors
+// to the original (unwhitened) space with correct directions.
+__global__ void unwhitenAndNormalizeKernel(float2 *__restrict__ V,
+                                            const float *__restrict__ d_sqrt_diag,
+                                            int N, int total_batches) {
+  extern __shared__ float s_norm_sq[];
+  const int col = blockIdx.x;
+  const int batch = blockIdx.y;
+  const int row = threadIdx.x;
+  if (batch >= total_batches || col >= N || row >= N)
+    return;
+
+  const float scale = d_sqrt_diag[batch * N + row];
+  float2 elem = V[batch * N * N + col * N + row];
+  elem.x *= scale;
+  elem.y *= scale;
+
+  s_norm_sq[row] = elem.x * elem.x + elem.y * elem.y;
+  __syncthreads();
+
+  if (row == 0) {
+    float total = 0.0f;
+    for (int i = 0; i < N; ++i)
+      total += s_norm_sq[i];
+    s_norm_sq[0] = total;
+  }
+  __syncthreads();
+
+  const float inv_norm = (s_norm_sq[0] > 0.0f) ? rsqrtf(s_norm_sq[0]) : 0.0f;
+  V[batch * N * N + col * N + row] = make_float2(elem.x * inv_norm, elem.y * inv_norm);
+}
+
+// Whiten the batched Hermitian matrix V in-place and store sqrt(diag(V)) to
+// d_sqrt_diag for later use by unwhitenEigenvectors.
+void diagonalWhiten(float2 *V, float *d_sqrt_diag, int N, int batches,
+                    cudaStream_t stream) {
+  extractDiagonalSqrtKernel<<<batches, N, 0, stream>>>(V, d_sqrt_diag, N,
+                                                        batches);
+  const int total_elements = N * N;
+  const int threadsPerBlock = 256;
+  const int blocksPerGrid =
+      (total_elements + threadsPerBlock - 1) / threadsPerBlock;
+  applyDiagonalWhiteningKernel<<<dim3(blocksPerGrid, batches), threadsPerBlock,
+                                  0, stream>>>(V, d_sqrt_diag, N, batches);
+}
+
+// Un-whiten and re-normalise all eigenvector columns of V (output of cuSOLVER
+// on the whitened matrix).  Restores correct null directions for null mode.
+void unwhitenEigenvectors(float2 *V, const float *d_sqrt_diag, int N,
+                           int batches, cudaStream_t stream) {
+  unwhitenAndNormalizeKernel<<<dim3(N, batches), N, N * sizeof(float), stream>>>(
+      V, d_sqrt_diag, N, batches);
+}
+
 __global__ void weightsDebugKernel(const __half2 *d_in, int N) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
