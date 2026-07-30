@@ -67,6 +67,9 @@ message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
 # FetchContent added in CMake 3.11, downloads during the configure step
 # FetchContent_MakeAvailable was added in CMake 3.14; simpler usage
 include(FetchContent)
+# Suppress install() rules from all external dependencies — only our own apps
+# should contribute to `make install`.  Re-enabled just around add_subdirectory(apps).
+set(CMAKE_SKIP_INSTALL_RULES TRUE)
 FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
 FetchContent_MakeAvailable(json)
 # Accumulator library
@@ -240,7 +243,9 @@ add_compile_definitions(
     NR_OBSERVING_PACKET_WORKER_THREADS=${NR_OBSERVING_PACKET_WORKER_THREADS}
   )
 
+set(CMAKE_SKIP_INSTALL_RULES FALSE)
 add_subdirectory(apps)
+set(CMAKE_SKIP_INSTALL_RULES TRUE)
 endif()
 
 # Silence warnings from external dependencies
