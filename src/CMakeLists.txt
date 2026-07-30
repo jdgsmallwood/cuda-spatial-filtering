@@ -22,7 +22,7 @@ target_include_directories(pointing PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(pointing PRIVATE ${CASACORE_LIBRARIES})
 set_target_properties(pointing PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(spatial
+add_library(spatial STATIC
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cpp
 ${CMAKE_CURRENT_SOURCE_DIR}/spatial.cu
 ${CMAKE_CURRENT_SOURCE_DIR}/ethernet.cpp
