@@ -32,8 +32,23 @@ if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
     target_link_libraries(gpu_app_common INTERFACE ${IBVERBS_LIBRARY})
 endif()
 
-add_executable(observe ${PROJECT_SOURCE_DIR}/apps/observe.cu)
-target_link_libraries(observe PRIVATE gpu_app_common)
+# Observe grid: observe_{NR_FPGAS}_{NR_CHANNELS} for all combinations of
+# FPGA sources (1-4) and channels (8,16,24,32).  PADDED_RECEIVERS is derived
+# as the next multiple of 32 above NR_FPGAS * NR_OBSERVING_RECEIVERS_PER_PACKET.
+foreach(NR_FPGAS 1 2 3 4)
+    foreach(NR_CHANNELS 8 16 24 32)
+        set(OBS_TARGET "observe_${NR_FPGAS}_${NR_CHANNELS}")
+        math(EXPR _NR_RECEIVERS "${NR_FPGAS} * ${NR_OBSERVING_RECEIVERS_PER_PACKET}")
+        math(EXPR _PADDED_RECEIVERS "(${_NR_RECEIVERS} + 31) / 32 * 32")
+        add_executable(${OBS_TARGET} ${PROJECT_SOURCE_DIR}/apps/observe.cu)
+        target_link_libraries(${OBS_TARGET} PRIVATE gpu_app_common)
+        target_compile_definitions(${OBS_TARGET} PRIVATE
+            NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
+            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
+            NR_OBSERVING_PADDED_RECEIVERS=${_PADDED_RECEIVERS}
+        )
+    endforeach()
+endforeach()
 
 add_executable(udp_sender ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp)
 target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)
@@ -75,4 +90,35 @@ target_link_libraries(bench_writers PRIVATE gpu_app_common)
 
 add_executable(bench_gpu ${PROJECT_SOURCE_DIR}/apps/bench_gpu.cu)
 target_link_libraries(bench_gpu PRIVATE gpu_app_common)
+
+# Non-observe apps get the default (CMake-cache) values for the three macros
+# that were removed from the global add_compile_definitions in favour of
+# per-target definitions in the observe grid above.
+set(_STANDARD_APPS
+    gpu_benchmark fft_antenna_spectra beamformed_bandpass
+    get_projection_matrix adaptive_beamformed_bandpass
+    pulsar_fold bench_capture bench_processor bench_writers bench_gpu
+)
+foreach(_APP IN LISTS _STANDARD_APPS)
+    target_compile_definitions(${_APP} PRIVATE
+        NR_OBSERVING_FPGA_SOURCES=${NR_OBSERVING_FPGA_SOURCES}
+        NR_OBSERVING_CHANNELS=${NR_OBSERVING_CHANNELS}
+        NR_OBSERVING_PADDED_RECEIVERS=${NR_OBSERVING_PADDED_RECEIVERS}
+    )
+endforeach()
+
+# Install all app binaries to <install-prefix>/bin (defaults to <project-root>/bin).
+set(_OBSERVE_TARGETS)
+foreach(NR_FPGAS 1 2 3 4)
+    foreach(NR_CHANNELS 8 16 24 32)
+        list(APPEND _OBSERVE_TARGETS "observe_${NR_FPGAS}_${NR_CHANNELS}")
+    endforeach()
+endforeach()
+
+install(TARGETS
+    ${_OBSERVE_TARGETS}
+    ${_STANDARD_APPS}
+    udp_sender
+    RUNTIME DESTINATION bin
+)
 
