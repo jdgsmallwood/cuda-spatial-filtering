@@ -18,6 +18,10 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
         "Install prefix (defaults to project root)" FORCE)
   endif()
 
+  # Preserve all non-system library paths (e.g. /opt/conda/lib) in the RPATH
+  # of installed binaries so they can find HDF5, CasaCore, etc. at runtime.
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
   # Let's ensure -std=c++xx instead of -std=g++xx
   set(CMAKE_CXX_EXTENSIONS OFF)
   set(CMAKE_CXX_STANDARD 17)
@@ -67,6 +71,13 @@ message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
 # FetchContent added in CMake 3.11, downloads during the configure step
 # FetchContent_MakeAvailable was added in CMake 3.14; simpler usage
 include(FetchContent)
+# Build all FetchContent dependencies as static libs so installed binaries
+# don't depend on .so files from the build directory.
+set(BUILD_SHARED_LIBS OFF)
+# Suppress install()/install(EXPORT) rules from external deps — prevents both
+# unwanted installation and CMake generate-time export validation errors (e.g.
+# tcc's libtcc-config export referencing TCCorrelator).  Re-enabled for apps/.
+set(CMAKE_SKIP_INSTALL_RULES TRUE)
 FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(json)
 # Accumulator library
@@ -129,6 +140,7 @@ FetchContent_MakeAvailable(tcc)
 
 target_include_directories(tcc PRIVATE ${tcc_SOURCE_DIR})
 message(STATUS "ccglib")
+set(CCGLIB_BUILD_STATIC ON)
 FetchContent_Declare(
   ccglib
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/ccglib
@@ -138,12 +150,19 @@ FetchContent_MakeAvailable(ccglib)
 
 target_link_libraries(ccglib PRIVATE xtensor)
 
+set(DISABLE_DBUS ON)       # avoid dbus transitive link dep when building pcap static
+set(BUILD_WITH_LIBNL OFF)  # avoid libnl/nl80211 transitive link dep
 FetchContent_Declare(
   pcap
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/libpcap
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(pcap)
+# With BUILD_SHARED_LIBS=OFF, libpcap only creates pcap_static, not pcap.
+# Alias it so our code can keep linking against the target named "pcap".
+if(NOT TARGET pcap)
+    add_library(pcap ALIAS pcap_static)
+endif()
 
 FetchContent_Declare(
   spdlog
@@ -215,8 +234,12 @@ FetchContent_Declare(
 )
 set(REDIS_PLUS_PLUS_CXX_STANDARD 17)
 set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
-set(REDIS_PLUS_PLUS_BUILD_SHARED ON)
+set(REDIS_PLUS_PLUS_BUILD_SHARED OFF)
 FetchContent_MakeAvailable(redis_plus_plus)
+# With BUILD_SHARED_LIBS=OFF, redis++ only creates redis++_static, not redis++.
+if(NOT TARGET redis++)
+    add_library(redis++ ALIAS redis++_static)
+endif()
 
 FetchContent_Declare(
   HighFive
@@ -251,6 +274,7 @@ add_compile_definitions(
     NR_OBSERVING_PACKET_WORKER_THREADS=${NR_OBSERVING_PACKET_WORKER_THREADS}
   )
 
+set(CMAKE_SKIP_INSTALL_RULES FALSE)
 add_subdirectory(apps)
 endif()
 
