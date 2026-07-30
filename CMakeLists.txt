@@ -67,10 +67,7 @@ message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
 # FetchContent added in CMake 3.11, downloads during the configure step
 # FetchContent_MakeAvailable was added in CMake 3.14; simpler usage
 include(FetchContent)
-# Suppress install() rules from all external dependencies — only our own apps
-# should contribute to `make install`.  Re-enabled just around add_subdirectory(apps).
-set(CMAKE_SKIP_INSTALL_RULES TRUE)
-FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(json)
 # Accumulator library
 # This is header only, so could be replaced with git submodules or FetchContent
@@ -94,6 +91,7 @@ message(STATUS "cudawrappers...")
 FetchContent_Declare(
   cudawrappers
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/cudawrappers
+  EXCLUDE_FROM_ALL
 )
 
 FetchContent_MakeAvailable(cudawrappers)
@@ -102,6 +100,7 @@ FetchContent_MakeAvailable(cudawrappers)
 FetchContent_Declare(
   xtl
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtl
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(xtl)
 
@@ -109,12 +108,14 @@ FetchContent_MakeAvailable(xtl)
 FetchContent_Declare(
   argparse
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/argparse
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(argparse)
 
 FetchContent_Declare(
   xtensor
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtensor
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(xtensor)
 message(STATUS "CMAKE_SOURCE: ${CMAKE_SOURCE_DIR}")
@@ -122,6 +123,7 @@ message(STATUS "CMAKE_SOURCE: ${CMAKE_SOURCE_DIR}")
 FetchContent_Declare(
   tcc
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/tcc
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(tcc)
 
@@ -130,6 +132,7 @@ message(STATUS "ccglib")
 FetchContent_Declare(
   ccglib
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/ccglib
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(ccglib)
 
@@ -138,12 +141,14 @@ target_link_libraries(ccglib PRIVATE xtensor)
 FetchContent_Declare(
   pcap
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/libpcap
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(pcap)
 
 FetchContent_Declare(
   spdlog
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/spdlog
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(spdlog)
 target_include_directories(spdlog PRIVATE ${spdlog_SOURCE_DIR})
@@ -191,6 +196,7 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
     SOURCE_DIR _deps/hiredis
     OVERRIDE_FIND_PACKAGE
+    EXCLUDE_FROM_ALL
 )
 #FetchContent_MakeAvailable(hiredis)
 
@@ -205,6 +211,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
     GIT_TAG origin/master#1.3.11   # or latest stable
     GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
 )
 set(REDIS_PLUS_PLUS_CXX_STANDARD 17)
 set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
@@ -214,6 +221,7 @@ FetchContent_MakeAvailable(redis_plus_plus)
 FetchContent_Declare(
   HighFive
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/highfive
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(HighFive)
 
@@ -243,9 +251,7 @@ add_compile_definitions(
     NR_OBSERVING_PACKET_WORKER_THREADS=${NR_OBSERVING_PACKET_WORKER_THREADS}
   )
 
-set(CMAKE_SKIP_INSTALL_RULES FALSE)
 add_subdirectory(apps)
-set(CMAKE_SKIP_INSTALL_RULES TRUE)
 endif()
 
 # Silence warnings from external dependencies
