@@ -182,6 +182,14 @@ int main(int argc, char *argv[]) {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
 
+  if (!args.fine_delays_filename.empty()) {
+    auto fine_delays = get_fine_delays_structure<Config>(args);
+    pipeline.set_fine_delays(fine_delays.data(),
+                             args.frequency_plan.base_frequency_hz,
+                             args.frequency_plan.channel_bandwidth_hz,
+                             args.min_freq_channel);
+  }
+
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 

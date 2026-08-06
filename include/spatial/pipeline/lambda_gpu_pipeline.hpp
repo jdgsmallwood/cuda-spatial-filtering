@@ -162,7 +162,9 @@ private:
     cudaStream_t stream;
     cudaStream_t host_stream;
     ManagedCufftPlan fft_plan;
+    ManagedCufftPlan fine_delay_fft_plan;
 
+    DevicePtr<typename T::FineDelayWorkspace> fine_delay_workspace;
     DevicePtr<typename T::InputPacketSamplesType> samples_entry; // y
     DevicePtr<typename T::PacketScalesType> scales;              // y
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
@@ -205,12 +207,13 @@ private:
     size_t cusolver_work_host_size = 0;
     std::unique_ptr<ccglib::pipeline::Pipeline> gemm_handle;
 
-    // Instantiated CUDA graphs of the two static mid-pipeline sections
-    // (pre- and post-eigendecomposition).  All device pointers in those
-    // sections are fixed per PipelineResources, so the capture stays valid
-    // for the buffer's lifetime.  nullptr -> run the section eagerly
-    // (capture failed or disabled via SPATIAL_DISABLE_CUDA_GRAPH).
-    cudaGraphExec_t graph_pre = nullptr;
+    // Instantiated CUDA graphs of the static mid-pipeline sections.
+    // graph_align:    packetToPreAlign + apply_delays → samples_aligned
+    // graph_pre_corr: aligned_to_corr_input + TCC + corr_to_trimmed + permutations
+    // graph_post:     visibility accumulation + beamforming + output permutations
+    // nullptr → run the section eagerly (capture failed or SPATIAL_DISABLE_CUDA_GRAPH=1).
+    cudaGraphExec_t graph_align = nullptr;
+    cudaGraphExec_t graph_pre_corr = nullptr;
     cudaGraphExec_t graph_post = nullptr;
 
     // Recorded on `stream` right after the post-eigendecomposition section
@@ -221,7 +224,9 @@ private:
     cudaEvent_t accumulate_done = nullptr;
 
     PipelineResources(CUdevice cu_device, size_t work_size)
-        : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
+        : fine_delay_workspace(
+              make_device_ptr<typename T::FineDelayWorkspace>()),
+          samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_pre_align(
@@ -292,8 +297,10 @@ private:
     }
 
     ~PipelineResources() {
-      if (graph_pre)
-        cudaGraphExecDestroy(graph_pre);
+      if (graph_align)
+        cudaGraphExecDestroy(graph_align);
+      if (graph_pre_corr)
+        cudaGraphExecDestroy(graph_pre_corr);
       if (graph_post)
         cudaGraphExecDestroy(graph_post);
       if (accumulate_done)
@@ -311,6 +318,8 @@ private:
     PipelineResources(PipelineResources &&other) noexcept
         : stream(other.stream), host_stream(other.host_stream),
           fft_plan(std::move(other.fft_plan)),
+          fine_delay_fft_plan(std::move(other.fine_delay_fft_plan)),
+          fine_delay_workspace(std::move(other.fine_delay_workspace)),
           samples_entry(std::move(other.samples_entry)),
           scales(std::move(other.scales)),
           samples_half(std::move(other.samples_half)),
@@ -324,11 +333,14 @@ private:
           weights_permuted(std::move(other.weights_permuted)),
           beamformer_output(std::move(other.beamformer_output)),
           cufft_work_area(std::move(other.cufft_work_area)),
-          gemm_handle(std::move(other.gemm_handle)), graph_pre(other.graph_pre),
+          gemm_handle(std::move(other.gemm_handle)),
+          graph_align(other.graph_align),
+          graph_pre_corr(other.graph_pre_corr),
           graph_post(other.graph_post), accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
       other.host_stream = nullptr;
-      other.graph_pre = nullptr;
+      other.graph_align = nullptr;
+      other.graph_pre_corr = nullptr;
       other.graph_post = nullptr;
       other.accumulate_done = nullptr;
     }
@@ -339,22 +351,28 @@ private:
           cudaStreamDestroy(stream);
         if (host_stream)
           cudaStreamDestroy(host_stream);
-        if (graph_pre)
-          cudaGraphExecDestroy(graph_pre);
+        if (graph_align)
+          cudaGraphExecDestroy(graph_align);
+        if (graph_pre_corr)
+          cudaGraphExecDestroy(graph_pre_corr);
         if (graph_post)
           cudaGraphExecDestroy(graph_post);
         if (accumulate_done)
           cudaEventDestroy(accumulate_done);
-        graph_pre = other.graph_pre;
+        graph_align = other.graph_align;
+        graph_pre_corr = other.graph_pre_corr;
         graph_post = other.graph_post;
         accumulate_done = other.accumulate_done;
-        other.graph_pre = nullptr;
+        other.graph_align = nullptr;
+        other.graph_pre_corr = nullptr;
         other.graph_post = nullptr;
         other.accumulate_done = nullptr;
 
         stream = other.stream;
         host_stream = other.host_stream;
         fft_plan = std::move(other.fft_plan);
+        fine_delay_fft_plan = std::move(other.fine_delay_fft_plan);
+        fine_delay_workspace = std::move(other.fine_delay_workspace);
         samples_entry = std::move(other.samples_entry);
         scales = std::move(other.scales);
         samples_half = std::move(other.samples_half);
@@ -397,6 +415,10 @@ private:
   cudaEvent_t visibilities_reset_done = nullptr;
 
   typename T::AntennaGains *d_gains;
+  // Fine-channel phase delay correction: precomputed phasors [chan][recv][bin].
+  // Allocated to identity {1,0} at construction; populated by set_fine_delays().
+  float2 *d_fine_delay_phases = nullptr;
+  bool has_fine_delays = false;
   std::vector<PipelineResources> buffers;
   int *d_subpacket_delays;
   int visibilities_start_seq_num;
@@ -441,13 +463,23 @@ public:
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
         dummy_run);
 
-    // Pre-eigendecomposition section: a single graph launch replaces ~12
-    // individual launches when capture succeeded at construction (see
-    // enqueue_pre_eigen / capture_graph).
-    if (b.graph_pre != nullptr) {
-      CUDA_CHECK(cudaGraphLaunch(b.graph_pre, b.stream));
+    // Alignment section: permute + apply_delays → samples_aligned.
+    if (b.graph_align != nullptr) {
+      CUDA_CHECK(cudaGraphLaunch(b.graph_align, b.stream));
     } else {
-      enqueue_pre_eigen(b);
+      enqueue_alignment(b);
+    }
+
+    // Fine-channel phase delay correction (eager, only when enabled).
+    if (has_fine_delays) {
+      apply_fine_delay_correction(b);
+    }
+
+    // Correlation section: aligned_to_corr_input + TCC + trimming + permutations.
+    if (b.graph_pre_corr != nullptr) {
+      CUDA_CHECK(cudaGraphLaunch(b.graph_pre_corr, b.stream));
+    } else {
+      enqueue_pre_corr(b);
     }
 
     // Eager: cuSOLVER may do host-side work per call that a captured graph
@@ -576,9 +608,8 @@ public:
   // here must use only per-buffer device pointers — no per-run host
   // pointers — to keep the capture valid.
 
-  // From half-converted samples up to the unpacked hermitian matrices that
-  // feed the eigendecomposition.
-  void enqueue_pre_eigen(PipelineResources &b) {
+  // Part 1: permute + apply integer delays → samples_aligned.
+  void enqueue_alignment(PipelineResources &b) {
     tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_pre_align.get(), b.stream);
@@ -588,7 +619,10 @@ public:
                         T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
                         T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
                         T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+  }
 
+  // Part 2: corr_input reformat + TCC + trimming + decomp permutations.
+  void enqueue_pre_corr(PipelineResources &b) {
     aligned_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
                           T::NR_RECEIVERS_PER_PACKET,
                           T::NR_TIME_STEPS_PER_PACKET,
@@ -619,6 +653,36 @@ public:
         (cuComplex *)b.decomp_visibilities.get(), T::NR_RECEIVERS,
         T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS,
         T::NR_CHANNELS, b.stream);
+  }
+
+  // Combined wrapper kept for any callers that want the full pre-eigen section.
+  void enqueue_pre_eigen(PipelineResources &b) {
+    enqueue_alignment(b);
+    enqueue_pre_corr(b);
+  }
+
+  // Apply fine-channel phase delay correction to samples_aligned (eager).
+  void apply_fine_delay_correction(PipelineResources &b) {
+    float2 *ws = (float2 *)b.fine_delay_workspace.get();
+    __half2 *aligned = (__half2 *)b.samples_aligned.get();
+
+    fine_delay_scatter_launch<T::NR_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
+                              T::NR_TIME_STEPS_PER_PACKET, T::NR_RECEIVERS,
+                              T::NR_POLARIZATIONS>(aligned, ws, b.stream);
+
+    CUFFT_CHECK(cufftXtExec(b.fine_delay_fft_plan, ws, ws, CUFFT_FORWARD));
+
+    fine_delay_phase_multiply_launch<T::NR_CHANNELS, T::NR_RECEIVERS,
+                                     T::NR_POLARIZATIONS,
+                                     NR_TIME_STEPS_FOR_CORRELATION>(
+        ws, d_fine_delay_phases, b.stream);
+
+    CUFFT_CHECK(cufftXtExec(b.fine_delay_fft_plan, ws, ws, CUFFT_INVERSE));
+
+    constexpr float inv_n = 1.0f / NR_TIME_STEPS_FOR_CORRELATION;
+    fine_delay_gather_launch<T::NR_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
+                             T::NR_TIME_STEPS_PER_PACKET, T::NR_RECEIVERS,
+                             T::NR_POLARIZATIONS>(ws, aligned, inv_n, b.stream);
   }
 
   // From visibility accumulation through beamforming to the cuFFT input
@@ -753,6 +817,18 @@ public:
     CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
                           sizeof(typename T::AntennaGains), cudaMemcpyDefault));
 
+    // Fine-delay phase table: identity phasors until set_fine_delays() is called.
+    CUDA_CHECK(cudaMalloc((void **)&d_fine_delay_phases,
+                          sizeof(typename T::FineDelayPhases)));
+    {
+      std::vector<float2> identity(
+          T::NR_CHANNELS * T::NR_RECEIVERS * NR_TIME_STEPS_FOR_CORRELATION,
+          {1.0f, 0.0f});
+      CUDA_CHECK(cudaMemcpy(d_fine_delay_phases, identity.data(),
+                            sizeof(typename T::FineDelayPhases),
+                            cudaMemcpyDefault));
+    }
+
     last_frame_processed = 0;
     num_integrated_units_processed = 0;
     num_correlation_units_integrated = 0;
@@ -838,6 +914,20 @@ public:
       CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
       CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
 
+      // Fine-delay FFT plan: batched 1-D FFT over the full correlation block,
+      // one batch per (channel × receiver × pol) combination.
+      {
+        constexpr long long FINE_N = NR_TIME_STEPS_FOR_CORRELATION;
+        long long fine_n[] = {FINE_N};
+        const long long FINE_BATCHES =
+            T::NR_CHANNELS * T::NR_RECEIVERS * T::NR_POLARIZATIONS;
+        size_t fine_ws = 0;
+        CUFFT_CHECK(cufftXtMakePlanMany(
+            b.fine_delay_fft_plan, 1, fine_n, nullptr, 1, FINE_N, CUDA_C_32F,
+            nullptr, 1, FINE_N, CUDA_C_32F, FINE_BATCHES, &fine_ws, CUDA_C_32F));
+        CUFFT_CHECK(cufftSetStream(b.fine_delay_fft_plan, b.stream));
+      }
+
       // Copy initial weights
       cudaMemcpyAsync(b.weights.get(), h_weights, sizeof(BeamWeights),
                       cudaMemcpyDefault, b.stream);
@@ -882,8 +972,11 @@ public:
       bool all_ok = true;
       for (auto &b : buffers) {
         if (!capture_graph(
-                b, [this](PipelineResources &r) { enqueue_pre_eigen(r); },
-                b.graph_pre) ||
+                b, [this](PipelineResources &r) { enqueue_alignment(r); },
+                b.graph_align) ||
+            !capture_graph(
+                b, [this](PipelineResources &r) { enqueue_pre_corr(r); },
+                b.graph_pre_corr) ||
             !capture_graph(
                 b, [this](PipelineResources &r) { enqueue_post_eigen(r); },
                 b.graph_post)) {
@@ -893,9 +986,13 @@ public:
       }
       if (!all_ok) {
         for (auto &b : buffers) {
-          if (b.graph_pre) {
-            cudaGraphExecDestroy(b.graph_pre);
-            b.graph_pre = nullptr;
+          if (b.graph_align) {
+            cudaGraphExecDestroy(b.graph_align);
+            b.graph_align = nullptr;
+          }
+          if (b.graph_pre_corr) {
+            cudaGraphExecDestroy(b.graph_pre_corr);
+            b.graph_pre_corr = nullptr;
           }
           if (b.graph_post) {
             cudaGraphExecDestroy(b.graph_post);
@@ -926,6 +1023,8 @@ public:
 
     if (visibilities_reset_done)
       cudaEventDestroy(visibilities_reset_done);
+    if (d_fine_delay_phases)
+      cudaFree(d_fine_delay_phases);
   };
   virtual void set_subpacket_delays(int *delays_subpacket) override {
     subpacket_delays_ = delays_subpacket;
@@ -958,6 +1057,39 @@ public:
     }
     cudaDeviceSynchronize();
     std::cout << "gains uploaded successfully...\n";
+  }
+
+  virtual void set_fine_delays(const float *delays_ns, double base_freq_hz,
+                               double channel_bw_hz,
+                               int min_freq_ch) override {
+    std::cout << "Computing fine-channel phase delay table...\n";
+    constexpr size_t N = NR_TIME_STEPS_FOR_CORRELATION;
+    std::vector<float2> table(T::NR_CHANNELS * T::NR_RECEIVERS * N);
+
+    for (size_t c = 0; c < T::NR_CHANNELS; ++c) {
+      const double f_coarse =
+          base_freq_hz + static_cast<double>(min_freq_ch + c) * channel_bw_hz;
+      for (size_t r = 0; r < T::NR_RECEIVERS; ++r) {
+        const double tau_s = static_cast<double>(delays_ns[r]) * 1e-9;
+        for (size_t k = 0; k < N; ++k) {
+          const long long k_signed = (k < N / 2) ? (long long)k
+                                                  : (long long)k - (long long)N;
+          const double f_fine =
+              f_coarse + (static_cast<double>(k_signed) / N) * channel_bw_hz;
+          const double phi = -2.0 * M_PI * f_fine * tau_s;
+          const size_t idx = (c * T::NR_RECEIVERS + r) * N + k;
+          table[idx] = {static_cast<float>(std::cos(phi)),
+                        static_cast<float>(std::sin(phi))};
+        }
+      }
+    }
+    CUDA_CHECK(cudaMemcpy(d_fine_delay_phases, table.data(),
+                          sizeof(typename T::FineDelayPhases),
+                          cudaMemcpyDefault));
+    has_fine_delays = true;
+    std::cout << "Fine-delay table uploaded for " << T::NR_RECEIVERS
+              << " receivers, " << T::NR_CHANNELS << " channels, " << N
+              << " fine bins.\n";
   }
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {

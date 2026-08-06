@@ -484,6 +484,111 @@ __global__ void scale_and_convert_to_half_kernel(
   }
 };
 
+// ---- Fine-channel phase delay correction kernels -------------------------
+//
+// Three-pass pipeline applied after apply_delays and before aligned_to_corr_input:
+//   scatter (half→float, rearrange to contiguous time) → cuFFT forward →
+//   phase multiply → cuFFT inverse → gather (float→half, normalise, restore layout)
+//
+// samples_aligned layout: __half2[NR_CHANNELS][NR_PACKETS][NR_TIME][NR_RECV][NR_POL]
+// workspace layout:        float2[NR_CHANNELS][NR_RECV][NR_POL][NR_PACKETS*NR_TIME]
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+__global__ void fine_delay_scatter_kernel(const __half2 *__restrict__ src,
+                                          float2 *__restrict__ dst) {
+  // Grid: (NR_CHANNELS, NR_RECV, NR_POL); threads: NR_PACKETS*NR_TIME (capped at 1024)
+  const int c   = blockIdx.x;
+  const int r   = blockIdx.y;
+  const int pol = blockIdx.z;
+
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  for (int i = threadIdx.x; i < (int)N; i += blockDim.x) {
+    const int p = i / NR_TIME;
+    const int t = i % NR_TIME;
+    // src index: [c][p][t][r][pol]
+    const size_t src_idx = ((c * NR_PACKETS + p) * NR_TIME + t) * NR_RECV * NR_POL
+                           + r * NR_POL + pol;
+    // dst index: [c][r][pol][i]
+    const size_t dst_idx = ((c * NR_RECV + r) * NR_POL + pol) * N + i;
+    const __half2 v = src[src_idx];
+    dst[dst_idx] = {__half2float(v.x), __half2float(v.y)};
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+void fine_delay_scatter_launch(const __half2 *src, float2 *dst,
+                               cudaStream_t stream) {
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  constexpr int THREADS = N <= 1024 ? (int)N : 1024;
+  fine_delay_scatter_kernel<NR_CHANNELS, NR_PACKETS, NR_TIME, NR_RECV, NR_POL>
+      <<<dim3(NR_CHANNELS, NR_RECV, NR_POL), dim3(THREADS), 0, stream>>>(src,
+                                                                          dst);
+}
+
+// Multiply workspace[c][r][pol][k] by phases[c][r][k] (same phase both pols).
+template <size_t NR_CHANNELS, size_t NR_RECV, size_t NR_POL, size_t N_FFT>
+__global__ void fine_delay_phase_multiply_kernel(
+    float2 *__restrict__ workspace,
+    const float2 *__restrict__ phases) {
+  // Grid: (NR_CHANNELS, NR_RECV, NR_POL); threads: N_FFT (capped at 1024)
+  const int c   = blockIdx.x;
+  const int r   = blockIdx.y;
+  const int pol = blockIdx.z;
+
+  for (int k = threadIdx.x; k < (int)N_FFT; k += blockDim.x) {
+    const size_t w_idx = ((c * NR_RECV + r) * NR_POL + pol) * N_FFT + k;
+    const size_t p_idx = (c * NR_RECV + r) * N_FFT + k;
+    const float2 w = workspace[w_idx];
+    const float2 ph = phases[p_idx];
+    workspace[w_idx] = {w.x * ph.x - w.y * ph.y, w.x * ph.y + w.y * ph.x};
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_RECV, size_t NR_POL, size_t N_FFT>
+void fine_delay_phase_multiply_launch(float2 *workspace, const float2 *phases,
+                                      cudaStream_t stream) {
+  constexpr int THREADS = N_FFT <= 1024 ? (int)N_FFT : 1024;
+  fine_delay_phase_multiply_kernel<NR_CHANNELS, NR_RECV, NR_POL, N_FFT>
+      <<<dim3(NR_CHANNELS, NR_RECV, NR_POL), dim3(THREADS), 0, stream>>>(
+          workspace, phases);
+}
+
+// Gather back: workspace → samples_aligned with 1/N normalisation.
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+__global__ void fine_delay_gather_kernel(const float2 *__restrict__ src,
+                                         __half2 *__restrict__ dst,
+                                         float inv_n) {
+  const int c   = blockIdx.x;
+  const int r   = blockIdx.y;
+  const int pol = blockIdx.z;
+
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  for (int i = threadIdx.x; i < (int)N; i += blockDim.x) {
+    const int p = i / NR_TIME;
+    const int t = i % NR_TIME;
+    const size_t src_idx = ((c * NR_RECV + r) * NR_POL + pol) * N + i;
+    const size_t dst_idx = ((c * NR_PACKETS + p) * NR_TIME + t) * NR_RECV * NR_POL
+                           + r * NR_POL + pol;
+    const float2 v = src[src_idx];
+    dst[dst_idx] = __float22half2_rn({v.x * inv_n, v.y * inv_n});
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+void fine_delay_gather_launch(const float2 *src, __half2 *dst, float inv_n,
+                              cudaStream_t stream) {
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  constexpr int THREADS = N <= 1024 ? (int)N : 1024;
+  fine_delay_gather_kernel<NR_CHANNELS, NR_PACKETS, NR_TIME, NR_RECV, NR_POL>
+      <<<dim3(NR_CHANNELS, NR_RECV, NR_POL), dim3(THREADS), 0, stream>>>(src,
+                                                                          dst,
+                                                                          inv_n);
+}
+
 template <int N> constexpr bool dependent_false = false;
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,

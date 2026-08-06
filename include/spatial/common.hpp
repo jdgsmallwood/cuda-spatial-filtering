@@ -202,6 +202,7 @@ struct CommonArgs {
   std::string beam_output_filename;
   std::string config_filename;
   std::string gains_filename;
+  std::string fine_delays_filename;
   std::string beam_weights_filename;
   std::string nr_signal_eigenvectors_filename;
   std::string targets_filename;
@@ -482,6 +483,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .help("JSON file with weights")
       .default_value("weights.json")
       .store_into(args.gains_filename);
+
+  program.add_argument("--fine-delays")
+      .help("JSON file with per-antenna fine-channel delay corrections in "
+            "nanoseconds, keyed by physical antenna ID "
+            "(e.g. {\"0\": 12.5, \"1\": -3.2})")
+      .default_value(std::string(""))
+      .store_into(args.fine_delays_filename);
 
   program.add_argument("-e", "--eigenvalue-num-filename")
       .help("JSON file with number of eigenvalues to num per channel")
@@ -806,6 +814,42 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
                     << "j.\n";
         }
       }
+    }
+  }
+  return output;
+};
+
+// Load per-antenna fine-channel delay corrections (nanoseconds) from a JSON
+// file.  The JSON is a flat object keyed by physical antenna ID (string), e.g.
+// {"0": 12.5, "1": -3.2}.  Antennas absent from the file receive delay 0.
+template <typename T>
+inline typename T::AntennaDelays
+get_fine_delays_structure(CommonArgs &args) {
+  typename T::AntennaDelays output{};
+  std::fill(output.begin(), output.end(), 0.0f);
+
+  std::ifstream f(args.fine_delays_filename);
+  if (!f.is_open()) {
+    throw std::runtime_error("Cannot open fine-delays file: " +
+                             args.fine_delays_filename);
+  }
+  json delays_json = json::parse(f);
+
+  for (auto f_idx = 0; f_idx < (int)T::NR_FPGA_SOURCES; ++f_idx) {
+    for (auto k = 0; k < (int)T::NR_RECEIVERS_PER_PACKET; ++k) {
+      int receiver_idx = f_idx * T::NR_RECEIVERS_PER_PACKET + k;
+      int antenna_id = args.antenna_mapping.count(receiver_idx)
+                           ? args.antenna_mapping.at(receiver_idx)
+                           : receiver_idx;
+      std::string key = std::to_string(antenna_id);
+      float delay_ns = 0.0f;
+      if (delays_json.contains(key)) {
+        delay_ns = delays_json[key].get<float>();
+      }
+      output[receiver_idx] = delay_ns;
+      std::cout << "Fine delay for receiver " << receiver_idx
+                << " (antenna " << antenna_id << "): " << delay_ns
+                << " ns\n";
     }
   }
   return output;

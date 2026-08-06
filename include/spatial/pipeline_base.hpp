@@ -16,6 +16,8 @@ public:
   virtual void set_antenna_gains(std::complex<float> *gains) {
     gains_ = gains;
   };
+  virtual void set_fine_delays(const float * /*delays_ns*/, double /*base_freq_hz*/,
+                               double /*channel_bw_hz*/, int /*min_freq_ch*/) {};
   virtual void execute_pipeline(FinalPacketData *packet_data,
                                 const bool dummy_run = false) = 0;
   virtual void dump_visibilities(const uint64_t end_seq_num = 0) = 0;

@@ -388,4 +388,20 @@ struct LambdaConfig {
   using ReceiverArray = std::array<Complex, NR_RECEIVERS>;
   using PolArray = std::array<ReceiverArray, NR_POLARIZATIONS>;
   using AntennaGains = std::array<PolArray, NR_CHANNELS>;
+
+  static constexpr size_t NR_TIME_STEPS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+
+  // Per-antenna delay in nanoseconds, one per receiver.
+  using AntennaDelays = std::array<float, NR_RECEIVERS>;
+
+  // Precomputed fine-channel phase correction table [chan][recv][fine_bin].
+  // Each entry is {cos(phi), sin(phi)} where phi = -2*pi*f_fine*tau.
+  using FineDelayPhases =
+      float2[NR_CHANNELS][NR_RECEIVERS][NR_TIME_STEPS_FOR_CORRELATION];
+
+  // Temporary float2 workspace for scatter/FFT/IFFT/gather [chan][recv][pol][bin].
+  using FineDelayWorkspace =
+      float2[NR_CHANNELS][NR_RECEIVERS][NR_POLARIZATIONS]
+            [NR_TIME_STEPS_FOR_CORRELATION];
 };
