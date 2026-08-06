@@ -12,11 +12,10 @@ glance:
 | `bench_gpu` | GPU correlate+beamform pipeline (`LambdaCorrBeamOnlyGPUPipeline`), **no writer overhead** (output_=nullptr so no D2H; measures raw GPU compute throughput) |
 | `bench_writers` | HDF5 visibilities/eigendata writer throughput |
 
-`bench_processor`, `bench_gpu`, and `bench_writers` each test **eight configs**
-in a single run without rebuilding: `1ch/1fpga`, `8ch/1fpga`, `16ch/1fpga`,
-`24ch/1fpga`, `32ch/1fpga`, `8ch/4fpga`, `16ch/4fpga`, `32ch/4fpga`. This
-lets you see how each stage scales with channel count and FPGA count
-from 8 to 32 channels in steps of 8.
+`bench_gpu` tests only the production 4-FPGA GPU configs in a single run
+without rebuilding: `8ch/4fpga`, `16ch/4fpga`, `24ch/4fpga`, and
+`32ch/4fpga`, plus an `8ch/4fpga` correlation-packet sweep. Processor and
+writer benchmarks may still include their broader CPU/I/O config sets.
 
 ### Packet processor scaling behaviour
 
@@ -55,51 +54,43 @@ required runs/sec threshold.
 
 | Config | runs/sec | input_GB/sec | real-time % |
 |---|---|---|---|
-| 8ch/1fpga | 804 | 4.25 | 1329% |
-| 16ch/1fpga | 399 | 4.21 | 659% |
-| 24ch/1fpga | 262 | 4.16 | 433% |
-| 32ch/1fpga | 196 | 4.14 | 324% |
 | 8ch/4fpga | 321 | 6.78 | 531% |
 | 16ch/4fpga | 160 | 6.78 | 265% |
 | 24ch/4fpga | 105 | 6.67 | 174% |
 | 32ch/4fpga | 77 | 6.53 | 127% |
 
-### Corr-packet sweep (8ch, 1fpga and 4fpga, corr=64→1024)
+### Corr-packet sweep (8ch/4fpga, corr=64→1024)
 
 Integration time per run = NR_PACKETS_FOR_CORRELATION / 15500 packets/sec/channel.
 
-| corr pkts | integ. time | required runs/sec | 8ch/1fpga runs/sec | real-time % | 8ch/4fpga runs/sec | real-time % |
-|---|---|---|---|---|---|---|
-| 64 | 4.1 ms | 242.2 | 3460 | 1428% | 1418 | 586% |
-| 128 | 8.3 ms | 121.1 | 1625 | 1342% | 648 | 535% |
-| 256 | 16.5 ms | 60.5 | 805 | 1330% | 320 | 529% |
-| 512 | 33.0 ms | 30.3 | 402 | 1327% | 158 | 521% |
-| 1024 | 66.1 ms | 15.1 | 201 | 1331% | 79 | 523% |
+| corr pkts | integ. time | required runs/sec | 8ch/4fpga runs/sec | real-time % |
+|---|---|---|---|---|
+| 64 | 4.1 ms | 242.2 | 1418 | 586% |
+| 128 | 8.3 ms | 121.1 | 648 | 535% |
+| 256 | 16.5 ms | 60.5 | 320 | 529% |
+| 512 | 33.0 ms | 30.3 | 158 | 521% |
+| 1024 | 66.1 ms | 15.1 | 79 | 523% |
 
-| corr pkts | 8ch/1fpga GB/sec | 8ch/4fpga GB/sec |
-|---|---|---|
-| 64 | 4.68 | 7.67 |
-| 128 | 4.33 | 6.90 |
-| 256 | 4.25 | 6.76 |
-| 512 | 4.23 | 6.66 |
-| 1024 | 4.22 | 6.60 |
+| corr pkts | 8ch/4fpga GB/sec |
+|---|---|
+| 64 | 7.67 |
+| 128 | 6.90 |
+| 256 | 6.76 |
+| 512 | 6.66 |
+| 1024 | 6.60 |
 
 Key findings:
-- **1fpga (10 rx → 32 padded)**: ~4.1–4.7 GB/sec across all configs. Runs/sec
-  halves when channels or corr_packets double — GPU is compute-bound on TCC.
-  Real-time % is ~1330% for all corr_packet values: margin is set by compute,
-  not integration length.
 - **4fpga (40 rx → 64 padded)**: ~6.6–7.7 GB/sec. Larger correlation matrices
   give better GPU SM utilization. Real-time % ~520–590%, roughly constant across
   corr_packet values for the same reason.
 - **Smaller NR_PACKETS_FOR_CORRELATION gives higher GB/sec** (shorter CUDA
-  graph → less per-graph overhead amortised over more launches). 4fpga benefits
-  more: +13% GB/sec at corr=64 vs 256 (7.67 vs 6.76), vs +10% for 1fpga.
+  graph → less per-graph overhead amortised over more launches): +13% GB/sec at
+  corr=64 vs 256 (7.67 vs 6.76).
   Choose the smallest corr value that gives acceptable integration time for your
   science use-case.
 - **3 pipeline buffers** is the sweet spot for 4fpga configs on 8 GB VRAM: 38%
   faster than 2 buffers (6.24 vs ~4.5 GB/sec for 8ch/4fpga) while avoiding OOM.
-- `bench_gpu --with-output` adds D2H cost (~0.7 GB/sec for 8ch/1fpga) and
+- `bench_gpu --with-output` adds D2H cost for the selected 4fpga configs and
   measures the combined H2D+compute+D2H path as seen by writers.
 - **32ch/4fpga at 127%** is the tightest margin — only 27% headroom above
   real-time on this GPU. Writer overhead and CPU-side processing will eat into

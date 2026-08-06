@@ -44,6 +44,10 @@ ctest -R ProcessorStateTest              # filter by test-suite name (regex)
 
 Two non-obvious things that will otherwise produce confusing failures:
 
+- **Run CUDA/GPU tests outside the Codex sandbox.** The sandbox can block OS/GPU operations that
+  these tests need, especially pinned host allocations (`cudaMallocHost`), causing errors like
+  `OS call failed or operation not supported on this OS` before any test assertions run. When
+  running GPU test binaries or GPU benchmarks from Codex, use an escalated/outside-sandbox command.
 - **Link errors like `undefined reference to 'arc4random@GLIBC_2.36'` /
   `strlcpy@GLIBC_2.38'` / `__isoc23_strtoull@GLIBC_2.38'`** when linking any test binary (or
   `apps/*`): the linker resolved `libc.so.6` against an *older* glibc than the system libraries it's

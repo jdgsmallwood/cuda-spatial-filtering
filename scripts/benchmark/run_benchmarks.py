@@ -48,8 +48,11 @@ VIS_WRITER_HDR_RE = re.compile(
 EIGEN_WRITER_HDR_RE = re.compile(
     r"\[Eigen Writer ch=(\d+) fpga=(\d+) rx=(\d+)\]"
 )
-GPU_BENCH_HDR_RE = re.compile(
-    r"\[GPU Pipeline ch=(\d+) fpga=(\d+) rx=(\d+)\]"
+CORRBEAM_HDR_RE = re.compile(
+    r"\[CorrBeam ch=(\d+) fpga=(\d+) rx=(\d+)\]"
+)
+LAMBDAGPU_HDR_RE = re.compile(
+    r"\[LambdaGPU ch=(\d+) fpga=(\d+) rx=(\d+)\]"
 )
 
 
@@ -222,9 +225,13 @@ def gpu_benchmark(args, env, results):
     legacy_bin    = args.build_dir / "apps" / "gpu_benchmark"
 
     if bench_gpu_bin.exists():
-        # bench_gpu runs 8 configs sequentially; each TCC NVRTC compile is
-        # cached after the first run.  Add 120 s/config for first-run compile.
-        n_configs = 8
+        # bench_gpu runs the 4-FPGA CorrBeamOnly channel sweep (4 configs),
+        # the 4-FPGA CorrBeamOnly corr-packet sweep (5 configs), and the
+        # 4-FPGA LambdaGPU full-pipeline channel sweep (4 configs)
+        # sequentially; each TCC
+        # NVRTC compile is cached after the first run.  Add 120 s/config for
+        # first-run compile.
+        n_configs = 13
         timeout = args.gpu_duration * n_configs + 120 * n_configs
         cmd = [str(bench_gpu_bin), "--duration", str(args.gpu_duration)]
         if args.gpu_num_buffers != 5:
@@ -233,9 +240,24 @@ def gpu_benchmark(args, env, results):
             cmd += ["--with-output"]
         stdout = run(cmd, env=env, timeout=timeout, label="bench_gpu")
 
-        gpu_rows = []
+        # bench_gpu prints three sweeps under "=== ... ===" section markers;
+        # the corr-packet sweep reuses the same 8ch/4fpga
+        # (nr_channels, nr_fpga_sources) pair as the channel sweep, so it
+        # must be kept out of gpu_pipeline (which the plots key on those
+        # pairs) even though it matches the same CorrBeam header regex.
+        section = "channel_sweep"
+        corrbeam_rows = []
+        corrsweep_rows = []
+        lambdagpu_rows = []
         for line in stdout.splitlines():
-            m = GPU_BENCH_HDR_RE.match(line)
+            if line.startswith("===") and "corr-packet sweep" in line:
+                section = "corr_sweep"
+                continue
+            if line.startswith("===") and "LambdaGPU" in line:
+                section = "lambdagpu"
+                continue
+
+            m = CORRBEAM_HDR_RE.match(line)
             if m:
                 row = {
                     "nr_channels": int(m.group(1)),
@@ -243,11 +265,30 @@ def gpu_benchmark(args, env, results):
                     "nr_receivers": int(m.group(3)),
                 }
                 row.update(parse_kv_line(line))
-                gpu_rows.append(row)
-        if gpu_rows:
-            results["gpu_pipeline"] = gpu_rows
+                if section == "corr_sweep":
+                    corrsweep_rows.append(row)
+                else:
+                    corrbeam_rows.append(row)
+                continue
+
+            m = LAMBDAGPU_HDR_RE.match(line)
+            if m:
+                row = {
+                    "nr_channels": int(m.group(1)),
+                    "nr_fpga_sources": int(m.group(2)),
+                    "nr_receivers": int(m.group(3)),
+                }
+                row.update(parse_kv_line(line))
+                lambdagpu_rows.append(row)
+
+        if corrbeam_rows:
+            results["gpu_pipeline"] = corrbeam_rows
         else:
-            print("!! bench_gpu: no '[GPU Pipeline ch=...]' lines found")
+            print("!! bench_gpu: no '[CorrBeam ch=...]' channel-sweep lines found")
+        if corrsweep_rows:
+            results["gpu_pipeline_corr_sweep"] = corrsweep_rows
+        if lambdagpu_rows:
+            results["gpu_pipeline_lambda"] = lambdagpu_rows
     else:
         # Legacy fallback: single-config gpu_benchmark
         cmd = [str(legacy_bin), "--duration", str(args.gpu_duration)]

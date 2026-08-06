@@ -167,6 +167,11 @@ public:
   std::atomic<uint64_t> packets_future_queued = 0;
   std::atomic<uint64_t> packets_stuck_unprocessed = 0;
   uint64_t pipeline_runs_queued = 0;
+  // Set on the first packet discarded because its freq_channel falls outside
+  // [MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + NR_CHANNELS). Used to emit a
+  // one-time warning -- this is the most common cause of "everything discarded,
+  // buffers never initialized" when --min_freq_channel is wrong.
+  std::atomic<bool> channel_discard_warned{false};
   std::mutex producer_mutex;
 
   // ── Strided multi-producer support ──────────────────────────────────────
@@ -651,10 +656,30 @@ public:
     // latest_packet_received / modified_since_last_completion_check / the
     // per-buffer samples-scales-arrivals arrays in
     // copy_data_to_input_buffer_if_able. Drop such packets here.
+    //
+    // NOTE: this check fires BEFORE buffer initialization (below). If
+    // every incoming packet is out-of-range, initialize_buffers() is
+    // never called, buffers never complete, and the Discarded counter
+    // climbs while Processed stays zero. The most common cause is a
+    // wrong --min_freq_channel value: the packets carry the actual radio
+    // channel number, which must lie in [min, min+NR_CHANNELS).
     const int freq_channel = static_cast<int>(parsed.freq_channel) -
                              static_cast<int>(MIN_FREQ_CHANNEL);
     if (freq_channel < 0 || freq_channel >= static_cast<int>(T::NR_CHANNELS))
         [[unlikely]] {
+      if (!channel_discard_warned.exchange(true, std::memory_order_relaxed)) {
+        WARN_LOG("Discarding packets: freq_channel={} is outside the configured "
+                 "window [{}, {}). Buffer initialization will never happen while "
+                 "all packets are out of range. Check --min_freq_channel.",
+                 parsed.freq_channel, MIN_FREQ_CHANNEL,
+                 MIN_FREQ_CHANNEL + T::NR_CHANNELS);
+        std::cout << "[ProcessorState] WARNING: freq_channel="
+                  << parsed.freq_channel << " outside window ["
+                  << MIN_FREQ_CHANNEL << ", "
+                  << MIN_FREQ_CHANNEL + T::NR_CHANNELS
+                  << "). All packets will be discarded. "
+                     "Check --min_freq_channel.\n";
+      }
       packets_discarded.fetch_add(1, std::memory_order_relaxed);
       parsed.original_packet_processed->store(true, std::memory_order_release);
       return;
@@ -903,6 +928,13 @@ public:
     // auto cpu_start = clock::now();
     // auto cpu_end = clock::now();
     INFO_LOG("Processor thread started");
+    INFO_LOG("Listening for freq_channels [{}, {}), NR_FPGA_SOURCES={}",
+             MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + T::NR_CHANNELS,
+             T::NR_FPGA_SOURCES);
+    std::cout << "[ProcessorState] Listening for freq_channels ["
+              << MIN_FREQ_CHANNEL << ", "
+              << MIN_FREQ_CHANNEL + T::NR_CHANNELS
+              << "), NR_FPGA_SOURCES=" << T::NR_FPGA_SOURCES << "\n";
     start_processing_threads();
     int current_read_index;
     constexpr int num_loops_before_completion_check = 1;
