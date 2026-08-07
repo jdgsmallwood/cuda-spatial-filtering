@@ -170,6 +170,7 @@ private:
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_pre_align; // y
     DevicePtr<typename T::HalfPacketAlignedSamplesType> samples_aligned,
+        samples_reordered,
         samples_padding, samples_consolidated,
         samples_consolidated_col_maj;                                      // y
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;         // y
@@ -232,6 +233,8 @@ private:
           samples_pre_align(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_aligned(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_reordered(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_padding(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
@@ -323,6 +326,7 @@ private:
           samples_entry(std::move(other.samples_entry)),
           scales(std::move(other.scales)),
           samples_half(std::move(other.samples_half)),
+          samples_reordered(std::move(other.samples_reordered)),
           samples_consolidated(std::move(other.samples_consolidated)),
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
@@ -376,6 +380,7 @@ private:
         samples_entry = std::move(other.samples_entry);
         scales = std::move(other.scales);
         samples_half = std::move(other.samples_half);
+        samples_reordered = std::move(other.samples_reordered);
         samples_consolidated = std::move(other.samples_consolidated);
         samples_consolidated_col_maj =
             std::move(other.samples_consolidated_col_maj);
@@ -421,6 +426,8 @@ private:
   bool has_fine_delays = false;
   std::vector<PipelineResources> buffers;
   int *d_subpacket_delays;
+  int *d_stream_perm_recv = nullptr; // [NR_RECEIVERS*NR_POL] canonical→src flat recv; identity by default
+  int *d_stream_perm_pol  = nullptr; // [NR_RECEIVERS*NR_POL] canonical→src hw pol slot; identity by default
   int visibilities_start_seq_num;
   int visibilities_end_seq_num;
   static constexpr int visibilities_total_packets_per_block =
@@ -608,7 +615,8 @@ public:
   // here must use only per-buffer device pointers — no per-run host
   // pointers — to keep the capture valid.
 
-  // Part 1: permute + apply integer delays → samples_aligned.
+  // Part 1: permute + apply integer delays → samples_aligned, then reorder
+  // receivers into canonical antenna-ID order → samples_reordered.
   void enqueue_alignment(PipelineResources &b) {
     tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
@@ -619,6 +627,13 @@ public:
                         T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
                         T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
                         T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+
+    reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
+                           T::NR_TIME_STEPS_PER_PACKET, T::NR_CHANNELS,
+                           T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
+        (__half *)b.samples_aligned.get(),
+        (__half *)b.samples_reordered.get(),
+        d_stream_perm_recv, d_stream_perm_pol, b.stream);
   }
 
   // Part 2: corr_input reformat + TCC + trimming + decomp permutations.
@@ -628,7 +643,7 @@ public:
                           T::NR_TIME_STEPS_PER_PACKET,
                           T::NR_PACKETS_FOR_CORRELATION,
                           T::NR_PADDED_RECEIVERS, NR_TIMES_PER_BLOCK>(
-        (__half *)b.samples_aligned.get(), (__half *)b.correlator_input.get(),
+        (__half *)b.samples_reordered.get(), (__half *)b.correlator_input.get(),
         b.stream);
 
     correlator.launchAsync((CUstream)b.stream,
@@ -661,10 +676,10 @@ public:
     enqueue_pre_corr(b);
   }
 
-  // Apply fine-channel phase delay correction to samples_aligned (eager).
+  // Apply fine-channel phase delay correction to samples_reordered (eager).
   void apply_fine_delay_correction(PipelineResources &b) {
     float2 *ws = (float2 *)b.fine_delay_workspace.get();
-    __half2 *aligned = (__half2 *)b.samples_aligned.get();
+    __half2 *aligned = (__half2 *)b.samples_reordered.get();
 
     fine_delay_scatter_launch<T::NR_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
                               T::NR_TIME_STEPS_PER_PACKET, T::NR_RECEIVERS,
@@ -701,7 +716,7 @@ public:
                             T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
                             T::NR_TIME_STEPS_PER_PACKET,
                             T::NR_PACKETS_FOR_CORRELATION>(
-        (__half *)b.samples_aligned.get(),
+        (__half *)b.samples_reordered.get(),
         (__half *)b.samples_consolidated_col_maj.get(), b.stream);
 
     update_weights((__half *)b.weights.get(), (__half *)b.weights_updated.get(),
@@ -827,6 +842,25 @@ public:
       CUDA_CHECK(cudaMemcpy(d_fine_delay_phases, identity.data(),
                             sizeof(typename T::FineDelayPhases),
                             cudaMemcpyDefault));
+    }
+
+    // Stream reorder permutation tables: identity by default (no reorder, no pol swap).
+    // Size = NR_RECEIVERS * NR_POL; indexed by (canonical_recv_flat * NR_POL + canonical_pol).
+    {
+      constexpr int NR_RECVS = T::NR_FPGA_SOURCES * T::NR_RECEIVERS_PER_PACKET;
+      constexpr int NR_PERM  = NR_RECVS * (int)T::NR_POLARIZATIONS;
+      CUDA_CHECK(cudaMalloc((void **)&d_stream_perm_recv, sizeof(int) * NR_PERM));
+      CUDA_CHECK(cudaMalloc((void **)&d_stream_perm_pol,  sizeof(int) * NR_PERM));
+      std::vector<int> identity_recv(NR_PERM), identity_pol(NR_PERM);
+      for (int i = 0; i < NR_RECVS; ++i)
+        for (int p = 0; p < (int)T::NR_POLARIZATIONS; ++p) {
+          identity_recv[i * T::NR_POLARIZATIONS + p] = i;
+          identity_pol [i * T::NR_POLARIZATIONS + p] = p;
+        }
+      CUDA_CHECK(cudaMemcpy(d_stream_perm_recv, identity_recv.data(),
+                            sizeof(int) * NR_PERM, cudaMemcpyDefault));
+      CUDA_CHECK(cudaMemcpy(d_stream_perm_pol, identity_pol.data(),
+                            sizeof(int) * NR_PERM, cudaMemcpyDefault));
     }
 
     last_frame_processed = 0;
@@ -1025,6 +1059,10 @@ public:
       cudaEventDestroy(visibilities_reset_done);
     if (d_fine_delay_phases)
       cudaFree(d_fine_delay_phases);
+    if (d_stream_perm_recv)
+      cudaFree(d_stream_perm_recv);
+    if (d_stream_perm_pol)
+      cudaFree(d_stream_perm_pol);
   };
   virtual void set_subpacket_delays(int *delays_subpacket) override {
     subpacket_delays_ = delays_subpacket;
@@ -1090,6 +1128,26 @@ public:
     std::cout << "Fine-delay table uploaded for " << T::NR_RECEIVERS
               << " receivers, " << T::NR_CHANNELS << " channels, " << N
               << " fine bins.\n";
+  }
+
+  // Upload stream reorder permutation tables.
+  // recv_perm[canonical_idx] = hw flat receiver (fpga*NR_RECV_PER_PKT+n), -1 = unused.
+  // pol_perm[canonical_idx]  = src pol_index that carries X (0 or 1).
+  // Both vectors must have length NR_FPGA_SOURCES * NR_RECEIVERS_PER_PACKET.
+  // Updating device memory in-place is safe for CUDA graphs (graph captures the
+  // pointer, not the value) — same as set_subpacket_delays().
+  void set_stream_permutation(const std::vector<int> &recv_perm,
+                              const std::vector<int> &pol_perm) {
+    constexpr int NR_RECVS = T::NR_FPGA_SOURCES * T::NR_RECEIVERS_PER_PACKET;
+    constexpr int NR_PERM  = NR_RECVS * (int)T::NR_POLARIZATIONS;
+    if ((int)recv_perm.size() != NR_PERM || (int)pol_perm.size() != NR_PERM)
+      throw std::runtime_error(
+          "set_stream_permutation: size must equal NR_FPGA_SOURCES * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS");
+    CUDA_CHECK(cudaMemcpy(d_stream_perm_recv, recv_perm.data(),
+                          sizeof(int) * NR_PERM, cudaMemcpyDefault));
+    CUDA_CHECK(cudaMemcpy(d_stream_perm_pol, pol_perm.data(),
+                          sizeof(int) * NR_PERM, cudaMemcpyDefault));
+    std::cout << "Stream reorder permutation uploaded.\n";
   }
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {

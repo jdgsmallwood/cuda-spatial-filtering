@@ -1,4 +1,5 @@
 #include "spatial/packet_formats.hpp"
+#include "spatial/stream_antenna_map.hpp"
 #include <arpa/inet.h> // for htons, htonl
 #include <cstring>     // for memcpy, memset
 #include <gtest/gtest.h>
@@ -216,4 +217,123 @@ TEST(PacketFormatTests, TestFreqChannelPreserved) {
   Config::PacketEntryType pkt = create_valid_test_packet<Config>(1, 0, channel);
   auto result = pkt.parse();
   EXPECT_EQ(result.freq_channel, static_cast<uint16_t>(channel));
+}
+
+// ---------------------------------------------------------------------------
+// StreamAntennaMap tests
+// ---------------------------------------------------------------------------
+
+// Build a StreamAntennaMap from a hand-crafted entries table (no JSON file needed).
+// "stream" = flat index within FPGA: stream k = receiver_slot (k/2), pol_slot (k%2).
+// FPGA 0: recv slot 0 = ant 3 (normal), recv slot 1 = ant 1 (pol-swapped), recv slot 2 = disconnected.
+// FPGA 1: recv slot 0 = ant 2, recv slot 1 = ant 4, recv slot 2 = disconnected.
+static StreamAntennaMap make_test_map() {
+  StreamAntennaMap m;
+  // FPGA 0
+  m.entries[0][0] = {3,  0};   // (recv 0, pol 0) = ant 3 X
+  m.entries[0][1] = {3,  1};   // (recv 0, pol 1) = ant 3 Y
+  m.entries[0][2] = {1,  1};   // (recv 1, pol 0) = ant 1 Y  (pol-swapped)
+  m.entries[0][3] = {1,  0};   // (recv 1, pol 1) = ant 1 X  (pol-swapped)
+  m.entries[0][4] = {-1, 0};   // (recv 2, pol 0) = disconnected
+  m.entries[0][5] = {-1, 1};   // (recv 2, pol 1) = disconnected
+  // FPGA 1
+  m.entries[1][0] = {2, 0};
+  m.entries[1][1] = {2, 1};
+  m.entries[1][2] = {4, 0};
+  m.entries[1][3] = {4, 1};
+  m.entries[1][4] = {-1, 0};
+  m.entries[1][5] = {-1, 1};
+  return m;
+}
+
+TEST(StreamAntennaMapTest, PermutationSortsByAntennaId) {
+  auto m = make_test_map();
+  // 2 FPGAs × 3 recv_per_fpga × 2 pol = 12 total slots; 4 connected antennas × 2 pol = 8 used.
+  auto [recv_perm, pol_perm] = m.build_permutation(2, 3, 2);
+
+  ASSERT_EQ((int)recv_perm.size(), 12);
+  ASSERT_EQ((int)pol_perm.size(), 12);
+
+  // Canonical recv 0 = ant 1 (pol-swapped at FPGA 0 recv slot 1, hw_flat = 0*3+1 = 1)
+  //   X pol: stream 3 → hw_recv=1, hw_pol=1
+  EXPECT_EQ(recv_perm[0], 1);
+  EXPECT_EQ(pol_perm[0],  1);
+  //   Y pol: stream 2 → hw_recv=1, hw_pol=0
+  EXPECT_EQ(recv_perm[1], 1);
+  EXPECT_EQ(pol_perm[1],  0);
+
+  // Canonical recv 1 = ant 2 → FPGA 1 recv slot 0, hw_flat = 1*3+0 = 3
+  //   X pol: stream 0 → hw_recv=3, hw_pol=0
+  EXPECT_EQ(recv_perm[2], 3);
+  EXPECT_EQ(pol_perm[2],  0);
+  //   Y pol: stream 1 → hw_recv=3, hw_pol=1
+  EXPECT_EQ(recv_perm[3], 3);
+  EXPECT_EQ(pol_perm[3],  1);
+
+  // Canonical recv 2 = ant 3 → FPGA 0 recv slot 0, hw_flat = 0*3+0 = 0
+  EXPECT_EQ(recv_perm[4], 0);
+  EXPECT_EQ(pol_perm[4],  0);
+  EXPECT_EQ(recv_perm[5], 0);
+  EXPECT_EQ(pol_perm[5],  1);
+
+  // Canonical recv 3 = ant 4 → FPGA 1 recv slot 1, hw_flat = 1*3+1 = 4
+  EXPECT_EQ(recv_perm[6], 4);
+  EXPECT_EQ(pol_perm[6],  0);
+  EXPECT_EQ(recv_perm[7], 4);
+  EXPECT_EQ(pol_perm[7],  1);
+
+  // Slots 8-11 (canonical recvs 4 and 5) are unused
+  EXPECT_EQ(recv_perm[8],  -1);
+  EXPECT_EQ(recv_perm[10], -1);
+}
+
+TEST(StreamAntennaMapTest, CanonicalAntennaMappingMatchesSortedOrder) {
+  auto m = make_test_map();
+  auto [recv_perm, pol_perm] = m.build_permutation(2, 3, 2);
+
+  // hw_mapping: hw_flat_recv → antenna_id
+  // FPGA 0: recv 0 (hw 0) = ant 3, recv 1 (hw 1) = ant 1, recv 2 (hw 2) = unused
+  // FPGA 1: recv 0 (hw 3) = ant 2, recv 1 (hw 4) = ant 4, recv 2 (hw 5) = unused
+  std::unordered_map<int, int> hw_mapping = {
+      {0, 3}, {1, 1}, {2, -1}, {3, 2}, {4, 4}, {5, -1}};
+
+  auto canon = m.build_canonical_antenna_mapping(recv_perm, hw_mapping, 2);
+
+  EXPECT_EQ(canon.at(0), 1); // canonical recv 0 = ant 1
+  EXPECT_EQ(canon.at(1), 2); // canonical recv 1 = ant 2
+  EXPECT_EQ(canon.at(2), 3); // canonical recv 2 = ant 3
+  EXPECT_EQ(canon.at(3), 4); // canonical recv 3 = ant 4
+  EXPECT_EQ(canon.at(4), -1); // unused
+  EXPECT_EQ(canon.at(5), -1); // unused
+}
+
+TEST(StreamAntennaMapTest, LoadFromJson) {
+  // Write a minimal JSON to a temp file and round-trip through load().
+  const std::string path = "/tmp/test_stream_antenna_map.json";
+  {
+    std::ofstream f(path);
+    f << R"({
+      "fpgas": {
+        "0": { "alveo_board": "A0", "streams": [
+          { "stream": 0, "antenna_id": 5, "polarization": 0 },
+          { "stream": 1, "antenna_id": 5, "polarization": 1 },
+          { "stream": 2, "antenna_id": -1, "polarization": 0 }
+        ]}
+      }
+    })";
+  }
+  StreamAntennaMap m = StreamAntennaMap::load(path);
+  ASSERT_TRUE(m.entries.count(0));
+  EXPECT_EQ(m.entries.at(0).at(0).antenna_id, 5);
+  EXPECT_EQ(m.entries.at(0).at(0).polarization, 0);
+  EXPECT_EQ(m.entries.at(0).at(1).antenna_id, 5);
+  EXPECT_EQ(m.entries.at(0).at(1).polarization, 1);
+  EXPECT_EQ(m.entries.at(0).at(2).antenna_id, -1);
+}
+
+TEST(StreamAntennaMapTest, ValidationFailsForMissingPolarization) {
+  StreamAntennaMap m;
+  // Antenna 7 has only polarization=0; polarization=1 is missing.
+  m.entries[0][0] = {7, 0};
+  EXPECT_THROW(m.build_permutation(1, 1, 2), std::runtime_error);
 }

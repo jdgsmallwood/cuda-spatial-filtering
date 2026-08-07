@@ -1,0 +1,105 @@
+{
+  "description": "Maps each FPGA data stream to its physical antenna and canonical polarization. 'stream' is the flat index within an FPGA: stream k = receiver_slot (k/2), pol_slot (k%2). 'polarization' is the canonical label for the signal at that hw position: 0=X, 1=Y. Each connected antenna must have exactly two entries, one with polarization=0 and one with polarization=1. Streams with antenna_id=-1 are disconnected. Fill in actual polarization values from wiring documentation; placeholder values assume normal (unswapped) wiring.",
+  "fpgas": {
+    "0": {
+      "alveo_board": "A0",
+      "streams": [
+        { "stream":  0, "antenna_id": -1, "polarization": 0 },
+        { "stream":  1, "antenna_id": -1, "polarization": 1 },
+        { "stream":  2, "antenna_id": 35, "polarization": 0 },
+        { "stream":  3, "antenna_id": 35, "polarization": 1 },
+        { "stream":  4, "antenna_id": -1, "polarization": 0 },
+        { "stream":  5, "antenna_id": -1, "polarization": 1 },
+        { "stream":  6, "antenna_id":  1, "polarization": 0 },
+        { "stream":  7, "antenna_id":  1, "polarization": 1 },
+        { "stream":  8, "antenna_id": -1, "polarization": 0 },
+        { "stream":  9, "antenna_id": -1, "polarization": 1 },
+        { "stream": 10, "antenna_id": 14, "polarization": 0 },
+        { "stream": 11, "antenna_id": 14, "polarization": 1 },
+        { "stream": 12, "antenna_id": -1, "polarization": 0 },
+        { "stream": 13, "antenna_id": -1, "polarization": 1 },
+        { "stream": 14, "antenna_id": 36, "polarization": 0 },
+        { "stream": 15, "antenna_id": 36, "polarization": 1 },
+        { "stream": 16, "antenna_id": 18, "polarization": 0 },
+        { "stream": 17, "antenna_id": 18, "polarization": 1 },
+        { "stream": 18, "antenna_id": 25, "polarization": 0 },
+        { "stream": 19, "antenna_id": 25, "polarization": 1 }
+      ]
+    },
+    "1": {
+      "alveo_board": "A1",
+      "streams": [
+        { "stream":  0, "antenna_id": 15, "polarization": 0 },
+        { "stream":  1, "antenna_id": 15, "polarization": 1 },
+        { "stream":  2, "antenna_id": 16, "polarization": 0 },
+        { "stream":  3, "antenna_id": 16, "polarization": 1 },
+        { "stream":  4, "antenna_id": 23, "polarization": 0 },
+        { "stream":  5, "antenna_id": 23, "polarization": 1 },
+        { "stream":  6, "antenna_id": 24, "polarization": 0 },
+        { "stream":  7, "antenna_id": 24, "polarization": 1 },
+        { "stream":  8, "antenna_id": 26, "polarization": 0 },
+        { "stream":  9, "antenna_id": 26, "polarization": 1 },
+        { "stream": 10, "antenna_id": 32, "polarization": 0 },
+        { "stream": 11, "antenna_id": 32, "polarization": 1 },
+        { "stream": 12, "antenna_id": 17, "polarization": 0 },
+        { "stream": 13, "antenna_id": 17, "polarization": 1 },
+        { "stream": 14, "antenna_id": 33, "polarization": 0 },
+        { "stream": 15, "antenna_id": 33, "polarization": 1 },
+        { "stream": 16, "antenna_id": 11, "polarization": 0 },
+        { "stream": 17, "antenna_id": 11, "polarization": 1 },
+        { "stream": 18, "antenna_id": 13, "polarization": 0 },
+        { "stream": 19, "antenna_id": 13, "polarization": 1 }
+      ]
+    },
+    "2": {
+      "alveo_board": "A2",
+      "streams": [
+        { "stream":  0, "antenna_id":  4, "polarization": 0 },
+        { "stream":  1, "antenna_id":  4, "polarization": 1 },
+        { "stream":  2, "antenna_id":  6, "polarization": 0 },
+        { "stream":  3, "antenna_id":  6, "polarization": 1 },
+        { "stream":  4, "antenna_id":  5, "polarization": 0 },
+        { "stream":  5, "antenna_id":  5, "polarization": 1 },
+        { "stream":  6, "antenna_id": 29, "polarization": 0 },
+        { "stream":  7, "antenna_id": 29, "polarization": 1 },
+        { "stream":  8, "antenna_id": 10, "polarization": 0 },
+        { "stream":  9, "antenna_id": 10, "polarization": 1 },
+        { "stream": 10, "antenna_id": 20, "polarization": 0 },
+        { "stream": 11, "antenna_id": 20, "polarization": 1 },
+        { "stream": 12, "antenna_id":  7, "polarization": 0 },
+        { "stream": 13, "antenna_id":  7, "polarization": 1 },
+        { "stream": 14, "antenna_id":  9, "polarization": 0 },
+        { "stream": 15, "antenna_id":  9, "polarization": 1 },
+        { "stream": 16, "antenna_id":  2, "polarization": 0 },
+        { "stream": 17, "antenna_id":  2, "polarization": 1 },
+        { "stream": 18, "antenna_id":  3, "polarization": 0 },
+        { "stream": 19, "antenna_id":  3, "polarization": 1 }
+      ]
+    },
+    "3": {
+      "alveo_board": "A3",
+      "streams": [
+        { "stream":  0, "antenna_id": 19, "polarization": 0 },
+        { "stream":  1, "antenna_id": 19, "polarization": 1 },
+        { "stream":  2, "antenna_id": 28, "polarization": 0 },
+        { "stream":  3, "antenna_id": 28, "polarization": 1 },
+        { "stream":  4, "antenna_id": 31, "polarization": 0 },
+        { "stream":  5, "antenna_id": 31, "polarization": 1 },
+        { "stream":  6, "antenna_id": 34, "polarization": 0 },
+        { "stream":  7, "antenna_id": 34, "polarization": 1 },
+        { "stream":  8, "antenna_id": 27, "polarization": 0 },
+        { "stream":  9, "antenna_id": 27, "polarization": 1 },
+        { "stream": 10, "antenna_id": 30, "polarization": 0 },
+        { "stream": 11, "antenna_id": 30, "polarization": 1 },
+        { "stream": 12, "antenna_id": 12, "polarization": 0 },
+        { "stream": 13, "antenna_id": 12, "polarization": 1 },
+        { "stream": 14, "antenna_id": 22, "polarization": 0 },
+        { "stream": 15, "antenna_id": 22, "polarization": 1 },
+        { "stream": 16, "antenna_id":  8, "polarization": 0 },
+        { "stream": 17, "antenna_id":  8, "polarization": 1 },
+        { "stream": 18, "antenna_id": 21, "polarization": 0 },
+        { "stream": 19, "antenna_id": 21, "polarization": 1 }
+      ]
+    }
+  }
+}

@@ -589,6 +589,64 @@ void fine_delay_gather_launch(const float2 *src, __half2 *dst, float inv_n,
                                                                           inv_n);
 }
 
+// Reorder kernel: rearranges samples_aligned output ({f,o,u,c,n,p,z} layout)
+// so that receiver dimension n is in canonical antenna-ID order and pol 0 = X.
+// Perm arrays are indexed by (out_f * NR_RECV + out_n) * NR_POL + out_p:
+//   d_recv_perm[perm_idx] = src flat receiver (fpga*NR_RECV+n), or -1 → zero output.
+//   d_pol_perm [perm_idx] = src hw pol slot to read from that receiver.
+template <size_t NR_FPGA, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_CHANNELS, size_t NR_RECV_PER_PKT, size_t NR_POL>
+__global__ void reorder_streams_kernel(const __half *__restrict__ src,
+                                       __half *__restrict__ dst,
+                                       const int *__restrict__ d_recv_perm,
+                                       const int *__restrict__ d_pol_perm) {
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t S_p   = COMPLEX;
+  constexpr size_t S_n   = NR_POL * COMPLEX;
+  constexpr size_t S_f   = NR_PACKETS * NR_TIME * NR_CHANNELS * NR_RECV_PER_PKT * NR_POL * COMPLEX;
+  constexpr size_t TOTAL = NR_FPGA * S_f;
+
+  for (size_t tid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+       tid < TOTAL; tid += (size_t)blockDim.x * gridDim.x) {
+    const int out_f    = (int)(tid / S_f);
+    const int out_n    = (int)((tid / S_n) % NR_RECV_PER_PKT);
+    const int out_p    = (int)((tid / S_p) % NR_POL);
+    const int out_flat = out_f * (int)NR_RECV_PER_PKT + out_n;
+    const int perm_idx = out_flat * (int)NR_POL + out_p;
+    const int src_flat = d_recv_perm[perm_idx];
+
+    if (src_flat < 0) {
+      dst[tid] = __float2half(0.0f);
+      continue;
+    }
+
+    const int src_pol = d_pol_perm[perm_idx];
+    const int src_f   = src_flat / (int)NR_RECV_PER_PKT;
+    const int src_n   = src_flat % (int)NR_RECV_PER_PKT;
+    const int src_p   = src_pol;
+
+    const ptrdiff_t delta =
+        (ptrdiff_t)(src_f - out_f) * (ptrdiff_t)S_f +
+        (ptrdiff_t)(src_n - out_n) * (ptrdiff_t)S_n +
+        (ptrdiff_t)(src_p - out_p) * (ptrdiff_t)S_p;
+    dst[tid] = src[(ptrdiff_t)tid + delta];
+  }
+}
+
+template <size_t NR_FPGA, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_CHANNELS, size_t NR_RECV_PER_PKT, size_t NR_POL>
+void reorder_streams_launch(const __half *src, __half *dst,
+                            const int *d_recv_perm, const int *d_pol_perm,
+                            cudaStream_t stream) {
+  constexpr size_t TOTAL =
+      NR_FPGA * NR_PACKETS * NR_TIME * NR_CHANNELS * NR_RECV_PER_PKT * NR_POL * 2;
+  constexpr int THREADS = 256;
+  const int BLOCKS = (int)((TOTAL + THREADS - 1) / THREADS);
+  reorder_streams_kernel<NR_FPGA, NR_PACKETS, NR_TIME, NR_CHANNELS,
+                         NR_RECV_PER_PKT, NR_POL>
+      <<<BLOCKS, THREADS, 0, stream>>>(src, dst, d_recv_perm, d_pol_perm);
+}
+
 template <int N> constexpr bool dependent_false = false;
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
