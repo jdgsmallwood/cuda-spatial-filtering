@@ -166,14 +166,19 @@ int main(int argc, char *argv[]) {
   // `beam_steering`/`pipeline`.
   const bool fold_calibration_into_steering =
       !args.beam_targets.empty() && args.apply_gains;
+  const bool use_canonical = !args.canonical_recv_perm.empty();
+  const auto &active_mapping =
+      use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
   typename Config::AntennaGains calibration_gains{};
   if (fold_calibration_into_steering) {
-    calibration_gains = get_gains_structure<Config>(args);
+    calibration_gains = use_canonical
+        ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+        : get_gains_structure<Config>(args);
   }
 
   // LambdaPulsarFoldPipeline runs with a single GPU buffer, so num_buffers = 1.
   BeamSteering<Config> beam_steering(
-      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.beam_targets, args.antenna_positions, active_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,
       args.steering_update_interval_seconds, /*num_buffers=*/1,
       fold_calibration_into_steering ? &calibration_gains : nullptr);
@@ -188,6 +193,8 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  if (use_canonical)
+    pipeline.set_stream_permutation(args.canonical_recv_perm, args.canonical_pol_perm);
   std::cout << "Initializing packet capture...\n";
   auto capture = make_packet_captures(args, 512 * 1024 * 1024);
   state.nr_capture_threads = static_cast<int>(capture.size());

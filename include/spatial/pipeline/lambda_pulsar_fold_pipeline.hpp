@@ -87,6 +87,7 @@ private:
     DevicePtr<typename T::HalfPacketSamplesType> samples_half,
         samples_pre_align;
     DevicePtr<typename T::HalfPacketAlignedSamplesType> samples_aligned,
+        samples_reordered,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
     DevicePtr<BeamOutput> beam_output;
@@ -134,6 +135,8 @@ private:
           samples_pre_align(
               make_device_ptr<typename T::HalfPacketSamplesType>()),
           samples_aligned(
+              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          samples_reordered(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_consolidated(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
@@ -224,6 +227,7 @@ private:
           samples_entry(std::move(other.samples_entry)),
           scales(std::move(other.scales)),
           samples_half(std::move(other.samples_half)),
+          samples_reordered(std::move(other.samples_reordered)),
           samples_consolidated(std::move(other.samples_consolidated)),
           samples_consolidated_col_maj(
               std::move(other.samples_consolidated_col_maj)),
@@ -408,8 +412,24 @@ private:
   BeamSteering<T> beam_steering_;
   int *d_subpacket_delays;
   typename T::AntennaGains *d_gains;
+  int *d_stream_perm_recv = nullptr;
+  int *d_stream_perm_pol  = nullptr;
 
 public:
+  void set_stream_permutation(const std::vector<int> &recv_perm,
+                              const std::vector<int> &pol_perm) override {
+    constexpr int NR_RECVS = T::NR_FPGA_SOURCES * T::NR_RECEIVERS_PER_PACKET;
+    constexpr int NR_PERM  = NR_RECVS * (int)T::NR_POLARIZATIONS;
+    if ((int)recv_perm.size() != NR_PERM || (int)pol_perm.size() != NR_PERM)
+      throw std::runtime_error(
+          "set_stream_permutation: size must equal NR_FPGA_SOURCES * "
+          "NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS");
+    CUDA_CHECK(cudaMemcpy(d_stream_perm_recv, recv_perm.data(),
+                          sizeof(int) * NR_PERM, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_stream_perm_pol, pol_perm.data(),
+                          sizeof(int) * NR_PERM, cudaMemcpyHostToDevice));
+  }
+
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
@@ -443,8 +463,15 @@ public:
                         T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
                         T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
 
+    reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
+                           T::NR_TIME_STEPS_PER_PACKET, T::NR_CHANNELS,
+                           T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
+        (__half *)b.samples_aligned.get(),
+        (__half *)b.samples_reordered.get(),
+        d_stream_perm_recv, d_stream_perm_pol, b.stream);
+
     tensor_16.runPermutation("alignedToPlanar", alpha,
-                             (__half *)b.samples_aligned.get(),
+                             (__half *)b.samples_reordered.get(),
                              (__half *)b.samples_consolidated.get(), b.stream);
 
     tensor_16.runPermutation(
@@ -454,7 +481,7 @@ public:
     if (RFI_MITIGATE) {
       tensor_16.runPermutation(
           "alignedToPadding", alpha,
-          reinterpret_cast<__half *>(b.samples_aligned.get()),
+          reinterpret_cast<__half *>(b.samples_reordered.get()),
           reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
 
       // ------------------------------------------------------------------
@@ -935,6 +962,23 @@ public:
     CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
                           sizeof(typename T::AntennaGains), cudaMemcpyDefault));
 
+    {
+      constexpr int NR_RECVS = T::NR_FPGA_SOURCES * T::NR_RECEIVERS_PER_PACKET;
+      constexpr int NR_PERM  = NR_RECVS * (int)T::NR_POLARIZATIONS;
+      CUDA_CHECK(cudaMalloc((void **)&d_stream_perm_recv, sizeof(int) * NR_PERM));
+      CUDA_CHECK(cudaMalloc((void **)&d_stream_perm_pol,  sizeof(int) * NR_PERM));
+      std::vector<int> identity_recv(NR_PERM), identity_pol(NR_PERM);
+      for (int i = 0; i < NR_RECVS; ++i)
+        for (int p = 0; p < (int)T::NR_POLARIZATIONS; ++p) {
+          identity_recv[i * T::NR_POLARIZATIONS + p] = i;
+          identity_pol [i * T::NR_POLARIZATIONS + p] = p;
+        }
+      CUDA_CHECK(cudaMemcpy(d_stream_perm_recv, identity_recv.data(),
+                            sizeof(int) * NR_PERM, cudaMemcpyHostToDevice));
+      CUDA_CHECK(cudaMemcpy(d_stream_perm_pol,  identity_pol.data(),
+                            sizeof(int) * NR_PERM, cudaMemcpyHostToDevice));
+    }
+
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
     buffers.reserve(num_buffers);
@@ -975,6 +1019,8 @@ public:
   };
 
   ~LambdaPulsarFoldPipeline() {
+    if (d_stream_perm_recv) cudaFree(d_stream_perm_recv);
+    if (d_stream_perm_pol)  cudaFree(d_stream_perm_pol);
     // Mirror the constructor: nothing to tear down when the PSRDADA sink was
     // disabled (dada_key == 0), and hdu/log are left null in that case.
     if (dada_key == 0)

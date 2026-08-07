@@ -67,6 +67,8 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  if (!args.canonical_recv_perm.empty())
+    pipeline.set_stream_permutation(args.canonical_recv_perm, args.canonical_pol_perm);
   std::cout << "Initializing packet capture...\n";
   auto capture = make_packet_captures(args);
   state.nr_capture_threads = static_cast<int>(capture.size());

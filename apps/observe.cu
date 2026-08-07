@@ -67,6 +67,9 @@ int main(int argc, char *argv[]) {
   auto fpga_delays = build_fpga_delay_array<nr_fpga_sources>(args, true);
 
   auto gains = get_gains_structure<Config>(args);
+  const bool use_canonical = !args.canonical_recv_perm.empty();
+  const auto &active_mapping =
+      use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
   ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
@@ -151,11 +154,16 @@ int main(int argc, char *argv[]) {
   const bool fold_calibration_into_steering =
       !args.beam_targets.empty() && args.apply_gains;
 
+  // Calibration gains for steering must be in canonical receiver order when a
+  // stream-antenna map is loaded; hardware-order gains are used for d_gains.
+  auto calib_gains = (fold_calibration_into_steering && use_canonical)
+      ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+      : gains;
   BeamSteering<Config> beam_steering(
-      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.beam_targets, args.antenna_positions, active_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,
       args.steering_update_interval_seconds, num_buffers,
-      fold_calibration_into_steering ? &gains : nullptr);
+      fold_calibration_into_steering ? &calib_gains : nullptr);
 
   const int integration_blocks =
       args.nr_integration_blocks > 0 ? args.nr_integration_blocks
@@ -168,6 +176,8 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  if (use_canonical)
+    pipeline.set_stream_permutation(args.canonical_recv_perm, args.canonical_pol_perm);
   if (args.apply_gains) {
     if (fold_calibration_into_steering) {
       std::cout << "Folding calibration gains into synthesized steering "

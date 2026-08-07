@@ -1,4 +1,6 @@
 #pragma once
+#include <stdexcept>
+#include <vector>
 // Forward declaration of this.
 class ProcessorStateBase;
 class Output;
@@ -18,6 +20,11 @@ public:
   };
   virtual void set_fine_delays(const float * /*delays_ns*/, double /*base_freq_hz*/,
                                double /*channel_bw_hz*/, int /*min_freq_ch*/) {};
+  virtual void set_stream_permutation(const std::vector<int> & /*recv_perm*/,
+                                      const std::vector<int> & /*pol_perm*/) {
+    throw std::runtime_error(
+        "set_stream_permutation not supported by this pipeline type");
+  }
   virtual void execute_pipeline(FinalPacketData *packet_data,
                                 const bool dummy_run = false) = 0;
   virtual void dump_visibilities(const uint64_t end_seq_num = 0) = 0;
