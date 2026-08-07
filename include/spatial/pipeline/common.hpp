@@ -59,6 +59,13 @@ template <typename T> struct BeamWeightsT {
 // phase = -2*pi*f/c * path_length.
 inline constexpr double kSpeedOfLightMetresPerSecond = 299792458.0;
 
+// Set BEAM_DEBUG=1 in the environment to enable verbose beam-tracking and
+// beam-output diagnostics.  Checked once at first call; zero cost thereafter.
+inline bool beam_debug() {
+  static bool result = std::getenv("BEAM_DEBUG") != nullptr;
+  return result;
+}
+
 // Synthesizes per-beam steering weights that point each beam at its target
 // (resolved to ENU direction cosines via zenith_direction()/
 // topocentric_direction(), see pointing.hpp), optionally folding in an
@@ -111,6 +118,14 @@ inline BeamWeightsT<T> compute_steering_weights(
                                     array_location.longitude_deg,
                                     array_location.height_m);
 
+    if (beam_debug()) {
+      std::cout << "[BeamSteering] beam " << b
+                << " target=(" << target.ra_deg << "," << target.dec_deg
+                << ") mode=" << target.mode
+                << " direction_cosines l=" << dc.l
+                << " m=" << dc.m << " n=" << dc.n << "\n";
+    }
+
     for (size_t chan = 0; chan < T::NR_CHANNELS; ++chan) {
       double frequency_hz = channel_to_frequency_hz(
           min_freq_channel + static_cast<int>(chan), frequency_plan);
@@ -154,10 +169,13 @@ inline BeamWeightsT<T> compute_steering_weights(
               __float2half(static_cast<float>(final_weight.real())),
               __float2half(static_cast<float>(final_weight.imag())));
 
-          std::cout << "Weight for channel " << chan << " pol " << pol
-                    << " and receiver " << receiver_idx << " is "
-                    << final_weight.real() << " + " << final_weight.imag()
-                    << "j.\n";
+          if (beam_debug()) {
+            std::cout << "[BeamSteering] weight beam=" << b
+                      << " chan=" << chan << " pol=" << pol
+                      << " recv=" << receiver_idx << " = "
+                      << final_weight.real() << "+" << final_weight.imag()
+                      << "j\n";
+          }
         }
       }
     }
@@ -217,6 +235,16 @@ template <typename T> struct BeamSteering {
         update_interval_(update_interval_seconds),
         calibration_gains_(calibration_gains) {
     buffers_.reserve(num_buffers);
+    if (!targets_.empty()) {
+      INFO_LOG("BeamSteering: tracking {} beam target(s) with {:.1f}s update interval",
+               targets_.size(), update_interval_seconds);
+      for (size_t i = 0; i < targets_.size(); ++i) {
+        INFO_LOG("  beam {}: mode={} ra={:.4f} dec={:.4f}",
+                 i, targets_[i].mode, targets_[i].ra_deg, targets_[i].dec_deg);
+      }
+    } else {
+      INFO_LOG("BeamSteering: no targets supplied -- steering is disabled (inert)");
+    }
   }
 
   // True once real targets have been supplied (vs. permanently inert).
@@ -232,20 +260,38 @@ template <typename T> struct BeamSteering {
   // Returns true if a refresh was recomputed and the copies were enqueued
   // (informational only).
   bool maybe_refresh() {
-    if (!active() || buffers_.empty())
+    if (!active() || buffers_.empty()) {
+      if (beam_debug())
+        std::cout << "[BeamSteering] maybe_refresh: inactive (targets="
+                  << targets_.size() << " buffers=" << buffers_.size() << ")\n";
       return false;
+    }
 
     // last_update_ starts at the epoch, so the very first call -- during the
     // constructor's warmup run -- is immediately overdue and synthesizes real
     // weights right away rather than running on placeholder h_weights.
     const auto now = std::chrono::system_clock::now();
-    if ((now - last_update_) < update_interval_)
+    const double elapsed_s =
+        std::chrono::duration<double>(now - last_update_).count();
+
+    if ((now - last_update_) < update_interval_) {
+      if (beam_debug())
+        std::cout << "[BeamSteering] maybe_refresh: not due ("
+                  << elapsed_s << "s elapsed, interval="
+                  << update_interval_.count() << "s)\n";
       return false;
+    }
+
+    INFO_LOG("BeamSteering: refreshing beam weights ({:.1f}s since last update)",
+             elapsed_s);
 
     current_weights_ = compute_steering_weights<T>(
         targets_, antenna_positions_, antenna_mapping_, frequency_plan_,
         min_freq_channel_, array_location_, now, calibration_gains_);
     last_update_ = now;
+
+    INFO_LOG("BeamSteering: weights recomputed, enqueuing to {} buffer(s)",
+             buffers_.size());
 
     // One recompute, every buffer, one call: all copies are enqueued here so
     // no buffer beamforms with older (or newer) weights than its peers.

@@ -674,6 +674,32 @@ public:
                              (float *)b.beamformer_output.get(),
                              (float *)b.beam_output.get(), b.stream);
 
+    if (beam_debug()) {
+      // Copy the full beam output to host and report min/max/mean so we can
+      // tell immediately whether the data is all-zeros or has real signal.
+      // BEAM_DEBUG=1 gates this; it inserts a stream sync so don't leave on in
+      // production.
+      CUDA_CHECK(cudaStreamSynchronize(b.stream));
+      constexpr size_t N = sizeof(BeamOutput) / sizeof(float);
+      std::vector<float> h_beam(N);
+      CUDA_CHECK(cudaMemcpy(h_beam.data(), b.beam_output.get(),
+                            sizeof(BeamOutput), cudaMemcpyDefault));
+      float bmin = h_beam[0], bmax = h_beam[0], bsum = 0.0f;
+      int n_nonzero = 0;
+      for (float v : h_beam) {
+        if (v < bmin) bmin = v;
+        if (v > bmax) bmax = v;
+        bsum += v;
+        if (v != 0.0f) ++n_nonzero;
+      }
+      std::cout << "[PulsarFold] beam_output: N=" << N
+                << " min=" << bmin << " max=" << bmax
+                << " mean=" << (bsum / static_cast<float>(N))
+                << " nonzero=" << n_nonzero << "/" << N
+                << " first4=[" << h_beam[0] << "," << h_beam[1]
+                << "," << h_beam[2] << "," << h_beam[3] << "]\n";
+    }
+
     if (output_ != nullptr && !dummy_run) {
 
       // PSRDADA beam streaming -- the header/data block writes below all
