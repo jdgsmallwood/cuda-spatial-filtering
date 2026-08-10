@@ -498,11 +498,12 @@ def _(mo, visibility_shape):
         value="Amplitude",
         label="Display",
     )
+    corr_log_picker = mo.ui.checkbox(label="Log scale (amplitude only)", value=False)
     mo.hstack(
-        [corr_channel_picker, corr_integration_picker, corr_display_picker],
+        [corr_channel_picker, corr_integration_picker, corr_display_picker, corr_log_picker],
         justify="start",
     )
-    return corr_channel_picker, corr_display_picker, corr_integration_picker
+    return corr_channel_picker, corr_display_picker, corr_integration_picker, corr_log_picker
 
 
 @app.cell
@@ -541,6 +542,7 @@ def _(
     corr_channel_picker,
     corr_display_picker,
     corr_integration_picker,
+    corr_log_picker,
     corr_matrix,
     mo,
     mo_stop_corr,
@@ -548,47 +550,76 @@ def _(
     plt,
 ):
     mo.stop(mo_stop_corr, mo.callout("No baseline data available for correlation matrix.", kind="warn"))
-    _pol_indices = [(0, 0), (0, 1), (1, 0), (1, 1)]
-    _pol_titles = ["XX", "XY", "YX", "YY"]
-    _n_recv = corr_matrix.shape[0]
-    _tick_labels = (
+    _n = corr_matrix.shape[0]
+    _ant_labels = (
         [str(_aid) for _aid in antenna_ids]
-        if len(antenna_ids) == _n_recv
-        else [str(_i) for _i in range(_n_recv)]
+        if len(antenna_ids) == _n
+        else [str(_i) for _i in range(_n)]
     )
-    _ticks = np.arange(_n_recv)
-    _axis_label = "Antenna ID" if len(antenna_ids) == _n_recv else "Receiver index"
+    _axis_label = "Antenna ID" if len(antenna_ids) == _n else "Receiver index"
 
-    _figure, _axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
-    for _idx, (_ax, (_p1, _p2), _title) in enumerate(
-        zip(_axes.flatten(), _pol_indices, _pol_titles)
+    # Tile all 4 pol combinations into a single 2N×2N matrix:
+    #   top-left=XX, top-right=XY, bottom-left=YX, bottom-right=YY
+    _tiled = np.zeros((2 * _n, 2 * _n))
+    for (_p1, _p2), (_qr, _qc) in zip(
+        [(0, 0), (0, 1), (1, 0), (1, 1)],
+        [(0, 0), (0, 1), (1, 0), (1, 1)],
     ):
-        _data = corr_matrix[:, :, _p1, _p2]
-        if corr_display_picker.value == "Amplitude":
-            _values = np.abs(_data)
-            _cb_label = "Amplitude"
-            _im_kwargs = {}
-        else:
-            _values = np.angle(_data)
-            _cb_label = "Phase (rad)"
-            _im_kwargs = {"vmin": -np.pi, "vmax": np.pi, "cmap": "hsv"}
-        _im = _ax.imshow(
-            _values,
-            aspect="auto",
-            origin="upper",
-            interpolation="nearest",
-            **_im_kwargs,
+        _block = corr_matrix[:, :, _p1, _p2]
+        _tiled[_qr * _n : (_qr + 1) * _n, _qc * _n : (_qc + 1) * _n] = (
+            np.abs(_block) if corr_display_picker.value == "Amplitude" else np.angle(_block)
         )
-        _ax.set_title(_title)
-        _ax.set_xlabel(_axis_label)
-        _ax.set_ylabel(_axis_label)
-        _ax.set_xticks(_ticks)
-        _ax.set_yticks(_ticks)
-        _ax.set_xticklabels(_tick_labels, rotation=90, fontsize=6)
-        _ax.set_yticklabels(_tick_labels, fontsize=6)
-        _figure.colorbar(_im, ax=_ax, label=_cb_label)
 
-    _figure.suptitle(
+    _im_kwargs = {}
+    if corr_display_picker.value == "Amplitude":
+        if corr_log_picker.value:
+            _eps = np.finfo(float).tiny
+            _tiled = np.log10(np.maximum(_tiled, _eps))
+            _cb_label = "log₁₀(Amplitude)"
+        else:
+            _cb_label = "Amplitude"
+    else:
+        _cb_label = "Phase (rad)"
+        _im_kwargs = {"vmin": -np.pi, "vmax": np.pi, "cmap": "hsv"}
+
+    _figure, _ax = plt.subplots(figsize=(10, 9), constrained_layout=True)
+    _im = _ax.imshow(
+        _tiled,
+        aspect="equal",
+        origin="upper",
+        interpolation="nearest",
+        **_im_kwargs,
+    )
+    _figure.colorbar(_im, ax=_ax, label=_cb_label)
+
+    # Quadrant dividers
+    _ax.axhline(_n - 0.5, color="white", linewidth=1.5, linestyle="--", alpha=0.7)
+    _ax.axvline(_n - 0.5, color="white", linewidth=1.5, linestyle="--", alpha=0.7)
+
+    # Quadrant labels
+    for _qlabel, _qcy, _qcx in [
+        ("XX", _n / 2 - 0.5, _n / 2 - 0.5),
+        ("XY", _n / 2 - 0.5, 3 * _n / 2 - 0.5),
+        ("YX", 3 * _n / 2 - 0.5, _n / 2 - 0.5),
+        ("YY", 3 * _n / 2 - 0.5, 3 * _n / 2 - 0.5),
+    ]:
+        _ax.text(
+            _qcx, _qcy, _qlabel,
+            ha="center", va="center",
+            fontsize=14, fontweight="bold",
+            color="white", alpha=0.55,
+        )
+
+    # Ticks: N per pol block, labeled by antenna ID repeated for X then Y
+    _ticks = np.arange(2 * _n)
+    _tick_labels = [f"X:{_l}" for _l in _ant_labels] + [f"Y:{_l}" for _l in _ant_labels]
+    _ax.set_xticks(_ticks)
+    _ax.set_yticks(_ticks)
+    _ax.set_xticklabels(_tick_labels, rotation=90, fontsize=6)
+    _ax.set_yticklabels(_tick_labels, fontsize=6)
+    _ax.set_xlabel(_axis_label)
+    _ax.set_ylabel(_axis_label)
+    _ax.set_title(
         f"Correlation matrix — channel {corr_channel_picker.value}, "
         f"integration {corr_integration_picker.value}"
     )
