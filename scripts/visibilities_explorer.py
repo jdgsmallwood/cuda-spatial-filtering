@@ -474,6 +474,128 @@ def _(
     return
 
 
+@app.cell
+def _(mo, visibility_shape):
+    mo.stop(
+        visibility_shape is None,
+        mo.callout("No `visibilities` dataset for correlation matrix.", kind="danger"),
+    )
+    _n_integrations, _n_channels = visibility_shape[0], visibility_shape[1]
+    corr_channel_picker = mo.ui.slider(
+        start=0,
+        stop=_n_channels - 1,
+        value=_n_channels // 2,
+        label="Channel (correlation matrix)",
+    )
+    corr_integration_picker = mo.ui.slider(
+        start=0,
+        stop=_n_integrations - 1,
+        value=0,
+        label="Integration (correlation matrix)",
+    )
+    corr_display_picker = mo.ui.radio(
+        options=["Amplitude", "Phase"],
+        value="Amplitude",
+        label="Display",
+    )
+    mo.hstack(
+        [corr_channel_picker, corr_integration_picker, corr_display_picker],
+        justify="start",
+    )
+    return corr_channel_picker, corr_display_picker, corr_integration_picker
+
+
+@app.cell
+def _(
+    baseline_receivers,
+    corr_channel_picker,
+    corr_integration_picker,
+    h5py,
+    np,
+    visibility_path,
+):
+    mo_stop_corr = baseline_receivers.size == 0
+    if not mo_stop_corr:
+        with h5py.File(visibility_path, "r") as _hdf:
+            _raw = _hdf["visibilities"][
+                corr_integration_picker.value,
+                corr_channel_picker.value,
+                :, :, :, :,
+            ]
+        _vis = _raw[..., 0] + 1j * _raw[..., 1]  # (n_baselines, 2, 2)
+        _n_recv = int(baseline_receivers.max()) + 1
+        corr_matrix = np.zeros((_n_recv, _n_recv, 2, 2), dtype=complex)
+        _r1 = baseline_receivers[:, 0]
+        _r2 = baseline_receivers[:, 1]
+        corr_matrix[_r1, _r2] = _vis
+        _off = _r1 != _r2
+        corr_matrix[_r2[_off], _r1[_off]] = np.conj(_vis[_off].swapaxes(-2, -1))
+    else:
+        corr_matrix = np.zeros((0, 0, 2, 2), dtype=complex)
+    return corr_matrix, mo_stop_corr
+
+
+@app.cell(hide_code=True)
+def _(
+    antenna_ids,
+    corr_channel_picker,
+    corr_display_picker,
+    corr_integration_picker,
+    corr_matrix,
+    mo,
+    mo_stop_corr,
+    np,
+    plt,
+):
+    mo.stop(mo_stop_corr, mo.callout("No baseline data available for correlation matrix.", kind="warn"))
+    _pol_indices = [(0, 0), (0, 1), (1, 0), (1, 1)]
+    _pol_titles = ["XX", "XY", "YX", "YY"]
+    _n_recv = corr_matrix.shape[0]
+    _tick_labels = (
+        [str(_aid) for _aid in antenna_ids]
+        if len(antenna_ids) == _n_recv
+        else [str(_i) for _i in range(_n_recv)]
+    )
+    _ticks = np.arange(_n_recv)
+    _axis_label = "Antenna ID" if len(antenna_ids) == _n_recv else "Receiver index"
+
+    _figure, _axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+    for _idx, (_ax, (_p1, _p2), _title) in enumerate(
+        zip(_axes.flatten(), _pol_indices, _pol_titles)
+    ):
+        _data = corr_matrix[:, :, _p1, _p2]
+        if corr_display_picker.value == "Amplitude":
+            _values = np.abs(_data)
+            _cb_label = "Amplitude"
+            _im_kwargs = {}
+        else:
+            _values = np.angle(_data)
+            _cb_label = "Phase (rad)"
+            _im_kwargs = {"vmin": -np.pi, "vmax": np.pi, "cmap": "hsv"}
+        _im = _ax.imshow(
+            _values,
+            aspect="auto",
+            origin="upper",
+            interpolation="nearest",
+            **_im_kwargs,
+        )
+        _ax.set_title(_title)
+        _ax.set_xlabel(_axis_label)
+        _ax.set_ylabel(_axis_label)
+        _ax.set_xticks(_ticks)
+        _ax.set_yticks(_ticks)
+        _ax.set_xticklabels(_tick_labels, rotation=90, fontsize=6)
+        _ax.set_yticklabels(_tick_labels, fontsize=6)
+        _figure.colorbar(_im, ax=_ax, label=_cb_label)
+
+    _figure.suptitle(
+        f"Correlation matrix — channel {corr_channel_picker.value}, "
+        f"integration {corr_integration_picker.value}"
+    )
+    mo.vstack([mo.md("## Correlation matrix"), _figure])
+    return
+
+
 @app.cell(hide_code=True)
 def _(missing_stats, mo, pd, sequence_numbers):
     if len(missing_stats):
