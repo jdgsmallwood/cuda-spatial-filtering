@@ -449,9 +449,10 @@ __global__ void scale_and_convert_to_half_kernel(
                   receiver_pol_idx;
   int scale_val_int = static_cast<int>(d_scale[scale_ptr]);
 
-  int gain_ptr = channel_idx * NR_RECEIVERS * NR_POLARIZATIONS +
-                 fpga_idx * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
-                 receiver_pol_idx;
+  // AntennaGains is [channel][polarization][receiver].
+  int gain_ptr = channel_idx * NR_POLARIZATIONS * NR_RECEIVERS +
+                 pol_idx * NR_RECEIVERS +
+                 fpga_idx * NR_RECEIVERS_PER_PACKET + recv_in_pkt;
   float2 gain = __ldg(&d_gains[gain_ptr]);
 
   size_t nr_fpga = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;

@@ -64,10 +64,16 @@ int main(int argc, char *argv[]) {
   std::cout << "Creating FFT Writer" << std::endl;
   std::string filename = make_default_filename(
       "beam_fft", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
+  write_stream_mapping_csv(
+      args, audit_sidecar_filename(filename),
+      nr_lambda_receivers_per_packet, nr_lambda_polarizations);
   std::string beam_filename = make_default_filename(
       "beam", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
 
   HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
+  write_hdf5_run_audit(
+      fft_beam_file, args, argc, argv, nr_lambda_receivers_per_packet,
+      nr_lambda_polarizations);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
   // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
   //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,

@@ -87,7 +87,13 @@ int main(int argc, char *argv[]) {
         make_default_filename("visibilities", args.min_freq_channel,
                               num_lambda_channels, args.fpga_id_vec);
   }
+  write_stream_mapping_csv(
+      args, audit_sidecar_filename(args.output_filename),
+      nr_lambda_receivers_per_packet, nr_lambda_polarizations);
   HighFive::File vis_file(args.output_filename, HighFive::File::Truncate);
+  write_hdf5_run_audit(
+      vis_file, args, argc, argv, nr_lambda_receivers_per_packet,
+      nr_lambda_polarizations);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -107,7 +113,7 @@ int main(int argc, char *argv[]) {
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
           args.min_freq_channel + num_lambda_channels - 1,
-          &args.antenna_mapping);
+          &active_mapping, 100, 0, use_canonical);
 
   auto eigen_filename =
       make_default_filename("eigendata", args.min_freq_channel,
@@ -135,8 +141,8 @@ int main(int argc, char *argv[]) {
       // zero weight so their noise is never summed into a beam. This covers
       // the unsteered case; when steering is active, compute_steering_weights
       // zeroes them the same way on the first refresh.
-      const auto mapping_it = args.antenna_mapping.find(j);
-      const bool null_input = mapping_it != args.antenna_mapping.end() &&
+      const auto mapping_it = active_mapping.find(j);
+      const bool null_input = mapping_it != active_mapping.end() &&
                               mapping_it->second < 0;
       const __half amplitude = __float2half(null_input ? 0.0f : 1.0f);
       for (auto k = 0; k < nr_lambda_beams; ++k) {

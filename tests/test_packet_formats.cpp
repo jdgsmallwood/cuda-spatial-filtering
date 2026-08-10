@@ -249,7 +249,7 @@ static StreamAntennaMap make_test_map() {
 TEST(StreamAntennaMapTest, PermutationSortsByAntennaId) {
   auto m = make_test_map();
   // 2 FPGAs × 3 recv_per_fpga × 2 pol = 12 total slots; 4 connected antennas × 2 pol = 8 used.
-  auto [recv_perm, pol_perm] = m.build_permutation(2, 3, 2);
+  auto [recv_perm, pol_perm] = m.build_permutation({0, 1}, 3, 2);
 
   ASSERT_EQ((int)recv_perm.size(), 12);
   ASSERT_EQ((int)pol_perm.size(), 12);
@@ -289,15 +289,9 @@ TEST(StreamAntennaMapTest, PermutationSortsByAntennaId) {
 
 TEST(StreamAntennaMapTest, CanonicalAntennaMappingMatchesSortedOrder) {
   auto m = make_test_map();
-  auto [recv_perm, pol_perm] = m.build_permutation(2, 3, 2);
+  auto [recv_perm, pol_perm] = m.build_permutation({0, 1}, 3, 2);
 
-  // hw_mapping: hw_flat_recv → antenna_id
-  // FPGA 0: recv 0 (hw 0) = ant 3, recv 1 (hw 1) = ant 1, recv 2 (hw 2) = unused
-  // FPGA 1: recv 0 (hw 3) = ant 2, recv 1 (hw 4) = ant 4, recv 2 (hw 5) = unused
-  std::unordered_map<int, int> hw_mapping = {
-      {0, 3}, {1, 1}, {2, -1}, {3, 2}, {4, 4}, {5, -1}};
-
-  auto canon = m.build_canonical_antenna_mapping(recv_perm, hw_mapping, 2);
+  auto canon = m.build_canonical_antenna_mapping({0, 1}, 3, 2);
 
   EXPECT_EQ(canon.at(0), 1); // canonical recv 0 = ant 1
   EXPECT_EQ(canon.at(1), 2); // canonical recv 1 = ant 2
@@ -335,5 +329,5 @@ TEST(StreamAntennaMapTest, ValidationFailsForMissingPolarization) {
   StreamAntennaMap m;
   // Antenna 7 has only polarization=0; polarization=1 is missing.
   m.entries[0][0] = {7, 0};
-  EXPECT_THROW(m.build_permutation(1, 1, 2), std::runtime_error);
+  EXPECT_THROW(m.build_permutation({0}, 1, 2), std::runtime_error);
 }

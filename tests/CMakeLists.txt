@@ -44,7 +44,7 @@ target_link_libraries(PipelineTests
 )
 
 add_executable(
-  CUDASpatialFilteringCPUTests test_packet_formats.cpp
+  CUDASpatialFilteringCPUTests test_packet_formats.cpp test_stream_antenna_map.cpp
 )
 target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE test_app_common)
 
@@ -53,6 +53,11 @@ add_executable(
 )
 target_link_libraries(WriterTests PRIVATE test_app_common)
 
+add_executable(
+  RunAuditTests test_run_audit.cu
+)
+target_link_libraries(RunAuditTests PRIVATE test_app_common)
+set_target_properties(RunAuditTests PROPERTIES CUDA_ARCHITECTURES "native")
 add_executable(
   ProcessorTests test_processor.cu
 )
@@ -127,6 +132,7 @@ gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
 gtest_discover_tests(PulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(CorrBeamPipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(RunAuditTests)
 gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(StreamReorderTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")

@@ -226,6 +226,11 @@ struct CommonArgs {
   std::vector<int> fpga_id_vec;
   std::unordered_map<uint32_t, int> fpga_ids;
   std::unordered_map<int, int> antenna_mapping;
+  // Indexed by hw_flat_receiver * NR_POLARIZATIONS + raw_pol. When populated,
+  // these are authoritative for gains applied before stream reordering.
+  std::unordered_map<int, int> raw_stream_antenna_mapping;
+  std::unordered_map<int, int> raw_stream_polarization_mapping;
+
   // Populated when --stream-antenna-map is supplied.  Maps canonical_idx →
   // antenna_id (ascending antenna-ID order, -1 = unused slot).  Empty when no
   // map file is loaded (callers fall back to antenna_mapping).
@@ -263,6 +268,76 @@ struct CommonArgs {
   // 0 means run indefinitely.
   double run_duration_seconds = 0.0;
 };
+
+inline std::string audit_sidecar_filename(const std::string &primary_filename) {
+  const size_t slash = primary_filename.find_last_of("/\\");
+  const size_t dot = primary_filename.find_last_of(".");
+  if (dot == std::string::npos ||
+      (slash != std::string::npos && dot < slash))
+    return primary_filename + ".streams.csv";
+  return primary_filename.substr(0, dot) + ".streams.csv";
+}
+
+inline void write_stream_mapping_csv(const CommonArgs &args,
+                                     const std::string &filename,
+                                     int nr_receivers_per_fpga = 10,
+                                     int nr_polarizations = 2) {
+  std::ofstream out(filename);
+  if (!out.is_open())
+    throw std::runtime_error("Cannot write stream mapping audit CSV: " + filename);
+  out << "global_datastream_id,fpga_input_index,fpga_id,network_interface,"
+         "fpga_stream_id,receiver_slot,raw_polarization,canonical_polarization,"
+         "antenna_id,canonical_receiver_index,configured_disconnected,"
+         "zeroed_after_reorder,mapping_source\n";
+
+  std::unordered_map<int, int> antenna_to_canonical;
+  for (const auto &[canonical_idx, antenna_id] : args.canonical_antenna_mapping)
+    if (antenna_id >= 0) antenna_to_canonical[antenna_id] = canonical_idx;
+
+  const bool authoritative = !args.canonical_recv_perm.empty();
+  const int streams_per_fpga = nr_receivers_per_fpga * nr_polarizations;
+  for (int input_f = 0; input_f < (int)args.fpga_id_vec.size(); ++input_f) {
+    const int fpga_id = args.fpga_id_vec[input_f];
+    const std::string interface_name =
+        input_f < (int)args.fpga_names.size() ? args.fpga_names[input_f] : "";
+    for (int stream = 0; stream < streams_per_fpga; ++stream) {
+      const int raw_idx = input_f * streams_per_fpga + stream;
+      const int receiver_idx =
+          input_f * nr_receivers_per_fpga + stream / nr_polarizations;
+      const int raw_pol = stream % nr_polarizations;
+      int antenna_id = -1;
+      int canonical_pol = raw_pol;
+      if (authoritative) {
+        auto ant_it = args.raw_stream_antenna_mapping.find(raw_idx);
+        auto pol_it = args.raw_stream_polarization_mapping.find(raw_idx);
+        if (ant_it != args.raw_stream_antenna_mapping.end())
+          antenna_id = ant_it->second;
+        if (pol_it != args.raw_stream_polarization_mapping.end())
+          canonical_pol = pol_it->second;
+      } else {
+        auto ant_it = args.antenna_mapping.find(receiver_idx);
+        if (ant_it != args.antenna_mapping.end()) antenna_id = ant_it->second;
+      }
+      int canonical_idx = receiver_idx;
+      if (authoritative) {
+        auto it = antenna_to_canonical.find(antenna_id);
+        canonical_idx = it != antenna_to_canonical.end() ? it->second : -1;
+      }
+      const bool disconnected = antenna_id < 0;
+      const bool zeroed = authoritative && disconnected;
+      out << raw_idx << "," << input_f << "," << fpga_id << ","
+          << interface_name << "," << stream << ","
+          << stream / nr_polarizations << "," << raw_pol << ","
+          << canonical_pol << "," << antenna_id << "," << canonical_idx
+          << "," << (disconnected ? 1 : 0) << "," << (zeroed ? 1 : 0)
+          << "," << (authoritative ? "stream_antenna_map" : "legacy_registry")
+          << "\n";
+    }
+  }
+  std::cout << "Wrote stream mapping audit CSV to " << filename << "\n";
+}
+
+#include "spatial/run_audit.hpp"
 
 template <size_t N>
 inline std::array<int64_t, N>
@@ -754,12 +829,23 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
     if (!args.stream_antenna_map_filename.empty()) {
       StreamAntennaMap sam = StreamAntennaMap::load(args.stream_antenna_map_filename);
-      auto [recv_perm, pol_perm] = sam.build_permutation(
-          (int)args.fpga_id_vec.size(), 10, 2);
+      auto [recv_perm, pol_perm] =
+          sam.build_permutation(args.fpga_id_vec, 10, 2);
       args.canonical_recv_perm = recv_perm;
       args.canonical_pol_perm  = pol_perm;
       args.canonical_antenna_mapping =
-          sam.build_canonical_antenna_mapping(recv_perm, args.antenna_mapping, 2);
+          sam.build_canonical_antenna_mapping(args.fpga_id_vec, 10, 2);
+      for (int input_f = 0; input_f < (int)args.fpga_id_vec.size(); ++input_f) {
+        const int fpga_id = args.fpga_id_vec[input_f];
+        auto fpga_it = sam.entries.find(fpga_id);
+        if (fpga_it == sam.entries.end()) continue;
+        for (const auto &[stream, entry] : fpga_it->second) {
+          if (stream < 0 || stream >= 20) continue;
+          const int raw_idx = input_f * 20 + stream;
+          args.raw_stream_antenna_mapping[raw_idx] = entry.antenna_id;
+          args.raw_stream_polarization_mapping[raw_idx] = entry.polarization;
+        }
+      }
       std::cout << "Canonical antenna mapping (from " << args.stream_antenna_map_filename << "):\n";
       int nr_canonical = (int)recv_perm.size() / 2;
       for (int c = 0; c < nr_canonical; ++c) {
@@ -845,24 +931,29 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
       for (auto f = 0; f < T::NR_FPGA_SOURCES; ++f) {
         int fpga_id = args.fpga_id_vec[f];
         for (auto k = 0; k < T::NR_RECEIVERS_PER_PACKET; ++k) {
-          std::string pol_string;
-          if (j == 0) {
-            pol_string = "XX";
-          } else {
-            pol_string = "YY";
-          }
           int receiver_idx = f * T::NR_RECEIVERS_PER_PACKET + k;
+          int antenna_id = args.antenna_mapping[receiver_idx];
+          int canonical_pol = j;
+          if (!args.raw_stream_antenna_mapping.empty()) {
+            const int raw_idx = receiver_idx * T::NR_POLARIZATIONS + j;
+            auto ant_it = args.raw_stream_antenna_mapping.find(raw_idx);
+            auto pol_it = args.raw_stream_polarization_mapping.find(raw_idx);
+            antenna_id = ant_it != args.raw_stream_antenna_mapping.end()
+                             ? ant_it->second : -1;
+            canonical_pol = pol_it != args.raw_stream_polarization_mapping.end()
+                                ? pol_it->second : j;
+          }
+          const std::string pol_string = canonical_pol == 0 ? "XX" : "YY";
 
           std::complex<float> val;
           try {
+            if (antenna_id < 0) throw std::out_of_range("disconnected stream");
             val = {
                 args.gains["weights"][std::to_string(args.min_freq_channel + i)]
-                          [pol_string][std::to_string(
-                              args.antenna_mapping[receiver_idx])]["real"],
+                          [pol_string][std::to_string(antenna_id)]["real"],
 
                 args.gains["weights"][std::to_string(args.min_freq_channel + i)]
-                          [pol_string][std::to_string(
-                              args.antenna_mapping[receiver_idx])]["imag"]};
+                          [pol_string][std::to_string(antenna_id)]["imag"]};
           } catch (const std::exception &err) {
             std::cout << "Gain not found for channel "
                       << std::to_string(args.min_freq_channel + i) << " pol "
@@ -872,6 +963,10 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
           }
 
           float mag = val.real() * val.real() + val.imag() * val.imag();
+          if (mag < 1e-12f) {
+            val = {1.0f, 0.0f};
+            mag = 1.0f;
+          }
           // we take the conjugate and divide by the magnitude to
           // correct for both the phase and the amplitude.
           output[i][j][receiver_idx] = {val.real() / mag, -val.imag() / mag};

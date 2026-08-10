@@ -311,8 +311,10 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
 
   const int min_channel = 98;
   const int max_channel = 105;
+  const std::unordered_map<int, int> antenna_map = {
+      {0, 35}, {1, 7}, {2, -1}, {3, -1}};
   HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(
-      file, min_channel, max_channel);
+      file, min_channel, max_channel, &antenna_map);
 
   // Prepare dummy data
   MockT::VisibilitiesOutputType vis_data;
@@ -348,4 +350,31 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   verify_file.getAttribute("max_channel").read(max_channel_out);
   EXPECT_EQ(min_channel, min_channel_out);
   EXPECT_EQ(max_channel, max_channel_out);
+
+  std::vector<int> antenna_ids;
+  verify_file.getDataSet("antenna_ids").read(antenna_ids);
+  EXPECT_EQ(antenna_ids, (std::vector<int>{35, 7, -1, -1}));
+
+  std::vector<int> baseline_antenna_ids(2 * MockT::NR_BASELINES_UNPADDED);
+  verify_file.getDataSet("baseline_antenna_ids")
+      .read_raw(baseline_antenna_ids.data());
+  EXPECT_EQ(baseline_antenna_ids[0], 35);
+  EXPECT_EQ(baseline_antenna_ids[1], 35);
+  EXPECT_EQ(baseline_antenna_ids[2], 35);
+  EXPECT_EQ(baseline_antenna_ids[3], 7);
+
+  std::vector<int> baseline_ids;
+  verify_file.getDataSet("baseline_ids").read(baseline_ids);
+  EXPECT_EQ(baseline_ids,
+            (std::vector<int>{8995, 8967, 1799, INT32_MIN, INT32_MIN,
+                              INT32_MIN, INT32_MIN, INT32_MIN, INT32_MIN,
+                              INT32_MIN}));
+  int invalid_baseline_id;
+  verify_file.getAttribute("invalid_baseline_id").read(invalid_baseline_id);
+  EXPECT_EQ(invalid_baseline_id, INT32_MIN);
+
+  std::vector<uint8_t> baseline_zeroed;
+  verify_file.getDataSet("baseline_zeroed").read(baseline_zeroed);
+  EXPECT_EQ(baseline_zeroed,
+            (std::vector<uint8_t>{0, 0, 0, 1, 1, 1, 1, 1, 1, 1}));
 }

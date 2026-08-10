@@ -125,7 +125,7 @@ Run do_run(BeamWeightsT<RC> weights,
            const std::vector<int> &recv_perm = {},
            const std::vector<int> &pol_perm  = {},
            const float *delays_ns = nullptr,       // length NR_RECEIVERS; nullptr = identity
-           const std::complex<float> *d_gains_flat = nullptr) { // [chan][hw_recv][pol]; nullptr = identity
+           const std::complex<float> *d_gains_flat = nullptr) { // [chan][pol][hw_recv]; nullptr = identity
   Run r;
   r.output  = std::make_shared<SingleHostMemoryOutput<RC>>();
   r.weights = std::move(weights);
@@ -136,7 +136,7 @@ Run do_run(BeamWeightsT<RC> weights,
   if (!recv_perm.empty())
     r.pipeline->set_stream_permutation(recv_perm, pol_perm);
 
-  // d_gains_flat is in the kernel's expected layout: [chan][hw_recv][pol].
+  // d_gains_flat is in the kernel's expected layout: [chan][pol][hw_recv].
   // set_antenna_gains() accepts a raw pointer and memcpys it verbatim.
   if (d_gains_flat)
     r.pipeline->set_antenna_gains(
@@ -253,7 +253,7 @@ TEST_F(StreamReorderTest, ReorderWithFineDelayMatchesCanonical) {
 // The permuted pipeline has d_gains in HARDWARE order (the gain for the antenna
 // that physically occupies each hw slot).
 //
-// d_gains are uploaded in the kernel's expected layout: [chan][hw_recv][pol].
+// d_gains are uploaded in the kernel's expected layout: [chan][pol][hw_recv].
 // set_antenna_gains() takes a raw std::complex<float>* and memcpys it verbatim
 // so this bypasses the AntennaGains struct layout.
 //
@@ -268,12 +268,12 @@ TEST_F(StreamReorderTest, ReorderWithGainsMatchesCanonical) {
   };
 
   // Reference gains: hw_flat k = antenna k → gain for antenna k.
-  // Layout: [chan][hw_recv][pol].  NR_CHANNELS=1, NR_RECV=4, NR_POL=2.
+  // Layout: [chan][pol][hw_recv].  NR_CHANNELS=1, NR_RECV=4, NR_POL=2.
   std::vector<std::complex<float>> ref_gains(RC::NR_CHANNELS * NR_RECV * RC::NR_POLARIZATIONS);
   for (int c = 0; c < (int)RC::NR_CHANNELS; ++c)
     for (int hw = 0; hw < NR_RECV; ++hw)
       for (int p = 0; p < (int)RC::NR_POLARIZATIONS; ++p)
-        ref_gains[c * NR_RECV * RC::NR_POLARIZATIONS + hw * RC::NR_POLARIZATIONS + p]
+        ref_gains[c * RC::NR_POLARIZATIONS * NR_RECV + p * NR_RECV + hw]
             = gain_for_ant(hw); // hw == antenna in reference case
 
   // Permuted gains: hw_flat k carries antenna kPermHwToAnt[k].
@@ -281,7 +281,7 @@ TEST_F(StreamReorderTest, ReorderWithGainsMatchesCanonical) {
   for (int c = 0; c < (int)RC::NR_CHANNELS; ++c)
     for (int hw = 0; hw < NR_RECV; ++hw)
       for (int p = 0; p < (int)RC::NR_POLARIZATIONS; ++p)
-        perm_gains[c * NR_RECV * RC::NR_POLARIZATIONS + hw * RC::NR_POLARIZATIONS + p]
+        perm_gains[c * RC::NR_POLARIZATIONS * NR_RECV + p * NR_RECV + hw]
             = gain_for_ant(kPermHwToAnt[hw]);
 
   auto weights = test_support::make_unity_beam_weights<RC>();
@@ -308,7 +308,7 @@ TEST_F(StreamReorderTest, ReorderGainsAndFineDelayTogetherMatchCanonical) {
   for (int c = 0; c < (int)RC::NR_CHANNELS; ++c)
     for (int hw = 0; hw < NR_RECV; ++hw)
       for (int p = 0; p < (int)RC::NR_POLARIZATIONS; ++p) {
-        int idx = c * NR_RECV * RC::NR_POLARIZATIONS + hw * RC::NR_POLARIZATIONS + p;
+        int idx = c * RC::NR_POLARIZATIONS * NR_RECV + p * NR_RECV + hw;
         ref_gains[idx]  = gain_for_ant(hw);
         perm_gains[idx] = gain_for_ant(kPermHwToAnt[hw]);
       }

@@ -9,6 +9,20 @@ project(
   LANGUAGES CUDA CXX)
 
 # Only do these if this is the main project, and not if it is included through add_subdirectory
+execute_process(
+  COMMAND git -c safe.directory=${CMAKE_SOURCE_DIR} rev-parse HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE SPATIAL_GIT_COMMIT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+if(NOT SPATIAL_GIT_COMMIT)
+  set(SPATIAL_GIT_COMMIT "unknown")
+endif()
+add_compile_definitions(
+  SPATIAL_PROJECT_VERSION="${PROJECT_VERSION}"
+  SPATIAL_GIT_COMMIT="${SPATIAL_GIT_COMMIT}"
+  SPATIAL_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
   # Default install prefix to the project root so `make install` puts binaries

@@ -55,16 +55,19 @@ struct StreamAntennaMap {
   // Validation: every connected antenna_id must appear with all nr_polarizations values
   // (0 .. nr_polarizations-1).  Throws std::runtime_error if any polarization is missing.
   std::pair<std::vector<int>, std::vector<int>>
-  build_permutation(int nr_fpgas, int nr_recv_per_fpga, int nr_polarizations) const {
+  build_permutation(const std::vector<int> &fpga_ids, int nr_recv_per_fpga,
+                    int nr_polarizations) const {
+    const int nr_fpgas = static_cast<int>(fpga_ids.size());
     int total = nr_fpgas * nr_recv_per_fpga * nr_polarizations;
 
     // Collect connected stream entries per antenna_id and canonical_pol.
     // ant_map[antenna_id][canonical_pol] = {hw_flat_recv, hw_pol_slot}
     std::map<int, std::map<int, std::pair<int, int>>> ant_map;
     for (int f = 0; f < nr_fpgas; ++f) {
+      const int fpga_id = fpga_ids[f];
       for (int s = 0; s < nr_recv_per_fpga * nr_polarizations; ++s) {
-        if (!entries.count(f) || !entries.at(f).count(s)) continue;
-        const auto &e = entries.at(f).at(s);
+        if (!entries.count(fpga_id) || !entries.at(fpga_id).count(s)) continue;
+        const auto &e = entries.at(fpga_id).at(s);
         if (e.antenna_id < 0) continue;
         int hw_recv = f * nr_recv_per_fpga + s / nr_polarizations;
         int hw_pol  = s % nr_polarizations;
@@ -100,24 +103,28 @@ struct StreamAntennaMap {
     return {recv_perm, pol_perm};
   }
 
-  // Build canonical_recv_idx → antenna_id mapping (one entry per canonical receiver,
-  // not per pol).  Uses recv_perm[c * nr_polarizations + 0] (the pol=0 slot) to look
-  // up hw_flat_recv → antenna_id via hw_mapping (AntennaMapRegistry output).
+  // Build canonical receiver identities directly from this map in the same
+  // ascending antenna-ID order used by build_permutation().
   std::unordered_map<int, int>
-  build_canonical_antenna_mapping(const std::vector<int> &recv_perm,
-                                  const std::unordered_map<int, int> &hw_mapping,
+  build_canonical_antenna_mapping(const std::vector<int> &fpga_ids,
+                                  int nr_recv_per_fpga,
                                   int nr_polarizations) const {
-    std::unordered_map<int, int> result;
-    int nr_canonical = (int)recv_perm.size() / nr_polarizations;
-    for (int c = 0; c < nr_canonical; ++c) {
-      int hw_flat = recv_perm[c * nr_polarizations];  // pol=0 slot sufficient for antenna lookup
-      int antenna_id = -1;
-      if (hw_flat >= 0) {
-        auto it = hw_mapping.find(hw_flat);
-        if (it != hw_mapping.end() && it->second >= 0) antenna_id = it->second;
+    std::set<int> connected_antennas;
+    for (int fpga_id : fpga_ids) {
+      auto fpga_it = entries.find(fpga_id);
+      if (fpga_it == entries.end()) continue;
+      for (const auto &[stream, entry] : fpga_it->second) {
+        if (stream >= 0 && stream < nr_recv_per_fpga * nr_polarizations &&
+            entry.antenna_id >= 0)
+          connected_antennas.insert(entry.antenna_id);
       }
-      result[c] = antenna_id;
     }
+
+    std::unordered_map<int, int> result;
+    const int nr_canonical = static_cast<int>(fpga_ids.size()) * nr_recv_per_fpga;
+    int c = 0;
+    for (int antenna_id : connected_antennas) result[c++] = antenna_id;
+    while (c < nr_canonical) result[c++] = -1;
     return result;
   }
 };
