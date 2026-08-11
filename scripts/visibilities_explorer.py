@@ -38,24 +38,45 @@ def _():
 
 @app.cell
 def _(Path, mo):
-    file_browser = mo.ui.file_browser(
-        initial_path=Path.cwd(),
-        filetypes=[".h5", ".hdf5"],
-        multiple=False,
-        label="Visibility HDF5 file",
+    dir_input = mo.ui.text(
+        value=str(Path.cwd()),
+        label="Directory",
+        placeholder="Absolute path to search",
+        full_width=True,
     )
-    file_browser
-    return (file_browser,)
+    dir_input
+    return (dir_input,)
 
 
 @app.cell
-def _(Path, file_browser, h5py, json, mo, np, pd):
+def _(Path, dir_input, mo):
+    _dir = Path(dir_input.value)
+    _matches = (
+        sorted(
+            p for p in _dir.iterdir()
+            if p.name.startswith("visibilities_") and p.suffix in (".h5", ".hdf5")
+        )
+        if _dir.is_dir()
+        else []
+    )
+    file_picker = mo.ui.dropdown(
+        options={p.name: p for p in _matches},
+        value=_matches[0].name if _matches else None,
+        label="Visibility file (visibilities_*.h5/.hdf5)",
+        searchable=True,
+    )
+    file_picker
+    return (file_picker,)
+
+
+@app.cell
+def _(file_picker, h5py, json, mo, np, pd):
     mo.stop(
-        not file_browser.value,
+        file_picker.value is None,
         mo.callout("Choose a visibility HDF5 file to begin.", kind="info"),
     )
 
-    visibility_path = Path(file_browser.path(index=0))
+    visibility_path = file_picker.value
     _inventory_rows = []
     _file_attributes = {}
     with h5py.File(visibility_path, "r") as _hdf:
