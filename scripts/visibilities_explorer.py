@@ -388,6 +388,143 @@ def _(baseline_df, mo, receiver_df, sidecar_path, stream_df):
     return
 
 
+@app.cell(hide_code=True)
+def _(forward_mapping_df, mo, np, plt):
+    mo.stop(
+        forward_mapping_df.empty,
+        mo.callout(
+            "No embedded `audit/forward_stream_mapping` in this file — wiring grid unavailable.",
+            kind="info",
+        ),
+    )
+    # One row per (FPGA, receiver slot): filter to raw_polarization == 0
+    _df = forward_mapping_df[forward_mapping_df["raw_polarization"] == 0].copy()
+    _fpga_ids = sorted(_df["fpga_id"].unique())
+    _n_fpgas = len(_fpga_ids)
+    _n_slots = int(_df["receiver_slot"].max()) + 1
+
+    _ant_id = np.full((_n_fpgas, _n_slots), -1, dtype=int)
+    _canon = np.full((_n_fpgas, _n_slots), -1, dtype=int)
+    _disconnected = np.ones((_n_fpgas, _n_slots), dtype=bool)
+    for _row in _df.itertuples():
+        _fi = _fpga_ids.index(int(_row.fpga_id))
+        _s = int(_row.receiver_slot)
+        _ant_id[_fi, _s] = int(_row.antenna_id)
+        _canon[_fi, _s] = int(_row.canonical_receiver_index)
+        _disconnected[_fi, _s] = bool(_row.configured_disconnected)
+
+    _color = np.ma.masked_where(_disconnected, _canon.astype(float))
+    _cmap = plt.cm.tab20.copy()
+    _cmap.set_bad(color="#d0d0d0")
+
+    _fig, _ax = plt.subplots(
+        figsize=(max(8, _n_slots * 1.1), _n_fpgas * 1.6 + 0.8),
+        constrained_layout=True,
+    )
+    _im = _ax.imshow(_color, aspect="auto", interpolation="nearest", cmap=_cmap,
+                     vmin=0, vmax=max(1, int(_color.max()) if not _color.mask.all() else 1))
+    for _fi in range(_n_fpgas):
+        for _s in range(_n_slots):
+            if _disconnected[_fi, _s]:
+                _ax.text(_s, _fi, "—", ha="center", va="center", fontsize=9, color="#999")
+            else:
+                _ax.text(_s, _fi - 0.15, f"A{_ant_id[_fi, _s]}",
+                         ha="center", va="center", fontsize=9, fontweight="bold", color="white")
+                _ax.text(_s, _fi + 0.25, f"R{_canon[_fi, _s]}",
+                         ha="center", va="center", fontsize=7, color="white", alpha=0.85)
+
+    _ax.set_xticks(np.arange(_n_slots))
+    _ax.set_xticklabels([f"slot {_s}" for _s in range(_n_slots)])
+    _ax.set_yticks(np.arange(_n_fpgas))
+    _ax.set_yticklabels([f"FPGA {_f}" for _f in _fpga_ids])
+    _ax.set_xlabel("Receiver slot within FPGA")
+    _ax.set_title("Stream wiring — A = antenna_id, R = canonical receiver index")
+    _fig.colorbar(_im, ax=_ax, label="Canonical receiver index")
+    _ax.set_xlim(-0.5, _n_slots - 0.5)
+    _ax.set_ylim(_n_fpgas - 0.5, -0.5)
+    mo.vstack([mo.md("## Wiring grid"), _fig])
+    return
+
+
+@app.cell
+def _(Path, mo, visibility_path):
+    _default = str(visibility_path.parent / "config.json")
+    layout_config_input = mo.ui.text(
+        value=_default,
+        label="config.json for physical layout (optional)",
+        full_width=True,
+    )
+    layout_config_input
+    return (layout_config_input,)
+
+
+@app.cell(hide_code=True)
+def _(Path, forward_mapping_df, json, layout_config_input, mo, np, plt, receiver_df):
+    _cfg_path = Path(layout_config_input.value)
+    mo.stop(
+        not _cfg_path.exists(),
+        mo.callout(
+            f"`{_cfg_path}` not found — physical layout unavailable. "
+            "Point the input above at your config.json.",
+            kind="info",
+        ),
+    )
+    with open(_cfg_path) as _f:
+        _cfg = json.load(_f)
+
+    # {antenna_id: (east_m, north_m)}
+    _enu = {}
+    for _fpga_antennas in _cfg.get("antenna_positions", {}).values():
+        for _ant_str, _pos in _fpga_antennas.items():
+            _enu[int(_ant_str)] = (_pos["east"], _pos["north"])
+
+    # antenna_id → FPGA (from forward mapping if available)
+    _ant_to_fpga = {}
+    if not forward_mapping_df.empty:
+        for _row in forward_mapping_df[forward_mapping_df["raw_polarization"] == 0].itertuples():
+            if int(_row.antenna_id) >= 0:
+                _ant_to_fpga[int(_row.antenna_id)] = int(_row.fpga_id)
+
+    _fpga_colors = {0: "tab:blue", 1: "tab:orange", 2: "tab:green", 3: "tab:red"}
+    _fig, _ax = plt.subplots(figsize=(8, 8), constrained_layout=True)
+    _ax.set_aspect("equal")
+    _ax.axhline(0, color="#ddd", linewidth=0.8)
+    _ax.axvline(0, color="#ddd", linewidth=0.8)
+    _ax.scatter([0], [0], marker="+", s=120, color="black", zorder=5)
+    _ax.text(0.15, 0.15, "ref", fontsize=7, color="black")
+
+    _seen_fpgas = set()
+    for _row in receiver_df.itertuples():
+        _aid = int(_row.antenna_id)
+        if _aid < 0 or _aid not in _enu:
+            continue
+        _e, _n = _enu[_aid]
+        _fpga = _ant_to_fpga.get(_aid, -1)
+        _color = _fpga_colors.get(_fpga, "gray")
+        _lbl = f"FPGA {_fpga}" if _fpga >= 0 else "unknown"
+        _ax.scatter([_e], [_n], color=_color, s=70, zorder=4,
+                    label=None if _fpga in _seen_fpgas else _lbl)
+        _seen_fpgas.add(_fpga)
+        _canon = int(_row.canonical_receiver_index)
+        _ax.annotate(
+            f"A{_aid}\nR{_canon}",
+            xy=(_e, _n),
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=7,
+            color=_color,
+            ha="left",
+        )
+
+    _ax.set_xlabel("East (m)")
+    _ax.set_ylabel("North (m)")
+    _ax.set_title("Physical antenna layout (ENU)  —  A = antenna_id, R = canonical receiver index")
+    _ax.legend(title="FPGA", fontsize=8)
+    _ax.grid(True, alpha=0.25)
+    mo.vstack([mo.md("## Physical antenna layout"), _fig])
+    return
+
+
 @app.cell
 def _(baseline_df, mo, visibility_shape):
     mo.stop(
