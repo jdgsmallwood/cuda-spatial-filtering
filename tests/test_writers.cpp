@@ -316,15 +316,21 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(
       file, min_channel, max_channel, &antenna_map);
 
-  // Prepare dummy data
-  MockT::VisibilitiesOutputType vis_data;
+  // Zero-init then set two known, non-trivial values at distinct positions.
+  // Layout: float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POL][NR_POL][COMPLEX]
+  //       = float[1][10][2][2][2]  →  80 floats total.
+  // bl(0,0) is ant35 autocorr (a connected baseline, not zeroed).
+  // bl(0,1) is the ant35×ant7 cross-baseline.
+  MockT::VisibilitiesOutputType vis_data{};
+  vis_data[0][0][0][0][0] = 1234.5f;   // ch=0, bl(0,0), XX re
+  vis_data[0][0][0][0][1] = -678.9f;   // ch=0, bl(0,0), XX im
+  vis_data[0][1][0][1][1] = 42.0f;     // ch=0, bl(0,1), XY im
 
-    size_t block_idx = writer.register_block(100, 200, 0 /* missing packets */, 400 /* total packets */);
-    void* vis_ptr = writer.get_visibilities_landing_pointer(block_idx);
-
-    std::memcpy(vis_ptr, &vis_data, sizeof(MockT::VisibilitiesOutputType));
-    writer.register_visibilities_transfer_complete(block_idx);
-    writer.drain_ready_blocks();
+  size_t block_idx = writer.register_block(100, 200, 0, 400);
+  void *vis_ptr = writer.get_visibilities_landing_pointer(block_idx);
+  std::memcpy(vis_ptr, &vis_data, sizeof(MockT::VisibilitiesOutputType));
+  writer.register_visibilities_transfer_complete(block_idx);
+  writer.drain_ready_blocks();
   writer.flush();
 
   // Reopen and verify
@@ -338,6 +344,29 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   ASSERT_EQ(vis_dims[3], MockT::NR_POLARIZATIONS);
   ASSERT_EQ(vis_dims[4], MockT::NR_POLARIZATIONS);
   ASSERT_EQ(vis_dims[5], MockT::COMPLEX);
+
+  // Verify actual visibility values survived the round-trip.
+  constexpr size_t total_floats =
+      MockT::NR_CHANNELS * MockT::NR_BASELINES_UNPADDED *
+      MockT::NR_POLARIZATIONS * MockT::NR_POLARIZATIONS * MockT::COMPLEX;
+  std::vector<float> stored(total_floats);
+  vis_ds.read_raw(stored.data());
+
+  // Flat index helper: [ch][bl][p1][p2][re_im]
+  // strides: ch→80, bl→8, p1→4, p2→2, re_im→1
+  auto idx = [&](int ch, int bl, int p1, int p2, int c) {
+    return ch * 80 + bl * 8 + p1 * 4 + p2 * 2 + c;
+  };
+  EXPECT_FLOAT_EQ(stored[idx(0, 0, 0, 0, 0)], 1234.5f);   // bl(0,0) XX re
+  EXPECT_FLOAT_EQ(stored[idx(0, 0, 0, 0, 1)], -678.9f);   // bl(0,0) XX im
+  EXPECT_FLOAT_EQ(stored[idx(0, 1, 0, 1, 1)],   42.0f);   // bl(0,1) XY im
+  // All other elements must be zero (zero-init + zeroed disconnected slots).
+  for (size_t i = 0; i < total_floats; ++i) {
+    if (i == static_cast<size_t>(idx(0, 0, 0, 0, 0))) continue;
+    if (i == static_cast<size_t>(idx(0, 0, 0, 0, 1))) continue;
+    if (i == static_cast<size_t>(idx(0, 1, 0, 1, 1))) continue;
+    EXPECT_FLOAT_EQ(stored[i], 0.0f) << "unexpected non-zero at flat index " << i;
+  }
 
   auto seq_ds = verify_file.getDataSet("vis_seq_nums");
   std::vector<std::vector<int>> seq_out(2);
@@ -377,4 +406,62 @@ TEST(HDF5BeamWriterTest, WritesVisibilities) {
   verify_file.getDataSet("baseline_zeroed").read(baseline_zeroed);
   EXPECT_EQ(baseline_zeroed,
             (std::vector<uint8_t>{0, 0, 0, 1, 1, 1, 1, 1, 1, 1}));
+}
+
+TEST(HDF5BeamWriterTest, WritesVisibilitiesMultiBlock) {
+  std::string filename = make_temp_hdf5_file();
+  HighFive::File file(filename, HighFive::File::Truncate);
+
+  const std::unordered_map<int, int> antenna_map = {
+      {0, 35}, {1, 7}, {2, -1}, {3, -1}};
+  HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(
+      file, 0, 0, &antenna_map, /*num_blocks=*/2);
+
+  // Block A: distinctive value at bl(0,0) XX re.
+  // Block B: distinctive value at bl(1,1) YY im.
+  MockT::VisibilitiesOutputType vis_a{};
+  MockT::VisibilitiesOutputType vis_b{};
+  vis_a[0][0][0][0][0] = 11.0f;   // ch=0, bl(0,0), XX re
+  vis_b[0][2][1][1][1] = 22.0f;   // ch=0, bl(1,1), YY im
+
+  auto write_block = [&](MockT::VisibilitiesOutputType &data,
+                         int start, int end) {
+    size_t blk = writer.register_block(start, end, 0, 8);
+    std::memcpy(writer.get_visibilities_landing_pointer(blk), &data,
+                sizeof(MockT::VisibilitiesOutputType));
+    writer.register_visibilities_transfer_complete(blk);
+    writer.drain_ready_blocks();
+  };
+
+  write_block(vis_a, 10, 18);
+  write_block(vis_b, 20, 28);
+  writer.flush();
+
+  HighFive::File verify_file(filename, HighFive::File::ReadOnly);
+
+  auto vis_ds = verify_file.getDataSet("visibilities");
+  auto dims = vis_ds.getDimensions();
+  ASSERT_EQ(dims[0], 2u);  // 2 blocks written
+
+  // Flat layout across 2 blocks: [2][1][10][2][2][2] = 160 floats.
+  constexpr size_t floats_per_block =
+      MockT::NR_CHANNELS * MockT::NR_BASELINES_UNPADDED *
+      MockT::NR_POLARIZATIONS * MockT::NR_POLARIZATIONS * MockT::COMPLEX;
+  std::vector<float> stored(2 * floats_per_block);
+  vis_ds.read_raw(stored.data());
+
+  // Block A (offset 0): bl(0,0) XX re = 11.0
+  EXPECT_FLOAT_EQ(stored[0 * floats_per_block + 0 * 8 + 0 * 4 + 0 * 2 + 0], 11.0f);
+  // Block B (offset floats_per_block): bl(1,1) YY im = 22.0
+  // bl(1,1) = 2, stride = 8; p1=1 stride=4; p2=1 stride=2; im=1
+  EXPECT_FLOAT_EQ(stored[1 * floats_per_block + 2 * 8 + 1 * 4 + 1 * 2 + 1], 22.0f);
+
+  // Sequence numbers: block A → [10,18], block B → [20,28].
+  auto seq_ds = verify_file.getDataSet("vis_seq_nums");
+  std::vector<size_t> seqs(4);
+  seq_ds.read_raw(seqs.data());
+  EXPECT_EQ(seqs[0], 10u);
+  EXPECT_EQ(seqs[1], 18u);
+  EXPECT_EQ(seqs[2], 20u);
+  EXPECT_EQ(seqs[3], 28u);
 }

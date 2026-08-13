@@ -1831,12 +1831,22 @@ public:
             }
           }
 
-          // Create a fake sender address since PCAP doesn't provide this
-          // This might not be necessary.
+          // Extract IP source address from the raw Ethernet frame so that
+          // OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET works correctly in PCAP
+          // replay mode. Layout: Ethernet (14) + 12 bytes into IP header =
+          // offset 26 for the 4-byte source IP (network byte order).
           struct sockaddr_in client_addr;
           std::memset(&client_addr, 0, sizeof(client_addr));
           client_addr.sin_family = AF_INET;
-          client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+          constexpr size_t IP_SRC_OFFSET = 26;
+          if (header->caplen > IP_SRC_OFFSET + 4) {
+            client_addr.sin_addr.s_addr =
+                *reinterpret_cast<const uint32_t *>(
+                    static_cast<const uint8_t *>(write_pointer) +
+                    IP_SRC_OFFSET);
+          } else {
+            client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+          }
           client_addr.sin_port = htons(0);
 
           // Add metadata
@@ -2024,12 +2034,22 @@ public:
               }
             }
 
-            // Create a fake sender address since PCAP doesn't provide this
-            // This might not be necessary.
+            // Extract IP source address from the raw Ethernet frame so that
+            // OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET works correctly in PCAP
+            // replay mode. Layout: Ethernet (14) + 12 bytes into IP header =
+            // offset 26 for the 4-byte source IP (network byte order).
             struct sockaddr_in client_addr;
             std::memset(&client_addr, 0, sizeof(client_addr));
             client_addr.sin_family = AF_INET;
-            client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            constexpr size_t IP_SRC_OFFSET = 26;
+            if (header->caplen > IP_SRC_OFFSET + 4) {
+              client_addr.sin_addr.s_addr =
+                  *reinterpret_cast<const uint32_t *>(
+                      static_cast<const uint8_t *>(write_pointer) +
+                      IP_SRC_OFFSET);
+            } else {
+              client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            }
             client_addr.sin_port = htons(0);
 
             // Add metadata

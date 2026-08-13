@@ -115,6 +115,10 @@ add_executable(StreamReorderTests test_stream_reorder.cu)
 target_link_libraries(StreamReorderTests PRIVATE test_support)
 set_target_properties(StreamReorderTests PROPERTIES CUDA_ARCHITECTURES "native")
 
+add_executable(AntennaOrderingTests test_antenna_ordering.cu)
+target_link_libraries(AntennaOrderingTests PRIVATE test_support)
+set_target_properties(AntennaOrderingTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
 # gettimeofday, and pool-alloc microbenchmarks for the six hot-path fixes.
@@ -136,6 +140,7 @@ gtest_discover_tests(RunAuditTests)
 gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(StreamReorderTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(AntennaOrderingTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 
 add_test(
   NAME AdaptiveDetectionReferencePythonTests

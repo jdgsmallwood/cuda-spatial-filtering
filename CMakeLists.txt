@@ -247,8 +247,8 @@ FetchContent_Declare(
     EXCLUDE_FROM_ALL
 )
 set(REDIS_PLUS_PLUS_CXX_STANDARD 17)
-set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
-set(REDIS_PLUS_PLUS_BUILD_SHARED OFF)
+set(REDIS_PLUS_PLUS_BUILD_TEST OFF CACHE BOOL "" FORCE)
+set(REDIS_PLUS_PLUS_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(redis_plus_plus)
 # With BUILD_SHARED_LIBS=OFF, redis++ only creates redis++_static, not redis++.
 if(NOT TARGET redis++)
@@ -266,18 +266,17 @@ FetchContent_MakeAvailable(HighFive)
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
 
-if(${USER_BUILD_TESTING} STREQUAL "OFF")
-  set(NR_OBSERVING_BUFFERS "3" CACHE STRING "Number of buffers")
-  set(NR_OBSERVING_FPGA_SOURCES "1" CACHE STRING "Number of FPGA sources")
-  set(NR_OBSERVING_CHANNELS "8" CACHE STRING "Number of lambda channels")
-  set(NR_OBSERVING_RECEIVERS_PER_PACKET "10" CACHE STRING "Number of receivers per packet")
-  set(NR_OBSERVING_PADDED_RECEIVERS "32" CACHE STRING "Should be next multiple of 32 above total receivers (per packet receivers * nr_fpga_sources)")
-  # Keep at 32 even when NR_OBSERVING_PADDED_RECEIVERS=64: going to 64/block collapses
-  # blocks/channel from 3 to 1 (triangular formula), cutting TCC grid size by 3x.
-  set(NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK "32" CACHE STRING "TCC tile size — must be 32, 48, or 64. Keep at 32 unless NR_PADDED_RECEIVERS >= 96")
-  set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets to correlate")
-  set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
-  set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
+set(NR_OBSERVING_BUFFERS "3" CACHE STRING "Number of buffers")
+set(NR_OBSERVING_FPGA_SOURCES "1" CACHE STRING "Number of FPGA sources")
+set(NR_OBSERVING_CHANNELS "8" CACHE STRING "Number of lambda channels")
+set(NR_OBSERVING_RECEIVERS_PER_PACKET "10" CACHE STRING "Number of receivers per packet")
+set(NR_OBSERVING_PADDED_RECEIVERS "32" CACHE STRING "Should be next multiple of 32 above total receivers (per packet receivers * nr_fpga_sources)")
+# Keep at 32 even when NR_OBSERVING_PADDED_RECEIVERS=64: going to 64/block collapses
+# blocks/channel from 3 to 1 (triangular formula), cutting TCC grid size by 3x.
+set(NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK "32" CACHE STRING "TCC tile size — must be 32, 48, or 64. Keep at 32 unless NR_PADDED_RECEIVERS >= 96")
+set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets to correlate")
+set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
+set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
 
 add_compile_definitions(
     NR_OBSERVING_BUFFERS=${NR_OBSERVING_BUFFERS}
@@ -290,7 +289,6 @@ add_compile_definitions(
 
 set(CMAKE_SKIP_INSTALL_RULES FALSE)
 add_subdirectory(apps)
-endif()
 
 # Silence warnings from external dependencies
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/extern)

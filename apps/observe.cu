@@ -212,9 +212,12 @@ int main(int argc, char *argv[]) {
   output->start_writer_loop();
 
   auto capture = make_packet_captures(args);
-  // Activate the lock-free strided producer path: each capture thread i owns
-  // ring slots i, i+N, i+2N, ... and claims them without producer_mutex.
-  state.nr_capture_threads = static_cast<int>(capture.size());
+  // Activate the lock-free strided producer path only for live capture: each
+  // capture thread i owns ring slots i, i+N, i+2N, ... and claims them
+  // without producer_mutex.  PCAPPacketCapture uses the legacy write_index
+  // producer path and must not enable the strided consumer path.
+  if (args.pcap_filename.empty())
+    state.nr_capture_threads = static_cast<int>(capture.size());
   INFO_LOG("Ring buffer size: {} packets\n", DEFAULT_PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;

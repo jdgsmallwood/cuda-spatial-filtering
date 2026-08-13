@@ -1296,7 +1296,14 @@ public:
         }
       }
     }
-    redis.command(args.begin(), args.end());
+    if (redis_available_) {
+      try {
+        redis.command(args.begin(), args.end());
+      } catch (const sw::redis::Error &e) {
+        ERROR_LOG("Redis write failed (disabling further writes): {}", e.what());
+        redis_available_ = false;
+      }
+    }
     current_slot_ = (current_slot_ + 1) % num_slots_;
   }
 
@@ -1309,6 +1316,7 @@ private:
            static_cast<size_t>(beam) * NR_FREQS + static_cast<size_t>(f);
   }
   std::string prefix;
+  bool redis_available_ = true;
 
   int channels_per_write_;
   int num_slots_;

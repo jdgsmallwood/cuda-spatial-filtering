@@ -776,6 +776,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     if (args.config.contains("network_interfaces")) {
       for (const auto &[fpga_str, ifname] :
            args.config["network_interfaces"].items()) {
+        if (fpga_str.empty() || fpga_str[0] == '_') continue; // skip comment keys
         int id = std::stoi(fpga_str);
         fpga_to_ifname[id] = ifname.get<std::string>();
         std::cout << "Config: FPGA " << id << " → " << ifname << "\n";
