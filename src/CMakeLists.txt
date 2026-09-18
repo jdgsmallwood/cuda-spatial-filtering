@@ -34,7 +34,7 @@ $<TARGET_OBJECTS:pointing>
 
 
 target_link_libraries(
-    spatial PRIVATE cusolver cuda cudart cublas tcc CUDA::cudart ccglib pcap cutensor HighFive::HighFive spdlog::spdlog ${CFITSIO_LIBRARIES} ${CASACORE_LIBRARIES}
+    spatial PRIVATE cusolver cuda cudart cublas tcc filter CUDA::cudart ccglib pcap cutensor HighFive::HighFive spdlog::spdlog ${CFITSIO_LIBRARIES} ${CASACORE_LIBRARIES}
 )
 
 

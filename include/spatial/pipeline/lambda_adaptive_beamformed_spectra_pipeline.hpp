@@ -2,14 +2,23 @@
 
 template <typename T>
 class LambdaAdaptiveBeamformedSpectraPipeline : public GPUPipeline {
+  static_assert((T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) %
+                        T::NR_FINE_CHANNELS ==
+                    0,
+                "NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET must divide evenly "
+                "by NR_FINE_CHANNELS");
+
 private:
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // NR_BITS;
 
   static constexpr int NR_BLOCKS_FOR_CORRELATION =
-      T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+      (T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+       T::NR_FINE_CHANNELS) /
       NR_TIMES_PER_BLOCK;
   static constexpr int NR_TIME_STEPS_FOR_CORRELATION =
       T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET;
+  static constexpr int NR_TIME_STEPS_PER_FINE_CHANNEL = T::NR_TIME_STEPS_PER_FINE_CHANNEL;
+  static_assert(NR_TIME_STEPS_PER_FINE_CHANNEL == NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
   static constexpr int COMPLEX = 2;
 
   static constexpr int NR_BASELINES =
@@ -80,10 +89,10 @@ private:
             2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE];
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
-           [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+           [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
   using BeamOutput =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
-                          [NR_TIME_STEPS_FOR_CORRELATION];
+                          [NR_TIME_STEPS_PER_FINE_CHANNEL];
   using ProjectionMatrix =
       std::complex<__half>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                           [T::NR_RECEIVERS];
@@ -114,6 +123,8 @@ private:
         samples_reordered,
         samples_consolidated, samples_consolidated_col_maj, samples_padding;
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;
+    DevicePtr<typename FineChannelizer<T>::FilterInputType> channelizer_input;
+    DevicePtr<typename FineChannelizer<T>::FilterOutputType> channelizer_output;
     DevicePtr<FFTCUFFTInputType> samples_cufft_input;
     DevicePtr<BeamOutput> beam_output;
     DevicePtr<FFTCUFFTOutputType> samples_cufft_output,
@@ -190,6 +201,10 @@ private:
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_padding(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+          channelizer_input(
+              make_device_ptr<typename FineChannelizer<T>::FilterInputType>()),
+          channelizer_output(
+              make_device_ptr<typename FineChannelizer<T>::FilterOutputType>()),
           samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
           beam_output(make_device_ptr<BeamOutput>()),
           beam_output_float(make_device_ptr<BeamformerOutput>()),
@@ -310,6 +325,8 @@ private:
           gemm_handle(std::move(other.gemm_handle)),
           samples_padding(std::move(other.samples_padding)),
           samples_padded(std::move(other.samples_padded)),
+          channelizer_input(std::move(other.channelizer_input)),
+          channelizer_output(std::move(other.channelizer_output)),
           correlator_input(std::move(other.correlator_input)),
           correlator_output(std::move(other.correlator_output)),
           float_projection_matrix(std::move(other.float_projection_matrix)),
@@ -372,6 +389,8 @@ private:
         gemm_handle = std::move(other.gemm_handle);
         samples_padding = std::move(other.samples_padding);
         samples_padded = std::move(other.samples_padded);
+        channelizer_input = std::move(other.channelizer_input);
+        channelizer_output = std::move(other.channelizer_output);
         correlator_input = std::move(other.correlator_input);
         correlator_output = std::move(other.correlator_output);
         float_projection_matrix = std::move(other.float_projection_matrix);
@@ -446,12 +465,12 @@ private:
   // u = time steps per packet
   // z = complex
 
-  inline static const std::vector<int> modePacket{'c', 'y', 'f', 'u',
+  inline static const std::vector<int> modePacket{'C', 'y', 'f', 'u',
                                                   'n', 'p', 'z'};
   inline static const std::vector<int> modePlanar{'c', 'p', 'z', 'f',
                                                   'n', 'o', 'u'};
 
-  inline static const std::vector<int> modePacketPreAlign{'f', 'y', 'u', 'c',
+  inline static const std::vector<int> modePacketPreAlign{'f', 'y', 'u', 'C',
                                                           'n', 'p', 'z'};
   inline static const std::vector<int> modePacketAligned{'f', 'o', 'u', 'c',
                                                          'n', 'p', 'z'};
@@ -502,6 +521,7 @@ private:
       {'a', NR_UNPADDED_BASELINES},
       {'b', NR_BLOCKS_FOR_CORRELATION},
       {'c', T::NR_CHANNELS},
+      {'C', T::NR_FPGA_CHANNELS},
       {'d', T::NR_PADDED_RECEIVERS},
       {'e', T::NR_BEAMS * 2}, // rfi mitigated beam + original beam
       {'f', T::NR_FPGA_SOURCES},
@@ -535,6 +555,7 @@ private:
   typename T::AntennaGains *d_gains;
   int *d_stream_perm_recv = nullptr;
   int *d_stream_perm_pol  = nullptr;
+  std::unique_ptr<FineChannelizer<T>> channelizer_;
 
   static constexpr int fft_total_packets_per_block =
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
@@ -587,53 +608,68 @@ public:
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_pre_align.get(), b.stream);
 
+    // Pre-channelization: samples_pre_align/samples_aligned/samples_reordered are all
+    // HalfPacketSamplesType-family buffers, shaped by the raw FPGA/coarse channel count.
     apply_delays_launch((__half *)b.samples_pre_align.get(),
                         (__half *)b.samples_aligned.get(), d_subpacket_delays,
                         T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
                         T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
-                        T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+                        T::NR_FPGA_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
 
     reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
-                           T::NR_TIME_STEPS_PER_PACKET, T::NR_CHANNELS,
+                           T::NR_TIME_STEPS_PER_PACKET, T::NR_FPGA_CHANNELS,
                            T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
         (__half *)b.samples_aligned.get(),
         (__half *)b.samples_reordered.get(),
         d_stream_perm_recv, d_stream_perm_pol, b.stream);
 
-    tensor_16.runPermutation("alignedToPlanar", alpha,
-                             (__half *)b.samples_reordered.get(),
-                             (__half *)b.samples_consolidated.get(), b.stream);
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      reorder_to_filter_input<
+          T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+          T::NR_RECEIVERS_PER_PACKET, T::NR_TIME_STEPS_PER_PACKET,
+          T::NR_PACKETS_FOR_CORRELATION, FineChannelizer<T>::NR_TAPS,
+          T::NR_FINE_CHANNELS>((__half *)b.samples_reordered.get(),
+                               (float2 *)b.channelizer_input.get(), b.stream);
 
-    tensor_16.runPermutation(
-        "consToColMajCons", alpha, (__half *)b.samples_consolidated.get(),
-        (__half *)b.samples_consolidated_col_maj.get(), b.stream);
+      channelizer_->launchAsync(b.stream, b.channelizer_input.get(),
+                                b.channelizer_output.get());
 
-    tensor_16.runPermutation(
-        "alignedToPadding", alpha,
-        reinterpret_cast<__half *>(b.samples_reordered.get()),
-        reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
+      channelizer_output_to_corr_input<
+          T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS, T::NR_FINE_CHANNEL_EDGE_TRIM,
+          T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_PADDED_RECEIVERS,
+          NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
+          (const __half2 *)b.channelizer_output.get(),
+          (__half *)b.correlator_input.get(), b.stream);
+    } else {
+      tensor_16.runPermutation("alignedToPlanar", alpha,
+                               (__half *)b.samples_reordered.get(),
+                               (__half *)b.samples_consolidated.get(), b.stream);
 
-    // ------------------------------------------------------------------
-    // 5. Copy unpadded → padded buffer then zero-fill the padding region
-    // ------------------------------------------------------------------
-    CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
-                               sizeof(typename T::HalfPacketAlignedSamplesType),
-                               cudaMemcpyDefault, b.stream));
-    CUDA_CHECK(
-        cudaMemsetAsync(reinterpret_cast<char *>(b.samples_padded.get()) +
-                            sizeof(typename T::HalfPacketAlignedSamplesType),
-                        0,
-                        sizeof(typename T::PaddedPacketSamplesType) -
-                            sizeof(typename T::HalfPacketAlignedSamplesType),
-                        b.stream));
+      tensor_16.runPermutation(
+          "consToColMajCons", alpha, (__half *)b.samples_consolidated.get(),
+          (__half *)b.samples_consolidated_col_maj.get(), b.stream);
 
-    // ------------------------------------------------------------------
-    // 6. Permute padded → correlator input layout
-    // ------------------------------------------------------------------
-    tensor_16.runPermutation(
-        "paddedToCorrInput", alpha,
-        reinterpret_cast<__half *>(b.samples_padded.get()),
-        reinterpret_cast<__half *>(b.correlator_input.get()), b.stream);
+      tensor_16.runPermutation(
+          "alignedToPadding", alpha,
+          reinterpret_cast<__half *>(b.samples_reordered.get()),
+          reinterpret_cast<__half *>(b.samples_padding.get()), b.stream);
+
+      CUDA_CHECK(cudaMemcpyAsync(b.samples_padded.get(), b.samples_padding.get(),
+                                 sizeof(typename T::HalfPacketAlignedSamplesType),
+                                 cudaMemcpyDefault, b.stream));
+      CUDA_CHECK(
+          cudaMemsetAsync(reinterpret_cast<char *>(b.samples_padded.get()) +
+                              sizeof(typename T::HalfPacketAlignedSamplesType),
+                          0,
+                          sizeof(typename T::PaddedPacketSamplesType) -
+                              sizeof(typename T::HalfPacketAlignedSamplesType),
+                          b.stream));
+
+      tensor_16.runPermutation(
+          "paddedToCorrInput", alpha,
+          reinterpret_cast<__half *>(b.samples_padded.get()),
+          reinterpret_cast<__half *>(b.correlator_input.get()), b.stream);
+    }
 
     // ------------------------------------------------------------------
     // 7. Cross-correlate with tcc::Correlator
@@ -793,6 +829,15 @@ public:
                              (__half *)b.weights_rfi_mitigated.get(),
                              (__half *)b.weights_beamformer.get(), b.stream);
 
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      corr_input_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
+                                 T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                                 T::NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
+                                 NR_TIMES_PER_BLOCK>(
+          (const __half *)b.correlator_input.get(),
+          (__half *)b.samples_consolidated_col_maj.get(), b.stream);
+    }
+
     b.gemm_handle->Run((CUdeviceptr)b.weights_beamformer.get(),
                        (CUdeviceptr)b.samples_consolidated_col_maj.get(),
                        (CUdeviceptr)b.beamformer_output.get());
@@ -805,47 +850,51 @@ public:
                           (__half *)b.beam_output.get(),
                           sizeof(BeamOutput) / sizeof(__half), b.stream);
 
-    tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
-                             (float *)b.beamformer_output.get(),
-                             (float *)b.samples_cufft_input.get(), b.stream);
+    // gpu-filter has already done the frequency decomposition once channelized -- the whole-band
+    // post-beam FFT/edge-trim/downsample becomes redundant, same as LambdaGPUPipeline.
+    if constexpr (T::NR_FINE_CHANNELS == 1) {
+      tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
+                               (float *)b.beamformer_output.get(),
+                               (float *)b.samples_cufft_input.get(), b.stream);
 
-    CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
-                            (void *)b.samples_cufft_output.get(),
-                            CUFFT_FORWARD));
+      CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
+                              (void *)b.samples_cufft_output.get(),
+                              CUFFT_FORWARD));
 
-    tensor_32.runPermutation("cufftOutputToFineChannelRemove", alpha_32,
-                             (float *)b.samples_cufft_output.get(),
-                             (float *)b.samples_cufft_output_fine_channel.get(),
-                             b.stream);
+      tensor_32.runPermutation("cufftOutputToFineChannelRemove", alpha_32,
+                               (float *)b.samples_cufft_output.get(),
+                               (float *)b.samples_cufft_output_fine_channel.get(),
+                               b.stream);
 
-    // First half goes in second half of destination
-    void *src_ptr = (char *)b.samples_cufft_output_fine_channel.get();
-    size_t src_size = sizeof(FineChannelCopyType);
+      // First half goes in second half of destination
+      void *src_ptr = (char *)b.samples_cufft_output_fine_channel.get();
+      size_t src_size = sizeof(FineChannelCopyType);
 
-    dest_ptr = (char *)b.samples_fine_channel_removed.get() +
-               sizeof(FineChannelCopyType);
+      dest_ptr = (char *)b.samples_fine_channel_removed.get() +
+                 sizeof(FineChannelCopyType);
 
-    cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
+      cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
 
-    src_ptr = (char *)b.samples_cufft_output_fine_channel.get() +
-              sizeof(FineChannelSeekType);
-    dest_ptr = (char *)b.samples_fine_channel_removed.get();
-    cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
+      src_ptr = (char *)b.samples_cufft_output_fine_channel.get() +
+                sizeof(FineChannelSeekType);
+      dest_ptr = (char *)b.samples_fine_channel_removed.get();
+      cudaMemcpyAsync(dest_ptr, src_ptr, src_size, cudaMemcpyDefault, b.stream);
 
-    tensor_32.runPermutation("fineChannelRemovedToBeamFFTDownsample", alpha_32,
-                             (float *)b.samples_fine_channel_removed.get(),
-                             (float *)b.cufft_downsampled_input.get(),
-                             b.stream);
+      tensor_32.runPermutation("fineChannelRemovedToBeamFFTDownsample", alpha_32,
+                               (float *)b.samples_fine_channel_removed.get(),
+                               (float *)b.cufft_downsampled_input.get(),
+                               b.stream);
 
-    cudaMemsetAsync((float *)b.cufft_downsampled_output.get(), 0,
-                    sizeof(FFTOutputType), b.stream);
+      cudaMemsetAsync((float *)b.cufft_downsampled_output.get(), 0,
+                      sizeof(FFTOutputType), b.stream);
 
-    sum_fft_over_packets_launch(
-        (float2 *)b.cufft_downsampled_input.get(),
-        (float *)b.cufft_downsampled_output.get(), 2 * T::NR_BEAMS,
-        T::NR_CHANNELS, T::NR_POLARIZATIONS,
-        T::NR_TIME_STEPS_PER_PACKET - 2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE,
-        T::NR_PACKETS_FOR_CORRELATION, b.stream);
+      sum_fft_over_packets_launch(
+          (float2 *)b.cufft_downsampled_input.get(),
+          (float *)b.cufft_downsampled_output.get(), 2 * T::NR_BEAMS,
+          T::NR_CHANNELS, T::NR_POLARIZATIONS,
+          T::NR_TIME_STEPS_PER_PACKET - 2 * NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE,
+          T::NR_PACKETS_FOR_CORRELATION, b.stream);
+    }
 
     if (output_ != nullptr && !dummy_run) {
       // -1, -1 is required but not used. Interface allows for single channel /
@@ -898,7 +947,9 @@ public:
       }
 
       size_t fft_block_num =
-          output_->register_fft_block(start_seq_num, end_seq_num);
+          T::NR_FINE_CHANNELS == 1
+              ? output_->register_fft_block(start_seq_num, end_seq_num)
+              : std::numeric_limits<size_t>::max();
       if (fft_block_num != std::numeric_limits<size_t>::max()) {
         auto *fft_output_pointer =
             (void *)output_->get_fft_landing_pointer(fft_block_num);
@@ -1050,7 +1101,7 @@ public:
                                      T::NR_PACKETS_FOR_CORRELATION;
 
     size_t work_size = 0;
-    {
+    if constexpr (T::NR_FINE_CHANNELS == 1) {
       // Temporary plan to calculate work_size
       cufftHandle temp_plan;
       CUFFT_CHECK(cufftCreate(&temp_plan));
@@ -1132,7 +1183,7 @@ public:
     CUDA_CHECK(
         cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
 
-    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+    auto default_gains = get_default_gains<T::NR_FPGA_CHANNELS, T::NR_RECEIVERS,
                                            T::NR_POLARIZATIONS>();
     CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
                           sizeof(typename T::AntennaGains), cudaMemcpyDefault));
@@ -1156,6 +1207,9 @@ public:
 
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device);
+    }
     buffers.reserve(num_buffers);
     std::vector<int32_t> fixed_detected_counts(CUSOLVER_BATCH_SIZE, 0);
     for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
@@ -1170,12 +1224,14 @@ public:
 
       // Finalize cuFFT plan for this buffer
       auto &b = buffers.back();
-      CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
-                                      CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
-                                      CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
-                                      CUDA_C_32F));
-      CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
-      CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
+      if constexpr (T::NR_FINE_CHANNELS == 1) {
+        CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
+                                        CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
+                                        CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
+                                        CUDA_C_32F));
+        CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
+        CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
+      }
 
       // Copy initial weights
       cudaMemcpyAsync(b.weights.get(), h_weights, sizeof(BeamWeights),

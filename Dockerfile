@@ -57,8 +57,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcfitsio-dev \
     casacore-dev \
     casacore-data \
+    libboost-dev \
     libnl-3-dev \
     libnl-genl-3-dev \
+    libnl-route-3-dev \
+    libibverbs-dev \
     libcurl4-gnutls-dev \
     && rm -rf /var/lib/apt/lists/*
 

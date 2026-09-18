@@ -121,6 +121,30 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(cudawrappers)
 
+# gpu-filter: ASTRON's GPU polyphase filterbank (pre-correlation fine channelization).
+# Declared here (before it's ever pulled in transitively) so its own internal
+# FetchContent_Declare(cudawrappers ...) is a no-op per CMake's "first
+# declaration for a given name wins" rule and resolves to our local
+# extern/cudawrappers submodule above instead of hitting the network again.
+# Its other two transitive deps (huge-page-allocator, multi-array) aren't
+# vendored locally -- they're small and fetched fresh from git.astron.nl.
+message(STATUS "gpu-filter...")
+FetchContent_Declare(
+  gpu-filter
+  GIT_REPOSITORY https://git.astron.nl/RD/gpu-filter
+  GIT_TAG 2026-09-03
+  EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(gpu-filter)
+
+# gpu-filter's own libfilter/CMakeLists.txt does
+# target_include_directories(filter PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>) to expose its
+# "libfilter/Foo.h"-style includes -- but CMAKE_SOURCE_DIR is always the top-level project's root
+# (ours, once fetched via FetchContent), not gpu-filter's own root, so that path is wrong here.
+# Same class of bug tcc has (see the target_include_directories(tcc ...) line below); fix it the
+# same way, from outside, using the FetchContent-provided *_SOURCE_DIR variable which is correct
+# regardless of gpu-filter's internal CMAKE_SOURCE_DIR misuse.
+target_include_directories(filter PUBLIC ${gpu-filter_SOURCE_DIR})
 
 FetchContent_Declare(
   xtl
@@ -166,6 +190,13 @@ target_link_libraries(ccglib PRIVATE xtensor)
 
 set(DISABLE_DBUS ON)       # avoid dbus transitive link dep when building pcap static
 set(BUILD_WITH_LIBNL OFF)  # avoid libnl/nl80211 transitive link dep
+# Avoid libpcap's own independent pkg_check_modules(libibverbs) RDMA-sniffing detection, which
+# would pull in conda's libibverbs.so (and its incompatible versioned libnl-3/libnl-route-3, see
+# the IBVERBS_LIBRARY comment above) into pcap_static regardless of our own app-level
+# find_library(IBVERBS_LIBRARY ...) preference for the system copy. Set as a CACHE entry (not a
+# plain variable) so libpcap's own option(DISABLE_RDMA ... OFF) -- which only creates a CACHE
+# entry if none already exists -- can't reintroduce OFF.
+set(DISABLE_RDMA ON CACHE BOOL "Disable libpcap's RDMA/libibverbs sniffing support" FORCE)
 FetchContent_Declare(
   pcap
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/libpcap
@@ -199,9 +230,25 @@ find_library(PSRDADA_LIBRARY psrdada ${PSRDADA_ROOT}/lib)
 # machines without an RDMA stack are unaffected. When found, HAVE_IBVERBS is
 # defined globally (gating include/spatial/libibverbs.hpp) and IBVERBS_LIBRARY
 # is linked onto the app/test common targets below.
-# --------------------------------------------
-find_library(IBVERBS_LIBRARY ibverbs)
-find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+#
+# Prefer the *system* libibverbs (/usr/lib/...) over conda's: conda's
+# libibverbs.so is linked against conda's own versioned libnl-3/libnl-route-3
+# (symbol-versioned, e.g. nl_send_simple@libnl_3), which is incompatible with
+# this container's system libnl-3 (built without symbol versioning) --
+# picking up conda's libibverbs alongside system libnl at link time produces
+# "undefined reference to nl_*@libnl_3" / missing-libnl-route-3 errors. Using
+# system libibverbs keeps the whole libibverbs+libnl-3+libnl-route-3 stack
+# self-consistent. Requires libibverbs-dev + libnl-route-3-dev installed
+# (see Dockerfile); falls back to an unrestricted search (which may find
+# conda's copy) if the system package isn't present.
+find_library(IBVERBS_LIBRARY ibverbs PATHS /usr/lib/x86_64-linux-gnu NO_DEFAULT_PATH)
+find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h PATHS /usr/include NO_DEFAULT_PATH)
+if(NOT IBVERBS_LIBRARY)
+  find_library(IBVERBS_LIBRARY ibverbs)
+endif()
+if(NOT IBVERBS_INCLUDE_DIR)
+  find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+endif()
 if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
   message(STATUS "libibverbs found (${IBVERBS_LIBRARY}) -- ibverbs capture backend enabled")
   add_compile_definitions(HAVE_IBVERBS)
@@ -275,6 +322,8 @@ set(NR_OBSERVING_PADDED_RECEIVERS "32" CACHE STRING "Should be next multiple of 
 # blocks/channel from 3 to 1 (triangular formula), cutting TCC grid size by 3x.
 set(NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK "32" CACHE STRING "TCC tile size — must be 32, 48, or 64. Keep at 32 unless NR_PADDED_RECEIVERS >= 96")
 set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets to correlate")
+set(NR_OBSERVING_FINE_CHANNELS "32" CACHE STRING "Fine channels per coarse/FPGA channel from the gpu-filter PFB (1 = disabled). Compute cost of TCC/ccglib/cuSOLVER scales ~linearly with NR_OBSERVING_CHANNELS * NR_OBSERVING_FINE_CHANNELS.")
+set(NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM "2" CACHE STRING "Fine channels dropped from each edge of every coarse channel's fine-channel breakdown before correlation, to discard the FPGA coarse channelizer's own 32/27-oversampling guard-band aliasing (ignored when NR_OBSERVING_FINE_CHANNELS=1).")
 set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
 set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
 

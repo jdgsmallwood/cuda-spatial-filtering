@@ -265,10 +265,10 @@ public:
   size_t NR_BETWEEN_SAMPLES;
   size_t NR_PACKETS_FOR_CORRELATION;
 
-  std::array<BufferState<T::NR_CHANNELS, T::NR_FPGA_SOURCES>, NR_INPUT_BUFFERS>
+  std::array<BufferState<T::NR_FPGA_CHANNELS, T::NR_FPGA_SOURCES>, NR_INPUT_BUFFERS>
       buffers;
   alignas(64) std::atomic<uint64_t>
-      latest_packet_received[T::NR_CHANNELS][T::NR_FPGA_SOURCES];
+      latest_packet_received[T::NR_FPGA_CHANNELS][T::NR_FPGA_SOURCES];
   mutable std::mutex buffer_index_mutex;
   GPUPipeline *pipeline_;
 
@@ -665,18 +665,18 @@ public:
     // channel number, which must lie in [min, min+NR_CHANNELS).
     const int freq_channel = static_cast<int>(parsed.freq_channel) -
                              static_cast<int>(MIN_FREQ_CHANNEL);
-    if (freq_channel < 0 || freq_channel >= static_cast<int>(T::NR_CHANNELS))
+    if (freq_channel < 0 || freq_channel >= static_cast<int>(T::NR_FPGA_CHANNELS))
         [[unlikely]] {
       if (!channel_discard_warned.exchange(true, std::memory_order_relaxed)) {
         WARN_LOG("Discarding packets: freq_channel={} is outside the configured "
                  "window [{}, {}). Buffer initialization will never happen while "
                  "all packets are out of range. Check --min_freq_channel.",
                  parsed.freq_channel, MIN_FREQ_CHANNEL,
-                 MIN_FREQ_CHANNEL + T::NR_CHANNELS);
+                 MIN_FREQ_CHANNEL + T::NR_FPGA_CHANNELS);
         std::cout << "[ProcessorState] WARNING: freq_channel="
                   << parsed.freq_channel << " outside window ["
                   << MIN_FREQ_CHANNEL << ", "
-                  << MIN_FREQ_CHANNEL + T::NR_CHANNELS
+                  << MIN_FREQ_CHANNEL + T::NR_FPGA_CHANNELS
                   << "). All packets will be discarded. "
                      "Check --min_freq_channel.\n";
       }
@@ -720,7 +720,7 @@ public:
     // this slot, and no processor thread can claim it as current_buffer until
     // is_ready=true and the queue push happen below under buffer_index_mutex.
     std::memset(d_samples[buffer_index]->arrivals, 0,
-                T::NR_CHANNELS * (T::NR_PACKETS_FOR_CORRELATION + 2) *
+                T::NR_FPGA_CHANNELS * (T::NR_PACKETS_FOR_CORRELATION + 2) *
                     T::NR_FPGA_SOURCES * sizeof(bool));
 
     {
@@ -803,7 +803,7 @@ public:
         continue;
       }
       const std::array<uint64_t, T::NR_FPGA_SOURCES> end_seq = buffer.end_seq;
-      for (auto channel = 0; channel < T::NR_CHANNELS; ++channel) {
+      for (auto channel = 0; channel < T::NR_FPGA_CHANNELS; ++channel) {
         if (buffer.is_populated[channel] ||
             !modified_since_last_completion_check[channel].load(
                 std::memory_order_acquire)) {
@@ -832,7 +832,7 @@ public:
         buffers_complete.push_back(buf_idx);
       }
     }
-    for (int channel = 0; channel < T::NR_CHANNELS; channel++) {
+    for (int channel = 0; channel < T::NR_FPGA_CHANNELS; channel++) {
       modified_since_last_completion_check[channel].store(
           false, std::memory_order_relaxed);
     }
@@ -929,11 +929,11 @@ public:
     // auto cpu_end = clock::now();
     INFO_LOG("Processor thread started");
     INFO_LOG("Listening for freq_channels [{}, {}), NR_FPGA_SOURCES={}",
-             MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + T::NR_CHANNELS,
+             MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + T::NR_FPGA_CHANNELS,
              T::NR_FPGA_SOURCES);
     std::cout << "[ProcessorState] Listening for freq_channels ["
               << MIN_FREQ_CHANNEL << ", "
-              << MIN_FREQ_CHANNEL + T::NR_CHANNELS
+              << MIN_FREQ_CHANNEL + T::NR_FPGA_CHANNELS
               << "), NR_FPGA_SOURCES=" << T::NR_FPGA_SOURCES << "\n";
     start_processing_threads();
     int current_read_index;
@@ -1501,7 +1501,7 @@ private:
   std::array<std::chrono::steady_clock::time_point, T::NR_FPGA_SOURCES>
       future_stuck_since{};
   std::array<bool, T::NR_FPGA_SOURCES> future_stuck_since_valid{};
-  std::array<std::atomic<bool>, T::NR_CHANNELS> modified_since_last_completion_check;
+  std::array<std::atomic<bool>, T::NR_FPGA_CHANNELS> modified_since_last_completion_check;
   std::priority_queue<BufferOrder, std::vector<BufferOrder>,
                       std::greater<BufferOrder>>
       buffer_ordering_queue;

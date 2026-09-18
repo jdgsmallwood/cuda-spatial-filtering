@@ -15,15 +15,17 @@ target_compile_options(gpu_app_common INTERFACE
 #     $<$<COMPILE_LANGUAGE:CUDA>:-w>)
 target_link_directories(gpu_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 
-target_link_libraries(gpu_app_common INTERFACE 
-    spatial CUDA::cudart cuda cutensor HighFive::HighFive 
-    spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse 
-    ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft 
+target_link_libraries(gpu_app_common INTERFACE
+    spatial CUDA::cudart cuda cutensor HighFive::HighFive
+    spdlog::spdlog ccglib tcc filter ${CFITSIO_LIBRARIES} argparse
+    ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft
     CUDA::cusolver nlohmann_json::nlohmann_json psrdada
 )
 
-target_compile_definitions(gpu_app_common INTERFACE 
+target_compile_definitions(gpu_app_common INTERFACE
     NUMBER_BEAMS=${NUMBER_BEAMS}
+    NR_OBSERVING_FINE_CHANNELS=${NR_OBSERVING_FINE_CHANNELS}
+    NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM=${NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM}
 )
 
 # Link libibverbs only when it was found at configure time (HAVE_IBVERBS),

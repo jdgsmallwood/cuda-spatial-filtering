@@ -44,11 +44,13 @@ BeamWeightsT<Config> make_unity_beam_weights() {
 }
 
 // Builds antenna calibration gains of unit magnitude / zero phase -- the
-// "apply no calibration" baseline.
+// "apply no calibration" baseline. AntennaGains is shaped by the raw
+// FPGA/coarse channel count (calibration is loaded/applied pre-channelization),
+// not the widened Config::NR_CHANNELS.
 template <typename Config>
 typename Config::AntennaGains make_unity_antenna_gains() {
   typename Config::AntennaGains gains{};
-  for (size_t c = 0; c < Config::NR_CHANNELS; ++c)
+  for (size_t c = 0; c < Config::NR_FPGA_CHANNELS; ++c)
     for (size_t p = 0; p < Config::NR_POLARIZATIONS; ++p)
       for (size_t r = 0; r < Config::NR_RECEIVERS; ++r)
         gains[c][p][r] = std::complex<float>(1.0f, 0.0f);
@@ -139,6 +141,26 @@ make_tracked_pulsar_fold_pipeline(BeamWeightsT<Config> *weights,
       /*rfi_dada_key=*/0, std::move(beam_steering));
 }
 
+// Same as make_pulsar_fold_pipeline, but with RFI_MITIGATE=true, so the
+// correlate/eigendecompose/project path runs before beamforming.
+template <typename Config>
+std::unique_ptr<LambdaPulsarFoldPipeline<Config, true>>
+make_pulsar_fold_pipeline_rfi_mitigate(
+    BeamWeightsT<Config> *weights,
+    std::unordered_map<int, int> nr_signal_eigenvectors = {},
+    int min_freq_channel = 0) {
+  if (nr_signal_eigenvectors.empty())
+    nr_signal_eigenvectors[min_freq_channel] = 1;
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     /*num_buffers=*/1);
+  return std::make_unique<LambdaPulsarFoldPipeline<Config, true>>(
+      weights, nr_signal_eigenvectors, min_freq_channel, /*dada_key=*/0,
+      /*header_filename=*/"", /*rfi_dada_key=*/0, std::move(beam_steering));
+}
+
 // Constructs a LambdaAdaptiveBeamformedSpectraPipeline with inert beam
 // steering. nr_signal_eigenvectors maps (min_freq_channel + channel_index)
 // → K; if the map is empty every channel defaults to K=1.
@@ -162,6 +184,39 @@ make_adaptive_beamformed_spectra_pipeline(
       num_buffers, weights, nr_signal_eigenvectors, min_freq_channel,
       std::move(beam_steering), shrink_eigenvalues, detect_signal_eigenmodes,
       detection_threshold_delta, eigenmode_stats_interval_seconds);
+}
+
+// LambdaAntennaSpectraPipeline takes just a buffer count -- no beam weights/steering, since it
+// does no beamforming (or correlation).
+template <typename Config>
+std::unique_ptr<LambdaAntennaSpectraPipeline<Config>>
+make_antenna_spectra_pipeline(int num_buffers) {
+  return std::make_unique<LambdaAntennaSpectraPipeline<Config>>(num_buffers);
+}
+
+// Constructs a LambdaBeamformedSpectraPipeline with inert beam steering (empty targets => the
+// constructor's warmup maybe_refresh() is a permanent no-op after the initial weight upload).
+template <typename Config>
+std::unique_ptr<LambdaBeamformedSpectraPipeline<Config>>
+make_beamformed_spectra_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
+                                 int min_freq_channel = 0) {
+  BeamSteering<Config> beam_steering(/*targets=*/{}, /*antenna_positions=*/{},
+                                     /*antenna_mapping=*/{}, FrequencyPlan{},
+                                     min_freq_channel, ArrayLocation{},
+                                     /*update_interval_seconds=*/1.0,
+                                     num_buffers);
+  return std::make_unique<LambdaBeamformedSpectraPipeline<Config>>(
+      num_buffers, weights, std::move(beam_steering));
+}
+
+// LambdaProjectionPipeline takes just a buffer count -- no beam weights/steering, since it does
+// no beamforming.
+template <typename Config, int NR_SIGNAL_EIGENVECTORS, int NR_RUNS_TO_AVERAGE>
+std::unique_ptr<LambdaProjectionPipeline<Config, NR_SIGNAL_EIGENVECTORS, NR_RUNS_TO_AVERAGE>>
+make_projection_pipeline(int num_buffers) {
+  return std::make_unique<
+      LambdaProjectionPipeline<Config, NR_SIGNAL_EIGENVECTORS, NR_RUNS_TO_AVERAGE>>(
+      num_buffers);
 }
 
 } // namespace pipeline_factories
@@ -206,7 +261,9 @@ public:
     const int nr_packets_for_correlation =
         static_cast<int>(Config::NR_PACKETS_FOR_CORRELATION);
 
-    for (size_t channel = 0; channel < Config::NR_CHANNELS; ++channel) {
+    // Packets are delivered per raw FPGA/coarse channel, not the widened
+    // (post-channelization) Config::NR_CHANNELS.
+    for (size_t channel = 0; channel < Config::NR_FPGA_CHANNELS; ++channel) {
       for (size_t fpga = 0; fpga < Config::NR_FPGA_SOURCES; ++fpga) {
         for (int pkt = 0; pkt <= nr_packets_for_correlation; ++pkt) {
           feed_packet(channel, fpga, pkt, start_sample, sample_fn, scale_fn);

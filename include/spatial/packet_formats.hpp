@@ -262,6 +262,26 @@ struct LambdaPacketEntry
   };
 };
 
+// NR_CHANNELS_T is the number of coarse channels delivered per-packet by the FPGAs -- kept as the
+// first template parameter (unchanged position, for source compatibility with every existing call
+// site) but its *meaning* is now "coarse/FPGA channel count", exposed as NR_FPGA_CHANNELS below.
+// NR_FINE_CHANNELS_T (trailing, defaulted to 1) is the number of gpu-filter PFB fine channels each
+// coarse channel is split into pre-correlation; NR_CHANNELS becomes the derived, widened
+// "processing/output channel count" used by everything downstream of channelization
+// (visibilities, beam output, eigendecomposition, spectra). With the default of 1, NR_CHANNELS ==
+// NR_FPGA_CHANNELS and every type below is numerically identical to before this parameter existed.
+//
+// NR_FINE_CHANNEL_EDGE_TRIM_T (trailing, defaulted to 0) is how many fine channels to drop from
+// *each* edge of every coarse channel's fine-channel breakdown before correlation/beamforming --
+// the FPGA's own coarse channelizer is itself a 32/27-oversampled PFB (see
+// scripts/fm_radio_run_1_alveo_0_eigenvector_directions.py's BW_PER_COARSE_CHANNEL), so raw samples
+// near each coarse channel's edge carry that channelizer's own guard-band aliasing, and
+// gpu-filter's fine channels nearest those edges inherit it. gpu-filter/FineChannelizer<T> itself
+// still computes the full NR_FINE_CHANNELS_T (the PFB can't selectively skip edge channels); only
+// NR_CHANNELS (and everything derived from it -- visibilities, beam output, eigendecomposition) is
+// sized by the trimmed count, and channelizer_output_to_corr_input (spatial.cuh) is what actually
+// drops the edge fine channels when gathering FineChannelizer's output. Default 0 keeps every
+// existing (non-edge-trimmed) config numerically identical.
 template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_TIME_STEPS_PER_PACKET_T, size_t NR_RECEIVERS_T,
           size_t NR_POLARIZATIONS_T, size_t NR_RECEIVERS_PER_PACKET_T,
@@ -269,10 +289,23 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_PADDED_RECEIVERS_T, size_t NR_PADDED_RECEIVERS_PER_BLOCK_T,
           size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false,
-          size_t FFT_DOWNSAMPLE_FACTOR_T = 128>
+          size_t FFT_DOWNSAMPLE_FACTOR_T = 128, size_t NR_FINE_CHANNELS_T = 1,
+          size_t NR_FINE_CHANNEL_EDGE_TRIM_T = 0>
 struct LambdaConfig {
 
-  static constexpr size_t NR_CHANNELS = NR_CHANNELS_T;
+  static constexpr size_t NR_FPGA_CHANNELS = NR_CHANNELS_T;
+  static constexpr size_t NR_FINE_CHANNELS = NR_FINE_CHANNELS_T;
+  static constexpr size_t NR_FINE_CHANNEL_EDGE_TRIM = NR_FINE_CHANNEL_EDGE_TRIM_T;
+  static_assert(NR_FINE_CHANNELS == 1 ||
+                    NR_FINE_CHANNELS > 2 * NR_FINE_CHANNEL_EDGE_TRIM,
+                "NR_FINE_CHANNEL_EDGE_TRIM_T trims more channels than NR_FINE_CHANNELS_T provides");
+  // Number of fine channels per coarse channel that actually survive into NR_CHANNELS/correlation
+  // after channelizer_output_to_corr_input drops NR_FINE_CHANNEL_EDGE_TRIM from each edge.
+  static constexpr size_t NR_EFFECTIVE_FINE_CHANNELS =
+      (NR_FINE_CHANNELS > 1) ? (NR_FINE_CHANNELS - 2 * NR_FINE_CHANNEL_EDGE_TRIM)
+                             : NR_FINE_CHANNELS;
+  // Widened processing/output channel count -- see the template-parameter comment above.
+  static constexpr size_t NR_CHANNELS = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS;
   static constexpr size_t NR_FPGA_SOURCES = NR_FPGA_SOURCES_T;
   static constexpr size_t NR_TIME_STEPS_PER_PACKET = NR_TIME_STEPS_PER_PACKET_T;
   static constexpr size_t NR_RECEIVERS = NR_RECEIVERS_T;
@@ -292,31 +325,45 @@ struct LambdaConfig {
       NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
   static constexpr size_t COMPLEX = 2;
 
+  static constexpr size_t NR_TIME_STEPS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+
+  // Post-channelization per-(fine-)channel time length: what BeamOutputType, the beamforming
+  // GEMM, and every Output<T> implementation actually work with. Exact (no truncation) as long as
+  // NR_TIME_STEPS_FOR_CORRELATION divides evenly by NR_FINE_CHANNELS, which FineChannelizer's own
+  // static_asserts (pipeline/common.hpp) already enforce whenever NR_FINE_CHANNELS > 1. Equals
+  // NR_TIME_STEPS_FOR_CORRELATION when NR_FINE_CHANNELS == 1.
+  static constexpr size_t NR_TIME_STEPS_PER_FINE_CHANNEL =
+      NR_TIME_STEPS_FOR_CORRELATION / NR_FINE_CHANNELS;
+
+  // Packet-parsing/ingest types: shaped by however many coarse channels the FPGAs actually
+  // deliver (NR_FPGA_CHANNELS), not the post-channelization processing count (NR_CHANNELS).
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketSamplesT =
-      std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
+      std::complex<T>[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
 
   template <typename T, int RECEIVERS = NR_RECEIVERS>
   using LambdaPacketAlignedSamplesT =
-      std::complex<T>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION]
+      std::complex<T>[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION]
                      [NR_TIME_STEPS_PER_PACKET][RECEIVERS][NR_POLARIZATIONS];
 
-  using PacketScalesType = int16_t[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
-                                  [NR_RECEIVERS][NR_POLARIZATIONS];
+  using PacketScalesType =
+      int16_t[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_RECEIVERS]
+             [NR_POLARIZATIONS];
 
   using Sample = std::complex<int8_t>;
   using InputPacketSamplesType =
-      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
+      std::complex<int8_t>[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
   using InputPacketSamplesPlanarType =
-      std::complex<int8_t>[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
+      std::complex<int8_t>[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2]
                           [NR_FPGA_SOURCES][NR_TIME_STEPS_PER_PACKET]
                           [NR_RECEIVERS_PER_PACKET][NR_POLARIZATIONS];
 
   using HalfInputPacketSamplesPlanarType =
-      __half2[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES]
+      __half2[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES]
              [NR_TIME_STEPS_PER_PACKET][NR_RECEIVERS_PER_PACKET]
              [NR_POLARIZATIONS];
 
@@ -340,14 +387,14 @@ struct LambdaConfig {
                         OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>;
   using PacketFinalDataType =
       LambdaFinalPacketData<InputPacketSamplesType, PacketScalesType,
-                            NR_CHANNELS, NR_PACKETS_FOR_CORRELATION,
+                            NR_FPGA_CHANNELS, NR_PACKETS_FOR_CORRELATION,
                             NR_RECEIVERS_PER_PACKET, NR_POLARIZATIONS,
                             NR_FPGA_SOURCES>;
   using BeamOutputType =
       __half[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
-            [NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET][COMPLEX];
+            [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
   using ArrivalsOutputType =
-      bool[NR_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES];
+      bool[NR_FPGA_CHANNELS][NR_PACKETS_FOR_CORRELATION + 2][NR_FPGA_SOURCES];
   using VisibilitiesOutputType =
       float[NR_CHANNELS][NR_BASELINES_UNPADDED][NR_POLARIZATIONS]
            [NR_POLARIZATIONS][COMPLEX];
@@ -356,8 +403,10 @@ struct LambdaConfig {
   using EigenvectorOutputType =
       std::complex<float>[NR_CHANNELS][NR_POLARIZATIONS][NR_POLARIZATIONS]
                          [NR_RECEIVERS][NR_RECEIVERS];
+  // Used only by LambdaAntennaSpectraPipeline (no beamforming there) -- sized by NR_RECEIVERS, see
+  // the MultiChannelFFTCUFFT*Type comment below for why NR_BEAMS was wrong here.
   using FFTCUFFTPreprocessingType =
-      __half2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+      __half2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
              [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
   using FFTCUFFTInputType =
       float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
@@ -366,11 +415,17 @@ struct LambdaConfig {
       float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
             [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
 
+  // Antenna-level (not beamformed) FFT working buffers, used only by
+  // LambdaAntennaSpectraPipeline -- sized by NR_RECEIVERS, not NR_BEAMS (there is no beamforming
+  // in that pipeline). get_data_for_multi_channel_fft_launch/detect_and_downsample_multi_channel_fft_launch
+  // (spatial.cuh) both size their total element count off NR_RECEIVERS explicitly; these types
+  // previously declared NR_BEAMS here instead, a latent heap-buffer-overflow whenever
+  // NR_BEAMS != NR_RECEIVERS (the common case -- NUMBER_BEAMS defaults to 1).
   using MultiChannelFFTCUFFTInputType =
-      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
             [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
   using MultiChannelFFTCUFFTOutputType =
-      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_BEAMS]
+      float2[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
             [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION];
   constexpr static int FFT_DOWNSAMPLE_FACTOR = FFT_DOWNSAMPLE_FACTOR_T;
   using FFTOutputType =
@@ -380,28 +435,36 @@ struct LambdaConfig {
   using AntennaFFTOutputType =
       float[NR_RECEIVERS][NR_TIME_STEPS_PER_PACKET *
                           NR_PACKETS_FOR_CORRELATION / FFT_DOWNSAMPLE_FACTOR];
+  // LambdaAntennaSpectraPipeline's per-antenna spectral monitoring output. The trailing axis is
+  // NR_TIME_STEPS_PER_FINE_CHANNEL (not the raw NR_TIME_STEPS_PER_PACKET*NR_PACKETS_FOR_CORRELATION
+  // block length) so this naturally shrinks once channelized: gpu-filter's fine channels are
+  // already the frequency decomposition (the widened NR_CHANNELS axis), so what's left per fine
+  // channel is only its own time-domain samples, downsampled by simple power-averaging (no FFT --
+  // see channelizer_output_to_antenna_power in spatial.cuh) rather than a second frequency
+  // decomposition. Identical to today's shape when NR_FINE_CHANNELS == 1 (NR_TIME_STEPS_PER_FINE_CHANNEL
+  // == NR_TIME_STEPS_FOR_CORRELATION then).
   using MultiChannelAntennaFFTOutputType =
       float[NR_CHANNELS][NR_POLARIZATIONS][NR_RECEIVERS]
-           [NR_TIME_STEPS_PER_PACKET * NR_PACKETS_FOR_CORRELATION /
-            FFT_DOWNSAMPLE_FACTOR];
+           [NR_TIME_STEPS_PER_FINE_CHANNEL / FFT_DOWNSAMPLE_FACTOR];
   using Complex = std::complex<float>;
   using ReceiverArray = std::array<Complex, NR_RECEIVERS>;
   using PolArray = std::array<ReceiverArray, NR_POLARIZATIONS>;
-  using AntennaGains = std::array<PolArray, NR_CHANNELS>;
-
-  static constexpr size_t NR_TIME_STEPS_FOR_CORRELATION =
-      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+  // Calibration gains are loaded per *coarse* channel from JSON and applied by
+  // scale_and_convert_to_half before channelization -- see get_gains_structure() in common.hpp.
+  using AntennaGains = std::array<PolArray, NR_FPGA_CHANNELS>;
 
   // Per-antenna delay in nanoseconds, one per receiver.
   using AntennaDelays = std::array<float, NR_RECEIVERS>;
 
-  // Precomputed fine-channel phase correction table [chan][recv][fine_bin].
+  // Precomputed fine-channel phase correction table [chan][recv][fine_bin]. Backs the
+  // pre-channelization apply_fine_delay_correction() path (NR_FINE_CHANNELS==1 configs only --
+  // retired in favour of gpu-filter's native delay compensation once channelization is active).
   // Each entry is {cos(phi), sin(phi)} where phi = -2*pi*f_fine*tau.
   using FineDelayPhases =
-      float2[NR_CHANNELS][NR_RECEIVERS][NR_TIME_STEPS_FOR_CORRELATION];
+      float2[NR_FPGA_CHANNELS][NR_RECEIVERS][NR_TIME_STEPS_FOR_CORRELATION];
 
   // Temporary float2 workspace for scatter/FFT/IFFT/gather [chan][recv][pol][bin].
   using FineDelayWorkspace =
-      float2[NR_CHANNELS][NR_RECEIVERS][NR_POLARIZATIONS]
+      float2[NR_FPGA_CHANNELS][NR_RECEIVERS][NR_POLARIZATIONS]
             [NR_TIME_STEPS_FOR_CORRELATION];
 };

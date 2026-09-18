@@ -4,6 +4,14 @@
 #define NUMBER_BEAMS 1
 #endif
 
+#ifndef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#endif
+
+#ifndef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
+#endif
+
 void writeVectorToCSV(const std::vector<float> &times,
                       const std::string &filename) {
   std::ofstream file(filename);
@@ -50,6 +58,9 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
+  constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
+  constexpr int num_lambda_fine_channel_edge_trim =
+      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -57,7 +68,8 @@ int main(int argc, char *argv[]) {
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers,
                    nr_lambda_padded_receivers_per_block,
-                   nr_correlation_blocks_to_integrate, true, 256>;
+                   nr_correlation_blocks_to_integrate, true, 256,
+                   num_lambda_fine_channels, num_lambda_fine_channel_edge_trim>;
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
@@ -112,7 +124,7 @@ int main(int argc, char *argv[]) {
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
-          args.min_freq_channel + num_lambda_channels - 1,
+          args.min_freq_channel + Config::NR_CHANNELS - 1,
           &active_mapping, 100, 0, use_canonical);
 
   auto eigen_filename =
@@ -123,10 +135,22 @@ int main(int argc, char *argv[]) {
   //      Config::EigenvalueOutputType,
   //      Config::EigenvectorOutputType>>(eigen_file);
 
-  auto fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations, "",
-      100, args.redis_channels_per_write);
-  // auto fft_writer = nullptr;
+  // RedisBeamFFTWriter feeds the whole-band post-beamform FFT/bandpass path, which
+  // LambdaGPUPipeline permanently skips once fine channelization is active (see
+  // execute_pipeline's NR_FINE_CHANNELS==1 gate) -- spectral resolution then comes from the
+  // fine-channelized beam output directly. Skip constructing (and provisioning Redis keys for)
+  // a writer that would otherwise never receive data.
+  std::unique_ptr<FFTWriter<Config::FFTOutputType>> fft_writer;
+  if constexpr (Config::NR_FINE_CHANNELS == 1) {
+    fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
+        num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations, "",
+        100, args.redis_channels_per_write);
+  } else {
+    std::cout << "Skipping RedisBeamFFTWriter: whole-band FFT/bandpass output is "
+                 "unavailable with fine channelization enabled "
+                 "(NR_OBSERVING_FINE_CHANNELS > 1)"
+              << std::endl;
+  }
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
@@ -199,11 +223,22 @@ int main(int argc, char *argv[]) {
   }
 
   if (!args.fine_delays_filename.empty()) {
-    auto fine_delays = get_fine_delays_structure<Config>(args);
-    pipeline.set_fine_delays(fine_delays.data(),
-                             args.frequency_plan.base_frequency_hz,
-                             args.frequency_plan.channel_bandwidth_hz,
-                             args.min_freq_channel);
+    if constexpr (Config::NR_FINE_CHANNELS > 1) {
+      std::cerr << "--fine-delays is not supported with fine channelization "
+                   "enabled (NR_OBSERVING_FINE_CHANNELS > 1) -- gpu-filter's "
+                   "own per-antenna delay compensation replaces the retired "
+                   "apply_fine_delay_correction() mechanism (not yet wired "
+                   "up); rebuild with NR_OBSERVING_FINE_CHANNELS=1 or drop "
+                   "--fine-delays."
+                << std::endl;
+      return 1;
+    } else {
+      auto fine_delays = get_fine_delays_structure<Config>(args);
+      pipeline.set_fine_delays(fine_delays.data(),
+                               args.frequency_plan.base_frequency_hz,
+                               args.frequency_plan.channel_bandwidth_hz,
+                               args.min_freq_channel);
+    }
   }
 
   std::thread processor([&state]() { state.process_packets(); });

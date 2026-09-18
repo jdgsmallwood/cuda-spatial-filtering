@@ -8,15 +8,42 @@ private:
   // We are converting it to fp16 so this should not be changable anymore.
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // NR_BITS;
 
+  static_assert((T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) %
+                        T::NR_FINE_CHANNELS ==
+                    0,
+                "NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET must divide evenly "
+                "by NR_FINE_CHANNELS");
+  // Per-fine-channel block count: with channelization active, each fine channel carries
+  // NR_TIME_STEPS_FOR_CORRELATION / NR_FINE_CHANNELS time samples, not the full raw length --
+  // TCC/cuSOLVER cost is what this controls (see NR_EIGENVALUES/CUSOLVER_BATCH_SIZE below, which
+  // scale with T::NR_CHANNELS = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS -- the trimmed count,
+  // see LambdaConfig -- independently of this, which is always keyed off the untrimmed
+  // NR_FINE_CHANNELS since gpu-filter still produces that many time-sliced fine channels).
+  // Identical to today's value when NR_FINE_CHANNELS == 1.
   static constexpr int NR_BLOCKS_FOR_CORRELATION =
-      T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+      (T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+       T::NR_FINE_CHANNELS) /
       NR_TIMES_PER_BLOCK;
   static constexpr int NR_BASELINES =
       T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
   static constexpr int NR_UNPADDED_BASELINES =
       T::NR_RECEIVERS * (T::NR_RECEIVERS + 1) / 2;
+  // Raw, pre-channelization time-sample count -- used only by the (pre-channelization)
+  // fine-delay-correction path. NOT the per-fine-channel time length; see
+  // NR_TIME_STEPS_PER_FINE_CHANNEL for that.
   static constexpr int NR_TIME_STEPS_FOR_CORRELATION =
       T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET;
+  // Post-channelization per-(fine-)channel time length -- what BeamformerOutput and the
+  // beamforming GEMM actually operate on, and (via T::NR_TIME_STEPS_PER_FINE_CHANNEL,
+  // packet_formats.hpp) also what LambdaConfig::BeamOutputType and every Output<T> landing
+  // buffer are sized from -- must stay the single shared source of truth so the pipeline's
+  // beamformer_data_output_half transfer size always matches the destination. Equals
+  // NR_TIME_STEPS_FOR_CORRELATION when NR_FINE_CHANNELS == 1.
+  static constexpr int NR_TIME_STEPS_PER_FINE_CHANNEL =
+      T::NR_TIME_STEPS_PER_FINE_CHANNEL;
+  static_assert(NR_TIME_STEPS_PER_FINE_CHANNEL == NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
+               "NR_TIME_STEPS_PER_FINE_CHANNEL (LambdaConfig) and NR_BLOCKS_FOR_CORRELATION * "
+               "NR_TIMES_PER_BLOCK (this pipeline) must agree");
   static constexpr int COMPLEX = 2;
   static constexpr int NR_EIGENVALUES =
       T::NR_PADDED_RECEIVERS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
@@ -54,13 +81,22 @@ private:
 
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
-           [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+           [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
 
   using HalfBeamformerOutput =
       __half[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
-            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+            [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
 
   using BeamWeights = BeamWeightsT<T>;
+
+  // Replaces T::HalfPacketAlignedSamplesType (now NR_FPGA_CHANNELS-shaped, raw-time-axis) as
+  // samples_consolidated_col_maj's type: widened-channel, per-fine-channel time axis, unpadded
+  // receivers split as [FPGA][RECEIVER_IN_PACKET] -- matches modePlanarColMajCons's convention
+  // ('c','p','z','s','f','n') and what corr_input_to_col_maj_cons (spatial.cuh) produces.
+  using SamplesConsolidatedColMajType =
+      __half[T::NR_CHANNELS][T::NR_POLARIZATIONS][COMPLEX]
+            [NR_TIME_STEPS_PER_FINE_CHANNEL][T::NR_FPGA_SOURCES]
+            [T::NR_RECEIVERS_PER_PACKET];
 
   // a = unpadded baselines
   // b = block
@@ -79,9 +115,16 @@ private:
   // u = time steps per packet
   // z = complex
 
-  inline static const std::vector<int> modePacket{'c', 'g', 'f', 'u',
+  // 'C' (capital) = NR_FPGA_CHANNELS, used only by the pre-channelization tensors below
+  // (packetToPreAlign is the only actively-invoked permutation among this file's registered
+  // tensors that operates before channelization -- samples_half/samples_pre_align are
+  // NR_FPGA_CHANNELS-shaped). Every other registered tensor/permutation in this file (including
+  // modePacketAligned and friends below, which are registered but never actually invoked via
+  // runPermutation in the executed code path -- the real work uses hand-written kernels instead)
+  // keeps lowercase 'c' bound to the widened, post-channelization T::NR_CHANNELS.
+  inline static const std::vector<int> modePacket{'C', 'g', 'f', 'u',
                                                   'n', 'p', 'z'};
-  inline static const std::vector<int> modePacketPreAlign{'f', 'g', 'u', 'c',
+  inline static const std::vector<int> modePacketPreAlign{'f', 'g', 'u', 'C',
                                                           'n', 'p', 'z'};
   inline static const std::vector<int> modePacketAligned{'f', 'o', 'u', 'c',
                                                          'n', 'p', 'z'};
@@ -131,6 +174,7 @@ private:
       {'a', NR_UNPADDED_BASELINES},
       {'b', NR_BLOCKS_FOR_CORRELATION},
       {'c', T::NR_CHANNELS},
+      {'C', T::NR_FPGA_CHANNELS},
       {'d', T::NR_PADDED_RECEIVERS},
       {'f', T::NR_FPGA_SOURCES},
       {'g', T::NR_PACKETS_FOR_CORRELATION + 2},
@@ -171,8 +215,8 @@ private:
         samples_pre_align; // y
     DevicePtr<typename T::HalfPacketAlignedSamplesType> samples_aligned,
         samples_reordered,
-        samples_padding, samples_consolidated,
-        samples_consolidated_col_maj;                                      // y
+        samples_padding, samples_consolidated;                             // y
+    DevicePtr<SamplesConsolidatedColMajType> samples_consolidated_col_maj; // y
     DevicePtr<typename T::PaddedPacketSamplesType> samples_padded;         // y
     DevicePtr<typename T::FFTCUFFTInputType> samples_cufft_input;          // y
     DevicePtr<typename T::FFTCUFFTOutputType> samples_cufft_output;        // y
@@ -181,6 +225,12 @@ private:
     DevicePtr<BeamformerOutput> beamformer_output, beamformer_data_output; // y
     DevicePtr<HalfBeamformerOutput> beamformer_data_output_half;           // y
     DevicePtr<void> cufft_work_area;                                       // y
+
+    // Fine-channelization scratch (only used when T::NR_FINE_CHANNELS > 1; allocated
+    // unconditionally for simplicity -- a modest, documented memory cost for
+    // NR_FINE_CHANNELS == 1 configs, see FineChannelizer's usage in enqueue_pre_corr).
+    DevicePtr<typename FineChannelizer<T>::FilterInputType> channelizer_input;   // y
+    DevicePtr<typename FineChannelizer<T>::FilterOutputType> channelizer_output; // y
 
     // Correlator I/O
     DevicePtr<CorrelatorInput> correlator_input;   // y
@@ -241,7 +291,11 @@ private:
           samples_consolidated(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_consolidated_col_maj(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr<SamplesConsolidatedColMajType>()),
+          channelizer_input(
+              make_device_ptr<typename FineChannelizer<T>::FilterInputType>()),
+          channelizer_output(
+              make_device_ptr<typename FineChannelizer<T>::FilterOutputType>()),
           samples_cufft_input(make_device_ptr<typename T::FFTCUFFTInputType>()),
           samples_cufft_output(
               make_device_ptr<typename T::FFTCUFFTOutputType>()),
@@ -422,8 +476,16 @@ private:
   typename T::AntennaGains *d_gains;
   // Fine-channel phase delay correction: precomputed phasors [chan][recv][bin].
   // Allocated to identity {1,0} at construction; populated by set_fine_delays().
+  // Only used for NR_FINE_CHANNELS == 1 -- retired in favour of gpu-filter's native delay
+  // compensation once channelization is active (set_fine_delays() throws in that case).
   float2 *d_fine_delay_phases = nullptr;
   bool has_fine_delays = false;
+  // Pipeline-level (not per-buffer, like `correlator`): one gpu-filter Filter instance per
+  // coarse channel, shared across all buffers -- see FineChannelizer's class comment for why
+  // that's safe with LambdaGPUPipeline's concurrent multi-buffer model. Only constructed when
+  // T::NR_FINE_CHANNELS > 1, so NR_FINE_CHANNELS == 1 configs pay zero NVRTC-JIT startup cost
+  // for a feature they don't use.
+  std::unique_ptr<FineChannelizer<T>> channelizer_;
   std::vector<PipelineResources> buffers;
   int *d_subpacket_delays;
   int *d_stream_perm_recv = nullptr; // [NR_RECEIVERS*NR_POL] canonical→src flat recv; identity by default
@@ -431,7 +493,7 @@ private:
   int visibilities_start_seq_num;
   int visibilities_end_seq_num;
   static constexpr int visibilities_total_packets_per_block =
-      T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
+      T::NR_FPGA_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int visibilities_missing_packets;
   cusolverEigMode_t cusolver_jobz;
   cublasFillMode_t cusolver_uplo;
@@ -477,9 +539,13 @@ public:
       enqueue_alignment(b);
     }
 
-    // Fine-channel phase delay correction (eager, only when enabled).
-    if (has_fine_delays) {
-      apply_fine_delay_correction(b);
+    // Fine-channel phase delay correction (eager, only when enabled). Retired in favour of
+    // gpu-filter's native delay compensation once fine channelization is active -- see
+    // set_fine_delays()'s guard and FineChannelizer's class comment in pipeline/common.hpp.
+    if constexpr (T::NR_FINE_CHANNELS == 1) {
+      if (has_fine_delays) {
+        apply_fine_delay_correction(b);
+      }
     }
 
     // Correlation section: aligned_to_corr_input + TCC + trimming + permutations.
@@ -519,16 +585,23 @@ public:
     // d_visibilities_accumulator, without a cudaDeviceSynchronize().
     cudaEventRecord(b.accumulate_done, b.stream);
 
-    CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
-                            (void *)b.samples_cufft_output.get(),
-                            CUFFT_FORWARD));
+    // Whole-band post-beamform FFT/bandpass output: a workaround for not having real
+    // channelization, now redundant once gpu-filter's fine channels provide the spectral
+    // decomposition directly -- deleted for the channelized path rather than preserved as a
+    // second, separate spectral decomposition (per project decision; downstream RedisBeamFFTWriter
+    // consumers need to move to reading resolution off the fine-channelized beam output instead).
+    if constexpr (T::NR_FINE_CHANNELS == 1) {
+      CUFFT_CHECK(cufftXtExec(b.fft_plan, (void *)b.samples_cufft_input.get(),
+                              (void *)b.samples_cufft_output.get(),
+                              CUFFT_FORWARD));
 
-    detect_and_downsample_fft_launch(
-        (float2 *)b.samples_cufft_output.get(),
-        (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
-        T::NR_POLARIZATIONS,
-        T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
-        T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+      detect_and_downsample_fft_launch(
+          (float2 *)b.samples_cufft_output.get(),
+          (float *)b.cufft_downsampled_output.get(), T::NR_CHANNELS,
+          T::NR_POLARIZATIONS,
+          T::NR_TIME_STEPS_PER_PACKET * T::NR_PACKETS_FOR_CORRELATION,
+          T::NR_BEAMS, T::FFT_DOWNSAMPLE_FACTOR, b.stream);
+    }
     cudaEventRecord(stop_run[benchmark_runs_done], b.stream);
 
     // Output handling
@@ -538,8 +611,9 @@ public:
       size_t eigenvalue_block_num =
           output_->register_eigendecomposition_data_block(start_seq_num,
                                                           end_seq_num);
-      size_t fft_block_num =
-          output_->register_fft_block(start_seq_num, end_seq_num);
+      size_t fft_block_num = T::NR_FINE_CHANNELS == 1
+                                 ? output_->register_fft_block(start_seq_num, end_seq_num)
+                                 : std::numeric_limits<size_t>::max();
 
       if (block_num != std::numeric_limits<size_t>::max()) {
         void *landing_pointer =
@@ -622,29 +696,52 @@ public:
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_pre_align.get(), b.stream);
 
+    // Pre-channelization: samples_pre_align/samples_aligned/samples_reordered are all
+    // HalfPacketSamplesType-family buffers, shaped by the raw FPGA/coarse channel count.
     apply_delays_launch((__half *)b.samples_pre_align.get(),
                         (__half *)b.samples_aligned.get(), d_subpacket_delays,
                         T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
                         T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
-                        T::NR_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+                        T::NR_FPGA_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
 
     reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
-                           T::NR_TIME_STEPS_PER_PACKET, T::NR_CHANNELS,
+                           T::NR_TIME_STEPS_PER_PACKET, T::NR_FPGA_CHANNELS,
                            T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
         (__half *)b.samples_aligned.get(),
         (__half *)b.samples_reordered.get(),
         d_stream_perm_recv, d_stream_perm_pol, b.stream);
   }
 
-  // Part 2: corr_input reformat + TCC + trimming + decomp permutations.
+  // Part 2: corr_input reformat (fine-channelization, or the plain reshape when disabled) + TCC
+  // + trimming + decomp permutations.
   void enqueue_pre_corr(PipelineResources &b) {
-    aligned_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
-                          T::NR_RECEIVERS_PER_PACKET,
-                          T::NR_TIME_STEPS_PER_PACKET,
-                          T::NR_PACKETS_FOR_CORRELATION,
-                          T::NR_PADDED_RECEIVERS, NR_TIMES_PER_BLOCK>(
-        (__half *)b.samples_reordered.get(), (__half *)b.correlator_input.get(),
-        b.stream);
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      reorder_to_filter_input<T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+                              T::NR_RECEIVERS_PER_PACKET, T::NR_TIME_STEPS_PER_PACKET,
+                              T::NR_PACKETS_FOR_CORRELATION, FineChannelizer<T>::NR_TAPS,
+                              T::NR_FINE_CHANNELS>(
+          (__half *)b.samples_reordered.get(),
+          (float2 *)b.channelizer_input.get(), b.stream);
+
+      channelizer_->launchAsync(b.stream, b.channelizer_input.get(),
+                                b.channelizer_output.get());
+
+      channelizer_output_to_corr_input<T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS,
+                                       T::NR_FINE_CHANNEL_EDGE_TRIM,
+                                       T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+                                       T::NR_PADDED_RECEIVERS,
+                                       NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
+          (const __half2 *)b.channelizer_output.get(),
+          (__half *)b.correlator_input.get(), b.stream);
+    } else {
+      aligned_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+                            T::NR_RECEIVERS_PER_PACKET,
+                            T::NR_TIME_STEPS_PER_PACKET,
+                            T::NR_PACKETS_FOR_CORRELATION,
+                            T::NR_PADDED_RECEIVERS, NR_TIMES_PER_BLOCK>(
+          (__half *)b.samples_reordered.get(), (__half *)b.correlator_input.get(),
+          b.stream);
+    }
 
     correlator.launchAsync((CUstream)b.stream,
                            (CUdeviceptr)b.correlator_output.get(),
@@ -681,13 +778,13 @@ public:
     float2 *ws = (float2 *)b.fine_delay_workspace.get();
     __half2 *aligned = (__half2 *)b.samples_reordered.get();
 
-    fine_delay_scatter_launch<T::NR_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
+    fine_delay_scatter_launch<T::NR_FPGA_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
                               T::NR_TIME_STEPS_PER_PACKET, T::NR_RECEIVERS,
                               T::NR_POLARIZATIONS>(aligned, ws, b.stream);
 
     CUFFT_CHECK(cufftXtExec(b.fine_delay_fft_plan, ws, ws, CUFFT_FORWARD));
 
-    fine_delay_phase_multiply_launch<T::NR_CHANNELS, T::NR_RECEIVERS,
+    fine_delay_phase_multiply_launch<T::NR_FPGA_CHANNELS, T::NR_RECEIVERS,
                                      T::NR_POLARIZATIONS,
                                      NR_TIME_STEPS_FOR_CORRELATION>(
         ws, d_fine_delay_phases, b.stream);
@@ -695,7 +792,7 @@ public:
     CUFFT_CHECK(cufftXtExec(b.fine_delay_fft_plan, ws, ws, CUFFT_INVERSE));
 
     constexpr float inv_n = 1.0f / NR_TIME_STEPS_FOR_CORRELATION;
-    fine_delay_gather_launch<T::NR_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
+    fine_delay_gather_launch<T::NR_FPGA_CHANNELS, T::NR_PACKETS_FOR_CORRELATION,
                              T::NR_TIME_STEPS_PER_PACKET, T::NR_RECEIVERS,
                              T::NR_POLARIZATIONS>(ws, aligned, inv_n, b.stream);
   }
@@ -712,11 +809,17 @@ public:
                                 T::NR_POLARIZATIONS * T::NR_CHANNELS,
                             b.stream);
 
-    aligned_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
-                            T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-                            T::NR_TIME_STEPS_PER_PACKET,
-                            T::NR_PACKETS_FOR_CORRELATION>(
-        (__half *)b.samples_reordered.get(),
+    // Sourced from correlator_input (the same buffer TCC reads, populated either by
+    // aligned_to_corr_input or the fine-channelizer path in enqueue_pre_corr) rather than the
+    // raw pre-channelization samples_reordered -- beamforming now runs on the same (possibly
+    // fine-channelized) data as correlation. Correct in both cases: for NR_FINE_CHANNELS == 1,
+    // correlator_input already holds exactly the same samples samples_reordered did, just
+    // reshaped/padded, so this is numerically identical to the old aligned_to_col_maj_cons path.
+    corr_input_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
+                               T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                               T::NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
+                               NR_TIMES_PER_BLOCK>(
+        (__half *)b.correlator_input.get(),
         (__half *)b.samples_consolidated_col_maj.get(), b.stream);
 
     update_weights((__half *)b.weights.get(), (__half *)b.weights_updated.get(),
@@ -733,13 +836,18 @@ public:
                        (CUdeviceptr)b.beamformer_output.get());
 
     beam_ccglib_to_half_output<T::NR_CHANNELS, T::NR_POLARIZATIONS,
-                               T::NR_BEAMS, NR_TIME_STEPS_FOR_CORRELATION>(
+                               T::NR_BEAMS, NR_TIME_STEPS_PER_FINE_CHANNEL>(
         (float *)b.beamformer_output.get(),
         (__half *)b.beamformer_data_output_half.get(), b.stream);
 
-    tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
-                             (float *)b.beamformer_output.get(),
-                             (float *)b.samples_cufft_input.get(), b.stream);
+    // Whole-band post-beamform FFT/bandpass prep: superseded by the fine channels themselves
+    // once channelization is active -- see the execute_pipeline note by the retired cufftXtExec
+    // call below for why this is deleted rather than reshaped for NR_FINE_CHANNELS > 1.
+    if constexpr (T::NR_FINE_CHANNELS == 1) {
+      tensor_32.runPermutation("beamToCUFFTInput", alpha_32,
+                               (float *)b.beamformer_output.get(),
+                               (float *)b.samples_cufft_input.get(), b.stream);
+    }
   }
 
   // Capture one section into an instantiated graph.  Raw CUDA calls (not
@@ -811,7 +919,12 @@ public:
               << ", NR_RECEIVERS_PER_BLOCK: "
               << T::NR_PADDED_RECEIVERS_PER_BLOCK << std::endl;
 
-    const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_FOR_CORRELATION;
+    // Per-fine-channel time length -- matches BeamformerOutput's (now possibly-shrunk) time
+    // axis. Identical to the old NR_TIME_STEPS_FOR_CORRELATION value when NR_FINE_CHANNELS == 1.
+    // (This plan is only ever executed for NR_FINE_CHANNELS == 1 -- see the if constexpr guard
+    // around its cufftXtExec call in execute_pipeline -- but is still sized correctly here so a
+    // future reader isn't misled by a stale constant.)
+    const long long CUFFT_FFT_SIZE = NR_TIME_STEPS_PER_FINE_CHANNEL;
     long long N[] = {CUFFT_FFT_SIZE};
     const size_t NUM_TOTAL_BATCHES =
         T::NR_BEAMS * T::NR_CHANNELS * T::NR_POLARIZATIONS;
@@ -827,7 +940,7 @@ public:
         cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
 
     CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
-    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+    auto default_gains = get_default_gains<T::NR_FPGA_CHANNELS, T::NR_RECEIVERS,
                                            T::NR_POLARIZATIONS>();
     CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
                           sizeof(typename T::AntennaGains), cudaMemcpyDefault));
@@ -837,7 +950,7 @@ public:
                           sizeof(typename T::FineDelayPhases)));
     {
       std::vector<float2> identity(
-          T::NR_CHANNELS * T::NR_RECEIVERS * NR_TIME_STEPS_FOR_CORRELATION,
+          T::NR_FPGA_CHANNELS * T::NR_RECEIVERS * NR_TIME_STEPS_FOR_CORRELATION,
           {1.0f, 0.0f});
       CUDA_CHECK(cudaMemcpy(d_fine_delay_phases, identity.data(),
                             sizeof(typename T::FineDelayPhases),
@@ -869,6 +982,10 @@ public:
     current_buffer = 0;
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
+
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device);
+    }
 
     size_t work_size = 0;
     {
@@ -948,13 +1065,16 @@ public:
       CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
       CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
 
-      // Fine-delay FFT plan: batched 1-D FFT over the full correlation block,
-      // one batch per (channel × receiver × pol) combination.
-      {
+      // Fine-delay FFT plan: batched 1-D FFT over the full correlation block, one batch per
+      // (channel × receiver × pol) combination. apply_fine_delay_correction() (which uses this
+      // plan) and set_fine_delays() (the only way has_fine_delays can become true) are both
+      // retired for NR_FINE_CHANNELS > 1 -- skip standing up a live cuFFT plan (and its internal
+      // work-area allocation) that can then never execute.
+      if constexpr (T::NR_FINE_CHANNELS == 1) {
         constexpr long long FINE_N = NR_TIME_STEPS_FOR_CORRELATION;
         long long fine_n[] = {FINE_N};
         const long long FINE_BATCHES =
-            T::NR_CHANNELS * T::NR_RECEIVERS * T::NR_POLARIZATIONS;
+            T::NR_FPGA_CHANNELS * T::NR_RECEIVERS * T::NR_POLARIZATIONS;
         size_t fine_ws = 0;
         CUFFT_CHECK(cufftXtMakePlanMany(
             b.fine_delay_fft_plan, 1, fine_n, nullptr, 1, FINE_N, CUDA_C_32F,
@@ -1077,7 +1197,7 @@ public:
                           cudaMemcpyDefault));
 
     std::cout << "Loaded gains are:\n";
-    for (auto i = 0; i < T::NR_CHANNELS; ++i) {
+    for (auto i = 0; i < T::NR_FPGA_CHANNELS; ++i) {
       for (auto j = 0; j < T::NR_POLARIZATIONS; ++j) {
         for (auto k = 0; k < T::NR_RECEIVERS; ++k) {
           std::cout << "channel " << i << " pol " << j << " receiver " << k
@@ -1100,11 +1220,19 @@ public:
   virtual void set_fine_delays(const float *delays_ns, double base_freq_hz,
                                double channel_bw_hz,
                                int min_freq_ch) override {
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      throw std::runtime_error(
+          "set_fine_delays() is not supported when NR_FINE_CHANNELS > 1 -- the "
+          "apply_fine_delay_correction() path it feeds is retired in favour of gpu-filter's "
+          "native delay compensation for the channelized pipeline. Wiring real per-antenna "
+          "delays into FineChannelizer's gpu-filter Filter instances (FilterArgs::delays / "
+          "launchAsync's devDelays) is tracked as follow-up work.");
+    }
     std::cout << "Computing fine-channel phase delay table...\n";
     constexpr size_t N = NR_TIME_STEPS_FOR_CORRELATION;
-    std::vector<float2> table(T::NR_CHANNELS * T::NR_RECEIVERS * N);
+    std::vector<float2> table(T::NR_FPGA_CHANNELS * T::NR_RECEIVERS * N);
 
-    for (size_t c = 0; c < T::NR_CHANNELS; ++c) {
+    for (size_t c = 0; c < T::NR_FPGA_CHANNELS; ++c) {
       const double f_coarse =
           base_freq_hz + static_cast<double>(min_freq_ch + c) * channel_bw_hz;
       for (size_t r = 0; r < T::NR_RECEIVERS; ++r) {
@@ -1126,7 +1254,7 @@ public:
                           cudaMemcpyDefault));
     has_fine_delays = true;
     std::cout << "Fine-delay table uploaded for " << T::NR_RECEIVERS
-              << " receivers, " << T::NR_CHANNELS << " channels, " << N
+              << " receivers, " << T::NR_FPGA_CHANNELS << " channels, " << N
               << " fine bins.\n";
   }
 

@@ -927,7 +927,7 @@ template <typename T>
 inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
   // AntennaGains objects should be [Channel][Pol][Antenna]
   typename T::AntennaGains output{};
-  for (auto i = 0; i < T::NR_CHANNELS; ++i) {
+  for (auto i = 0; i < T::NR_FPGA_CHANNELS; ++i) {
     for (auto j = 0; j < T::NR_POLARIZATIONS; ++j) {
       for (auto f = 0; f < T::NR_FPGA_SOURCES; ++f) {
         int fpga_id = args.fpga_id_vec[f];
@@ -993,7 +993,7 @@ get_gains_structure_canonical(
     CommonArgs &args,
     const std::unordered_map<int, int> &canonical_mapping) {
   typename T::AntennaGains output{};
-  for (int i = 0; i < T::NR_CHANNELS; ++i) {
+  for (int i = 0; i < T::NR_FPGA_CHANNELS; ++i) {
     for (int j = 0; j < T::NR_POLARIZATIONS; ++j) {
       const std::string pol_string = (j == 0) ? "XX" : "YY";
       for (int k = 0; k < T::NR_RECEIVERS; ++k) {

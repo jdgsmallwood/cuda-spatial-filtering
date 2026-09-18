@@ -1,5 +1,13 @@
 #include "spatial/common.hpp"
 
+#ifndef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#endif
+
+#ifndef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
+#endif
+
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
@@ -29,24 +37,31 @@ int main(int argc, char *argv[]) {
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
   constexpr int fft_downsample_factor = 64;
+  constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
+  constexpr int num_lambda_fine_channel_edge_trim =
+      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM;
   using Config = LambdaConfig<
       num_lambda_channels, nr_fpga_sources, nr_lambda_time_steps_per_packet,
       nr_lambda_receivers, nr_lambda_polarizations,
       nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
       nr_lambda_beams, nr_lambda_padded_receivers,
       nr_lambda_padded_receivers_per_block, nr_correlation_blocks_to_integrate,
-      true, fft_downsample_factor>;
+      true, fft_downsample_factor, num_lambda_fine_channels,
+      num_lambda_fine_channel_edge_trim>;
 
-  // 2x as there will be original & RFI mitigated beams.
+  // 2x as there will be original & RFI mitigated beams. Only meaningful when
+  // NR_FINE_CHANNELS == 1 -- the whole-band FFT is deleted once channelized (see
+  // LambdaAdaptiveBeamformedSpectraPipeline::execute_pipeline).
   using FFTOutputType =
-      float[NR_OBSERVING_CHANNELS][nr_lambda_polarizations][2 * nr_lambda_beams]
+      float[Config::NR_CHANNELS][nr_lambda_polarizations][2 * nr_lambda_beams]
            [nr_lambda_time_steps_per_packet - 10];
 
+  // Trailing axis matches the pipeline's own (private) BeamOutput type --
+  // Config::NR_TIME_STEPS_PER_FINE_CHANNEL, not the raw packets*time-per-packet product.
   using BeamOutputType =
-      std::complex<__half>[NR_OBSERVING_CHANNELS][nr_lambda_polarizations]
+      std::complex<__half>[Config::NR_CHANNELS][nr_lambda_polarizations]
                           [2 * nr_lambda_beams]
-                          [NR_OBSERVING_PACKETS_FOR_CORRELATION *
-                           nr_lambda_time_steps_per_packet];
+                          [Config::NR_TIME_STEPS_PER_FINE_CHANNEL];
   const std::unordered_map<std::string, int> ifname_to_fpga{
       {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
 
@@ -68,12 +83,20 @@ int main(int argc, char *argv[]) {
       "beam_fft", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
 
   HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
-  // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
-  //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
-  //     "beam-fft:");
-  auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
-      fft_beam_file, args.min_freq_channel,
-      args.min_freq_channel + num_lambda_channels - 1);
+  // The whole-band FFT is deleted once channelized -- gpu-filter's fine channels are the
+  // spectrum instead (see LambdaAdaptiveBeamformedSpectraPipeline::execute_pipeline). Skip
+  // constructing a writer that would otherwise never receive data.
+  std::unique_ptr<FFTWriter<FFTOutputType>> fft_writer;
+  if constexpr (Config::NR_FINE_CHANNELS == 1) {
+    fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
+        fft_beam_file, args.min_freq_channel,
+        args.min_freq_channel + Config::NR_CHANNELS - 1);
+  } else {
+    std::cout << "Skipping FFT writer: whole-band FFT/bandpass output is "
+                 "unavailable with fine channelization enabled "
+                 "(NR_OBSERVING_FINE_CHANNELS > 1)"
+              << std::endl;
+  }
 
   std::cout << "Creating Eigen Writer\n";
   std::string eigen_filename =
@@ -117,7 +140,7 @@ int main(int argc, char *argv[]) {
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
 
-  for (auto i = 0; i < num_lambda_channels; ++i) {
+  for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
     for (auto j = 0; j < nr_lambda_receivers; ++j) {
       for (auto k = 0; k < nr_lambda_beams; ++k) {
         for (auto l = 0; l < nr_lambda_polarizations; ++l) {

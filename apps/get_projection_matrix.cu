@@ -1,5 +1,13 @@
 #include "spatial/common.hpp"
 
+#ifndef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#endif
+
+#ifndef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
+#endif
+
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
@@ -26,6 +34,9 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
+  constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
+  constexpr int num_lambda_fine_channel_edge_trim =
+      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -33,7 +44,8 @@ int main(int argc, char *argv[]) {
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers,
                    nr_lambda_padded_receivers_per_block,
-                   nr_correlation_blocks_to_integrate, true>;
+                   nr_correlation_blocks_to_integrate, true, 128,
+                   num_lambda_fine_channels, num_lambda_fine_channel_edge_trim>;
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {

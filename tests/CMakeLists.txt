@@ -24,7 +24,7 @@ target_link_directories(test_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 target_compile_options(test_app_common INTERFACE
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=128,2417>)
 target_link_libraries(test_app_common INTERFACE GTest::gtest_main spatial CUDA::cudart ccglib
-HighFive::HighFive CUDA::cufft CUDA::cusolver cutensor tcc psrdada ${CASACORE_LIBRARIES} redis++ hiredis argparse)
+HighFive::HighFive CUDA::cufft CUDA::cusolver cutensor tcc filter psrdada ${CASACORE_LIBRARIES} redis++ hiredis argparse)
 
 set_target_properties(test_app_common PROPERTIES CUDA_ARCHITECTURES "native")
 add_executable(
@@ -119,6 +119,34 @@ add_executable(AntennaOrderingTests test_antenna_ordering.cu)
 target_link_libraries(AntennaOrderingTests PRIVATE test_support)
 set_target_properties(AntennaOrderingTests PROPERTIES CUDA_ARCHITECTURES "native")
 
+add_executable(FineChannelizerTests test_fine_channelizer.cu)
+target_link_libraries(FineChannelizerTests PRIVATE test_support)
+set_target_properties(FineChannelizerTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedAntennaSpectraTests test_fine_channelized_antenna_spectra.cu)
+target_link_libraries(FineChannelizedAntennaSpectraTests PRIVATE test_support)
+set_target_properties(FineChannelizedAntennaSpectraTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedBeamformedSpectraTests test_fine_channelized_beamformed_spectra.cu)
+target_link_libraries(FineChannelizedBeamformedSpectraTests PRIVATE test_support)
+set_target_properties(FineChannelizedBeamformedSpectraTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedProjectionTests test_fine_channelized_projection.cu)
+target_link_libraries(FineChannelizedProjectionTests PRIVATE test_support)
+set_target_properties(FineChannelizedProjectionTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedAdaptiveTests test_fine_channelized_adaptive.cu)
+target_link_libraries(FineChannelizedAdaptiveTests PRIVATE test_support)
+set_target_properties(FineChannelizedAdaptiveTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedPulsarFoldTests test_fine_channelized_pulsar_fold.cu)
+target_link_libraries(FineChannelizedPulsarFoldTests PRIVATE test_support)
+set_target_properties(FineChannelizedPulsarFoldTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedCorrBeamTests test_fine_channelized_corr_beam.cu)
+target_link_libraries(FineChannelizedCorrBeamTests PRIVATE test_support)
+set_target_properties(FineChannelizedCorrBeamTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
 # gettimeofday, and pool-alloc microbenchmarks for the six hot-path fixes.
@@ -141,6 +169,13 @@ gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_E
 gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(StreamReorderTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(AntennaOrderingTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizerTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedAntennaSpectraTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedBeamformedSpectraTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedProjectionTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedAdaptiveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedPulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedCorrBeamTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 
 add_test(
   NAME AdaptiveDetectionReferencePythonTests

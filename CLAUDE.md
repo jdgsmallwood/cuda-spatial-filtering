@@ -77,21 +77,86 @@ Two non-obvious things that will otherwise produce confusing failures:
 `module load cuda/12.6.0 gcc/13.3.0 cmake/3.29.3`, which keeps the host compiler's glibc and the
 system's in sync and avoids both issues above.)
 
+- **`Could NOT find Boost`** (configure-time failure once `extern/gpu-filter` is in the build):
+  Boost headers aren't installed anywhere in this container (`libboost-dev` is in the Dockerfile
+  for future image rebuilds, but a *running* container built before that lands won't have it, and
+  you won't have root to `apt-get install` it). If you can't install the system package, point
+  CMake at a headers-only Boost extraction instead (no build/link needed — `gpu-filter`'s
+  `FilterBank` only uses header-only `boost::multi_array`):
+  ```bash
+  cmake ... -DBOOST_ROOT=/path/to/boost-X.Y.Z -DBoost_INCLUDE_DIR=/path/to/boost-X.Y.Z ..
+  ```
+- **`cuFFTDx requires GPU architecture sm_70 or higher`** at configure time, even though the
+  actual GPU is sm_70+: this project's own `CMAKE_CUDA_ARCHITECTURES` default is the string
+  `"native"` (set *after* `project(... LANGUAGES CUDA ...)` in the top-level `CMakeLists.txt`, so
+  CMake's built-in native-arch auto-resolution never fires and the literal string `"native"`
+  survives to configure time). `extern/gpu-filter`'s own architecture check
+  (`if(... CMAKE_CUDA_ARCHITECTURES LESS 70)`) does a numeric comparison against that string,
+  which is always false-y and trips the guard. Pass an explicit numeric value at configure time
+  (this also fixes the "native" issue for every other target, not just gpu-filter):
+  ```bash
+  cmake ... -DCMAKE_CUDA_ARCHITECTURES=89 ..   # 89 for an RTX 4060; use the actual compute capability
+  ```
+- **`undefined reference to 'nl_*@libnl_3'` / missing `libnl-route-3.so.200`** when linking any app
+  target (not test targets — only `apps/CMakeLists.txt`'s `gpu_app_common` links `IBVERBS_LIBRARY`):
+  conda ships its own `libibverbs.so`, built against conda's own *versioned* `libnl-3`/
+  `libnl-route-3` — incompatible with this container's *unversioned* system `libnl-3` and (if
+  `libnl-route-3-dev` isn't installed) entirely-missing system `libnl-route-3`. The repo's
+  `CMakeLists.txt` already prefers a system `libibverbs` (`/usr/lib/x86_64-linux-gnu` searched
+  first) and disables `libpcap`'s own independent `pkg_check_modules(libibverbs)` RDMA-sniffing
+  probe (`DISABLE_RDMA` — libpcap does this check unconditionally on Linux and would otherwise
+  pull conda's copy in a second, independent way even after the app-level preference is fixed).
+  This only fully resolves once `libibverbs-dev` + `libnl-route-3-dev` are installed (in the
+  Dockerfile for future rebuilds); on a *running* container without them and without root, force
+  ibverbs off entirely instead of fighting the conda/system split:
+  ```bash
+  cmake ... -DIBVERBS_LIBRARY:FILEPATH= -DIBVERBS_INCLUDE_DIR:PATH= ..   # empty (not NOTFOUND) so
+                                                                          # find_library doesn't re-search
+  ```
+- **`ppf::Filter::launchAsync`'s raw-pointer overload (`CUstream`/`CUdeviceptr` args) hangs
+  indefinitely in `cuLaunchKernel`**, regardless of CUDA context model — a real bug isolated via
+  a minimal repro (just one `Filter` instance, nothing else, not even TCC). `FineChannelizer`
+  (`pipeline/common.hpp`) works around it by calling gpu-filter's `cu::Stream`-based overload
+  directly, wrapping the raw stream/pointers into non-owning `cu::Stream`/`cu::DeviceMemory`
+  objects itself instead of letting `Filter::launchAsync` do it internally. If you're calling
+  `ppf::Filter::launchAsync` directly anywhere else, use the `cu::Stream`-based overload, not the
+  raw-pointer one. See `docs/architecture.md` Section 6's "Resolved" note for the full
+  investigation (including the wrong turns — an earlier theory blamed external GPU contention;
+  that was a misdiagnosis of ordinary desktop GPU usage, not the real cause).
+
 Test binaries (see `tests/CMakeLists.txt`): `CUDASpatialFilteringTests` (test_spatial.cpp, mostly
 disabled/commented-out correlation experiments), `PipelineTests` (test_pipeline.cu, GPU pipeline
 kernels), `CUDASpatialFilteringCPUTests` (test_packet_formats.cpp, CPU-only packet parsing),
 `WriterTests` (test_writers.cpp, HDF5 writers), `ProcessorTests` (test_processor.cu, the packet
 ring-buffer/`ProcessorState` machinery), `PipelineHarnessSelfTest` (support/test_harness_selftest.cu,
-proves out the shared pipeline-test harness in `tests/support/` — see `tests/TESTING.md`), plus
-`test_beamforming.cpp` for beamforming math.
+proves out the shared pipeline-test harness in `tests/support/` — see `tests/TESTING.md`),
+`FineChannelizerTests` (test_fine_channelizer.cu, exercises `LambdaGPUPipeline` with pre-correlation
+fine channelization active, plus direct low-level unit tests of the shared
+`reorder_to_filter_input`/`channelizer_output_to_corr_input`/`channelizer_output_to_col_maj_cons`
+buffer-layout kernels every pipeline reuses — see the note on GPU-contention-induced startup stalls
+below if a run appears to hang), `FineChannelizedAntennaSpectraTests`/
+`FineChannelizedBeamformedSpectraTests`/`FineChannelizedProjectionTests`/
+`FineChannelizedAdaptiveTests`/`FineChannelizedPulsarFoldTests`/`FineChannelizedCorrBeamTests`
+(one per remaining `Lambda*Pipeline` variant, each with a channelized-vs-disabled-config pair of
+physical-invariant tests), plus `test_beamforming.cpp` for beamforming math.
 
 Build options that shape the generated code (set with `-D...`, see top-level `CMakeLists.txt`):
 `NR_OBSERVING_BUFFERS`, `NR_OBSERVING_FPGA_SOURCES`, `NR_OBSERVING_CHANNELS`,
 `NR_OBSERVING_RECEIVERS_PER_PACKET`, `NR_OBSERVING_PADDED_RECEIVERS`,
 `NR_OBSERVING_PACKETS_FOR_CORRELATION`, `NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE`,
-`NUMBER_BEAMS`. These become `add_compile_definitions` and feed directly into the `LambdaConfig`
-template instantiations in each app's `main()`. They only apply to the `apps` subdirectory build
-(skipped when `BUILD_TESTING=ON`).
+`NR_OBSERVING_FINE_CHANNELS`, `NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM`, `NUMBER_BEAMS`. These become
+`add_compile_definitions` and feed directly into the `LambdaConfig` template instantiations in each
+app's `main()`. They only apply to the `apps` subdirectory build (skipped when `BUILD_TESTING=ON`).
+`NR_OBSERVING_FINE_CHANNELS` (default 32) is the pre-correlation PFB channelizer's fine-channel
+count per coarse/FPGA channel, via ASTRON's `gpu-filter` (see `docs/architecture.md` Section 6) —
+`1` disables channelization entirely, reproducing pre-channelization behaviour exactly.
+`NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM` (default 2) is how many fine channels are dropped from each
+edge of every coarse channel's fine-channel breakdown before correlation (ignored when
+`NR_OBSERVING_FINE_CHANNELS=1`) — the FPGA's own coarse channelizer is a 32/27-oversampled PFB, so
+raw samples near a coarse channel's edge carry that channelizer's guard-band aliasing, which
+`gpu-filter`'s fine channels nearest those edges inherit; `channelizer_output_to_corr_input`
+(`spatial.cuh`) drops them, and `LambdaConfig::NR_CHANNELS` is sized by the trimmed
+`NR_EFFECTIVE_FINE_CHANNELS`, not the raw `NR_FINE_CHANNELS`.
 
 The Textual TUI in `ui/` (`cd ui && hatch run ui`, or `python ui.py`) is a convenience wrapper for
 setting these CMake cache variables and kicking off a build/configure.
@@ -182,6 +247,35 @@ hard-codes its own `LambdaConfig` instantiation in `main()`:
   Batch/Complex sections are *not* column-major.
 - **cuTensor**: assumes column-major modes; `tensor.cpp` does a `std::reverse` on modes/extents so
   the rest of the code can reason in row-major terms.
+- **gpu-filter's FIR kernel looks *forward*, not backward**: `readInputAndDoFIRfiltering`
+  (`FilterAndCorrect.cu`) computes output tick `T` from raw input ticks `[T, T+NR_TAPS-1]` — the
+  extra `NR_TAPS-1` samples its `InputType` reserves beyond the "real" sample count are **trailing
+  look-ahead** for the last output block, not **leading history** before the first. It's an easy
+  convention to get backwards by analogy with a causal FIR filter (which *would* want leading
+  history) — `FineChannelizer`'s `reorder_to_filter_input` (`spatial.cuh`) writes real samples
+  starting at buffer offset 0 and zero-pads the trailing region accordingly; get this backwards and
+  every fine-channelized output is silently computed from zero/mismatched input, not caught by
+  `FineChannelizerTests`' finite/autocorrelation invariant checks (both are trivially satisfied by
+  degenerate near-zero output).
+- **New cuTensor mode labels can perturb permutations that never reference them**: adding a mode
+  label to one tensor (e.g. widening a `'c'`-labeled axis to a separate `'C'` for the raw
+  pre-channelization axis) can change the numeric output of a *different*, unrelated permutation in
+  the same `CutensorSetup` even when that permutation's own mode vector wasn't edited and the
+  extents involved are numerically identical — observed once as a real regression
+  (`LambdaAdaptiveBeamformedSpectraPipeline`'s `modePacketAligned`, changed from `'c'` to `'C'`
+  alongside the mode actually needed by new code, broke an existing disabled-path test). Only
+  change a mode label for a tensor that the new code path actually reads/writes via cuTensor; leave
+  labels on tensors used solely by old/disabled-path-only permutations untouched, even if they're
+  nominally shaped the same way.
+- **`LambdaCorrBeamOnlyGPUPipeline` is the one pipeline where `NR_FINE_CHANNELS == 1` and `> 1` are
+  genuinely different code, not the same path at a different width**: every other `Lambda*Pipeline`
+  reuses the same delay/reorder/channelize/correlate/beamform sequence at both widths (the
+  `if constexpr` branches differ only in whether the channelizer stage runs). This one's disabled
+  path is a fused single-kernel fast path (`packet_to_corr_input`/`packet_to_col_maj_cons`, no
+  delay/reorder stage at all — it's a benchmark harness measuring that steady-state overhead) with
+  no seam for a channelizer, so the `NR_FINE_CHANNELS > 1` branch reconstructs the full
+  delay-bridge-through-beamform sequence from scratch instead. Don't assume the two branches are
+  numerically equivalent by construction the way they are everywhere else.
 
 ## Python tooling (`scripts/`, `ui/`)
 
@@ -192,6 +286,35 @@ hard-codes its own `LambdaConfig` instantiation in `main()`:
   captures, and `mlflow_save_benchmarks*.py` for logging benchmark runs to MLflow.
 - `ui/ui.py` is a Textual TUI (`CMakeBuilder`) that exposes the `NR_OBSERVING_*`/`NUMBER_BEAMS`
   CMake cache variables as a form and drives `cmake`/`cmake --build` for you.
+
+## Documentation
+
+Maintain living architecture/data-flow documentation in `docs/`, and treat it as part of the
+change, not an afterthought — any change that alters a pipeline's stages, buffer shapes/layouts,
+or the relationships between components (`GPUPipeline` variants, `ProcessorState`, `Output`
+writers, external libraries like `tcc`/`ccglib`/`gpu-filter`) should update the relevant doc in the
+same commit.
+
+- Prefer diagrams over prose for data flow, pipeline stage sequencing, buffer/tensor shape
+  transformations, and component dependencies — a reader should be able to see the shape of the
+  system before reading any code. Use **Mermaid** diagrams embedded directly in markdown
+  (` ```mermaid ` code fences) as the default: they render as diagrams on GitHub/GitLab and in most
+  markdown viewers/editors, and — unlike static image files — are plain text, so they stay
+  accurate as the code changes and are easy for an agent (or a human) to update in a normal diff
+  rather than regenerating and re-exporting a binary image. Reach for an actual image file (SVG/PNG
+  under `docs/`) only when a diagram genuinely can't be expressed as Mermaid (e.g. a real hardware
+  photo, an annotated screenshot, a complex physical layout).
+- `docs/architecture.md`: top-level pipeline data-flow diagram — packet capture →
+  `ProcessorState` buffering → `GPUPipeline` (correlate/beamform/eigendecompose) → `Output`
+  writers — plus one diagram per `Lambda*Pipeline` variant showing its own stage sequence and where
+  it diverges from the others.
+- For any new multi-stage subsystem (e.g. a new pipeline variant, a new channelization/filtering
+  stage), add or extend a diagram showing its buffer shapes at each stage boundary, not just prose
+  describing them — this codebase leans heavily on compile-time array shapes
+  (`LambdaConfig`-derived types) threaded through many reshape/permutation kernels, which is exactly
+  the kind of thing that's much clearer as a diagram than as a paragraph.
+- Keep doc updates scoped to what actually changed — don't regenerate an entire diagram set for an
+  unrelated change, but do update the specific diagram(s) that describe whatever you touched.
 
 ## Notes
 

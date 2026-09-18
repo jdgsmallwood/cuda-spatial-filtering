@@ -15,6 +15,12 @@
 #ifndef NUMBER_BEAMS
 #define NUMBER_BEAMS 1
 #endif
+#ifndef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#endif
+#ifndef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
+#endif
 constexpr size_t NR_CHANNELS = NR_OBSERVING_CHANNELS;
 constexpr size_t NR_FPGA_SOURCES = NR_OBSERVING_FPGA_SOURCES;
 constexpr size_t NR_RECEIVERS_PER_PACKET = NR_OBSERVING_RECEIVERS_PER_PACKET;
@@ -32,7 +38,9 @@ using Config =
     LambdaConfig<NR_CHANNELS, NR_FPGA_SOURCES, NR_TIME_STEPS_PER_PACKET,
                  NR_RECEIVERS, NR_POLARIZATIONS, NR_RECEIVERS_PER_PACKET,
                  NR_PACKETS_FOR_CORRELATION, NR_BEAMS, NR_PADDED_RECEIVERS,
-                 NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP>;
+                 NR_PADDED_RECEIVERS_PER_BLOCK, NR_VISIBILITIES_BEFORE_DUMP,
+                 false, 256, NR_OBSERVING_FINE_CHANNELS,
+                 NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM>;
 
 template <typename T> struct DummyFinalPacketData : public FinalPacketData {
   using sampleT = typename T::InputPacketSamplesType;
@@ -141,7 +149,7 @@ int main(int argc, char *argv[]) {
   }
 
   BeamWeightsT<Config> h_weights;
-  for (auto i = 0; i < NR_CHANNELS; ++i) {
+  for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
     for (auto j = 0; j < NR_RECEIVERS; ++j) {
       for (auto k = 0; k < NR_POLARIZATIONS; ++k) {
         for (auto l = 0; l < NR_BEAMS; ++l) {

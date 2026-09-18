@@ -1,6 +1,11 @@
 #pragma once
 
 template <typename T> class LambdaCorrBeamOnlyGPUPipeline : public GPUPipeline {
+  static_assert((T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) %
+                        T::NR_FINE_CHANNELS ==
+                    0,
+                "NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET must divide evenly "
+                "by NR_FINE_CHANNELS");
 
 private:
   int num_buffers;
@@ -10,7 +15,8 @@ private:
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // NR_BITS;
 
   static constexpr int NR_BLOCKS_FOR_CORRELATION =
-      T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+      (T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+       T::NR_FINE_CHANNELS) /
       NR_TIMES_PER_BLOCK;
   static constexpr int NR_BASELINES =
       T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
@@ -18,6 +24,8 @@ private:
       T::NR_RECEIVERS * (T::NR_RECEIVERS + 1) / 2;
   static constexpr int NR_TIME_STEPS_FOR_CORRELATION =
       T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET;
+  static constexpr int NR_TIME_STEPS_PER_FINE_CHANNEL = T::NR_TIME_STEPS_PER_FINE_CHANNEL;
+  static_assert(NR_TIME_STEPS_PER_FINE_CHANNEL == NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK);
   static constexpr int COMPLEX = 2;
   const int NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
 
@@ -46,11 +54,11 @@ private:
 
   using BeamformerOutput =
       float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
-           [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+           [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
 
   using HalfBeamformerOutput =
       __half[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
-            [NR_TIME_STEPS_FOR_CORRELATION][COMPLEX];
+            [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
 
   using BeamWeights = BeamWeightsT<T>;
 
@@ -74,6 +82,16 @@ private:
 
   inline static const std::vector<int> modePacket{'c', 'o', 'f', 'u',
                                                   'n', 'p', 'z'};
+  // Separate from modePacket above (which stays untouched -- it's only read by the dead
+  // packetToPlanar/packetToCUFFTInput permutations below) -- source/destination pair for the
+  // NR_FINE_CHANNELS > 1 delay/reorder bridge, matching HalfPacketSamplesType's actual raw
+  // memory layout (including the +2 lookahead/init-packet frames, 'y') and the layout
+  // apply_delays_launch expects (FPGA outermost), same convention as the other pipelines'
+  // packetToPreAlign.
+  inline static const std::vector<int> modePacketRaw{'C', 'y', 'f', 'u',
+                                                      'n', 'p', 'z'};
+  inline static const std::vector<int> modePacketPreAlign{'f', 'y', 'u', 'C',
+                                                           'n', 'p', 'z'};
   // o and u need to end up together and will be interpreted as b x t in the
   // next transformation. Similarly f x n = r in next transformation.
   inline static const std::vector<int> modePacketPadding{'f', 'n', 'c', 'o',
@@ -122,6 +140,7 @@ private:
       {'a', NR_UNPADDED_BASELINES},
       {'b', NR_BLOCKS_FOR_CORRELATION},
       {'c', T::NR_CHANNELS},
+      {'C', T::NR_FPGA_CHANNELS},
       {'d', T::NR_PADDED_RECEIVERS},
       {'f', T::NR_FPGA_SOURCES},
       {'l', NR_BASELINES},
@@ -134,6 +153,7 @@ private:
       {'s', NR_BLOCKS_FOR_CORRELATION *NR_TIMES_PER_BLOCK},
       {'t', NR_TIMES_PER_BLOCK},
       {'u', T::NR_TIME_STEPS_PER_PACKET},
+      {'y', T::NR_PACKETS_FOR_CORRELATION + 2},
       {'z', 2}, // real, imaginary
 
   };
@@ -155,6 +175,19 @@ private:
   std::vector<typename T::HalfPacketSamplesType *> d_samples_half;
   std::vector<CorrelatorInput *> d_correlator_input;
   std::vector<CorrelatorOutput *> d_correlator_output;
+
+  // NR_FINE_CHANNELS > 1 only: delay/reorder bridge (this benchmark pipeline has no delay/reorder
+  // infrastructure of its own -- d_subpacket_delays stays zeroed and d_stream_perm_recv/pol stay
+  // identity, existing purely to reuse apply_delays_launch/reorder_streams_launch) plus the
+  // FineChannelizer<T> input/output landing buffers.
+  std::vector<typename T::HalfPacketSamplesType *> d_samples_pre_align;
+  std::vector<typename T::HalfPacketAlignedSamplesType *> d_samples_aligned, d_samples_reordered;
+  std::vector<typename FineChannelizer<T>::FilterInputType *> d_channelizer_input;
+  std::vector<typename FineChannelizer<T>::FilterOutputType *> d_channelizer_output;
+  int *d_subpacket_delays = nullptr;
+  int *d_stream_perm_recv = nullptr;
+  int *d_stream_perm_pol = nullptr;
+  std::unique_ptr<FineChannelizer<T>> channelizer_;
 
   TrimmedVisibilities *d_visibilities_accumulator;
 
@@ -303,13 +336,56 @@ public:
   // individual launches. Any op added here must use only per-buffer device
   // pointers -- no per-run host pointers -- to keep the capture valid.
   void enqueue_main(int i) {
-    packet_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
-                         T::NR_RECEIVERS_PER_PACKET,
-                         T::NR_TIME_STEPS_PER_PACKET,
-                         T::NR_PACKETS_FOR_CORRELATION,
-                         T::NR_PADDED_RECEIVERS, NR_TIMES_PER_BLOCK>(
-        (__half *)d_samples_half[i], (__half *)d_correlator_input[i],
-        streams[i]);
+    // NR_FINE_CHANNELS == 1 and > 1 take genuinely different code shapes here, not just "same
+    // path, wider dimension" -- the disabled path below is today's fused single-kernel fast path
+    // (packet_to_corr_input/packet_to_col_maj_cons go straight from raw packet layout to their
+    // destination, benchmarking today's steady-state kernel-launch overhead unchanged), while the
+    // channelized path reconstructs the delay/reorder -> channelize -> correlate -> beamform
+    // sequence every other pipeline uses (this benchmark never had delay/reorder infrastructure of
+    // its own, so d_subpacket_delays/d_stream_perm_recv/pol below are inert identity bridges, not
+    // new benchmark semantics).
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      tensor_16.runPermutation("packetToPreAlign", alpha,
+                               (__half *)d_samples_half[i],
+                               (__half *)d_samples_pre_align[i], streams[i]);
+
+      apply_delays_launch((__half *)d_samples_pre_align[i],
+                          (__half *)d_samples_aligned[i], d_subpacket_delays,
+                          T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
+                          T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
+                          T::NR_FPGA_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, streams[i]);
+
+      reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
+                             T::NR_TIME_STEPS_PER_PACKET, T::NR_FPGA_CHANNELS,
+                             T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
+          (__half *)d_samples_aligned[i], (__half *)d_samples_reordered[i],
+          d_stream_perm_recv, d_stream_perm_pol, streams[i]);
+
+      reorder_to_filter_input<
+          T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+          T::NR_RECEIVERS_PER_PACKET, T::NR_TIME_STEPS_PER_PACKET,
+          T::NR_PACKETS_FOR_CORRELATION, FineChannelizer<T>::NR_TAPS,
+          T::NR_FINE_CHANNELS>((__half *)d_samples_reordered[i],
+                               (float2 *)d_channelizer_input[i], streams[i]);
+
+      channelizer_->launchAsync(streams[i], d_channelizer_input[i],
+                                d_channelizer_output[i]);
+
+      channelizer_output_to_corr_input<
+          T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS, T::NR_FINE_CHANNEL_EDGE_TRIM,
+          T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_PADDED_RECEIVERS,
+          NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
+          (const __half2 *)d_channelizer_output[i],
+          (__half *)d_correlator_input[i], streams[i]);
+    } else {
+      packet_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+                           T::NR_RECEIVERS_PER_PACKET,
+                           T::NR_TIME_STEPS_PER_PACKET,
+                           T::NR_PACKETS_FOR_CORRELATION,
+                           T::NR_PADDED_RECEIVERS, NR_TIMES_PER_BLOCK>(
+          (__half *)d_samples_half[i], (__half *)d_correlator_input[i],
+          streams[i]);
+    }
 
     correlator.launchAsync((CUstream)streams[i],
                            (CUdeviceptr)d_correlator_output[i],
@@ -322,12 +398,21 @@ public:
         T::NR_CHANNELS, NR_BASELINES, NR_UNPADDED_BASELINES,
         T::NR_POLARIZATIONS * T::NR_POLARIZATIONS * COMPLEX, streams[i]);
 
-    packet_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
-                           T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-                           T::NR_TIME_STEPS_PER_PACKET,
-                           T::NR_PACKETS_FOR_CORRELATION>(
-        (__half *)d_samples_half[i],
-        (__half *)d_samples_consolidated_col_maj[i], streams[i]);
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      corr_input_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
+                                 T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                                 T::NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
+                                 NR_TIMES_PER_BLOCK>(
+          (const __half *)d_correlator_input[i],
+          (__half *)d_samples_consolidated_col_maj[i], streams[i]);
+    } else {
+      packet_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
+                             T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                             T::NR_TIME_STEPS_PER_PACKET,
+                             T::NR_PACKETS_FOR_CORRELATION>(
+          (__half *)d_samples_half[i],
+          (__half *)d_samples_consolidated_col_maj[i], streams[i]);
+    }
 
     tensor_16.runPermutation("weightsInputToCCGLIB", alpha,
                              (__half *)d_weights[i],
@@ -338,7 +423,7 @@ public:
              (CUdeviceptr)d_beamformer_output[i]);
 
     beam_ccglib_to_half_output<T::NR_CHANNELS, T::NR_POLARIZATIONS,
-                               T::NR_BEAMS, NR_TIME_STEPS_FOR_CORRELATION>(
+                               T::NR_BEAMS, NR_TIME_STEPS_PER_FINE_CHANNEL>(
         (float *)d_beamformer_output[i],
         (__half *)d_beamformer_data_output_half[i], streams[i]);
   }
@@ -424,8 +509,13 @@ public:
     d_correlator_output.resize(num_buffers);
     d_beamformer_output.resize(num_buffers);
     d_beamformer_data_output_half.resize(num_buffers);
+    d_samples_pre_align.resize(num_buffers);
+    d_samples_aligned.resize(num_buffers);
+    d_samples_reordered.resize(num_buffers);
+    d_channelizer_input.resize(num_buffers);
+    d_channelizer_output.resize(num_buffers);
     CUDA_CHECK(cudaMalloc((void **)&d_gains, sizeof(typename T::AntennaGains)));
-    auto default_gains = get_default_gains<T::NR_CHANNELS, T::NR_RECEIVERS,
+    auto default_gains = get_default_gains<T::NR_FPGA_CHANNELS, T::NR_RECEIVERS,
                                            T::NR_POLARIZATIONS>();
     CUDA_CHECK(cudaMemcpy(d_gains, default_gains.data(),
                           sizeof(typename T::AntennaGains), cudaMemcpyDefault));
@@ -454,6 +544,44 @@ public:
                             sizeof(BeamformerOutput)));
       CUDA_CHECK(cudaMalloc((void **)&d_beamformer_data_output_half[i],
                             sizeof(HalfBeamformerOutput)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_pre_align[i],
+                            sizeof(typename T::HalfPacketSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_aligned[i],
+                            sizeof(typename T::HalfPacketAlignedSamplesType)));
+      CUDA_CHECK(cudaMalloc((void **)&d_samples_reordered[i],
+                            sizeof(typename T::HalfPacketAlignedSamplesType)));
+      CUDA_CHECK(cudaMalloc(
+          (void **)&d_channelizer_input[i],
+          sizeof(typename FineChannelizer<T>::FilterInputType)));
+      CUDA_CHECK(cudaMalloc(
+          (void **)&d_channelizer_output[i],
+          sizeof(typename FineChannelizer<T>::FilterOutputType)));
+    }
+
+    CUDA_CHECK(cudaMalloc((void **)&d_subpacket_delays,
+                          sizeof(int) * T::NR_FPGA_SOURCES));
+    CUDA_CHECK(
+        cudaMemset(d_subpacket_delays, 0, sizeof(int) * T::NR_FPGA_SOURCES));
+    {
+      constexpr int NR_RECVS = T::NR_FPGA_SOURCES * T::NR_RECEIVERS_PER_PACKET;
+      constexpr int NR_PERM  = NR_RECVS * (int)T::NR_POLARIZATIONS;
+      CUDA_CHECK(cudaMalloc((void **)&d_stream_perm_recv, sizeof(int) * NR_PERM));
+      CUDA_CHECK(cudaMalloc((void **)&d_stream_perm_pol,  sizeof(int) * NR_PERM));
+      std::vector<int> identity_recv(NR_PERM), identity_pol(NR_PERM);
+      for (int r = 0; r < NR_RECVS; ++r)
+        for (int p = 0; p < (int)T::NR_POLARIZATIONS; ++p) {
+          identity_recv[r * T::NR_POLARIZATIONS + p] = r;
+          identity_pol [r * T::NR_POLARIZATIONS + p] = p;
+        }
+      CUDA_CHECK(cudaMemcpy(d_stream_perm_recv, identity_recv.data(),
+                            sizeof(int) * NR_PERM, cudaMemcpyHostToDevice));
+      CUDA_CHECK(cudaMemcpy(d_stream_perm_pol,  identity_pol.data(),
+                            sizeof(int) * NR_PERM, cudaMemcpyHostToDevice));
+    }
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      CUdevice cu_device_for_channelizer;
+      cuDeviceGet(&cu_device_for_channelizer, 0);
+      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device_for_channelizer);
     }
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
@@ -506,6 +634,8 @@ public:
 
     cudaDeviceSynchronize();
     tensor_16.addTensor(modePacket, "packet");
+    tensor_16.addTensor(modePacketRaw, "packetRaw");
+    tensor_16.addTensor(modePacketPreAlign, "prealign");
     tensor_16.addTensor(modePlanar, "planar");
     tensor_16.addTensor(modePlanarCons, "planarCons");
     tensor_16.addTensor(modePlanarColMajCons, "planarColMajCons");
@@ -523,6 +653,8 @@ public:
                              "packetToCUFFTInput");
     tensor_16.addPermutation("packet", "planar", CUTENSOR_COMPUTE_DESC_16F,
                              "packetToPlanar");
+    tensor_16.addPermutation("packetRaw", "prealign", CUTENSOR_COMPUTE_DESC_16F,
+                             "packetToPreAlign");
     tensor_16.addPermutation("planarCons", "planarColMajCons",
                              CUTENSOR_COMPUTE_DESC_16F, "consToColMajCons");
     tensor_16.addPermutation("weightsInput", "weightsCCGLIB",
@@ -637,6 +769,25 @@ public:
     for (auto samples_consolidated_col_maj : d_samples_consolidated_col_maj) {
       cudaFree(samples_consolidated_col_maj);
     }
+
+    for (auto p : d_samples_pre_align) {
+      cudaFree(p);
+    }
+    for (auto p : d_samples_aligned) {
+      cudaFree(p);
+    }
+    for (auto p : d_samples_reordered) {
+      cudaFree(p);
+    }
+    for (auto p : d_channelizer_input) {
+      cudaFree(p);
+    }
+    for (auto p : d_channelizer_output) {
+      cudaFree(p);
+    }
+    if (d_subpacket_delays) cudaFree(d_subpacket_delays);
+    if (d_stream_perm_recv) cudaFree(d_stream_perm_recv);
+    if (d_stream_perm_pol) cudaFree(d_stream_perm_pol);
 
     for (auto event : start_run) {
       cudaEventDestroy(event);
