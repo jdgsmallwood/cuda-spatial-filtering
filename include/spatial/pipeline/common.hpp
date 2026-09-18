@@ -346,6 +346,19 @@ template <typename T> DevicePtr<T> make_device_ptr(size_t size = sizeof(T)) {
   return DevicePtr<T>(ptr);
 }
 
+// Allocates only when Condition is true at compile time, otherwise returns a
+// null DevicePtr (no cudaMalloc) -- for buffers a pipeline only reads/writes
+// inside an `if constexpr (Condition)` branch elsewhere, so allocating them
+// unconditionally would just waste device memory in the disabled branch.
+template <typename T, bool Condition>
+DevicePtr<T> make_device_ptr_if(size_t size = sizeof(T)) {
+  if constexpr (Condition) {
+    return make_device_ptr<T>(size);
+  } else {
+    return DevicePtr<T>();
+  }
+}
+
 struct ManagedCufftPlan {
   cufftHandle handle = 0;
   ManagedCufftPlan() { CUFFT_CHECK(cufftCreate(&handle)); }

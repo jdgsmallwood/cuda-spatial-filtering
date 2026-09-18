@@ -29,6 +29,21 @@ using Cfg16ch4fpga = LambdaConfig<    16,  4,   64,  40,  2,  10, 256,  1,  64, 
 using Cfg24ch4fpga = LambdaConfig<    24,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg32ch4fpga = LambdaConfig<    32,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 
+// Fine-channelization comparison: same coarse-channel/FPGA/receiver shape as
+// the configs above, but with gpu-filter's pre-correlation PFB active at the
+// repo's default settings (NR_OBSERVING_FINE_CHANNELS=32,
+// NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM=2 -- see CMakeLists.txt/CLAUDE.md).
+// Trailing template args: OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET=false,
+// FFT_DOWNSAMPLE_FACTOR=128 (default), NR_FINE_CHANNELS=32,
+// NR_FINE_CHANNEL_EDGE_TRIM=2. Effective (post-trim) channel count is
+// NR_FPGA_CHANNELS * (32 - 2*2) = NR_FPGA_CHANNELS * 28, e.g. 8 coarse ->
+// 224 effective -- substantially more correlator/beamformer work than the
+// same coarse-channel count with fine channelization off, so only the
+// smallest configs are instantiated here to stay within this dev GPU's VRAM.
+//                                            ch  fp   ts   rx  pol rxpp corr  bm  pad  blk       acc     oct  fft  fine trim
+using Cfg8ch4fpga_fine32  = LambdaConfig<      8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000, false, 128,  32,   2>;
+using Cfg16ch4fpga_fine32 = LambdaConfig<     16,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000, false, 128,  32,   2>;
+
 // Correlation-packet sweep: 8ch/4fpga held fixed while
 // NR_PACKETS_FOR_CORRELATION varies 64→1024 (powers of 2). The 256-packet
 // case reuses the config above.
@@ -422,6 +437,12 @@ int main(int argc, char *argv[]) {
       .help("Packets/sec/channel target for --relocation-check")
       .default_value(15500.0)
       .scan<'g', double>();
+  program.add_argument("--fine-channel-check")
+      .help("Compare LambdaGPU throughput with fine channelization off vs. on "
+            "(NR_FINE_CHANNELS=32, edge-trim=2) at 8ch and 16ch/4fpga, instead "
+            "of the sweeps above")
+      .default_value(false)
+      .implicit_value(true);
 
   try {
     program.parse_args(argc, argv);
@@ -437,6 +458,7 @@ int main(int argc, char *argv[]) {
   const bool   lambda_only       = program.get<bool>("--lambda-only");
   const bool   corrbeam_only     = program.get<bool>("--corrbeam-only");
   const bool   relocation_check  = program.get<bool>("--relocation-check");
+  const bool   fine_channel_check = program.get<bool>("--fine-channel-check");
   const int    relocation_streams = program.get<int>("--relocation-streams");
   const int    relocation_poll_batch = program.get<int>("--relocation-poll-batch");
   const double relocation_pkt_rate = program.get<double>("--relocation-pkt-rate-per-channel");
@@ -455,6 +477,33 @@ int main(int argc, char *argv[]) {
     const double channels_pkt_rate = Cfg32ch4fpga::NR_CHANNELS * relocation_pkt_rate;
     run_relocation_check<Cfg32ch4fpga>(duration_s, num_buffers_4fpga, relocation_streams,
                                        relocation_poll_batch, /*dest_slots=*/256, channels_pkt_rate);
+    return 0;
+  }
+
+  if (fine_channel_check) {
+    std::cout << "=== Fine-channelization effect on LambdaGPUPipeline throughput ===\n"
+              << "  duration=" << duration_s << "s each, num_buffers=" << num_buffers_4fpga << "\n\n";
+
+    auto compare = [&](const char *label, auto off_result, auto on_result) {
+      std::cout << "--- " << label << " ---\n";
+      std::cout << "  off (NR_FINE_CHANNELS=1):  "; print_lambda_result(off_result);
+      std::cout << "  on  (NR_FINE_CHANNELS=32, effective ch=" << on_result.nr_channels << "): ";
+      print_lambda_result(on_result);
+      const double throughput_ratio = on_result.runs_per_sec / off_result.runs_per_sec;
+      const double gpu_ms_ratio = on_result.avg_gpu_ms / off_result.avg_gpu_ms;
+      std::cout << "  => runs/sec ratio (on/off) = " << throughput_ratio
+                << "  (" << (1.0 / throughput_ratio) << "x slower)"
+                << " | avg_gpu_ms ratio (on/off) = " << gpu_ms_ratio << "x\n\n";
+    };
+
+    std::cout << "[8 coarse channels]\n";
+    compare("8ch4fpga", run_lambda_bench<Cfg8ch4fpga>(duration_s, num_buffers_4fpga),
+           run_lambda_bench<Cfg8ch4fpga_fine32>(duration_s, num_buffers_4fpga));
+
+    std::cout << "[16 coarse channels]\n";
+    compare("16ch4fpga", run_lambda_bench<Cfg16ch4fpga>(duration_s, num_buffers_4fpga),
+           run_lambda_bench<Cfg16ch4fpga_fine32>(duration_s, num_buffers_4fpga));
+
     return 0;
   }
 

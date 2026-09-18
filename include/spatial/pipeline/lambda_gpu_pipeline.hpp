@@ -276,7 +276,8 @@ private:
 
     PipelineResources(CUdevice cu_device, size_t work_size)
         : fine_delay_workspace(
-              make_device_ptr<typename T::FineDelayWorkspace>()),
+              make_device_ptr_if<typename T::FineDelayWorkspace,
+                                T::NR_FINE_CHANNELS == 1>()),
           samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
           samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
@@ -296,11 +297,15 @@ private:
               make_device_ptr<typename FineChannelizer<T>::FilterInputType>()),
           channelizer_output(
               make_device_ptr<typename FineChannelizer<T>::FilterOutputType>()),
-          samples_cufft_input(make_device_ptr<typename T::FFTCUFFTInputType>()),
+          samples_cufft_input(
+              make_device_ptr_if<typename T::FFTCUFFTInputType,
+                                T::NR_FINE_CHANNELS == 1>()),
           samples_cufft_output(
-              make_device_ptr<typename T::FFTCUFFTOutputType>()),
+              make_device_ptr_if<typename T::FFTCUFFTOutputType,
+                                T::NR_FINE_CHANNELS == 1>()),
           cufft_downsampled_output(
-              make_device_ptr<typename T::FFTOutputType>()),
+              make_device_ptr_if<typename T::FFTOutputType,
+                                T::NR_FINE_CHANNELS == 1>()),
           beamformer_data_output_half(make_device_ptr<HalfBeamformerOutput>()),
           weights(make_device_ptr<BeamWeights>()),
           weights_permuted(make_device_ptr<BeamWeights>()),
@@ -319,7 +324,8 @@ private:
           eigenvalues(make_device_ptr<Eigenvalues>()),
           cusolver_info(
               make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
-          cufft_work_area(make_device_ptr<void>(work_size)) {
+          cufft_work_area(
+              make_device_ptr_if<void, T::NR_FINE_CHANNELS == 1>(work_size)) {
       // Stream Creation
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
@@ -1070,12 +1076,20 @@ public:
           cudaEventCreateWithFlags(&b.accumulate_done, cudaEventDisableTiming));
       CUDA_CHECK(cudaMemsetAsync(b.correlator_input.get(), 0,
                                  sizeof(CorrelatorInput), b.stream));
-      CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
-                                      CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
-                                      CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
-                                      CUDA_C_32F));
-      CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
-      CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
+      // Whole-band post-beamform FFT plan: only executed for NR_FINE_CHANNELS == 1
+      // (see enqueue_post_eigen/execute_pipeline's if constexpr guards) -- skip
+      // making the plan (and its work-area allocation, both the explicit
+      // cufft_work_area buffer and whatever cuFFT would auto-allocate internally)
+      // for a plan that can then never run, same reasoning as fine_delay_fft_plan
+      // below.
+      if constexpr (T::NR_FINE_CHANNELS == 1) {
+        CUFFT_CHECK(cufftXtMakePlanMany(b.fft_plan, 1, N, NULL, 1, CUFFT_FFT_SIZE,
+                                        CUDA_C_32F, NULL, 1, CUFFT_FFT_SIZE,
+                                        CUDA_C_32F, NUM_TOTAL_BATCHES, &work_size,
+                                        CUDA_C_32F));
+        CUFFT_CHECK(cufftSetStream(b.fft_plan, b.stream));
+        CUFFT_CHECK(cufftSetWorkArea(b.fft_plan, b.cufft_work_area.get()));
+      }
 
       // Fine-delay FFT plan: batched 1-D FFT over the full correlation block, one batch per
       // (channel × receiver × pol) combination. apply_fine_delay_correction() (which uses this
