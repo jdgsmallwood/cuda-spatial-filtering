@@ -53,6 +53,51 @@ flowchart LR
 `release_buffer` (on `ProcessorStateBase`) is the hand-back from a `GPUPipeline` once it's done
 reading a buffer, so `ProcessorState` can reuse that ring-buffer slot for new packets.
 
+### 1a. GPUDirect RDMA ingest variant (`LibibverbsGpuDirectPacketCapture`)
+
+An alternative to the `IBV` box above: instead of copying each packet into the CPU ring and later
+`cudaMemcpyAsync`-ing a whole completed buffer to the GPU, the NIC DMAs payload straight into GPU
+memory, and a CUDA-graph-replayed kernel relocates it to its final correlation-buffer position once
+the header reveals where it belongs (channels from one FPGA interleave on a single QP — the FPGA
+can't assign a distinct UDP port per channel — so the destination can't be predicted before a packet
+arrives). See `include/spatial/libibverbs.hpp` and the design writeup this implements.
+
+```mermaid
+flowchart LR
+    NIC[NIC: 3-SGE receive] -->|SGE1: header| HDR[CPU pinned header ring]
+    NIC -->|SGE2+SGE3: scales+samples| POOL["GPU landing pool\n(2 halves x POLL_BATCH slots)"]
+
+    HDR --> RESOLVE["resolve_gpu_slot()\n(ProcessorState -- same locate_packet()\narithmetic as the reactive path)"]
+    RESOLVE -->|dst addr| GRAPH
+
+    POOL -->|src addr| GRAPH["CUDA graph replay\n(gpudirect_relocate_kernel)"]
+    GRAPH --> BLOCK["samples_entry / scales\n(GPUPipeline's device buffers --\nthe correlation block itself)"]
+
+    GRAPH -.->|cudaEventRecord, gates repost| REPOST[Repost this half's WRs]
+    REPOST -.-> NIC
+
+    BLOCK --> ZERO[GPU zero_missing_scales_kernel]
+    ZERO --> INGEST[scale_and_convert_to_half_kernel]
+```
+
+Key points the diagram doesn't show directly:
+- **Double-buffer safety**: a landing-pool half's WRs are only reposted after its *previous*
+  relocation graph replay is confirmed done (`cudaEventQuery`), so the NIC never overwrites data the
+  relocation kernel hasn't read yet.
+- **Placement arithmetic is shared, not duplicated**: `resolve_gpu_slot()` (on `ProcessorStateBase`,
+  implemented by `ProcessorState<T,...>`) calls the same `locate_packet()`/`packet_index_for_buffer()`
+  the reactive path uses (`spatial.hpp`) — the two paths can never numerically diverge.
+  `GPUPipeline::gpu_landing_samples_ptr`/`gpu_landing_scales_ptr` (`pipeline_base.hpp`) expose the
+  device buffers `resolve_gpu_slot()` resolves addresses into.
+- **Validated at 32 channels/4-FPGA** against a synthetic busy-kernel proxy and the real
+  `LambdaGPUPipeline` (`apps/bench_gpudirect_scatter.cu`, `apps/bench_gpu.cu --relocation-check`) —
+  64-channel validation is deferred pending production-scale GPU memory.
+- **Unverified against real ibverbs/GPUDirect hardware**: this environment has no libibverbs-dev
+  install, so `libibverbs.hpp`'s `LibibverbsGpuDirectPacketCapture` itself has never been compiled —
+  everything upstream of the NIC (placement arithmetic, the relocation kernel, `zero_missing_scales`)
+  is tested against real GPU hardware in `tests/test_ibverbs_placement.cu` and
+  `tests/test_gpudirect_scatter.cu`.
+
 ## 2. `LambdaConfig` — the shape contract
 
 Every type used across ingest, GPU processing, and output is derived from one compile-time struct,

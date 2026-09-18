@@ -904,6 +904,67 @@ __global__ void scale_and_convert_to_half_kernel(
   }
 };
 
+// ---- GPU-resident missing-packet zero-fill (GPUDirect ingest) ------------
+//
+// Device-side equivalent of LambdaFinalPacketData::zero_missing_packets()
+// (packet_formats.hpp) for the GPUDirect ingest path (see
+// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md): once
+// `scales` is device memory (relocated there directly by the capture
+// backend instead of landing in a pinned host buffer), the host-side loop
+// in LambdaFinalPacketData can no longer touch it, so this kernel does the
+// same [channel][packet][fpga] scan on the GPU before every buffer hand-off
+// to the correlator. `d_arrivals` must be device-readable (e.g. allocated
+// with cudaHostAllocMapped and passed via cudaHostGetDevicePointer, or a
+// genuine device allocation) -- a plain cudaHostAllocDefault pointer is not
+// dereferenceable from device code.
+template <size_t NR_CHANNELS, size_t NR_PACKETS_PLUS2, size_t NR_FPGAS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_POLARIZATIONS>
+__global__ void
+zero_missing_scales_kernel(int16_t *__restrict__ d_scales,
+                           const bool *__restrict__ d_arrivals) {
+  const int channel_idx = blockIdx.x % NR_CHANNELS;
+  const int packet_idx = blockIdx.x / NR_CHANNELS;
+  const int fpga_idx = blockIdx.y;
+
+  constexpr size_t ELEMS_PER_FPGA = NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
+  if (threadIdx.x >= ELEMS_PER_FPGA) {
+    return;
+  }
+
+  const bool arrived =
+      d_arrivals[(static_cast<size_t>(channel_idx) * NR_PACKETS_PLUS2 +
+                  packet_idx) *
+                     NR_FPGAS +
+                 fpga_idx];
+  if (arrived) {
+    return;
+  }
+
+  const int pol_idx = threadIdx.x % NR_POLARIZATIONS;
+  const int recv_in_pkt = threadIdx.x / NR_POLARIZATIONS;
+  constexpr size_t NR_RECEIVERS = NR_FPGAS * NR_RECEIVERS_PER_PACKET;
+  const int receiver_idx = fpga_idx * NR_RECEIVERS_PER_PACKET + recv_in_pkt;
+
+  const size_t scale_ptr =
+      (static_cast<size_t>(channel_idx) * NR_PACKETS_PLUS2 + packet_idx) *
+          NR_RECEIVERS * NR_POLARIZATIONS +
+      static_cast<size_t>(receiver_idx) * NR_POLARIZATIONS + pol_idx;
+  d_scales[scale_ptr] = 0;
+}
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS_PLUS2, size_t NR_FPGAS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_POLARIZATIONS>
+void zero_missing_scales(int16_t *d_scales, const bool *d_arrivals,
+                         cudaStream_t stream) {
+  constexpr size_t ELEMS_PER_FPGA = NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
+  const dim3 grid(static_cast<unsigned int>(NR_CHANNELS * NR_PACKETS_PLUS2),
+                  static_cast<unsigned int>(NR_FPGAS));
+  zero_missing_scales_kernel<NR_CHANNELS, NR_PACKETS_PLUS2, NR_FPGAS,
+                            NR_RECEIVERS_PER_PACKET, NR_POLARIZATIONS>
+      <<<grid, static_cast<int>(ELEMS_PER_FPGA), 0, stream>>>(d_scales,
+                                                              d_arrivals);
+}
+
 // ---- Fine-channel phase delay correction kernels -------------------------
 //
 // Three-pass pipeline applied after apply_delays and before aligned_to_corr_input:

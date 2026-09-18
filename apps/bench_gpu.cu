@@ -1,3 +1,4 @@
+#include "bench_gpudirect_scatter_common.hpp"
 #include "spatial/logging.hpp"
 #include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
@@ -11,6 +12,8 @@
 #include <iostream>
 #include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <thread>
+#include <vector>
 
 // Fixed representative GPU pipeline configs -- 8..32 channels in steps of 8
 // for the production 4-FPGA (40 rx) layout. Each config is a separate
@@ -249,6 +252,119 @@ LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
   return r;
 }
 
+// Phase 0 relocation-vs-real-pipeline check (see
+// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md): the
+// bench_gpudirect_scatter binary showed a large throughput deficit under a
+// *synthetic* SM-saturating busy kernel. This re-runs the same relocation
+// streams concurrently with the actual LambdaGPUPipeline<T> (the real
+// correlate+beamform+eigen+fft workload) instead of a synthetic proxy, to
+// check whether that finding holds against genuine pipeline occupancy
+// patterns (which may leave more/less real scheduling gaps than a blunt
+// fixed-grid FMA loop does).
+template <typename T>
+void run_relocation_check(double duration_s, int num_buffers, int num_streams,
+                          int poll_batch, int dest_slots, double channels_pkt_rate) {
+  FakeProcessorState state;
+  DummyFinalPacketData<T> packet_data;
+
+  BeamWeightsT<T> h_weights{};
+  for (size_t ch = 0; ch < T::NR_CHANNELS; ++ch)
+    for (size_t rx = 0; rx < T::NR_RECEIVERS; ++rx)
+      for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol)
+        for (size_t bm = 0; bm < T::NR_BEAMS; ++bm)
+          h_weights.weights[ch][pol][bm][rx] =
+              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+
+  BeamSteering<T> beam_steering({}, {}, {}, FrequencyPlan{}, 0, ArrayLocation{},
+                                 180.0, 5);
+  LambdaGPUPipeline<T> pipeline(num_buffers, &h_weights, std::move(beam_steering));
+  pipeline.set_state(&state);
+
+  auto run_pipeline_for = [&](double secs, std::atomic<bool> *stop_flag) {
+    unsigned long long runs = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < secs) {
+      if (stop_flag && stop_flag->load(std::memory_order_relaxed)) break;
+      pipeline.execute_pipeline(&packet_data);
+      ++runs;
+    }
+    cudaDeviceSynchronize();
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return runs / elapsed;
+  };
+
+  std::cout << "\n=== Relocation check [ch=" << T::NR_CHANNELS << " fpga=" << T::NR_FPGA_SOURCES
+            << "]: baseline LambdaGPUPipeline alone (" << duration_s << "s) ===\n";
+  const double baseline_runs_per_sec = run_pipeline_for(duration_s, nullptr);
+  std::cout << "baseline pipeline runs/sec=" << baseline_runs_per_sec << "\n";
+
+  const double target_per_stream = channels_pkt_rate / poll_batch;
+  const double target_aggregate = target_per_stream * num_streams;
+  const double pass_threshold = 2.0 * target_aggregate;
+  std::cout << "\n=== Concurrent: real LambdaGPUPipeline + " << num_streams
+            << " relocation streams (" << duration_s << "s) ===\n"
+            << "  target ~" << target_per_stream << " replays/sec/stream, ~" << target_aggregate
+            << " aggregate, pass threshold (2x)=" << pass_threshold << "\n";
+
+  std::atomic<bool> start_gate{false};
+  std::atomic<bool> stop_pipeline{false};
+  std::vector<gpudirect_bench::StreamStats> stats(num_streams);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < num_streams; ++i) {
+    threads.emplace_back(gpudirect_bench::run_stream, poll_batch, dest_slots, duration_s,
+                         std::ref(start_gate), std::ref(stats[i]));
+  }
+  double concurrent_runs_per_sec = 0.0;
+  std::thread pipeline_thread([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    concurrent_runs_per_sec = run_pipeline_for(duration_s, &stop_pipeline);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  start_gate.store(true, std::memory_order_release);
+  for (auto &t : threads) t.join();
+  stop_pipeline.store(true, std::memory_order_release);
+  pipeline_thread.join();
+  std::cout << "concurrent pipeline runs/sec=" << concurrent_runs_per_sec << "\n";
+
+  unsigned long long total_replays = 0, total_stalls = 0;
+  for (int i = 0; i < num_streams; ++i) {
+    const auto &s = stats[i];
+    std::cout << "[stream " << i << "] replays/sec=" << (s.replays / duration_s)
+              << " stalls=" << s.stalls << " avg_us=" << (s.replays ? s.total_replay_us / s.replays : 0.0)
+              << " max_us=" << s.max_replay_us << "\n";
+    total_replays += s.replays;
+    total_stalls += s.stalls;
+  }
+  const double aggregate_rate = total_replays / duration_s;
+  const double degradation_pct =
+      baseline_runs_per_sec > 0 ? 100.0 * (1.0 - concurrent_runs_per_sec / baseline_runs_per_sec) : 0.0;
+
+  std::cout << "\n[aggregate] replocation replays/sec=" << aggregate_rate
+            << " total_stalls=" << total_stalls
+            << " pipeline degradation=" << degradation_pct << "%\n";
+  std::cout << "\n=== Phase 0 pass criteria (real pipeline) ===\n";
+  bool pass = true;
+  if (aggregate_rate >= pass_threshold) {
+    std::cout << "[PASS] aggregate replay rate " << aggregate_rate << " >= 2x target (" << pass_threshold << ")\n";
+  } else {
+    std::cout << "[FAIL] aggregate replay rate " << aggregate_rate << " < 2x target (" << pass_threshold << ")\n";
+    pass = false;
+  }
+  if (total_stalls == 0) {
+    std::cout << "[PASS] zero double-buffer stalls\n";
+  } else {
+    std::cout << "[FAIL] " << total_stalls << " double-buffer stalls observed\n";
+    pass = false;
+  }
+  if (degradation_pct < 10.0) {
+    std::cout << "[PASS] pipeline degradation " << degradation_pct << "% < 10%\n";
+  } else {
+    std::cout << "[FAIL] pipeline degradation " << degradation_pct << "% >= 10%\n";
+    pass = false;
+  }
+  std::cout << "\nOverall Phase 0 (real pipeline): " << (pass ? "PASS" : "FAIL") << "\n";
+}
+
 static void print_lambda_result(const LambdaGpuBenchResult &r) {
   std::printf(
       "[LambdaGPU ch=%zu fpga=%zu rx=%zu] "
@@ -289,6 +405,23 @@ int main(int argc, char *argv[]) {
       .help("Run only the CorrBeamOnly sweeps, skip LambdaGPU sweep")
       .default_value(false)
       .implicit_value(true);
+  program.add_argument("--relocation-check")
+      .help("Phase 0 check: run GPUDirect relocation streams concurrently with the "
+            "real LambdaGPUPipeline (Cfg32ch4fpga) instead of the sweeps above")
+      .default_value(false)
+      .implicit_value(true);
+  program.add_argument("--relocation-streams")
+      .help("Number of simulated FPGA relocation streams for --relocation-check")
+      .default_value(4)
+      .scan<'i', int>();
+  program.add_argument("--relocation-poll-batch")
+      .help("Packets per relocation batch for --relocation-check")
+      .default_value(64)
+      .scan<'i', int>();
+  program.add_argument("--relocation-pkt-rate-per-channel")
+      .help("Packets/sec/channel target for --relocation-check")
+      .default_value(15500.0)
+      .scan<'g', double>();
 
   try {
     program.parse_args(argc, argv);
@@ -303,6 +436,10 @@ int main(int argc, char *argv[]) {
   const bool   with_output       = program.get<bool>("--with-output");
   const bool   lambda_only       = program.get<bool>("--lambda-only");
   const bool   corrbeam_only     = program.get<bool>("--corrbeam-only");
+  const bool   relocation_check  = program.get<bool>("--relocation-check");
+  const int    relocation_streams = program.get<int>("--relocation-streams");
+  const int    relocation_poll_batch = program.get<int>("--relocation-poll-batch");
+  const double relocation_pkt_rate = program.get<double>("--relocation-pkt-rate-per-channel");
 
   // Async file logger so the pipeline's INFO_LOG/DEBUG_LOG macros have
   // somewhere to write without polluting stdout.
@@ -313,6 +450,13 @@ int main(int argc, char *argv[]) {
       tp, spdlog::async_overflow_policy::overrun_oldest);
   logger->set_level(spdlog::level::info);
   spatial::Logger::set(logger);
+
+  if (relocation_check) {
+    const double channels_pkt_rate = Cfg32ch4fpga::NR_CHANNELS * relocation_pkt_rate;
+    run_relocation_check<Cfg32ch4fpga>(duration_s, num_buffers_4fpga, relocation_streams,
+                                       relocation_poll_batch, /*dest_slots=*/256, channels_pkt_rate);
+    return 0;
+  }
 
   std::cout << "bench_gpu: 4-FPGA CorrBeam channel/corr-packet sweeps + 4-FPGA LambdaGPU channel sweep"
             << "\n  duration=" << duration_s << "s each"

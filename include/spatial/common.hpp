@@ -381,16 +381,18 @@ make_packet_captures(const CommonArgs &args,
   }
 
   const bool use_ibverbs = args.capture_backend == "ibverbs";
-  if (!use_ibverbs && args.capture_backend != "kernel") {
+  const bool use_ibverbs_gpudirect = args.capture_backend == "ibverbs-gpudirect";
+  if (!use_ibverbs && !use_ibverbs_gpudirect && args.capture_backend != "kernel") {
     throw std::runtime_error("Unknown --capture-backend '" +
                              args.capture_backend +
-                             "' (expected 'kernel' or 'ibverbs')");
+                             "' (expected 'kernel', 'ibverbs', or 'ibverbs-gpudirect')");
   }
 #ifndef HAVE_IBVERBS
-  if (use_ibverbs) {
+  if (use_ibverbs || use_ibverbs_gpudirect) {
     throw std::runtime_error(
-        "--capture-backend=ibverbs requested but this binary was built without "
-        "libibverbs (install libibverbs-dev and rebuild on an RDMA host)");
+        "--capture-backend=" + args.capture_backend +
+        " requested but this binary was built without libibverbs (install "
+        "libibverbs-dev and rebuild on an RDMA host)");
   }
 #endif
 
@@ -398,6 +400,15 @@ make_packet_captures(const CommonArgs &args,
   for (int i = 0; i < nr_nics; ++i) {
     auto nic = args.fpga_names[i];
 #ifdef HAVE_IBVERBS
+    if (use_ibverbs_gpudirect) {
+      // GPUDirect ingest path (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md):
+      // constructed here like every other backend, but needs an explicit
+      // arm() call once the app's pipeline/ProcessorState exist -- see
+      // arm_gpudirect_captures() below, called separately from main().
+      capture.push_back(std::make_unique<LibibverbsGpuDirectPacketCapture>(
+          nic, args.port, BUFFER_SIZE));
+      continue;
+    }
     if (use_ibverbs) {
       capture.push_back(std::make_unique<LibibverbsPacketCapture>(
           nic, args.port, BUFFER_SIZE));
@@ -410,6 +421,24 @@ make_packet_captures(const CommonArgs &args,
   }
   return capture;
 }
+
+#ifdef HAVE_IBVERBS
+// Arms every LibibverbsGpuDirectPacketCapture in `captures` against `state`
+// (a no-op for every other backend/capture type) -- must be called once,
+// after `state`'s pipeline has GPU-resident landing buffers, and before
+// spawning the capture threads that call get_packets(). See
+// LibibverbsGpuDirectPacketCapture::arm()'s doc comment for why this can't
+// happen inside make_packet_captures() itself (the pipeline doesn't exist
+// yet at that point in every app's main()).
+inline void arm_gpudirect_captures(std::vector<std::unique_ptr<PacketInput>> &captures,
+                                   ProcessorStateBase &state) {
+  for (auto &c : captures) {
+    if (auto *gpudirect = dynamic_cast<LibibverbsGpuDirectPacketCapture *>(c.get())) {
+      gpudirect->arm(state);
+    }
+  }
+}
+#endif
 
 template <typename CaptureContainer>
 inline uint32_t get_total_capture_drops(const CaptureContainer &capture) {
@@ -535,9 +564,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .store_into(args.port);
 
   program.add_argument("--capture-backend")
-      .help("Live packet-capture backend: 'kernel' (SOCK_DGRAM/recvmmsg) or "
+      .help("Live packet-capture backend: 'kernel' (SOCK_DGRAM/recvmmsg), "
             "'ibverbs' (libibverbs raw-packet QP, requires an RDMA NIC and a "
-            "build with libibverbs)")
+            "build with libibverbs), or 'ibverbs-gpudirect' (GPUDirect RDMA "
+            "straight into GPU memory, requires an RDMA NIC with GPUDirect/"
+            "nvidia-peermem support in addition to libibverbs -- see the "
+            "arm_gpudirect_captures() call every app using this backend must "
+            "make once its pipeline exists)")
       .default_value(std::string("kernel"))
       .store_into(args.capture_backend);
 

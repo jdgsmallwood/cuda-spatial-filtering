@@ -55,6 +55,18 @@ endforeach()
 add_executable(udp_sender ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp)
 target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)
 
+# Raw-frame pcap replay over a libibverbs send QP, for testing
+# LibibverbsPacketCapture/LibibverbsGpuDirectPacketCapture end to end (send
+# via ibverbs, receive via ibverbs) -- see the file's header comment. Prints
+# a friendly error and exits if built without libibverbs, matching the
+# capture-side backend's own --capture-backend=ibverbs error message.
+add_executable(ibverbs_pcap_sender ${PROJECT_SOURCE_DIR}/apps/ibverbs_pcap_sender.cpp)
+target_include_directories(ibverbs_pcap_sender PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(ibverbs_pcap_sender PRIVATE pcap argparse)
+if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
+    target_link_libraries(ibverbs_pcap_sender PRIVATE ${IBVERBS_LIBRARY})
+endif()
+
 add_executable(gpu_benchmark ${PROJECT_SOURCE_DIR}/apps/gpu_benchmark.cu)
 target_link_libraries(gpu_benchmark PRIVATE gpu_app_common)
 
@@ -92,6 +104,13 @@ target_link_libraries(bench_writers PRIVATE gpu_app_common)
 
 add_executable(bench_gpu ${PROJECT_SOURCE_DIR}/apps/bench_gpu.cu)
 target_link_libraries(bench_gpu PRIVATE gpu_app_common)
+
+# Phase 0 validation benchmark for the GPUDirect RDMA ingest plan (see
+# docs/architecture.md and the plan referenced there): CUDA-graph-replay
+# scatter relocation throughput/contention, no ibverbs/NIC dependency.
+add_executable(bench_gpudirect_scatter ${PROJECT_SOURCE_DIR}/apps/bench_gpudirect_scatter.cu)
+target_include_directories(bench_gpudirect_scatter PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(bench_gpudirect_scatter PRIVATE spdlog::spdlog argparse CUDA::cudart cuda)
 
 # Non-observe apps get the default (CMake-cache) values for the three macros
 # that were removed from the global add_compile_definitions in favour of

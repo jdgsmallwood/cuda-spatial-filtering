@@ -29,6 +29,16 @@ public:
                                 const bool dummy_run = false) = 0;
   virtual void dump_visibilities(const uint64_t end_seq_num = 0) = 0;
 
+  // GPUDirect RDMA ingest support (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md
+  // and docs/architecture.md's GPUDirect section): the device-resident
+  // samples/scales array for one input buffer slot, so a capture backend
+  // can relocate packet payloads directly into it instead of via a pinned-host
+  // buffer + cudaMemcpyAsync. Default null means "no GPU-resident landing
+  // buffer available" -- the CPU-memory ingest path (KernelSocketPacketCapture,
+  // PCAPPacketCapture) never calls these and doesn't need an override.
+  virtual void *gpu_landing_samples_ptr(int /*buffer_index*/) { return nullptr; }
+  virtual void *gpu_landing_scales_ptr(int /*buffer_index*/) { return nullptr; }
+
 protected:
   // Initialized so a pipeline used before set_state/set_output is called
   // (e.g. the constructor warmup run) trips ingest_and_scale's nullptr

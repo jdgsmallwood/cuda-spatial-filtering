@@ -63,6 +63,11 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
+add_executable(
+  IbverbsPlacementTests test_ibverbs_placement.cu
+)
+target_link_libraries(IbverbsPlacementTests PRIVATE test_app_common)
+
 
 # Built standalone (not linked against test_app_common) so pointing.cpp's
 # casacore calls are compiled/linked entirely by the system C++ compiler --
@@ -119,6 +124,10 @@ add_executable(AntennaOrderingTests test_antenna_ordering.cu)
 target_link_libraries(AntennaOrderingTests PRIVATE test_support)
 set_target_properties(AntennaOrderingTests PROPERTIES CUDA_ARCHITECTURES "native")
 
+add_executable(GpuDirectScatterTests test_gpudirect_scatter.cu)
+target_link_libraries(GpuDirectScatterTests PRIVATE test_support)
+set_target_properties(GpuDirectScatterTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 add_executable(FineChannelizerTests test_fine_channelizer.cu)
 target_link_libraries(FineChannelizerTests PRIVATE test_support)
 set_target_properties(FineChannelizerTests PROPERTIES CUDA_ARCHITECTURES "native")
@@ -160,6 +169,7 @@ gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(IbverbsPlacementTests)
 gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
 gtest_discover_tests(PulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
@@ -169,6 +179,7 @@ gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_E
 gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(StreamReorderTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(AntennaOrderingTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(GpuDirectScatterTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineChannelizerTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineChannelizedAntennaSpectraTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineChannelizedBeamformedSpectraTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")

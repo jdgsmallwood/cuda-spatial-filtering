@@ -249,6 +249,29 @@ public:
   virtual void process_all_available_packets() = 0;
 
   virtual void handle_buffer_completion(bool force_flush = false) = 0;
+
+  // GPUDirect ingest support (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md,
+  // libibverbs.hpp's LibibverbsGpuDirectPacketCapture). Resolves where a
+  // packet with the given (sample_count, fpga_id, freq_channel) belongs,
+  // using the same placement arithmetic as the reactive
+  // copy_data_to_input_buffer_if_able path (locate_packet()), and returns the
+  // GPU-resident samples/scales addresses to relocate its payload to.
+  // Returns false for stale/unresolved packets (caller should not relocate)
+  // or when the paired GPUPipeline has no GPU-resident landing buffers.
+  // Default false is safe for every existing ProcessorStateBase subclass
+  // (BenchCaptureState, FakeProcessorState, test fakes) -- only
+  // ProcessorState<T,...> overrides this meaningfully.
+  virtual bool resolve_gpu_slot(uint64_t /*sample_count*/, uint32_t /*fpga_id*/,
+                                uint16_t /*freq_channel*/,
+                                void *& /*out_samples_addr*/,
+                                void *& /*out_scales_addr*/) {
+    return false;
+  }
+  // Byte size of one packet's samples/scales slot in the GPU-resident
+  // landing buffers above -- queried once by LibibverbsGpuDirectPacketCapture::arm().
+  // Default 0 signals "not GPUDirect-capable."
+  virtual size_t gpu_samples_slot_bytes() const { return 0; }
+  virtual size_t gpu_scales_slot_bytes() const { return 0; }
 };
 template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000, int WORKER_COUNT = 3>
@@ -427,6 +450,101 @@ public:
     }
   }
 
+  // Core placement formula for one candidate buffer window: which packet
+  // slot (relative to that buffer's start_seq[fpga_index]) this sample_count
+  // maps to. Single source of truth -- copy_data_to_input_buffer_if_able's
+  // scan loop below and locate_packet() (used by the GPUDirect ingest path,
+  // see docs/architecture.md) both call this instead of duplicating the
+  // arithmetic.
+  int packet_index_for_buffer(uint64_t sample_count, size_t fpga_index,
+                              int buffer_index) const {
+    const uint64_t buffer_start = buffers[buffer_index].start_seq[fpga_index];
+    return static_cast<int>((sample_count - buffer_start) / NR_BETWEEN_SAMPLES);
+  }
+
+  enum class PacketLocationStatus {
+    kValid,      // packet_index/buffer_index below are where this packet belongs
+    kStale,      // older than the lowest possible start token -- discard
+    kUnresolved  // didn't land in any of the NR_INPUT_BUFFERS windows scanned
+  };
+  struct PacketLocation {
+    PacketLocationStatus status;
+    int buffer_index = -1;
+    int packet_index = 0;
+  };
+
+  // Resolves the (buffer_index, packet_index) a packet maps to, scanning the
+  // NR_INPUT_BUFFERS windows starting at current_buffer exactly as
+  // copy_data_to_input_buffer_if_able does. Used by the GPUDirect ingest
+  // path's proactive placement (see libibverbs.hpp) instead of duplicating
+  // this scan.
+  //
+  // Known limitation vs. the reactive path below: guard/boundary packets
+  // whose packet_index falls in the overlap between two adjacent buffer
+  // windows are copied into BOTH buffers by the reactive path (see
+  // is_extended/num_copied below) -- this returns only the first (lowest
+  // buffer_num) match. Acceptable for the GPUDirect path's first cut since
+  // it affects only the ~2 guard packets per buffer rotation, not steady
+  // state; revisit if boundary-packet correctness matters for a given
+  // consumer.
+  PacketLocation locate_packet(uint64_t sample_count, size_t fpga_index) const {
+    const int current_buf = current_buffer;
+    for (int buffer_num = 0; buffer_num < NR_INPUT_BUFFERS; ++buffer_num) {
+      const int buffer_index = (current_buf + buffer_num) % NR_INPUT_BUFFERS;
+      const int packet_index =
+          packet_index_for_buffer(sample_count, fpga_index, buffer_index);
+      if (buffer_num == 0 && packet_index < -1) [[unlikely]] {
+        return {PacketLocationStatus::kStale, -1, packet_index};
+      }
+      if (packet_index >= -1 &&
+          packet_index < static_cast<int>(NR_PACKETS_FOR_CORRELATION) + 1) {
+        return {PacketLocationStatus::kValid, buffer_index, packet_index};
+      }
+    }
+    return {PacketLocationStatus::kUnresolved, -1, 0};
+  }
+
+  // GPUDirect ingest support (see ProcessorStateBase::resolve_gpu_slot's doc
+  // comment). Reuses fpga_index_lut/fpga_ids and locate_packet() exactly as
+  // the reactive path does -- this is the second consumer of
+  // initialize_buffers()'s output the plan describes, proactive instead of
+  // reactive.
+  bool resolve_gpu_slot(uint64_t sample_count, uint32_t fpga_id, uint16_t freq_channel,
+                        void *&out_samples_addr, void *&out_scales_addr) override {
+    int fpga_index_i =
+        fpga_id < fpga_index_lut.size() ? fpga_index_lut[fpga_id] : -1;
+    if (fpga_index_i < 0) [[unlikely]] {
+      const auto it = fpga_ids.find(fpga_id);
+      if (it == fpga_ids.end()) return false;
+      fpga_index_i = it->second;
+    }
+    const size_t fpga_index = static_cast<size_t>(fpga_index_i);
+
+    const int channel = static_cast<int>(freq_channel) - static_cast<int>(MIN_FREQ_CHANNEL);
+    if (channel < 0 || channel >= static_cast<int>(T::NR_FPGA_CHANNELS)) return false;
+
+    const auto loc = locate_packet(sample_count, fpga_index);
+    if (loc.status != PacketLocationStatus::kValid) return false;
+    if (!pipeline_) return false;
+
+    auto *samples_base = static_cast<typename T::InputPacketSamplesType *>(
+        pipeline_->gpu_landing_samples_ptr(loc.buffer_index));
+    auto *scales_base = static_cast<typename T::PacketScalesType *>(
+        pipeline_->gpu_landing_scales_ptr(loc.buffer_index));
+    if (!samples_base || !scales_base) return false; // CPU-memory pipeline, not GPUDirect
+
+    out_samples_addr = &(*samples_base)[channel][loc.packet_index + 1][fpga_index];
+    const size_t receiver_index = fpga_index * T::NR_RECEIVERS_PER_PACKET;
+    out_scales_addr = &(*scales_base)[channel][loc.packet_index + 1][receiver_index];
+    return true;
+  }
+  size_t gpu_samples_slot_bytes() const override {
+    return sizeof(typename T::PacketDataStructure);
+  }
+  size_t gpu_scales_slot_bytes() const override {
+    return sizeof(typename T::PacketScaleStructure);
+  }
+
   __attribute__((hot)) void copy_data_to_input_buffer_if_able(
       ProcessedPacket<typename T::PacketScaleStructure,
                       typename T::PacketDataStructure> &pkt,
@@ -478,9 +596,8 @@ public:
     // copy to correct place or leave it.
     for (int buffer_num = 0; buffer_num < NR_INPUT_BUFFERS; ++buffer_num) {
       const int buffer_index = (current_buf + buffer_num) % NR_INPUT_BUFFERS;
-      const uint64_t buffer_start = buffers[buffer_index].start_seq[fpga_index];
       const int packet_index =
-          (sample_count - buffer_start) / NR_BETWEEN_SAMPLES;
+          packet_index_for_buffer(sample_count, fpga_index, buffer_index);
 
       // should be < -1 as the -1th packet is useful for us due to inter-FPGA
       // drift.
@@ -490,7 +607,7 @@ public:
         // Regardless we can't do anything with this.
         INFO_LOG("Discarding packet as it is before current buffer with "
                  "begin_seq {} actually has packet_index {}",
-                 buffer_start, pkt.sample_count);
+                 buffers[buffer_index].start_seq[fpga_index], pkt.sample_count);
         packets_discarded.fetch_add(1);
         pkt.original_packet_processed->store(true, std::memory_order_release);
         return;

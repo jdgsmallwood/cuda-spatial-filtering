@@ -504,6 +504,18 @@ public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
   size_t benchmark_runs_done = 0;
   cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
+
+  // GPUDirect RDMA ingest support (see pipeline_base.hpp): expose the
+  // per-buffer device-resident samples/scales arrays that ingest_and_scale
+  // (pipeline/common.hpp) already cudaMemcpyAsync's into, so a capture
+  // backend can relocate packet payloads directly here instead.
+  void *gpu_landing_samples_ptr(int buffer_index) override {
+    return buffers[buffer_index].samples_entry.get();
+  }
+  void *gpu_landing_scales_ptr(int buffer_index) override {
+    return buffers[buffer_index].scales.get();
+  }
+
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
