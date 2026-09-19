@@ -105,6 +105,15 @@ target_link_libraries(bench_writers PRIVATE gpu_app_common)
 add_executable(bench_gpu ${PROJECT_SOURCE_DIR}/apps/bench_gpu.cu)
 target_link_libraries(bench_gpu PRIVATE gpu_app_common)
 
+# Exploratory: eigendecomposition speedup investigation, not wired into the
+# production pipeline -- see exploration/eigensolver/README.md for full
+# context (findings, open questions, how to resume). Kept buildable here so
+# it doesn't bit-rot.
+add_executable(bench_eigensolver ${PROJECT_SOURCE_DIR}/exploration/eigensolver/bench_eigensolver.cu)
+target_include_directories(bench_eigensolver PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                                     ${PROJECT_SOURCE_DIR}/exploration/eigensolver)
+target_link_libraries(bench_eigensolver PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas argparse spdlog::spdlog)
+
 # Phase 0 validation benchmark for the GPUDirect RDMA ingest plan (see
 # docs/architecture.md and the plan referenced there): CUDA-graph-replay
 # scatter relocation throughput/contention, no ibverbs/NIC dependency.

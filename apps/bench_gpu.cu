@@ -209,6 +209,12 @@ struct LambdaGpuBenchResult {
   double input_gb_per_sec;
   double avg_gpu_ms;
   double gpu_util;
+  // Stage breakdown (see LambdaGPUPipeline::pre_corr_done/eigen_done):
+  // ingest+align+correlate (channelizer+TCC), eigendecomposition (cuSOLVER),
+  // beamform+output (ccglib GEMM + permutations, graph_post).
+  double avg_pre_corr_ms;
+  double avg_eigen_ms;
+  double avg_post_ms;
 };
 
 template <typename T>
@@ -240,16 +246,26 @@ LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
   const double elapsed =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
-  // avg_gpu_ms from the last NR_BENCHMARKING_RUNS events (the ring wraps modulo that).
+  // avg_gpu_ms (+ stage breakdown) from the last NR_BENCHMARKING_RUNS events
+  // (the ring wraps modulo that).
   constexpr unsigned long long RING = LambdaGPUPipeline<T>::NR_BENCHMARKING_RUNS;
   const unsigned long long sample_runs = std::min(pipeline_runs, RING);
-  double total_gpu_ms = 0.0;
+  double total_gpu_ms = 0.0, total_pre_corr_ms = 0.0, total_eigen_ms = 0.0, total_post_ms = 0.0;
   for (unsigned long long i = 0; i < sample_runs; ++i) {
     float ms = 0.0f;
     cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.stop_run[i]);
     total_gpu_ms += ms;
+    cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.pre_corr_done[i]);
+    total_pre_corr_ms += ms;
+    cudaEventElapsedTime(&ms, pipeline.pre_corr_done[i], pipeline.eigen_done[i]);
+    total_eigen_ms += ms;
+    cudaEventElapsedTime(&ms, pipeline.eigen_done[i], pipeline.stop_run[i]);
+    total_post_ms += ms;
   }
   const double avg_gpu_ms = sample_runs > 0 ? total_gpu_ms / sample_runs : 0.0;
+  const double avg_pre_corr_ms = sample_runs > 0 ? total_pre_corr_ms / sample_runs : 0.0;
+  const double avg_eigen_ms = sample_runs > 0 ? total_eigen_ms / sample_runs : 0.0;
+  const double avg_post_ms = sample_runs > 0 ? total_post_ms / sample_runs : 0.0;
 
   constexpr size_t in_bytes = sizeof(typename T::InputPacketSamplesType);
 
@@ -264,6 +280,9 @@ LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
   r.input_gb_per_sec = static_cast<double>(in_bytes) * pipeline_runs / elapsed / 1e9;
   r.avg_gpu_ms      = avg_gpu_ms;
   r.gpu_util        = avg_gpu_ms * r.runs_per_sec / 1000.0;
+  r.avg_pre_corr_ms = avg_pre_corr_ms;
+  r.avg_eigen_ms    = avg_eigen_ms;
+  r.avg_post_ms     = avg_post_ms;
   return r;
 }
 
@@ -385,11 +404,15 @@ static void print_lambda_result(const LambdaGpuBenchResult &r) {
       "[LambdaGPU ch=%zu fpga=%zu rx=%zu] "
       "elapsed=%.3f runs=%llu runs/sec=%.4f "
       "input_bytes=%zu input_GB/sec=%.6f "
-      "avg_gpu_ms=%.3f gpu_util=%.1f%%\n",
+      "avg_gpu_ms=%.3f gpu_util=%.1f%% "
+      "[pre_corr=%.3fms (%.1f%%) eigen=%.3fms (%.1f%%) post=%.3fms (%.1f%%)]\n",
       r.nr_channels, r.nr_fpga_sources, r.nr_receivers,
       r.elapsed, (unsigned long long)r.runs, r.runs_per_sec,
       r.input_bytes, r.input_gb_per_sec,
-      r.avg_gpu_ms, r.gpu_util * 100.0);
+      r.avg_gpu_ms, r.gpu_util * 100.0,
+      r.avg_pre_corr_ms, 100.0 * r.avg_pre_corr_ms / r.avg_gpu_ms,
+      r.avg_eigen_ms, 100.0 * r.avg_eigen_ms / r.avg_gpu_ms,
+      r.avg_post_ms, 100.0 * r.avg_post_ms / r.avg_gpu_ms);
   std::fflush(stdout);
 }
 
@@ -491,9 +514,23 @@ int main(int argc, char *argv[]) {
       print_lambda_result(on_result);
       const double throughput_ratio = on_result.runs_per_sec / off_result.runs_per_sec;
       const double gpu_ms_ratio = on_result.avg_gpu_ms / off_result.avg_gpu_ms;
+      const double pre_corr_ratio = on_result.avg_pre_corr_ms / off_result.avg_pre_corr_ms;
+      const double eigen_ratio = on_result.avg_eigen_ms / off_result.avg_eigen_ms;
+      const double post_ratio = on_result.avg_post_ms / off_result.avg_post_ms;
+      const double pre_corr_delta_ms = on_result.avg_pre_corr_ms - off_result.avg_pre_corr_ms;
+      const double eigen_delta_ms = on_result.avg_eigen_ms - off_result.avg_eigen_ms;
+      const double post_delta_ms = on_result.avg_post_ms - off_result.avg_post_ms;
+      const double total_delta_ms = pre_corr_delta_ms + eigen_delta_ms + post_delta_ms;
       std::cout << "  => runs/sec ratio (on/off) = " << throughput_ratio
                 << "  (" << (1.0 / throughput_ratio) << "x slower)"
-                << " | avg_gpu_ms ratio (on/off) = " << gpu_ms_ratio << "x\n\n";
+                << " | avg_gpu_ms ratio (on/off) = " << gpu_ms_ratio << "x\n"
+                << "  stage ratios (on/off): pre_corr(channelizer+correlate)=" << pre_corr_ratio
+                << "x  eigen(cuSOLVER)=" << eigen_ratio << "x  post(beamform+output)=" << post_ratio
+                << "x\n"
+                << "  stage share of the added " << total_delta_ms << "ms/run: pre_corr="
+                << 100.0 * pre_corr_delta_ms / total_delta_ms << "%  eigen="
+                << 100.0 * eigen_delta_ms / total_delta_ms << "%  post="
+                << 100.0 * post_delta_ms / total_delta_ms << "%\n\n";
     };
 
     std::cout << "[8 coarse channels]\n";

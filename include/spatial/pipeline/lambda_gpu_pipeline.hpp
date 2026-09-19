@@ -510,6 +510,13 @@ public:
   static constexpr size_t NR_BENCHMARKING_RUNS = 100;
   size_t benchmark_runs_done = 0;
   cudaEvent_t start_run[NR_BENCHMARKING_RUNS], stop_run[NR_BENCHMARKING_RUNS];
+  // Stage-boundary events for isolating where time goes within one
+  // execute_pipeline call -- pre_corr_done brackets ingest+align+correlate
+  // (channelizer + TCC, graph_align/graph_pre_corr), eigen_done brackets the
+  // eager cuSOLVER eigendecomposition call, and stop_run (already recorded at
+  // the very end) closes out the beamforming/output section (graph_post).
+  // Benchmark-only instrumentation, same ring-buffer pattern as start_run/stop_run.
+  cudaEvent_t pre_corr_done[NR_BENCHMARKING_RUNS], eigen_done[NR_BENCHMARKING_RUNS];
 
   // GPUDirect RDMA ingest support (see pipeline_base.hpp): expose the
   // per-buffer device-resident samples/scales arrays that ingest_and_scale
@@ -573,6 +580,8 @@ public:
       enqueue_pre_corr(b);
     }
 
+    cudaEventRecord(pre_corr_done[benchmark_runs_done], b.stream);
+
     // Eager: cuSOLVER may do host-side work per call that a captured graph
     // would not replay, so it stays out of the graphs.
     CUSOLVER_CHECK(cusolverDnXsyevBatched(
@@ -583,6 +592,8 @@ public:
         b.cusolver_work_device.get(), b.cusolver_work_device_size,
         b.cusolver_work_host, b.cusolver_work_host_size, b.cusolver_info.get(),
         CUSOLVER_BATCH_SIZE));
+
+    cudaEventRecord(eigen_done[benchmark_runs_done], b.stream);
 
     // The post-eigen section's first op (accumulate_visibilities) adds into
     // d_visibilities_accumulator. Wait for dump_visibilities' last reset of
@@ -1121,6 +1132,8 @@ public:
     for (auto i = 0; i < NR_BENCHMARKING_RUNS; ++i) {
       cudaEventCreate(&start_run[i]);
       cudaEventCreate(&stop_run[i]);
+      cudaEventCreate(&pre_corr_done[i]);
+      cudaEventCreate(&eigen_done[i]);
     }
 
     cudaDeviceSynchronize();
