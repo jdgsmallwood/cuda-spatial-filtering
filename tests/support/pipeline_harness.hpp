@@ -97,6 +97,15 @@ make_corr_beam_only_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
       num_buffers, weights, std::move(beam_steering));
 }
 
+// Constructs a LambdaStarweavePipeline (correlation-only, visibilities-only --
+// no beamforming, so unlike the factories above there's no BeamWeightsT/BeamSteering
+// to construct at all).
+template <typename Config>
+std::unique_ptr<LambdaStarweavePipeline<Config>>
+make_starweave_pipeline(int num_buffers) {
+  return std::make_unique<LambdaStarweavePipeline<Config>>(num_buffers);
+}
+
 // Constructs a LambdaPulsarFoldPipeline with its PSRDADA sink disabled
 // (dada_key == 0), so the full GPU compute (ingest/scale -> permute -> ccglib
 // beamform) runs without a running ring buffer or a header.hdr file. The

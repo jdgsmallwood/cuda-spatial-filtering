@@ -123,7 +123,7 @@ flowchart TD
 All variants implement the `GPUPipeline` interface (`include/spatial/pipeline_base.hpp`) and share
 `LambdaPipelineIngest<T>::ingest_and_scale` (`pipeline/common.hpp`) as their first step.
 
-All seven variants share the same pre-correlation fine-channelization wiring (`FineChannelizer<T>`,
+All eight variants share the same pre-correlation fine-channelization wiring (`FineChannelizer<T>`,
 `reorder_to_filter_input`/`channelizer_output_to_*` in `spatial.cuh` — see Section 6 and
 `CLAUDE.md`'s `NR_OBSERVING_FINE_CHANNELS`/`NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM` docs), gated
 `if constexpr (T::NR_FINE_CHANNELS > 1)` so the `NR_FINE_CHANNELS == 1` path stays byte-for-byte
@@ -146,8 +146,9 @@ different width.
 | `LambdaCorrBeamOnlyGPUPipeline` | Benchmark-only correlation+beamforming, no FFT output | yes | yes | no | pre-correlation fine channels (disabled path keeps its fused fast-path kernels unchanged) |
 | `LambdaProjectionPipeline` | Accumulates projection matrices for RFI mitigation | yes | no | yes | offline only |
 | `LambdaPulsarFoldPipeline` | Folds beamformed time series for pulsar timing | yes (RFI-mitigate mode only) | yes | varies | no (folding is external, via DSPSR) |
+| `LambdaStarweavePipeline` | Correlation-only: ingest+align+fine-channelize+correlate, visibilities only | yes | no | no | pre-correlation fine channels (no FFT/beamform ever) |
 
-All seven support `NR_FINE_CHANNELS > 1` as of this rollout; the edge-channel trim
+All eight support `NR_FINE_CHANNELS > 1` as of this rollout; the edge-channel trim
 (`NR_FINE_CHANNEL_EDGE_TRIM`) is applied uniformly by the shared `channelizer_output_to_corr_input`/
 `channelizer_output_to_col_maj_cons`/`channelizer_output_to_antenna_power` kernels, not
 per-pipeline.
@@ -378,6 +379,46 @@ suspect: the raw-pointer overload binds temporaries to non-`const` reference par
 conclusively pinned down as *the* cause). `FineChannelizer::launchAsync`
 (`pipeline/common.hpp`) now calls the `cu::Stream`-based overload directly as a confirmed,
 reliable workaround — not a guess. Worth reporting upstream to ASTRON if this recurs.
+
+## 7. `LambdaStarweavePipeline` stage detail
+
+The leanest variant — correlate and dump visibilities, nothing else. Modeled on
+`LambdaGPUPipeline`'s ingest/align/channelize/correlate sequence (Section 4), not
+`LambdaCorrBeamOnlyGPUPipeline`'s fused benchmark-only fast path, so per-FPGA delay correction
+and receiver/pol reordering always run before correlation regardless of `NR_FINE_CHANNELS` — the
+`if constexpr (T::NR_FINE_CHANNELS > 1)` branch only changes how `correlator_input` gets
+populated, exactly like `LambdaGPUPipeline`'s equivalent branch.
+
+Two stages are captured as CUDA graphs (`graph_align`, `graph_corr`) when
+`SPATIAL_DISABLE_CUDA_GRAPH` isn't set. Unlike `LambdaGPUPipeline` there's no
+eigendecomposition/beamforming section to keep separate and eager, so `accumulate_visibilities`
+runs eagerly right after `graph_corr` (a single cheap kernel call) rather than needing a third
+graph.
+
+```mermaid
+flowchart TD
+    A["ingest_and_scale\n(int8 → __half, scale, gain)"] --> B
+
+    subgraph graph_align["enqueue_alignment (graph_align)"]
+        B["packetToPreAlign permutation"] --> C["apply_delays\n(per-FPGA integer delay)"]
+        C --> D["reorder_streams\n(canonical receiver/pol order)"]
+    end
+
+    D --> E{"NR_FINE_CHANNELS > 1?"}
+
+    subgraph graph_corr["enqueue_corr (graph_corr)"]
+        E -- no --> G["aligned_to_corr_input"]
+        E -- yes --> CH1["reorder_to_filter_input\n(__half → contiguous float2 per coarse channel)"]
+        CH1 --> CH2["FineChannelizer::launchAsync\n(1 gpu-filter Filter per coarse channel)"]
+        CH2 --> CH3["channelizer_output_to_corr_input\n(gather into TCC's correlator_input, padded)"]
+        CH3 --> H
+        G --> H["TCC correlator.launchAsync"]
+        H --> I["corr_to_trimmed"]
+    end
+
+    I --> M["accumulate_visibilities (eager)"]
+    M --> T[/"Visibilities → HDF5"/]
+```
 
 ---
 

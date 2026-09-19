@@ -107,6 +107,12 @@ target_link_libraries(CorrBeamPipelineTests PRIVATE test_support)
 set_target_properties(CorrBeamPipelineTests PROPERTIES CUDA_ARCHITECTURES "native")
 
 add_executable(
+  StarweaveTests test_starweave_pipeline.cu
+)
+target_link_libraries(StarweaveTests PRIVATE test_support)
+set_target_properties(StarweaveTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(
   AdaptivePipelineTests test_adaptive_pipeline.cu
 )
 target_link_libraries(AdaptivePipelineTests PRIVATE test_support)
@@ -156,6 +162,10 @@ add_executable(FineChannelizedCorrBeamTests test_fine_channelized_corr_beam.cu)
 target_link_libraries(FineChannelizedCorrBeamTests PRIVATE test_support)
 set_target_properties(FineChannelizedCorrBeamTests PROPERTIES CUDA_ARCHITECTURES "native")
 
+add_executable(FineChannelizedStarweaveTests test_fine_channelized_starweave.cu)
+target_link_libraries(FineChannelizedStarweaveTests PRIVATE test_support)
+set_target_properties(FineChannelizedStarweaveTests PROPERTIES CUDA_ARCHITECTURES "native")
+
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
 # gettimeofday, and pool-alloc microbenchmarks for the six hot-path fixes.
@@ -174,6 +184,7 @@ gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
 gtest_discover_tests(PulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(CorrBeamPipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(StarweaveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(RunAuditTests)
 gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
@@ -187,6 +198,7 @@ gtest_discover_tests(FineChannelizedProjectionTests PROPERTIES ENVIRONMENT "${TE
 gtest_discover_tests(FineChannelizedAdaptiveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineChannelizedPulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineChannelizedCorrBeamTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedStarweaveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 
 add_test(
   NAME AdaptiveDetectionReferencePythonTests

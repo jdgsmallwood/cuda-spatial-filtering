@@ -52,6 +52,24 @@ foreach(NR_FPGAS 1 2 3 4)
     endforeach()
 endforeach()
 
+# Starweave grid: starweave_{NR_FPGAS}_{NR_CHANNELS}, same combinations as the observe grid
+# above -- correlation-only, visibilities-only counterpart to observe (see
+# apps/starweave.cu / LambdaStarweavePipeline).
+foreach(NR_FPGAS 1 2 3 4)
+    foreach(NR_CHANNELS 8 16 24 32)
+        set(SW_TARGET "starweave_${NR_FPGAS}_${NR_CHANNELS}")
+        math(EXPR _NR_RECEIVERS "${NR_FPGAS} * ${NR_OBSERVING_RECEIVERS_PER_PACKET}")
+        math(EXPR _PADDED_RECEIVERS "(${_NR_RECEIVERS} + 31) / 32 * 32")
+        add_executable(${SW_TARGET} ${PROJECT_SOURCE_DIR}/apps/starweave.cu)
+        target_link_libraries(${SW_TARGET} PRIVATE gpu_app_common)
+        target_compile_definitions(${SW_TARGET} PRIVATE
+            NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
+            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
+            NR_OBSERVING_PADDED_RECEIVERS=${_PADDED_RECEIVERS}
+        )
+    endforeach()
+endforeach()
+
 add_executable(udp_sender ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp)
 target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)
 
@@ -139,14 +157,17 @@ endforeach()
 
 # Install all app binaries to <install-prefix>/bin (defaults to <project-root>/bin).
 set(_OBSERVE_TARGETS)
+set(_STARWEAVE_TARGETS)
 foreach(NR_FPGAS 1 2 3 4)
     foreach(NR_CHANNELS 8 16 24 32)
         list(APPEND _OBSERVE_TARGETS "observe_${NR_FPGAS}_${NR_CHANNELS}")
+        list(APPEND _STARWEAVE_TARGETS "starweave_${NR_FPGAS}_${NR_CHANNELS}")
     endforeach()
 endforeach()
 
 install(TARGETS
     ${_OBSERVE_TARGETS}
+    ${_STARWEAVE_TARGETS}
     ${_STANDARD_APPS}
     udp_sender
     RUNTIME DESTINATION bin
