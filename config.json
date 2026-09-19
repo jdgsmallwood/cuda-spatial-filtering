@@ -56,6 +56,13 @@
       "21": {"east": -3.246, "north": -1.023, "up": 0}
     }
   },
+  "network_interfaces": {
+    "_comment": "Maps FPGA ID to NIC name so you can pass -i 0,1,2,3 on the command line.",
+    "0": "enp134s0np0",
+    "1": "enp134s0np0",
+    "2": "enp175s0np0",
+    "3": "enp216s0np0"
+  },
   "flagged_antennas": {
     "0": [],
     "1": [],

@@ -1,5 +1,13 @@
 #include "spatial/common.hpp"
 
+#ifndef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#endif
+
+#ifndef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
+#endif
+
 template <typename T> class ProjectionWeightApplicator {
 public:
   static constexpr int N = T::NR_RECEIVERS;
@@ -204,18 +212,27 @@ int main(int argc, char *argv[]) {
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
   constexpr int fft_downsample_factor = 64;
+  constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
+  constexpr int num_lambda_fine_channel_edge_trim =
+      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM;
   using Config = LambdaConfig<
       num_lambda_channels, nr_fpga_sources, nr_lambda_time_steps_per_packet,
       nr_lambda_receivers, nr_lambda_polarizations,
       nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
       nr_lambda_beams, nr_lambda_padded_receivers,
       nr_lambda_padded_receivers_per_block,
-      nr_correlation_blocks_to_integrate, true, fft_downsample_factor>;
+      nr_correlation_blocks_to_integrate, true, fft_downsample_factor,
+      num_lambda_fine_channels, num_lambda_fine_channel_edge_trim>;
 
+  // Matches LambdaBeamformedSpectraPipeline's own (private) FFTOutputType exactly -- its trailing
+  // axis is Config::NR_TIME_STEPS_PER_FINE_CHANNEL (not the raw
+  // nr_lambda_time_steps_per_packet*NR_OBSERVING_PACKETS_FOR_CORRELATION product), which shrinks
+  // once channelized since gpu-filter's fine channels replace the whole-band FFT. Also
+  // Config::NR_CHANNELS (widened), not the raw NR_OBSERVING_CHANNELS -- both must stay in sync
+  // with the pipeline's internal type since sizeof(FFTOutputType) drives the output memcpy size.
   using FFTOutputType =
-      float[NR_OBSERVING_CHANNELS][nr_lambda_polarizations][nr_lambda_beams]
-           [nr_lambda_time_steps_per_packet *
-            NR_OBSERVING_PACKETS_FOR_CORRELATION / fft_downsample_factor];
+      float[Config::NR_CHANNELS][nr_lambda_polarizations][nr_lambda_beams]
+           [Config::NR_TIME_STEPS_PER_FINE_CHANNEL / fft_downsample_factor];
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
     throw std::runtime_error("The number of network interfaces does not match "
@@ -231,6 +248,10 @@ int main(int argc, char *argv[]) {
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       args.min_freq_channel, fpga_delays, args.fpga_ids);
 
+  // RedisBeamFFTWriter always receives spectral output, channelized or not: unlike observe.cu's
+  // whole-band FFT (deleted outright when channelized), this pipeline's FFT path is retargeted --
+  // see execute_pipeline's if constexpr (NR_FINE_CHANNELS == 1) gate around cufftXtExec -- rather
+  // than removed, since gpu-filter's fine channels ARE this pipeline's spectrum.
   std::cout << "Creating FFT Writer" << std::endl;
   auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
       Config::NR_CHANNELS, nr_lambda_beams, Config::NR_POLARIZATIONS,
@@ -245,7 +266,10 @@ int main(int argc, char *argv[]) {
   std::cout << "Loading weights...\n";
   BeamWeightsT<Config> h_weights;
 
-  for (auto i = 0; i < num_lambda_channels; ++i) {
+  // BeamWeightsT<Config>::weights is sized by the widened Config::NR_CHANNELS, not the raw
+  // (coarse) num_lambda_channels -- looping only num_lambda_channels would leave the extra
+  // fine-channel weight entries uninitialized once channelization is active.
+  for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
     for (auto j = 0; j < nr_lambda_receivers; ++j) {
       for (auto k = 0; k < nr_lambda_beams; ++k) {
         for (auto l = 0; l < nr_lambda_polarizations; ++l) {
@@ -269,13 +293,18 @@ int main(int argc, char *argv[]) {
   // `beam_steering`/`pipeline`.
   const bool fold_calibration_into_steering =
       !args.beam_targets.empty() && args.apply_gains;
+  const bool use_canonical = !args.canonical_recv_perm.empty();
+  const auto &active_mapping =
+      use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
   typename Config::AntennaGains calibration_gains{};
   if (fold_calibration_into_steering) {
-    calibration_gains = get_gains_structure<Config>(args);
+    calibration_gains = use_canonical
+        ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+        : get_gains_structure<Config>(args);
   }
 
   BeamSteering<Config> beam_steering(
-      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.beam_targets, args.antenna_positions, active_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,
       args.steering_update_interval_seconds, num_buffers,
       fold_calibration_into_steering ? &calibration_gains : nullptr);
@@ -287,6 +316,8 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  if (use_canonical)
+    pipeline.set_stream_permutation(args.canonical_recv_perm, args.canonical_pol_perm);
   std::cout << "Initializing packet capture...\n";
   auto capture = make_packet_captures(args);
   state.nr_capture_threads = static_cast<int>(capture.size());

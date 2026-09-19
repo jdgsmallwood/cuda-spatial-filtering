@@ -8,3 +8,4 @@
 #include "spatial/pipeline/lambda_corr_beam_only_gpu_pipeline.hpp"
 #include "spatial/pipeline/lambda_projection_pipeline.hpp"
 #include "spatial/pipeline/lambda_pulsar_fold_pipeline.hpp"
+#include "spatial/pipeline/lambda_starweave_pipeline.hpp"

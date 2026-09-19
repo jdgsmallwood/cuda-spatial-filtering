@@ -142,6 +142,349 @@ void aligned_to_corr_input(const __half *input, __half *corr_input,
       NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(input, corr_input);
 }
 
+// Gathers samples_reordered (__half[FPGA][PACKET][TIME_IN_PACKET][CHANNEL(coarse)]
+// [RECEIVER_IN_PACKET][POL][COMPLEX], same layout aligned_to_corr_input_kernel reads above) into
+// a contiguous per-coarse-channel [RECEIVER][POL][TIME] complex-float time series -- the input
+// shape FineChannelizer<T>'s gpu-filter Filter instances expect. gpu-filter's FIR kernel
+// (readInputAndDoFIRfiltering in FilterAndCorrect.cu) looks *forward* from each output tick --
+// output tick T is computed from raw input ticks [T, T+NR_TAPS-1] -- so the extra
+// (NR_TAPS-1)*NR_FINE_CHANNELS samples its InputType reserves beyond NR_SAMPLES_PER_CHANNEL are
+// trailing look-ahead for the last output block, not leading history for the first. Real samples
+// are therefore written starting at t_dst=0; the trailing look-ahead region is zero-filled in the
+// same kernel (v1 doesn't carry PFB history/look-ahead across buffers, see FineChannelizer's
+// class comment for the accepted per-buffer edge-transient tradeoff), avoiding a separate
+// full-buffer memset.
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION, size_t NR_TAPS, size_t NR_FINE_CHANNELS>
+__global__ void
+reorder_to_filter_input_kernel(const __half *input, float2 *filter_input) {
+  constexpr size_t NR_TIME_STEPS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+  constexpr size_t HISTORY = (NR_TAPS - 1) * NR_FINE_CHANNELS;
+  constexpr size_t DST_TIME_LEN = NR_TIME_STEPS_FOR_CORRELATION + HISTORY;
+
+  const size_t total =
+      NR_CHANNELS * NR_RECEIVERS * NR_POLARIZATIONS * DST_TIME_LEN;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t t_dst = rem % DST_TIME_LEN;
+    rem /= DST_TIME_LEN;
+    const size_t p = rem % NR_POLARIZATIONS;
+    rem /= NR_POLARIZATIONS;
+    const size_t receiver = rem % NR_RECEIVERS;
+    rem /= NR_RECEIVERS;
+    const size_t c = rem;
+
+    const size_t output_idx =
+        ((c * NR_RECEIVERS + receiver) * NR_POLARIZATIONS + p) * DST_TIME_LEN +
+        t_dst;
+
+    if (t_dst >= NR_TIME_STEPS_FOR_CORRELATION) {
+      filter_input[output_idx] = make_float2(0.0f, 0.0f);
+    } else {
+      const size_t t_src = t_dst;
+      const size_t fpga = receiver / NR_RECEIVERS_PER_PACKET;
+      const size_t receiver_in_packet = receiver % NR_RECEIVERS_PER_PACKET;
+      const size_t packet = t_src / NR_TIME_STEPS_PER_PACKET;
+      const size_t time_in_packet = t_src % NR_TIME_STEPS_PER_PACKET;
+
+      const size_t input_idx =
+          (((((fpga * NR_PACKETS_FOR_CORRELATION + packet) *
+                  NR_TIME_STEPS_PER_PACKET +
+              time_in_packet) *
+                 NR_CHANNELS +
+             c) *
+                NR_RECEIVERS_PER_PACKET +
+            receiver_in_packet) *
+               NR_POLARIZATIONS +
+           p) *
+              2 /* COMPLEX */;
+
+      filter_input[output_idx] =
+          make_float2(__half2float(input[input_idx]),
+                     __half2float(input[input_idx + 1]));
+    }
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
+          size_t NR_PACKETS_FOR_CORRELATION, size_t NR_TAPS, size_t NR_FINE_CHANNELS>
+void reorder_to_filter_input(const __half *input, float2 *filter_input,
+                             cudaStream_t stream) {
+  constexpr size_t NR_TIME_STEPS_FOR_CORRELATION =
+      NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET;
+  constexpr size_t HISTORY = (NR_TAPS - 1) * NR_FINE_CHANNELS;
+  constexpr size_t DST_TIME_LEN = NR_TIME_STEPS_FOR_CORRELATION + HISTORY;
+  constexpr size_t total =
+      NR_CHANNELS * NR_RECEIVERS * NR_POLARIZATIONS * DST_TIME_LEN;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  reorder_to_filter_input_kernel<NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
+                                 NR_RECEIVERS_PER_PACKET, NR_TIME_STEPS_PER_PACKET,
+                                 NR_PACKETS_FOR_CORRELATION, NR_TAPS,
+                                 NR_FINE_CHANNELS><<<blocks, threads, 0, stream>>>(
+      input, filter_input);
+}
+
+// Gathers FineChannelizer<T>::FilterOutputType (__half2[COARSE][FINE][BLOCK][RECEIVER][POL]
+// [TIME_IN_BLOCK] -- gpu-filter's native per-coarse-channel output, bit-identical complex layout
+// to TCC's trailing [COMPLEX] axis since cuda::std::complex<__half> == __half2) directly into
+// TCC's CorrelatorInput (__half[C][BLOCK][PADDED_RECEIVER][POL][TIME_IN_BLOCK][COMPLEX], where
+// C = coarse*NR_EFFECTIVE_FINE_CHANNELS + (fine - NR_EDGE_TRIM)). Padding rows
+// (receiver >= NR_RECEIVERS) are left untouched -- corr_input is zeroed once at buffer
+// construction, same convention aligned_to_corr_input_kernel relies on for the non-channelized
+// path.
+//
+// Implements the 32/27-oversampling edge-channel trim: gpu-filter still computes all
+// NR_FINE_CHANNELS fine channels per coarse channel (the PFB can't selectively skip edge
+// channels), but only fine indices in [NR_EDGE_TRIM, NR_FINE_CHANNELS - NR_EDGE_TRIM) are gathered
+// into corr_input -- the NR_EDGE_TRIM channels nearest each edge of the coarse channel's passband
+// carry the FPGA coarse channelizer's own guard-band aliasing (see LambdaConfig's
+// NR_FINE_CHANNEL_EDGE_TRIM_T comment in packet_formats.hpp) and are dropped, not just left unused
+// -- NR_CHANNELS itself is sized by the trimmed NR_EFFECTIVE_FINE_CHANNELS count.
+template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
+          size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_PADDED_RECEIVERS,
+          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
+__global__ void
+channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
+                                        __half *corr_input) {
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  const size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
+                       NR_BLOCKS_FOR_CORRELATION * NR_RECEIVERS *
+                       NR_POLARIZATIONS * NR_TIMES_PER_BLOCK;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t t = rem % NR_TIMES_PER_BLOCK;
+    rem /= NR_TIMES_PER_BLOCK;
+    const size_t p = rem % NR_POLARIZATIONS;
+    rem /= NR_POLARIZATIONS;
+    const size_t receiver = rem % NR_RECEIVERS;
+    rem /= NR_RECEIVERS;
+    const size_t block = rem % NR_BLOCKS_FOR_CORRELATION;
+    rem /= NR_BLOCKS_FOR_CORRELATION;
+    const size_t effective_fine = rem % NR_EFFECTIVE_FINE_CHANNELS;
+    const size_t coarse = rem / NR_EFFECTIVE_FINE_CHANNELS;
+
+    // Map the trimmed/effective fine-channel index back into FineChannelizer's untrimmed output
+    // range -- gpu-filter's own output still spans the full [0, NR_FINE_CHANNELS).
+    const size_t fine = effective_fine + NR_EDGE_TRIM;
+
+    const size_t src_idx =
+        ((((coarse * NR_FINE_CHANNELS + fine) * NR_BLOCKS_FOR_CORRELATION +
+           block) *
+              NR_RECEIVERS +
+          receiver) *
+             NR_POLARIZATIONS +
+         p) *
+            NR_TIMES_PER_BLOCK +
+        t;
+
+    const size_t c = coarse * NR_EFFECTIVE_FINE_CHANNELS + effective_fine;
+    const size_t dst_idx =
+        ((((c * NR_BLOCKS_FOR_CORRELATION + block) * NR_PADDED_RECEIVERS +
+           receiver) *
+              NR_POLARIZATIONS +
+          p) *
+             NR_TIMES_PER_BLOCK +
+         t) *
+            2 /* COMPLEX */;
+
+    const __half2 sample = filter_output[src_idx];
+    corr_input[dst_idx] = sample.x;
+    corr_input[dst_idx + 1] = sample.y;
+    idx += stride;
+  }
+}
+
+template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
+          size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_PADDED_RECEIVERS,
+          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
+void channelizer_output_to_corr_input(const __half2 *filter_output,
+                                      __half *corr_input, cudaStream_t stream) {
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
+                           NR_BLOCKS_FOR_CORRELATION * NR_RECEIVERS *
+                           NR_POLARIZATIONS * NR_TIMES_PER_BLOCK;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  channelizer_output_to_corr_input_kernel<
+      NR_FPGA_CHANNELS, NR_FINE_CHANNELS, NR_EDGE_TRIM, NR_POLARIZATIONS, NR_RECEIVERS,
+      NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
+      NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(filter_output,
+                                                          corr_input);
+}
+
+// Gathers FineChannelizer<T>::FilterOutputType directly into per-(fine-channel,receiver,pol) power
+// (|sample|^2, averaged over DOWNSAMPLE_FACTOR consecutive time samples within that fine channel),
+// into MultiChannelAntennaFFTOutputType (float[C][POL][RECEIVER][NR_TIME_STEPS_PER_FINE_CHANNEL /
+// FFT_DOWNSAMPLE_FACTOR]). Replaces the whole-band get_data_for_multi_channel_fft_launch ->
+// cufftXtExec -> detect_and_downsample_multi_channel_fft_launch triad for
+// LambdaAntennaSpectraPipeline once channelized: gpu-filter has already done the frequency
+// decomposition (that's what the widened C axis now is), so all that's left is power-detection +
+// time-averaging, no FFT needed. Applies the same edge-channel trim as
+// channelizer_output_to_corr_input (see its comment) -- gathers only fine indices in
+// [NR_EDGE_TRIM, NR_FINE_CHANNELS - NR_EDGE_TRIM).
+template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
+          size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
+__global__ void channelizer_output_to_antenna_power_kernel(
+    const __half2 *__restrict__ filter_output, float *__restrict__ output_data,
+    int DOWNSAMPLE_FACTOR) {
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_BLOCKS_PER_FINE_CHANNEL =
+      NR_SAMPLES_PER_FINE_CHANNEL / NR_TIMES_PER_OUTPUT_BLOCK;
+  const int num_output_freqs = NR_SAMPLES_PER_FINE_CHANNEL / DOWNSAMPLE_FACTOR;
+
+  // Flattened 3D grid, same convention as detect_and_downsample_multi_channel_fft: x = output
+  // (downsampled-time) index, y = receiver, z = channel * pol (channel here is the widened,
+  // trimmed C = coarse*NR_EFFECTIVE_FINE_CHANNELS + effective_fine).
+  const int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int rx = blockIdx.y;
+  const int c_pol = blockIdx.z;
+  const int c = c_pol / NR_POLARIZATIONS;
+  const int pol = c_pol % NR_POLARIZATIONS;
+  const int coarse = c / NR_EFFECTIVE_FINE_CHANNELS;
+  const int effective_fine = c % NR_EFFECTIVE_FINE_CHANNELS;
+  const int fine = effective_fine + NR_EDGE_TRIM;
+
+  if (out_idx >= num_output_freqs || rx >= (int)NR_RECEIVERS)
+    return;
+
+  float sum = 0.0f;
+  int count = 0;
+  const int start_t = out_idx * DOWNSAMPLE_FACTOR;
+  for (int j = 0; j < DOWNSAMPLE_FACTOR; ++j) {
+    const int t = start_t + j;
+    const int block = t / (int)NR_TIMES_PER_OUTPUT_BLOCK;
+    const int time_in_block = t % (int)NR_TIMES_PER_OUTPUT_BLOCK;
+    const size_t src_idx =
+        ((((size_t)coarse * NR_FINE_CHANNELS + fine) * NR_BLOCKS_PER_FINE_CHANNEL +
+          block) *
+             NR_RECEIVERS +
+         rx) *
+            NR_POLARIZATIONS * NR_TIMES_PER_OUTPUT_BLOCK +
+        pol * NR_TIMES_PER_OUTPUT_BLOCK + time_in_block;
+    const __half2 s = filter_output[src_idx];
+    const float re = __half2float(s.x);
+    const float im = __half2float(s.y);
+    const float val = re * re + im * im;
+    if (!isnan(val)) {
+      sum += val;
+      count++;
+    }
+  }
+  const float final_val = (count > 0) ? (sum / (float)count) : 0.0f;
+
+  const size_t dst_idx =
+      ((size_t)c * NR_POLARIZATIONS + pol) * NR_RECEIVERS * num_output_freqs +
+      (size_t)rx * num_output_freqs + out_idx;
+  output_data[dst_idx] = final_val;
+}
+
+template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
+          size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
+void channelizer_output_to_antenna_power(const __half2 *filter_output,
+                                         float *output_data, int DOWNSAMPLE_FACTOR,
+                                         cudaStream_t stream) {
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_CHANNELS = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS;
+  const int num_output_freqs = NR_SAMPLES_PER_FINE_CHANNEL / DOWNSAMPLE_FACTOR;
+  channelizer_output_to_antenna_power_kernel<
+      NR_FPGA_CHANNELS, NR_FINE_CHANNELS, NR_EDGE_TRIM, NR_POLARIZATIONS, NR_RECEIVERS,
+      NR_SAMPLES_PER_FINE_CHANNEL,
+      NR_TIMES_PER_OUTPUT_BLOCK><<<dim3((num_output_freqs + 255) / 256, NR_RECEIVERS,
+                                        NR_CHANNELS * NR_POLARIZATIONS),
+                                   256, 0, stream>>>(filter_output, output_data,
+                                                     DOWNSAMPLE_FACTOR);
+}
+
+// Gathers FineChannelizer<T>::FilterOutputType directly into the beamforming-ready
+// [C][POL][COMPLEX][S=fine-channel-time][FPGA][RECEIVER_IN_PACKET] layout (modePlanarColMajCons's
+// 'c','p','z','s','f','n' convention -- the same output layout corr_input_to_col_maj_cons
+// produces), for pipelines that beamform directly from channelizer output with no TCC correlation
+// step in between (unlike corr_input_to_col_maj_cons's source, gpu-filter's own output has no
+// padded-receiver axis, so there's no padding to drop here). Applies the same edge-channel trim as
+// channelizer_output_to_corr_input -- see its comment.
+template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
+          size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_RECEIVERS_PER_PACKET,
+          size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
+__global__ void channelizer_output_to_col_maj_cons_kernel(
+    const __half2 *__restrict__ filter_output, __half *__restrict__ output) {
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_BLOCKS_PER_FINE_CHANNEL =
+      NR_SAMPLES_PER_FINE_CHANNEL / NR_TIMES_PER_OUTPUT_BLOCK;
+  const size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS * NR_POLARIZATIONS *
+                       COMPLEX * NR_SAMPLES_PER_FINE_CHANNEL * NR_FPGA_SOURCES *
+                       NR_RECEIVERS_PER_PACKET;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t receiver_in_packet = rem % NR_RECEIVERS_PER_PACKET;
+    rem /= NR_RECEIVERS_PER_PACKET;
+    const size_t fpga = rem % NR_FPGA_SOURCES;
+    rem /= NR_FPGA_SOURCES;
+    const size_t sample = rem % NR_SAMPLES_PER_FINE_CHANNEL;
+    rem /= NR_SAMPLES_PER_FINE_CHANNEL;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t p = rem % NR_POLARIZATIONS;
+    rem /= NR_POLARIZATIONS;
+    const size_t effective_fine = rem % NR_EFFECTIVE_FINE_CHANNELS;
+    const size_t coarse = rem / NR_EFFECTIVE_FINE_CHANNELS;
+
+    const size_t fine = effective_fine + NR_EDGE_TRIM;
+    const size_t receiver = fpga * NR_RECEIVERS_PER_PACKET + receiver_in_packet;
+    const size_t block = sample / NR_TIMES_PER_OUTPUT_BLOCK;
+    const size_t time_in_block = sample % NR_TIMES_PER_OUTPUT_BLOCK;
+
+    const size_t src_idx =
+        ((((coarse * NR_FINE_CHANNELS + fine) * NR_BLOCKS_PER_FINE_CHANNEL + block) *
+              NR_RECEIVERS +
+          receiver) *
+             NR_POLARIZATIONS +
+         p) *
+            NR_TIMES_PER_OUTPUT_BLOCK +
+        time_in_block;
+
+    const __half2 sample_value = filter_output[src_idx];
+    output[idx] = (z == 0) ? sample_value.x : sample_value.y;
+    idx += stride;
+  }
+}
+
+template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
+          size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_RECEIVERS_PER_PACKET,
+          size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
+void channelizer_output_to_col_maj_cons(const __half2 *filter_output,
+                                        __half *output, cudaStream_t stream) {
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS * NR_POLARIZATIONS *
+                           COMPLEX * NR_SAMPLES_PER_FINE_CHANNEL * NR_FPGA_SOURCES *
+                           NR_RECEIVERS_PER_PACKET;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  channelizer_output_to_col_maj_cons_kernel<
+      NR_FPGA_CHANNELS, NR_FINE_CHANNELS, NR_EDGE_TRIM, NR_POLARIZATIONS, NR_RECEIVERS,
+      NR_RECEIVERS_PER_PACKET, NR_SAMPLES_PER_FINE_CHANNEL,
+      NR_TIMES_PER_OUTPUT_BLOCK><<<blocks, threads, 0, stream>>>(filter_output, output);
+}
+
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
           size_t NR_RECEIVERS_PER_PACKET, size_t NR_TIME_STEPS_PER_PACKET,
           size_t NR_PACKETS_FOR_CORRELATION>
@@ -210,6 +553,82 @@ void aligned_to_col_maj_cons(const __half *input, __half *output,
                                  NR_TIME_STEPS_PER_PACKET,
                                  NR_PACKETS_FOR_CORRELATION>
       <<<blocks, threads, 0, stream>>>(input, output);
+}
+
+// Beamforming-source replacement for aligned_to_col_maj_cons: reads from CorrelatorInput
+// (__half[C][BLOCK][PADDED_RECEIVER][POL][TIME_IN_BLOCK][COMPLEX], the same buffer TCC consumes,
+// populated either by aligned_to_corr_input or the fine-channelizer path) instead of the raw
+// packet layout, so beamforming runs on the same (possibly fine-channelized) data as correlation.
+// Produces the identical output layout aligned_to_col_maj_cons did
+// (__half[C][POL][COMPLEX][S=BLOCK*TIME][FPGA][RECEIVER_IN_PACKET], matching
+// modePlanarColMajCons's 'c','p','z','s','f','n' convention), dropping the padding rows
+// (receiver >= NR_RECEIVERS) that CorrelatorInput carries but the GEMM doesn't want. Works
+// uniformly whether or not fine channelization is active: NR_CHANNELS/NR_BLOCKS_FOR_CORRELATION
+// already carry the widened/per-fine-channel values from the caller.
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_PADDED_RECEIVERS,
+          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
+__global__ void corr_input_to_col_maj_cons_kernel(const __half *corr_input,
+                                                   __half *output) {
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_SAMPLES = NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK;
+  const size_t total = NR_CHANNELS * NR_POLARIZATIONS * COMPLEX * NR_SAMPLES *
+                       NR_FPGA_SOURCES * NR_RECEIVERS_PER_PACKET;
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = blockDim.x * gridDim.x;
+
+  while (idx < total) {
+    size_t rem = idx;
+    const size_t receiver_in_packet = rem % NR_RECEIVERS_PER_PACKET;
+    rem /= NR_RECEIVERS_PER_PACKET;
+    const size_t fpga = rem % NR_FPGA_SOURCES;
+    rem /= NR_FPGA_SOURCES;
+    const size_t sample = rem % NR_SAMPLES;
+    rem /= NR_SAMPLES;
+    const size_t z = rem % COMPLEX;
+    rem /= COMPLEX;
+    const size_t p = rem % NR_POLARIZATIONS;
+    const size_t c = rem / NR_POLARIZATIONS;
+
+    const size_t block = sample / NR_TIMES_PER_BLOCK;
+    const size_t time_in_block = sample % NR_TIMES_PER_BLOCK;
+    const size_t receiver = fpga * NR_RECEIVERS_PER_PACKET + receiver_in_packet;
+
+    const size_t input_idx =
+        ((((c * NR_BLOCKS_FOR_CORRELATION + block) * NR_PADDED_RECEIVERS +
+               receiver) *
+                  NR_POLARIZATIONS +
+              p) *
+                 NR_TIMES_PER_BLOCK +
+             time_in_block) *
+                COMPLEX +
+            z;
+
+    output[idx] = corr_input[input_idx];
+    idx += stride;
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_PADDED_RECEIVERS,
+          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
+void corr_input_to_col_maj_cons(const __half *corr_input, __half *output,
+                                cudaStream_t stream) {
+  static_assert(NR_RECEIVERS % NR_RECEIVERS_PER_PACKET == 0,
+                "NR_RECEIVERS must be divisible by NR_RECEIVERS_PER_PACKET");
+  constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t NR_SAMPLES = NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK;
+  constexpr size_t total = NR_CHANNELS * NR_POLARIZATIONS * COMPLEX * NR_SAMPLES *
+                           NR_FPGA_SOURCES * NR_RECEIVERS_PER_PACKET;
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  corr_input_to_col_maj_cons_kernel<NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS,
+                                    NR_RECEIVERS_PER_PACKET, NR_PADDED_RECEIVERS,
+                                    NR_BLOCKS_FOR_CORRELATION,
+                                    NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(
+      corr_input, output);
 }
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
@@ -449,9 +868,10 @@ __global__ void scale_and_convert_to_half_kernel(
                   receiver_pol_idx;
   int scale_val_int = static_cast<int>(d_scale[scale_ptr]);
 
-  int gain_ptr = channel_idx * NR_RECEIVERS * NR_POLARIZATIONS +
-                 fpga_idx * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
-                 receiver_pol_idx;
+  // AntennaGains is [channel][polarization][receiver].
+  int gain_ptr = channel_idx * NR_POLARIZATIONS * NR_RECEIVERS +
+                 pol_idx * NR_RECEIVERS +
+                 fpga_idx * NR_RECEIVERS_PER_PACKET + recv_in_pkt;
   float2 gain = __ldg(&d_gains[gain_ptr]);
 
   size_t nr_fpga = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
@@ -483,6 +903,230 @@ __global__ void scale_and_convert_to_half_kernel(
     d_output[ptr] = __float22half2_rn(gain_applied_val);
   }
 };
+
+// ---- GPU-resident missing-packet zero-fill (GPUDirect ingest) ------------
+//
+// Device-side equivalent of LambdaFinalPacketData::zero_missing_packets()
+// (packet_formats.hpp) for the GPUDirect ingest path (see
+// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md): once
+// `scales` is device memory (relocated there directly by the capture
+// backend instead of landing in a pinned host buffer), the host-side loop
+// in LambdaFinalPacketData can no longer touch it, so this kernel does the
+// same [channel][packet][fpga] scan on the GPU before every buffer hand-off
+// to the correlator. `d_arrivals` must be device-readable (e.g. allocated
+// with cudaHostAllocMapped and passed via cudaHostGetDevicePointer, or a
+// genuine device allocation) -- a plain cudaHostAllocDefault pointer is not
+// dereferenceable from device code.
+template <size_t NR_CHANNELS, size_t NR_PACKETS_PLUS2, size_t NR_FPGAS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_POLARIZATIONS>
+__global__ void
+zero_missing_scales_kernel(int16_t *__restrict__ d_scales,
+                           const bool *__restrict__ d_arrivals) {
+  const int channel_idx = blockIdx.x % NR_CHANNELS;
+  const int packet_idx = blockIdx.x / NR_CHANNELS;
+  const int fpga_idx = blockIdx.y;
+
+  constexpr size_t ELEMS_PER_FPGA = NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
+  if (threadIdx.x >= ELEMS_PER_FPGA) {
+    return;
+  }
+
+  const bool arrived =
+      d_arrivals[(static_cast<size_t>(channel_idx) * NR_PACKETS_PLUS2 +
+                  packet_idx) *
+                     NR_FPGAS +
+                 fpga_idx];
+  if (arrived) {
+    return;
+  }
+
+  const int pol_idx = threadIdx.x % NR_POLARIZATIONS;
+  const int recv_in_pkt = threadIdx.x / NR_POLARIZATIONS;
+  constexpr size_t NR_RECEIVERS = NR_FPGAS * NR_RECEIVERS_PER_PACKET;
+  const int receiver_idx = fpga_idx * NR_RECEIVERS_PER_PACKET + recv_in_pkt;
+
+  const size_t scale_ptr =
+      (static_cast<size_t>(channel_idx) * NR_PACKETS_PLUS2 + packet_idx) *
+          NR_RECEIVERS * NR_POLARIZATIONS +
+      static_cast<size_t>(receiver_idx) * NR_POLARIZATIONS + pol_idx;
+  d_scales[scale_ptr] = 0;
+}
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS_PLUS2, size_t NR_FPGAS,
+          size_t NR_RECEIVERS_PER_PACKET, size_t NR_POLARIZATIONS>
+void zero_missing_scales(int16_t *d_scales, const bool *d_arrivals,
+                         cudaStream_t stream) {
+  constexpr size_t ELEMS_PER_FPGA = NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS;
+  const dim3 grid(static_cast<unsigned int>(NR_CHANNELS * NR_PACKETS_PLUS2),
+                  static_cast<unsigned int>(NR_FPGAS));
+  zero_missing_scales_kernel<NR_CHANNELS, NR_PACKETS_PLUS2, NR_FPGAS,
+                            NR_RECEIVERS_PER_PACKET, NR_POLARIZATIONS>
+      <<<grid, static_cast<int>(ELEMS_PER_FPGA), 0, stream>>>(d_scales,
+                                                              d_arrivals);
+}
+
+// ---- Fine-channel phase delay correction kernels -------------------------
+//
+// Three-pass pipeline applied after apply_delays and before aligned_to_corr_input:
+//   scatter (half→float, rearrange to contiguous time) → cuFFT forward →
+//   phase multiply → cuFFT inverse → gather (float→half, normalise, restore layout)
+//
+// samples_aligned layout: __half2[NR_CHANNELS][NR_PACKETS][NR_TIME][NR_RECV][NR_POL]
+// workspace layout:        float2[NR_CHANNELS][NR_RECV][NR_POL][NR_PACKETS*NR_TIME]
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+__global__ void fine_delay_scatter_kernel(const __half2 *__restrict__ src,
+                                          float2 *__restrict__ dst) {
+  // Grid: (NR_CHANNELS, NR_RECV, NR_POL); threads: NR_PACKETS*NR_TIME (capped at 1024)
+  const int c   = blockIdx.x;
+  const int r   = blockIdx.y;
+  const int pol = blockIdx.z;
+
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  for (int i = threadIdx.x; i < (int)N; i += blockDim.x) {
+    const int p = i / NR_TIME;
+    const int t = i % NR_TIME;
+    // src index: [c][p][t][r][pol]
+    const size_t src_idx = ((c * NR_PACKETS + p) * NR_TIME + t) * NR_RECV * NR_POL
+                           + r * NR_POL + pol;
+    // dst index: [c][r][pol][i]
+    const size_t dst_idx = ((c * NR_RECV + r) * NR_POL + pol) * N + i;
+    const __half2 v = src[src_idx];
+    dst[dst_idx] = {__half2float(v.x), __half2float(v.y)};
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+void fine_delay_scatter_launch(const __half2 *src, float2 *dst,
+                               cudaStream_t stream) {
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  constexpr int THREADS = N <= 1024 ? (int)N : 1024;
+  fine_delay_scatter_kernel<NR_CHANNELS, NR_PACKETS, NR_TIME, NR_RECV, NR_POL>
+      <<<dim3(NR_CHANNELS, NR_RECV, NR_POL), dim3(THREADS), 0, stream>>>(src,
+                                                                          dst);
+}
+
+// Multiply workspace[c][r][pol][k] by phases[c][r][k] (same phase both pols).
+template <size_t NR_CHANNELS, size_t NR_RECV, size_t NR_POL, size_t N_FFT>
+__global__ void fine_delay_phase_multiply_kernel(
+    float2 *__restrict__ workspace,
+    const float2 *__restrict__ phases) {
+  // Grid: (NR_CHANNELS, NR_RECV, NR_POL); threads: N_FFT (capped at 1024)
+  const int c   = blockIdx.x;
+  const int r   = blockIdx.y;
+  const int pol = blockIdx.z;
+
+  for (int k = threadIdx.x; k < (int)N_FFT; k += blockDim.x) {
+    const size_t w_idx = ((c * NR_RECV + r) * NR_POL + pol) * N_FFT + k;
+    const size_t p_idx = (c * NR_RECV + r) * N_FFT + k;
+    const float2 w = workspace[w_idx];
+    const float2 ph = phases[p_idx];
+    workspace[w_idx] = {w.x * ph.x - w.y * ph.y, w.x * ph.y + w.y * ph.x};
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_RECV, size_t NR_POL, size_t N_FFT>
+void fine_delay_phase_multiply_launch(float2 *workspace, const float2 *phases,
+                                      cudaStream_t stream) {
+  constexpr int THREADS = N_FFT <= 1024 ? (int)N_FFT : 1024;
+  fine_delay_phase_multiply_kernel<NR_CHANNELS, NR_RECV, NR_POL, N_FFT>
+      <<<dim3(NR_CHANNELS, NR_RECV, NR_POL), dim3(THREADS), 0, stream>>>(
+          workspace, phases);
+}
+
+// Gather back: workspace → samples_aligned with 1/N normalisation.
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+__global__ void fine_delay_gather_kernel(const float2 *__restrict__ src,
+                                         __half2 *__restrict__ dst,
+                                         float inv_n) {
+  const int c   = blockIdx.x;
+  const int r   = blockIdx.y;
+  const int pol = blockIdx.z;
+
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  for (int i = threadIdx.x; i < (int)N; i += blockDim.x) {
+    const int p = i / NR_TIME;
+    const int t = i % NR_TIME;
+    const size_t src_idx = ((c * NR_RECV + r) * NR_POL + pol) * N + i;
+    const size_t dst_idx = ((c * NR_PACKETS + p) * NR_TIME + t) * NR_RECV * NR_POL
+                           + r * NR_POL + pol;
+    const float2 v = src[src_idx];
+    dst[dst_idx] = __float22half2_rn({v.x * inv_n, v.y * inv_n});
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_RECV, size_t NR_POL>
+void fine_delay_gather_launch(const float2 *src, __half2 *dst, float inv_n,
+                              cudaStream_t stream) {
+  constexpr size_t N = NR_PACKETS * NR_TIME;
+  constexpr int THREADS = N <= 1024 ? (int)N : 1024;
+  fine_delay_gather_kernel<NR_CHANNELS, NR_PACKETS, NR_TIME, NR_RECV, NR_POL>
+      <<<dim3(NR_CHANNELS, NR_RECV, NR_POL), dim3(THREADS), 0, stream>>>(src,
+                                                                          dst,
+                                                                          inv_n);
+}
+
+// Reorder kernel: rearranges samples_aligned output ({f,o,u,c,n,p,z} layout)
+// so that receiver dimension n is in canonical antenna-ID order and pol 0 = X.
+// Perm arrays are indexed by (out_f * NR_RECV + out_n) * NR_POL + out_p:
+//   d_recv_perm[perm_idx] = src flat receiver (fpga*NR_RECV+n), or -1 → zero output.
+//   d_pol_perm [perm_idx] = src hw pol slot to read from that receiver.
+template <size_t NR_FPGA, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_CHANNELS, size_t NR_RECV_PER_PKT, size_t NR_POL>
+__global__ void reorder_streams_kernel(const __half *__restrict__ src,
+                                       __half *__restrict__ dst,
+                                       const int *__restrict__ d_recv_perm,
+                                       const int *__restrict__ d_pol_perm) {
+  constexpr size_t COMPLEX = 2;
+  constexpr size_t S_p   = COMPLEX;
+  constexpr size_t S_n   = NR_POL * COMPLEX;
+  constexpr size_t S_f   = NR_PACKETS * NR_TIME * NR_CHANNELS * NR_RECV_PER_PKT * NR_POL * COMPLEX;
+  constexpr size_t TOTAL = NR_FPGA * S_f;
+
+  for (size_t tid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+       tid < TOTAL; tid += (size_t)blockDim.x * gridDim.x) {
+    const int out_f    = (int)(tid / S_f);
+    const int out_n    = (int)((tid / S_n) % NR_RECV_PER_PKT);
+    const int out_p    = (int)((tid / S_p) % NR_POL);
+    const int out_flat = out_f * (int)NR_RECV_PER_PKT + out_n;
+    const int perm_idx = out_flat * (int)NR_POL + out_p;
+    const int src_flat = d_recv_perm[perm_idx];
+
+    if (src_flat < 0) {
+      dst[tid] = __float2half(0.0f);
+      continue;
+    }
+
+    const int src_pol = d_pol_perm[perm_idx];
+    const int src_f   = src_flat / (int)NR_RECV_PER_PKT;
+    const int src_n   = src_flat % (int)NR_RECV_PER_PKT;
+    const int src_p   = src_pol;
+
+    const ptrdiff_t delta =
+        (ptrdiff_t)(src_f - out_f) * (ptrdiff_t)S_f +
+        (ptrdiff_t)(src_n - out_n) * (ptrdiff_t)S_n +
+        (ptrdiff_t)(src_p - out_p) * (ptrdiff_t)S_p;
+    dst[tid] = src[(ptrdiff_t)tid + delta];
+  }
+}
+
+template <size_t NR_FPGA, size_t NR_PACKETS, size_t NR_TIME,
+          size_t NR_CHANNELS, size_t NR_RECV_PER_PKT, size_t NR_POL>
+void reorder_streams_launch(const __half *src, __half *dst,
+                            const int *d_recv_perm, const int *d_pol_perm,
+                            cudaStream_t stream) {
+  constexpr size_t TOTAL =
+      NR_FPGA * NR_PACKETS * NR_TIME * NR_CHANNELS * NR_RECV_PER_PKT * NR_POL * 2;
+  constexpr int THREADS = 256;
+  const int BLOCKS = (int)((TOTAL + THREADS - 1) / THREADS);
+  reorder_streams_kernel<NR_FPGA, NR_PACKETS, NR_TIME, NR_CHANNELS,
+                         NR_RECV_PER_PKT, NR_POL>
+      <<<BLOCKS, THREADS, 0, stream>>>(src, dst, d_recv_perm, d_pol_perm);
+}
 
 template <int N> constexpr bool dependent_false = false;
 

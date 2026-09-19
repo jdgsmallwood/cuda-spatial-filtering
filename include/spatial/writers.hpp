@@ -17,6 +17,7 @@
 #include <highfive/H5File.hpp>
 #include <immintrin.h>
 #include <memory>
+#include <limits>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -723,10 +724,12 @@ public:
   HDF5VisibilitiesWriter(
       HighFive::File &file, const int min_channel, const int max_channel,
       const std::unordered_map<int, int> *antenna_map = nullptr,
-      const int num_blocks = 100, const int deflate_level = 0)
+      const int num_blocks = 100, const int deflate_level = 0,
+      const bool zero_negative_antenna_slots = true)
       : VisibilitiesWriter<T>(num_blocks), file_(file), batch_size_(num_blocks),
         element_count_(sizeof(T) /
-                       sizeof(typename std::remove_all_extents<T>::type)) {
+                       sizeof(typename std::remove_all_extents<T>::type)),
+        zero_negative_antenna_slots_(zero_negative_antenna_slots) {
 
     std::cout << "HDF5Visibilities Writer starting with element_count "
               << element_count_ << " and total size " << sizeof(T) << " bytes."
@@ -746,6 +749,10 @@ public:
     file_.createAttribute<double>("mjd_start", start_time);
     file_.createAttribute<int>("min_channel", min_channel);
     file_.createAttribute<int>("max_channel", max_channel);
+    file_.createAttribute<int>("stream_reorder_enabled",
+                               zero_negative_antenna_slots_ ? 1 : 0);
+    file_.createAttribute<int>("invalid_baseline_id",
+                               std::numeric_limits<int32_t>::min());
 
     vis_dims_ = get_array_dims<T>();
     std::vector<size_t> vis_dataset_dims = {0};
@@ -845,38 +852,65 @@ public:
 
 private:
   void write_baseline_ids() {
-    // Extract NR_BASELINES from T.
-    // T is float[CH][BL][POL][POL][CPLX].
-    // extent<T, 0> is Channels, extent<T, 1> is Baselines.
+    // T is float[channel][baseline][pol][pol][complex]. The baseline axis
+    // follows packed triangular canonical-receiver order.
     constexpr size_t nr_baselines = std::extent<T, 1>::value;
-
-    // Calculate number of antennas from triangular number formula:
-    // B = A(A+1)/2  =>  A^2 + A - 2B = 0
-    // A = (-1 + sqrt(1 + 8B)) / 2
-    size_t nr_antennas =
+    const size_t nr_antennas =
         static_cast<size_t>((std::sqrt(1 + 8 * nr_baselines) - 1) / 2);
 
-    std::vector<int> baseline_ids;
-    baseline_ids.reserve(nr_baselines);
+    std::vector<int> antenna_ids(nr_antennas, -1);
+    std::vector<uint8_t> antenna_zeroed(nr_antennas, 1);
+    for (size_t receiver = 0; receiver < nr_antennas; ++receiver) {
+      auto it = antenna_map_.find(static_cast<int>(receiver));
+      if (it != antenna_map_.end()) antenna_ids[receiver] = it->second;
+      antenna_zeroed[receiver] =
+          zero_negative_antenna_slots_ && antenna_ids[receiver] < 0 ? 1 : 0;
+    }
 
-    // Generate FITS IDs (256 * ant1 + ant2) based on triangular order
-    // Order: 0-0, 0-1, 1-1, 0-2, 1-2, 2-2 ...
-    for (size_t ant2 = 0; ant2 < nr_antennas; ++ant2) {
-      for (size_t ant1 = 0; ant1 <= ant2; ++ant1) {
-        baseline_ids.push_back(256 * antenna_map_[ant1] + antenna_map_[ant2]);
+    std::vector<int> baseline_ids;
+    std::vector<int> baseline_receiver_indices;
+    std::vector<int> baseline_antenna_ids;
+    std::vector<uint8_t> baseline_zeroed;
+    baseline_ids.reserve(nr_baselines);
+    baseline_receiver_indices.reserve(2 * nr_baselines);
+    baseline_antenna_ids.reserve(2 * nr_baselines);
+    baseline_zeroed.reserve(nr_baselines);
+
+    for (size_t receiver_2 = 0; receiver_2 < nr_antennas; ++receiver_2) {
+      for (size_t receiver_1 = 0; receiver_1 <= receiver_2; ++receiver_1) {
+        const int antenna_1 = antenna_ids[receiver_1];
+        const int antenna_2 = antenna_ids[receiver_2];
+        baseline_ids.push_back(
+            antenna_1 < 0 || antenna_2 < 0
+                ? std::numeric_limits<int32_t>::min()
+                : 256 * antenna_1 + antenna_2);
+        baseline_receiver_indices.push_back(static_cast<int>(receiver_1));
+        baseline_receiver_indices.push_back(static_cast<int>(receiver_2));
+        baseline_antenna_ids.push_back(antenna_1);
+        baseline_antenna_ids.push_back(antenna_2);
+        baseline_zeroed.push_back(
+            zero_negative_antenna_slots_ &&
+                    (antenna_1 < 0 || antenna_2 < 0)
+                ? 1 : 0);
       }
     }
 
-    // Sanity check
-    if (baseline_ids.size() != nr_baselines) {
-      // Handle error/log warning here if dimensions don't match expectation
-    }
-
-    // Write to HDF5 (Static dataset, no need for Unlimited/Chunking)
-    file_
-        .createDataSet<int>("baseline_ids",
-                            HighFive::DataSpace::From(baseline_ids))
+    file_.createDataSet<int>("antenna_ids", HighFive::DataSpace::From(antenna_ids))
+        .write(antenna_ids);
+    file_.createDataSet<uint8_t>("antenna_zeroed",
+                                 HighFive::DataSpace::From(antenna_zeroed))
+        .write(antenna_zeroed);
+    file_.createDataSet<int>("baseline_ids", HighFive::DataSpace::From(baseline_ids))
         .write(baseline_ids);
+    file_.createDataSet<int>("baseline_receiver_indices",
+                             HighFive::DataSpace({nr_baselines, size_t{2}}))
+        .write_raw(baseline_receiver_indices.data());
+    file_.createDataSet<int>("baseline_antenna_ids",
+                             HighFive::DataSpace({nr_baselines, size_t{2}}))
+        .write_raw(baseline_antenna_ids.data());
+    file_.createDataSet<uint8_t>("baseline_zeroed",
+                                 HighFive::DataSpace::From(baseline_zeroed))
+        .write(baseline_zeroed);
   }
 
   void generate_identity_map() {
@@ -892,6 +926,7 @@ private:
   HighFive::DataSet vis_missing_dataset_;
   std::vector<size_t> vis_dims_;
   std::unordered_map<int, int> antenna_map_;
+  bool zero_negative_antenna_slots_;
 
   size_t batch_size_;
   size_t buffer_count_ = 0;
@@ -1270,7 +1305,14 @@ public:
         }
       }
     }
-    redis.command(args.begin(), args.end());
+    if (redis_available_) {
+      try {
+        redis.command(args.begin(), args.end());
+      } catch (const sw::redis::Error &e) {
+        ERROR_LOG("Redis write failed (disabling further writes): {}", e.what());
+        redis_available_ = false;
+      }
+    }
     current_slot_ = (current_slot_ + 1) % num_slots_;
   }
 
@@ -1283,6 +1325,7 @@ private:
            static_cast<size_t>(beam) * NR_FREQS + static_cast<size_t>(f);
   }
   std::string prefix;
+  bool redis_available_ = true;
 
   int channels_per_write_;
   int num_slots_;

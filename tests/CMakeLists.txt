@@ -24,7 +24,7 @@ target_link_directories(test_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 target_compile_options(test_app_common INTERFACE
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=128,2417>)
 target_link_libraries(test_app_common INTERFACE GTest::gtest_main spatial CUDA::cudart ccglib
-HighFive::HighFive CUDA::cufft CUDA::cusolver cutensor tcc psrdada ${CASACORE_LIBRARIES} redis++ hiredis argparse)
+HighFive::HighFive CUDA::cufft CUDA::cusolver cutensor tcc filter psrdada ${CASACORE_LIBRARIES} redis++ hiredis argparse)
 
 set_target_properties(test_app_common PROPERTIES CUDA_ARCHITECTURES "native")
 add_executable(
@@ -44,7 +44,7 @@ target_link_libraries(PipelineTests
 )
 
 add_executable(
-  CUDASpatialFilteringCPUTests test_packet_formats.cpp
+  CUDASpatialFilteringCPUTests test_packet_formats.cpp test_stream_antenna_map.cpp
 )
 target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE test_app_common)
 
@@ -54,9 +54,19 @@ add_executable(
 target_link_libraries(WriterTests PRIVATE test_app_common)
 
 add_executable(
+  RunAuditTests test_run_audit.cu
+)
+target_link_libraries(RunAuditTests PRIVATE test_app_common)
+set_target_properties(RunAuditTests PROPERTIES CUDA_ARCHITECTURES "native")
+add_executable(
   ProcessorTests test_processor.cu
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
+
+add_executable(
+  IbverbsPlacementTests test_ibverbs_placement.cu
+)
+target_link_libraries(IbverbsPlacementTests PRIVATE test_app_common)
 
 
 # Built standalone (not linked against test_app_common) so pointing.cpp's
@@ -97,10 +107,64 @@ target_link_libraries(CorrBeamPipelineTests PRIVATE test_support)
 set_target_properties(CorrBeamPipelineTests PROPERTIES CUDA_ARCHITECTURES "native")
 
 add_executable(
+  StarweaveTests test_starweave_pipeline.cu
+)
+target_link_libraries(StarweaveTests PRIVATE test_support)
+set_target_properties(StarweaveTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(
   AdaptivePipelineTests test_adaptive_pipeline.cu
 )
 target_link_libraries(AdaptivePipelineTests PRIVATE test_support)
 set_target_properties(AdaptivePipelineTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineDelayTests test_fine_delay.cu)
+target_link_libraries(FineDelayTests PRIVATE test_support)
+set_target_properties(FineDelayTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(StreamReorderTests test_stream_reorder.cu)
+target_link_libraries(StreamReorderTests PRIVATE test_support)
+set_target_properties(StreamReorderTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(AntennaOrderingTests test_antenna_ordering.cu)
+target_link_libraries(AntennaOrderingTests PRIVATE test_support)
+set_target_properties(AntennaOrderingTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(GpuDirectScatterTests test_gpudirect_scatter.cu)
+target_link_libraries(GpuDirectScatterTests PRIVATE test_support)
+set_target_properties(GpuDirectScatterTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizerTests test_fine_channelizer.cu)
+target_link_libraries(FineChannelizerTests PRIVATE test_support)
+set_target_properties(FineChannelizerTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedAntennaSpectraTests test_fine_channelized_antenna_spectra.cu)
+target_link_libraries(FineChannelizedAntennaSpectraTests PRIVATE test_support)
+set_target_properties(FineChannelizedAntennaSpectraTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedBeamformedSpectraTests test_fine_channelized_beamformed_spectra.cu)
+target_link_libraries(FineChannelizedBeamformedSpectraTests PRIVATE test_support)
+set_target_properties(FineChannelizedBeamformedSpectraTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedProjectionTests test_fine_channelized_projection.cu)
+target_link_libraries(FineChannelizedProjectionTests PRIVATE test_support)
+set_target_properties(FineChannelizedProjectionTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedAdaptiveTests test_fine_channelized_adaptive.cu)
+target_link_libraries(FineChannelizedAdaptiveTests PRIVATE test_support)
+set_target_properties(FineChannelizedAdaptiveTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedPulsarFoldTests test_fine_channelized_pulsar_fold.cu)
+target_link_libraries(FineChannelizedPulsarFoldTests PRIVATE test_support)
+set_target_properties(FineChannelizedPulsarFoldTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedCorrBeamTests test_fine_channelized_corr_beam.cu)
+target_link_libraries(FineChannelizedCorrBeamTests PRIVATE test_support)
+set_target_properties(FineChannelizedCorrBeamTests PROPERTIES CUDA_ARCHITECTURES "native")
+
+add_executable(FineChannelizedStarweaveTests test_fine_channelized_starweave.cu)
+target_link_libraries(FineChannelizedStarweaveTests PRIVATE test_support)
+set_target_properties(FineChannelizedStarweaveTests PROPERTIES CUDA_ARCHITECTURES "native")
 
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
@@ -115,11 +179,26 @@ gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(IbverbsPlacementTests)
 gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
 gtest_discover_tests(PulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(CorrBeamPipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(StarweaveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(RunAuditTests)
 gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(StreamReorderTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(AntennaOrderingTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(GpuDirectScatterTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizerTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedAntennaSpectraTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedBeamformedSpectraTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedProjectionTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedAdaptiveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedPulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedCorrBeamTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(FineChannelizedStarweaveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 
 add_test(
   NAME AdaptiveDetectionReferencePythonTests

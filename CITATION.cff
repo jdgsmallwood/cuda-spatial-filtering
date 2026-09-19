@@ -1,0 +1,43 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "LAMBDA GPU Signal Processing Pipeline"
+version: 0.1.0
+date-released: "2026-08-12"
+url: "https://github.com/jdgsmallwood/cuda-spatial-filtering"
+repository-code: "https://github.com/jdgsmallwood/cuda-spatial-filtering"
+license: MIT
+abstract: >-
+  Real-time CUDA C++ signal processing pipeline for the LAMBDA radio-astronomy
+  instrument. Ingests UDP/PCAP packet streams from FPGA-based receivers,
+  correlates and beamforms on the GPU via Tensor Core Correlator and ccglib,
+  applies adaptive spatial filtering and RFI mitigation via eigendecomposition,
+  and writes results to HDF5, PSRDADA, FITS, and Redis.
+keywords:
+  - radio astronomy
+  - GPU computing
+  - CUDA
+  - signal processing
+  - beamforming
+  - RFI mitigation
+  - real-time processing
+  - correlator
+authors:
+  - family-names: Smallwood
+    given-names: Justin
+    email: justin.d.smallwood@gmail.com
+    orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"  # replace with real ORCID
+  # Add co-authors here in the same format:
+  # - family-names: Surname
+  #   given-names: Given
+  #   orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"
+  #   affiliation: "Institution Name"
+preferred-citation:
+  type: article
+  title: "LAMBDA GPU Signal Processing Pipeline"
+  journal: "Journal of Open Source Software"
+  # doi: "10.21105/joss.XXXXX"   # fill in after JOSS assigns a DOI
+  authors:
+    - family-names: Smallwood
+      given-names: Justin
+      orcid: "https://orcid.org/XXXX-XXXX-XXXX-XXXX"

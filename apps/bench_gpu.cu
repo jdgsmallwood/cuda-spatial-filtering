@@ -1,3 +1,4 @@
+#include "bench_gpudirect_scatter_common.hpp"
 #include "spatial/logging.hpp"
 #include "spatial/output.hpp"
 #include "spatial/packet_formats.hpp"
@@ -11,6 +12,8 @@
 #include <iostream>
 #include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <thread>
+#include <vector>
 
 // Fixed representative GPU pipeline configs -- 8..32 channels in steps of 8
 // for the production 4-FPGA (40 rx) layout. Each config is a separate
@@ -25,6 +28,21 @@ using Cfg8ch4fpga  = LambdaConfig<     8,  4,   64,  40,  2,  10, 256,  1,  64, 
 using Cfg16ch4fpga = LambdaConfig<    16,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg24ch4fpga = LambdaConfig<    24,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
 using Cfg32ch4fpga = LambdaConfig<    32,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000>;
+
+// Fine-channelization comparison: same coarse-channel/FPGA/receiver shape as
+// the configs above, but with gpu-filter's pre-correlation PFB active at the
+// repo's default settings (NR_OBSERVING_FINE_CHANNELS=32,
+// NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM=2 -- see CMakeLists.txt/CLAUDE.md).
+// Trailing template args: OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET=false,
+// FFT_DOWNSAMPLE_FACTOR=128 (default), NR_FINE_CHANNELS=32,
+// NR_FINE_CHANNEL_EDGE_TRIM=2. Effective (post-trim) channel count is
+// NR_FPGA_CHANNELS * (32 - 2*2) = NR_FPGA_CHANNELS * 28, e.g. 8 coarse ->
+// 224 effective -- substantially more correlator/beamformer work than the
+// same coarse-channel count with fine channelization off, so only the
+// smallest configs are instantiated here to stay within this dev GPU's VRAM.
+//                                            ch  fp   ts   rx  pol rxpp corr  bm  pad  blk       acc     oct  fft  fine trim
+using Cfg8ch4fpga_fine32  = LambdaConfig<      8,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000, false, 128,  32,   2>;
+using Cfg16ch4fpga_fine32 = LambdaConfig<     16,  4,   64,  40,  2,  10, 256,  1,  64,  32, 10000000, false, 128,  32,   2>;
 
 // Correlation-packet sweep: 8ch/4fpga held fixed while
 // NR_PACKETS_FOR_CORRELATION varies 64→1024 (powers of 2). The 256-packet
@@ -191,6 +209,12 @@ struct LambdaGpuBenchResult {
   double input_gb_per_sec;
   double avg_gpu_ms;
   double gpu_util;
+  // Stage breakdown (see LambdaGPUPipeline::pre_corr_done/eigen_done):
+  // ingest+align+correlate (channelizer+TCC), eigendecomposition (cuSOLVER),
+  // beamform+output (ccglib GEMM + permutations, graph_post).
+  double avg_pre_corr_ms;
+  double avg_eigen_ms;
+  double avg_post_ms;
 };
 
 template <typename T>
@@ -222,16 +246,26 @@ LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
   const double elapsed =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
-  // avg_gpu_ms from the last NR_BENCHMARKING_RUNS events (the ring wraps modulo that).
+  // avg_gpu_ms (+ stage breakdown) from the last NR_BENCHMARKING_RUNS events
+  // (the ring wraps modulo that).
   constexpr unsigned long long RING = LambdaGPUPipeline<T>::NR_BENCHMARKING_RUNS;
   const unsigned long long sample_runs = std::min(pipeline_runs, RING);
-  double total_gpu_ms = 0.0;
+  double total_gpu_ms = 0.0, total_pre_corr_ms = 0.0, total_eigen_ms = 0.0, total_post_ms = 0.0;
   for (unsigned long long i = 0; i < sample_runs; ++i) {
     float ms = 0.0f;
     cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.stop_run[i]);
     total_gpu_ms += ms;
+    cudaEventElapsedTime(&ms, pipeline.start_run[i], pipeline.pre_corr_done[i]);
+    total_pre_corr_ms += ms;
+    cudaEventElapsedTime(&ms, pipeline.pre_corr_done[i], pipeline.eigen_done[i]);
+    total_eigen_ms += ms;
+    cudaEventElapsedTime(&ms, pipeline.eigen_done[i], pipeline.stop_run[i]);
+    total_post_ms += ms;
   }
   const double avg_gpu_ms = sample_runs > 0 ? total_gpu_ms / sample_runs : 0.0;
+  const double avg_pre_corr_ms = sample_runs > 0 ? total_pre_corr_ms / sample_runs : 0.0;
+  const double avg_eigen_ms = sample_runs > 0 ? total_eigen_ms / sample_runs : 0.0;
+  const double avg_post_ms = sample_runs > 0 ? total_post_ms / sample_runs : 0.0;
 
   constexpr size_t in_bytes = sizeof(typename T::InputPacketSamplesType);
 
@@ -246,7 +280,123 @@ LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
   r.input_gb_per_sec = static_cast<double>(in_bytes) * pipeline_runs / elapsed / 1e9;
   r.avg_gpu_ms      = avg_gpu_ms;
   r.gpu_util        = avg_gpu_ms * r.runs_per_sec / 1000.0;
+  r.avg_pre_corr_ms = avg_pre_corr_ms;
+  r.avg_eigen_ms    = avg_eigen_ms;
+  r.avg_post_ms     = avg_post_ms;
   return r;
+}
+
+// Phase 0 relocation-vs-real-pipeline check (see
+// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md): the
+// bench_gpudirect_scatter binary showed a large throughput deficit under a
+// *synthetic* SM-saturating busy kernel. This re-runs the same relocation
+// streams concurrently with the actual LambdaGPUPipeline<T> (the real
+// correlate+beamform+eigen+fft workload) instead of a synthetic proxy, to
+// check whether that finding holds against genuine pipeline occupancy
+// patterns (which may leave more/less real scheduling gaps than a blunt
+// fixed-grid FMA loop does).
+template <typename T>
+void run_relocation_check(double duration_s, int num_buffers, int num_streams,
+                          int poll_batch, int dest_slots, double channels_pkt_rate) {
+  FakeProcessorState state;
+  DummyFinalPacketData<T> packet_data;
+
+  BeamWeightsT<T> h_weights{};
+  for (size_t ch = 0; ch < T::NR_CHANNELS; ++ch)
+    for (size_t rx = 0; rx < T::NR_RECEIVERS; ++rx)
+      for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol)
+        for (size_t bm = 0; bm < T::NR_BEAMS; ++bm)
+          h_weights.weights[ch][pol][bm][rx] =
+              std::complex<__half>(__float2half(1.0f), __float2half(0.0f));
+
+  BeamSteering<T> beam_steering({}, {}, {}, FrequencyPlan{}, 0, ArrayLocation{},
+                                 180.0, 5);
+  LambdaGPUPipeline<T> pipeline(num_buffers, &h_weights, std::move(beam_steering));
+  pipeline.set_state(&state);
+
+  auto run_pipeline_for = [&](double secs, std::atomic<bool> *stop_flag) {
+    unsigned long long runs = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < secs) {
+      if (stop_flag && stop_flag->load(std::memory_order_relaxed)) break;
+      pipeline.execute_pipeline(&packet_data);
+      ++runs;
+    }
+    cudaDeviceSynchronize();
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return runs / elapsed;
+  };
+
+  std::cout << "\n=== Relocation check [ch=" << T::NR_CHANNELS << " fpga=" << T::NR_FPGA_SOURCES
+            << "]: baseline LambdaGPUPipeline alone (" << duration_s << "s) ===\n";
+  const double baseline_runs_per_sec = run_pipeline_for(duration_s, nullptr);
+  std::cout << "baseline pipeline runs/sec=" << baseline_runs_per_sec << "\n";
+
+  const double target_per_stream = channels_pkt_rate / poll_batch;
+  const double target_aggregate = target_per_stream * num_streams;
+  const double pass_threshold = 2.0 * target_aggregate;
+  std::cout << "\n=== Concurrent: real LambdaGPUPipeline + " << num_streams
+            << " relocation streams (" << duration_s << "s) ===\n"
+            << "  target ~" << target_per_stream << " replays/sec/stream, ~" << target_aggregate
+            << " aggregate, pass threshold (2x)=" << pass_threshold << "\n";
+
+  std::atomic<bool> start_gate{false};
+  std::atomic<bool> stop_pipeline{false};
+  std::vector<gpudirect_bench::StreamStats> stats(num_streams);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < num_streams; ++i) {
+    threads.emplace_back(gpudirect_bench::run_stream, poll_batch, dest_slots, duration_s,
+                         std::ref(start_gate), std::ref(stats[i]));
+  }
+  double concurrent_runs_per_sec = 0.0;
+  std::thread pipeline_thread([&]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    concurrent_runs_per_sec = run_pipeline_for(duration_s, &stop_pipeline);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  start_gate.store(true, std::memory_order_release);
+  for (auto &t : threads) t.join();
+  stop_pipeline.store(true, std::memory_order_release);
+  pipeline_thread.join();
+  std::cout << "concurrent pipeline runs/sec=" << concurrent_runs_per_sec << "\n";
+
+  unsigned long long total_replays = 0, total_stalls = 0;
+  for (int i = 0; i < num_streams; ++i) {
+    const auto &s = stats[i];
+    std::cout << "[stream " << i << "] replays/sec=" << (s.replays / duration_s)
+              << " stalls=" << s.stalls << " avg_us=" << (s.replays ? s.total_replay_us / s.replays : 0.0)
+              << " max_us=" << s.max_replay_us << "\n";
+    total_replays += s.replays;
+    total_stalls += s.stalls;
+  }
+  const double aggregate_rate = total_replays / duration_s;
+  const double degradation_pct =
+      baseline_runs_per_sec > 0 ? 100.0 * (1.0 - concurrent_runs_per_sec / baseline_runs_per_sec) : 0.0;
+
+  std::cout << "\n[aggregate] replocation replays/sec=" << aggregate_rate
+            << " total_stalls=" << total_stalls
+            << " pipeline degradation=" << degradation_pct << "%\n";
+  std::cout << "\n=== Phase 0 pass criteria (real pipeline) ===\n";
+  bool pass = true;
+  if (aggregate_rate >= pass_threshold) {
+    std::cout << "[PASS] aggregate replay rate " << aggregate_rate << " >= 2x target (" << pass_threshold << ")\n";
+  } else {
+    std::cout << "[FAIL] aggregate replay rate " << aggregate_rate << " < 2x target (" << pass_threshold << ")\n";
+    pass = false;
+  }
+  if (total_stalls == 0) {
+    std::cout << "[PASS] zero double-buffer stalls\n";
+  } else {
+    std::cout << "[FAIL] " << total_stalls << " double-buffer stalls observed\n";
+    pass = false;
+  }
+  if (degradation_pct < 10.0) {
+    std::cout << "[PASS] pipeline degradation " << degradation_pct << "% < 10%\n";
+  } else {
+    std::cout << "[FAIL] pipeline degradation " << degradation_pct << "% >= 10%\n";
+    pass = false;
+  }
+  std::cout << "\nOverall Phase 0 (real pipeline): " << (pass ? "PASS" : "FAIL") << "\n";
 }
 
 static void print_lambda_result(const LambdaGpuBenchResult &r) {
@@ -254,11 +404,15 @@ static void print_lambda_result(const LambdaGpuBenchResult &r) {
       "[LambdaGPU ch=%zu fpga=%zu rx=%zu] "
       "elapsed=%.3f runs=%llu runs/sec=%.4f "
       "input_bytes=%zu input_GB/sec=%.6f "
-      "avg_gpu_ms=%.3f gpu_util=%.1f%%\n",
+      "avg_gpu_ms=%.3f gpu_util=%.1f%% "
+      "[pre_corr=%.3fms (%.1f%%) eigen=%.3fms (%.1f%%) post=%.3fms (%.1f%%)]\n",
       r.nr_channels, r.nr_fpga_sources, r.nr_receivers,
       r.elapsed, (unsigned long long)r.runs, r.runs_per_sec,
       r.input_bytes, r.input_gb_per_sec,
-      r.avg_gpu_ms, r.gpu_util * 100.0);
+      r.avg_gpu_ms, r.gpu_util * 100.0,
+      r.avg_pre_corr_ms, 100.0 * r.avg_pre_corr_ms / r.avg_gpu_ms,
+      r.avg_eigen_ms, 100.0 * r.avg_eigen_ms / r.avg_gpu_ms,
+      r.avg_post_ms, 100.0 * r.avg_post_ms / r.avg_gpu_ms);
   std::fflush(stdout);
 }
 
@@ -289,6 +443,29 @@ int main(int argc, char *argv[]) {
       .help("Run only the CorrBeamOnly sweeps, skip LambdaGPU sweep")
       .default_value(false)
       .implicit_value(true);
+  program.add_argument("--relocation-check")
+      .help("Phase 0 check: run GPUDirect relocation streams concurrently with the "
+            "real LambdaGPUPipeline (Cfg32ch4fpga) instead of the sweeps above")
+      .default_value(false)
+      .implicit_value(true);
+  program.add_argument("--relocation-streams")
+      .help("Number of simulated FPGA relocation streams for --relocation-check")
+      .default_value(4)
+      .scan<'i', int>();
+  program.add_argument("--relocation-poll-batch")
+      .help("Packets per relocation batch for --relocation-check")
+      .default_value(64)
+      .scan<'i', int>();
+  program.add_argument("--relocation-pkt-rate-per-channel")
+      .help("Packets/sec/channel target for --relocation-check")
+      .default_value(15500.0)
+      .scan<'g', double>();
+  program.add_argument("--fine-channel-check")
+      .help("Compare LambdaGPU throughput with fine channelization off vs. on "
+            "(NR_FINE_CHANNELS=32, edge-trim=2) at 8ch and 16ch/4fpga, instead "
+            "of the sweeps above")
+      .default_value(false)
+      .implicit_value(true);
 
   try {
     program.parse_args(argc, argv);
@@ -303,6 +480,11 @@ int main(int argc, char *argv[]) {
   const bool   with_output       = program.get<bool>("--with-output");
   const bool   lambda_only       = program.get<bool>("--lambda-only");
   const bool   corrbeam_only     = program.get<bool>("--corrbeam-only");
+  const bool   relocation_check  = program.get<bool>("--relocation-check");
+  const bool   fine_channel_check = program.get<bool>("--fine-channel-check");
+  const int    relocation_streams = program.get<int>("--relocation-streams");
+  const int    relocation_poll_batch = program.get<int>("--relocation-poll-batch");
+  const double relocation_pkt_rate = program.get<double>("--relocation-pkt-rate-per-channel");
 
   // Async file logger so the pipeline's INFO_LOG/DEBUG_LOG macros have
   // somewhere to write without polluting stdout.
@@ -313,6 +495,54 @@ int main(int argc, char *argv[]) {
       tp, spdlog::async_overflow_policy::overrun_oldest);
   logger->set_level(spdlog::level::info);
   spatial::Logger::set(logger);
+
+  if (relocation_check) {
+    const double channels_pkt_rate = Cfg32ch4fpga::NR_CHANNELS * relocation_pkt_rate;
+    run_relocation_check<Cfg32ch4fpga>(duration_s, num_buffers_4fpga, relocation_streams,
+                                       relocation_poll_batch, /*dest_slots=*/256, channels_pkt_rate);
+    return 0;
+  }
+
+  if (fine_channel_check) {
+    std::cout << "=== Fine-channelization effect on LambdaGPUPipeline throughput ===\n"
+              << "  duration=" << duration_s << "s each, num_buffers=" << num_buffers_4fpga << "\n\n";
+
+    auto compare = [&](const char *label, auto off_result, auto on_result) {
+      std::cout << "--- " << label << " ---\n";
+      std::cout << "  off (NR_FINE_CHANNELS=1):  "; print_lambda_result(off_result);
+      std::cout << "  on  (NR_FINE_CHANNELS=32, effective ch=" << on_result.nr_channels << "): ";
+      print_lambda_result(on_result);
+      const double throughput_ratio = on_result.runs_per_sec / off_result.runs_per_sec;
+      const double gpu_ms_ratio = on_result.avg_gpu_ms / off_result.avg_gpu_ms;
+      const double pre_corr_ratio = on_result.avg_pre_corr_ms / off_result.avg_pre_corr_ms;
+      const double eigen_ratio = on_result.avg_eigen_ms / off_result.avg_eigen_ms;
+      const double post_ratio = on_result.avg_post_ms / off_result.avg_post_ms;
+      const double pre_corr_delta_ms = on_result.avg_pre_corr_ms - off_result.avg_pre_corr_ms;
+      const double eigen_delta_ms = on_result.avg_eigen_ms - off_result.avg_eigen_ms;
+      const double post_delta_ms = on_result.avg_post_ms - off_result.avg_post_ms;
+      const double total_delta_ms = pre_corr_delta_ms + eigen_delta_ms + post_delta_ms;
+      std::cout << "  => runs/sec ratio (on/off) = " << throughput_ratio
+                << "  (" << (1.0 / throughput_ratio) << "x slower)"
+                << " | avg_gpu_ms ratio (on/off) = " << gpu_ms_ratio << "x\n"
+                << "  stage ratios (on/off): pre_corr(channelizer+correlate)=" << pre_corr_ratio
+                << "x  eigen(cuSOLVER)=" << eigen_ratio << "x  post(beamform+output)=" << post_ratio
+                << "x\n"
+                << "  stage share of the added " << total_delta_ms << "ms/run: pre_corr="
+                << 100.0 * pre_corr_delta_ms / total_delta_ms << "%  eigen="
+                << 100.0 * eigen_delta_ms / total_delta_ms << "%  post="
+                << 100.0 * post_delta_ms / total_delta_ms << "%\n\n";
+    };
+
+    std::cout << "[8 coarse channels]\n";
+    compare("8ch4fpga", run_lambda_bench<Cfg8ch4fpga>(duration_s, num_buffers_4fpga),
+           run_lambda_bench<Cfg8ch4fpga_fine32>(duration_s, num_buffers_4fpga));
+
+    std::cout << "[16 coarse channels]\n";
+    compare("16ch4fpga", run_lambda_bench<Cfg16ch4fpga>(duration_s, num_buffers_4fpga),
+           run_lambda_bench<Cfg16ch4fpga_fine32>(duration_s, num_buffers_4fpga));
+
+    return 0;
+  }
 
   std::cout << "bench_gpu: 4-FPGA CorrBeam channel/corr-packet sweeps + 4-FPGA LambdaGPU channel sweep"
             << "\n  duration=" << duration_s << "s each"

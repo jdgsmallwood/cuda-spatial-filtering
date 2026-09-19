@@ -15,15 +15,17 @@ target_compile_options(gpu_app_common INTERFACE
 #     $<$<COMPILE_LANGUAGE:CUDA>:-w>)
 target_link_directories(gpu_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 
-target_link_libraries(gpu_app_common INTERFACE 
-    spatial CUDA::cudart cuda cutensor HighFive::HighFive 
-    spdlog::spdlog ccglib tcc ${CFITSIO_LIBRARIES} argparse 
-    ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft 
+target_link_libraries(gpu_app_common INTERFACE
+    spatial CUDA::cudart cuda cutensor HighFive::HighFive
+    spdlog::spdlog ccglib tcc filter ${CFITSIO_LIBRARIES} argparse
+    ${CASACORE_LIBRARIES} redis++ hiredis CUDA::cufft
     CUDA::cusolver nlohmann_json::nlohmann_json psrdada
 )
 
-target_compile_definitions(gpu_app_common INTERFACE 
+target_compile_definitions(gpu_app_common INTERFACE
     NUMBER_BEAMS=${NUMBER_BEAMS}
+    NR_OBSERVING_FINE_CHANNELS=${NR_OBSERVING_FINE_CHANNELS}
+    NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM=${NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM}
 )
 
 # Link libibverbs only when it was found at configure time (HAVE_IBVERBS),
@@ -32,11 +34,56 @@ if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
     target_link_libraries(gpu_app_common INTERFACE ${IBVERBS_LIBRARY})
 endif()
 
-add_executable(observe ${PROJECT_SOURCE_DIR}/apps/observe.cu)
-target_link_libraries(observe PRIVATE gpu_app_common)
+# Observe grid: observe_{NR_FPGAS}_{NR_CHANNELS} for all combinations of
+# FPGA sources (1-4) and channels (8,16,24,32).  PADDED_RECEIVERS is derived
+# as the next multiple of 32 above NR_FPGAS * NR_OBSERVING_RECEIVERS_PER_PACKET.
+foreach(NR_FPGAS 1 2 3 4)
+    foreach(NR_CHANNELS 8 16 24 32)
+        set(OBS_TARGET "observe_${NR_FPGAS}_${NR_CHANNELS}")
+        math(EXPR _NR_RECEIVERS "${NR_FPGAS} * ${NR_OBSERVING_RECEIVERS_PER_PACKET}")
+        math(EXPR _PADDED_RECEIVERS "(${_NR_RECEIVERS} + 31) / 32 * 32")
+        add_executable(${OBS_TARGET} ${PROJECT_SOURCE_DIR}/apps/observe.cu)
+        target_link_libraries(${OBS_TARGET} PRIVATE gpu_app_common)
+        target_compile_definitions(${OBS_TARGET} PRIVATE
+            NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
+            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
+            NR_OBSERVING_PADDED_RECEIVERS=${_PADDED_RECEIVERS}
+        )
+    endforeach()
+endforeach()
+
+# Starweave grid: starweave_{NR_FPGAS}_{NR_CHANNELS}, same combinations as the observe grid
+# above -- correlation-only, visibilities-only counterpart to observe (see
+# apps/starweave.cu / LambdaStarweavePipeline).
+foreach(NR_FPGAS 1 2 3 4)
+    foreach(NR_CHANNELS 8 16 24 32)
+        set(SW_TARGET "starweave_${NR_FPGAS}_${NR_CHANNELS}")
+        math(EXPR _NR_RECEIVERS "${NR_FPGAS} * ${NR_OBSERVING_RECEIVERS_PER_PACKET}")
+        math(EXPR _PADDED_RECEIVERS "(${_NR_RECEIVERS} + 31) / 32 * 32")
+        add_executable(${SW_TARGET} ${PROJECT_SOURCE_DIR}/apps/starweave.cu)
+        target_link_libraries(${SW_TARGET} PRIVATE gpu_app_common)
+        target_compile_definitions(${SW_TARGET} PRIVATE
+            NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
+            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
+            NR_OBSERVING_PADDED_RECEIVERS=${_PADDED_RECEIVERS}
+        )
+    endforeach()
+endforeach()
 
 add_executable(udp_sender ${PROJECT_SOURCE_DIR}/apps/udp_sender.cpp)
 target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)
+
+# Raw-frame pcap replay over a libibverbs send QP, for testing
+# LibibverbsPacketCapture/LibibverbsGpuDirectPacketCapture end to end (send
+# via ibverbs, receive via ibverbs) -- see the file's header comment. Prints
+# a friendly error and exits if built without libibverbs, matching the
+# capture-side backend's own --capture-backend=ibverbs error message.
+add_executable(ibverbs_pcap_sender ${PROJECT_SOURCE_DIR}/apps/ibverbs_pcap_sender.cpp)
+target_include_directories(ibverbs_pcap_sender PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(ibverbs_pcap_sender PRIVATE pcap argparse)
+if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
+    target_link_libraries(ibverbs_pcap_sender PRIVATE ${IBVERBS_LIBRARY})
+endif()
 
 add_executable(gpu_benchmark ${PROJECT_SOURCE_DIR}/apps/gpu_benchmark.cu)
 target_link_libraries(gpu_benchmark PRIVATE gpu_app_common)
@@ -75,4 +122,54 @@ target_link_libraries(bench_writers PRIVATE gpu_app_common)
 
 add_executable(bench_gpu ${PROJECT_SOURCE_DIR}/apps/bench_gpu.cu)
 target_link_libraries(bench_gpu PRIVATE gpu_app_common)
+
+# Exploratory: eigendecomposition speedup investigation, not wired into the
+# production pipeline -- see exploration/eigensolver/README.md for full
+# context (findings, open questions, how to resume). Kept buildable here so
+# it doesn't bit-rot.
+add_executable(bench_eigensolver ${PROJECT_SOURCE_DIR}/exploration/eigensolver/bench_eigensolver.cu)
+target_include_directories(bench_eigensolver PRIVATE ${PROJECT_SOURCE_DIR}/include
+                                                     ${PROJECT_SOURCE_DIR}/exploration/eigensolver)
+target_link_libraries(bench_eigensolver PRIVATE CUDA::cudart CUDA::cusolver CUDA::cublas argparse spdlog::spdlog)
+
+# Phase 0 validation benchmark for the GPUDirect RDMA ingest plan (see
+# docs/architecture.md and the plan referenced there): CUDA-graph-replay
+# scatter relocation throughput/contention, no ibverbs/NIC dependency.
+add_executable(bench_gpudirect_scatter ${PROJECT_SOURCE_DIR}/apps/bench_gpudirect_scatter.cu)
+target_include_directories(bench_gpudirect_scatter PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(bench_gpudirect_scatter PRIVATE spdlog::spdlog argparse CUDA::cudart cuda)
+
+# Non-observe apps get the default (CMake-cache) values for the three macros
+# that were removed from the global add_compile_definitions in favour of
+# per-target definitions in the observe grid above.
+set(_STANDARD_APPS
+    gpu_benchmark fft_antenna_spectra beamformed_bandpass
+    get_projection_matrix adaptive_beamformed_bandpass
+    pulsar_fold bench_capture bench_processor bench_writers bench_gpu
+)
+foreach(_APP IN LISTS _STANDARD_APPS)
+    target_compile_definitions(${_APP} PRIVATE
+        NR_OBSERVING_FPGA_SOURCES=${NR_OBSERVING_FPGA_SOURCES}
+        NR_OBSERVING_CHANNELS=${NR_OBSERVING_CHANNELS}
+        NR_OBSERVING_PADDED_RECEIVERS=${NR_OBSERVING_PADDED_RECEIVERS}
+    )
+endforeach()
+
+# Install all app binaries to <install-prefix>/bin (defaults to <project-root>/bin).
+set(_OBSERVE_TARGETS)
+set(_STARWEAVE_TARGETS)
+foreach(NR_FPGAS 1 2 3 4)
+    foreach(NR_CHANNELS 8 16 24 32)
+        list(APPEND _OBSERVE_TARGETS "observe_${NR_FPGAS}_${NR_CHANNELS}")
+        list(APPEND _STARWEAVE_TARGETS "starweave_${NR_FPGAS}_${NR_CHANNELS}")
+    endforeach()
+endforeach()
+
+install(TARGETS
+    ${_OBSERVE_TARGETS}
+    ${_STARWEAVE_TARGETS}
+    ${_STANDARD_APPS}
+    udp_sender
+    RUNTIME DESTINATION bin
+)
 

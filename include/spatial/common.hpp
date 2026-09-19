@@ -192,6 +192,8 @@ private:
   std::unordered_map<int, std::unordered_map<int, int>> base_maps;
 };
 
+#include "spatial/stream_antenna_map.hpp"
+
 // ENUPosition, ArrayLocation, FrequencyPlan, and BeamTarget come from
 // pointing.hpp (via pipeline.hpp above) -- shared geometry/target types also
 // consumed by compute_steering_weights().
@@ -202,6 +204,7 @@ struct CommonArgs {
   std::string beam_output_filename;
   std::string config_filename;
   std::string gains_filename;
+  std::string fine_delays_filename;
   std::string beam_weights_filename;
   std::string nr_signal_eigenvectors_filename;
   std::string targets_filename;
@@ -223,6 +226,20 @@ struct CommonArgs {
   std::vector<int> fpga_id_vec;
   std::unordered_map<uint32_t, int> fpga_ids;
   std::unordered_map<int, int> antenna_mapping;
+  // Indexed by hw_flat_receiver * NR_POLARIZATIONS + raw_pol. When populated,
+  // these are authoritative for gains applied before stream reordering.
+  std::unordered_map<int, int> raw_stream_antenna_mapping;
+  std::unordered_map<int, int> raw_stream_polarization_mapping;
+
+  // Populated when --stream-antenna-map is supplied.  Maps canonical_idx →
+  // antenna_id (ascending antenna-ID order, -1 = unused slot).  Empty when no
+  // map file is loaded (callers fall back to antenna_mapping).
+  std::unordered_map<int, int> canonical_antenna_mapping;
+  // recv_perm[canonical_idx] = hw flat receiver; pol_perm[canonical_idx] = X pol index.
+  // Both empty when no map file is loaded.
+  std::vector<int> canonical_recv_perm;
+  std::vector<int> canonical_pol_perm;
+  std::string stream_antenna_map_filename;
   std::unordered_map<int, int> nr_signal_eigenvectors;
   bool shrink_eigenvalues = false;
   bool detect_signal_eigenmodes = false;
@@ -251,6 +268,76 @@ struct CommonArgs {
   // 0 means run indefinitely.
   double run_duration_seconds = 0.0;
 };
+
+inline std::string audit_sidecar_filename(const std::string &primary_filename) {
+  const size_t slash = primary_filename.find_last_of("/\\");
+  const size_t dot = primary_filename.find_last_of(".");
+  if (dot == std::string::npos ||
+      (slash != std::string::npos && dot < slash))
+    return primary_filename + ".streams.csv";
+  return primary_filename.substr(0, dot) + ".streams.csv";
+}
+
+inline void write_stream_mapping_csv(const CommonArgs &args,
+                                     const std::string &filename,
+                                     int nr_receivers_per_fpga = 10,
+                                     int nr_polarizations = 2) {
+  std::ofstream out(filename);
+  if (!out.is_open())
+    throw std::runtime_error("Cannot write stream mapping audit CSV: " + filename);
+  out << "global_datastream_id,fpga_input_index,fpga_id,network_interface,"
+         "fpga_stream_id,receiver_slot,raw_polarization,canonical_polarization,"
+         "antenna_id,canonical_receiver_index,configured_disconnected,"
+         "zeroed_after_reorder,mapping_source\n";
+
+  std::unordered_map<int, int> antenna_to_canonical;
+  for (const auto &[canonical_idx, antenna_id] : args.canonical_antenna_mapping)
+    if (antenna_id >= 0) antenna_to_canonical[antenna_id] = canonical_idx;
+
+  const bool authoritative = !args.canonical_recv_perm.empty();
+  const int streams_per_fpga = nr_receivers_per_fpga * nr_polarizations;
+  for (int input_f = 0; input_f < (int)args.fpga_id_vec.size(); ++input_f) {
+    const int fpga_id = args.fpga_id_vec[input_f];
+    const std::string interface_name =
+        input_f < (int)args.fpga_names.size() ? args.fpga_names[input_f] : "";
+    for (int stream = 0; stream < streams_per_fpga; ++stream) {
+      const int raw_idx = input_f * streams_per_fpga + stream;
+      const int receiver_idx =
+          input_f * nr_receivers_per_fpga + stream / nr_polarizations;
+      const int raw_pol = stream % nr_polarizations;
+      int antenna_id = -1;
+      int canonical_pol = raw_pol;
+      if (authoritative) {
+        auto ant_it = args.raw_stream_antenna_mapping.find(raw_idx);
+        auto pol_it = args.raw_stream_polarization_mapping.find(raw_idx);
+        if (ant_it != args.raw_stream_antenna_mapping.end())
+          antenna_id = ant_it->second;
+        if (pol_it != args.raw_stream_polarization_mapping.end())
+          canonical_pol = pol_it->second;
+      } else {
+        auto ant_it = args.antenna_mapping.find(receiver_idx);
+        if (ant_it != args.antenna_mapping.end()) antenna_id = ant_it->second;
+      }
+      int canonical_idx = receiver_idx;
+      if (authoritative) {
+        auto it = antenna_to_canonical.find(antenna_id);
+        canonical_idx = it != antenna_to_canonical.end() ? it->second : -1;
+      }
+      const bool disconnected = antenna_id < 0;
+      const bool zeroed = authoritative && disconnected;
+      out << raw_idx << "," << input_f << "," << fpga_id << ","
+          << interface_name << "," << stream << ","
+          << stream / nr_polarizations << "," << raw_pol << ","
+          << canonical_pol << "," << antenna_id << "," << canonical_idx
+          << "," << (disconnected ? 1 : 0) << "," << (zeroed ? 1 : 0)
+          << "," << (authoritative ? "stream_antenna_map" : "legacy_registry")
+          << "\n";
+    }
+  }
+  std::cout << "Wrote stream mapping audit CSV to " << filename << "\n";
+}
+
+#include "spatial/run_audit.hpp"
 
 template <size_t N>
 inline std::array<int64_t, N>
@@ -294,16 +381,18 @@ make_packet_captures(const CommonArgs &args,
   }
 
   const bool use_ibverbs = args.capture_backend == "ibverbs";
-  if (!use_ibverbs && args.capture_backend != "kernel") {
+  const bool use_ibverbs_gpudirect = args.capture_backend == "ibverbs-gpudirect";
+  if (!use_ibverbs && !use_ibverbs_gpudirect && args.capture_backend != "kernel") {
     throw std::runtime_error("Unknown --capture-backend '" +
                              args.capture_backend +
-                             "' (expected 'kernel' or 'ibverbs')");
+                             "' (expected 'kernel', 'ibverbs', or 'ibverbs-gpudirect')");
   }
 #ifndef HAVE_IBVERBS
-  if (use_ibverbs) {
+  if (use_ibverbs || use_ibverbs_gpudirect) {
     throw std::runtime_error(
-        "--capture-backend=ibverbs requested but this binary was built without "
-        "libibverbs (install libibverbs-dev and rebuild on an RDMA host)");
+        "--capture-backend=" + args.capture_backend +
+        " requested but this binary was built without libibverbs (install "
+        "libibverbs-dev and rebuild on an RDMA host)");
   }
 #endif
 
@@ -311,6 +400,15 @@ make_packet_captures(const CommonArgs &args,
   for (int i = 0; i < nr_nics; ++i) {
     auto nic = args.fpga_names[i];
 #ifdef HAVE_IBVERBS
+    if (use_ibverbs_gpudirect) {
+      // GPUDirect ingest path (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md):
+      // constructed here like every other backend, but needs an explicit
+      // arm() call once the app's pipeline/ProcessorState exist -- see
+      // arm_gpudirect_captures() below, called separately from main().
+      capture.push_back(std::make_unique<LibibverbsGpuDirectPacketCapture>(
+          nic, args.port, BUFFER_SIZE));
+      continue;
+    }
     if (use_ibverbs) {
       capture.push_back(std::make_unique<LibibverbsPacketCapture>(
           nic, args.port, BUFFER_SIZE));
@@ -323,6 +421,24 @@ make_packet_captures(const CommonArgs &args,
   }
   return capture;
 }
+
+#ifdef HAVE_IBVERBS
+// Arms every LibibverbsGpuDirectPacketCapture in `captures` against `state`
+// (a no-op for every other backend/capture type) -- must be called once,
+// after `state`'s pipeline has GPU-resident landing buffers, and before
+// spawning the capture threads that call get_packets(). See
+// LibibverbsGpuDirectPacketCapture::arm()'s doc comment for why this can't
+// happen inside make_packet_captures() itself (the pipeline doesn't exist
+// yet at that point in every app's main()).
+inline void arm_gpudirect_captures(std::vector<std::unique_ptr<PacketInput>> &captures,
+                                   ProcessorStateBase &state) {
+  for (auto &c : captures) {
+    if (auto *gpudirect = dynamic_cast<LibibverbsGpuDirectPacketCapture *>(c.get())) {
+      gpudirect->arm(state);
+    }
+  }
+}
+#endif
 
 template <typename CaptureContainer>
 inline uint32_t get_total_capture_drops(const CaptureContainer &capture) {
@@ -448,9 +564,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .store_into(args.port);
 
   program.add_argument("--capture-backend")
-      .help("Live packet-capture backend: 'kernel' (SOCK_DGRAM/recvmmsg) or "
+      .help("Live packet-capture backend: 'kernel' (SOCK_DGRAM/recvmmsg), "
             "'ibverbs' (libibverbs raw-packet QP, requires an RDMA NIC and a "
-            "build with libibverbs)")
+            "build with libibverbs), or 'ibverbs-gpudirect' (GPUDirect RDMA "
+            "straight into GPU memory, requires an RDMA NIC with GPUDirect/"
+            "nvidia-peermem support in addition to libibverbs -- see the "
+            "arm_gpudirect_captures() call every app using this backend must "
+            "make once its pipeline exists)")
       .default_value(std::string("kernel"))
       .store_into(args.capture_backend);
 
@@ -482,6 +602,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .help("JSON file with weights")
       .default_value("weights.json")
       .store_into(args.gains_filename);
+
+  program.add_argument("--fine-delays")
+      .help("JSON file with per-antenna fine-channel delay corrections in "
+            "nanoseconds, keyed by physical antenna ID "
+            "(e.g. {\"0\": 12.5, \"1\": -3.2})")
+      .default_value(std::string(""))
+      .store_into(args.fine_delays_filename);
 
   program.add_argument("-e", "--eigenvalue-num-filename")
       .help("JSON file with number of eigenvalues to num per channel")
@@ -565,6 +692,13 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(0.0)
       .scan<'g', double>()
       .store_into(args.run_duration_seconds);
+
+  program.add_argument("--stream-antenna-map")
+      .help("JSON file mapping each (FPGA, stream) to its physical antenna_id "
+            "and x_pol_index.  When supplied, the pipeline reorders receivers "
+            "into canonical antenna-ID order and ensures pol 0 = X.")
+      .default_value(std::string(""))
+      .store_into(args.stream_antenna_map_filename);
 
   try {
     program.parse_args(argc, argv);
@@ -667,24 +801,55 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
                 << std::endl;
     }
 
-    const std::unordered_map<std::string, int> ifname_to_fpga{
+    // FPGA-ID → NIC name table.  config.json "network_interfaces" populates this
+    // so you can pass -i 0,1,2,3 instead of the full interface names:
+    //   "network_interfaces": {"0": "enp134s0np0", "1": "enp134s0np0",
+    //                          "2": "enp175s0np0", "3": "enp216s0np0"}
+    std::unordered_map<int, std::string> fpga_to_ifname;
+    if (args.config.contains("network_interfaces")) {
+      for (const auto &[fpga_str, ifname] :
+           args.config["network_interfaces"].items()) {
+        if (fpga_str.empty() || fpga_str[0] == '_') continue; // skip comment keys
+        int id = std::stoi(fpga_str);
+        fpga_to_ifname[id] = ifname.get<std::string>();
+        std::cout << "Config: FPGA " << id << " → " << ifname << "\n";
+      }
+    }
+
+    // Reverse map (NIC name → FPGA ID) kept for backward-compat when full
+    // interface names are passed directly on -i.  Hardcoded defaults cover the
+    // physical LAMBDA host; config entries are added on top.
+    std::unordered_map<std::string, int> ifname_to_fpga{
         {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
+    for (const auto &[id, name] : fpga_to_ifname)
+      ifname_to_fpga[name] = id;
 
+    // Resolve each token from -i: a bare integer is treated as an FPGA ID and
+    // expanded to its NIC name via fpga_to_ifname; anything else is a NIC name
+    // looked up in ifname_to_fpga (FPGA ID defaults to 0 if unknown).
     args.fpga_names = split_ifnames(args.ifname);
-
     {
-      // use scope here to deallocate i at the end.
       int i = 0;
-      for (const auto &name : args.fpga_names) {
+      for (auto &name : args.fpga_names) {
+        bool is_id = !name.empty() &&
+                     std::all_of(name.begin(), name.end(), ::isdigit);
         int fpga_id = 0;
-
-        auto it = ifname_to_fpga.find(name);
-        if (it != ifname_to_fpga.end()) {
-          fpga_id = it->second;
+        if (is_id) {
+          fpga_id = std::stoi(name);
+          auto it = fpga_to_ifname.find(fpga_id);
+          if (it == fpga_to_ifname.end())
+            throw std::runtime_error(
+                "No network_interfaces entry in config.json for FPGA ID " +
+                name);
+          name = it->second; // replace the integer token with the real NIC name
+        } else {
+          auto it = ifname_to_fpga.find(name);
+          if (it != ifname_to_fpga.end())
+            fpga_id = it->second;
         }
         args.fpga_ids[fpga_id] = i;
         args.fpga_id_vec.push_back(fpga_id);
-        i++;
+        ++i;
       }
     }
 
@@ -695,6 +860,36 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     for (const auto &[key, val] : args.antenna_mapping) {
       std::cout << "Key: " << key << ", Val: " << val << std::endl;
     };
+
+    if (!args.stream_antenna_map_filename.empty()) {
+      StreamAntennaMap sam = StreamAntennaMap::load(args.stream_antenna_map_filename);
+      auto [recv_perm, pol_perm] =
+          sam.build_permutation(args.fpga_id_vec, 10, 2);
+      args.canonical_recv_perm = recv_perm;
+      args.canonical_pol_perm  = pol_perm;
+      args.canonical_antenna_mapping =
+          sam.build_canonical_antenna_mapping(args.fpga_id_vec, 10, 2);
+      for (int input_f = 0; input_f < (int)args.fpga_id_vec.size(); ++input_f) {
+        const int fpga_id = args.fpga_id_vec[input_f];
+        auto fpga_it = sam.entries.find(fpga_id);
+        if (fpga_it == sam.entries.end()) continue;
+        for (const auto &[stream, entry] : fpga_it->second) {
+          if (stream < 0 || stream >= 20) continue;
+          const int raw_idx = input_f * 20 + stream;
+          args.raw_stream_antenna_mapping[raw_idx] = entry.antenna_id;
+          args.raw_stream_polarization_mapping[raw_idx] = entry.polarization;
+        }
+      }
+      std::cout << "Canonical antenna mapping (from " << args.stream_antenna_map_filename << "):\n";
+      int nr_canonical = (int)recv_perm.size() / 2;
+      for (int c = 0; c < nr_canonical; ++c) {
+        auto it = args.canonical_antenna_mapping.find(c);
+        int ant = (it != args.canonical_antenna_mapping.end()) ? it->second : -1;
+        std::cout << "  canonical[" << c << "] = antenna " << ant
+                  << " (X: hw_flat=" << recv_perm[c*2+0] << " pol=" << pol_perm[c*2+0]
+                  << "; Y: hw_flat=" << recv_perm[c*2+1] << " pol=" << pol_perm[c*2+1] << ")\n";
+      }
+    }
 
   } catch (const std::exception &err) {
     std::cerr << err.what() << "\n" << program;
@@ -765,29 +960,34 @@ template <typename T>
 inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
   // AntennaGains objects should be [Channel][Pol][Antenna]
   typename T::AntennaGains output{};
-  for (auto i = 0; i < T::NR_CHANNELS; ++i) {
+  for (auto i = 0; i < T::NR_FPGA_CHANNELS; ++i) {
     for (auto j = 0; j < T::NR_POLARIZATIONS; ++j) {
       for (auto f = 0; f < T::NR_FPGA_SOURCES; ++f) {
         int fpga_id = args.fpga_id_vec[f];
         for (auto k = 0; k < T::NR_RECEIVERS_PER_PACKET; ++k) {
-          std::string pol_string;
-          if (j == 0) {
-            pol_string = "XX";
-          } else {
-            pol_string = "YY";
-          }
           int receiver_idx = f * T::NR_RECEIVERS_PER_PACKET + k;
+          int antenna_id = args.antenna_mapping[receiver_idx];
+          int canonical_pol = j;
+          if (!args.raw_stream_antenna_mapping.empty()) {
+            const int raw_idx = receiver_idx * T::NR_POLARIZATIONS + j;
+            auto ant_it = args.raw_stream_antenna_mapping.find(raw_idx);
+            auto pol_it = args.raw_stream_polarization_mapping.find(raw_idx);
+            antenna_id = ant_it != args.raw_stream_antenna_mapping.end()
+                             ? ant_it->second : -1;
+            canonical_pol = pol_it != args.raw_stream_polarization_mapping.end()
+                                ? pol_it->second : j;
+          }
+          const std::string pol_string = canonical_pol == 0 ? "XX" : "YY";
 
           std::complex<float> val;
           try {
+            if (antenna_id < 0) throw std::out_of_range("disconnected stream");
             val = {
                 args.gains["weights"][std::to_string(args.min_freq_channel + i)]
-                          [pol_string][std::to_string(
-                              args.antenna_mapping[receiver_idx])]["real"],
+                          [pol_string][std::to_string(antenna_id)]["real"],
 
                 args.gains["weights"][std::to_string(args.min_freq_channel + i)]
-                          [pol_string][std::to_string(
-                              args.antenna_mapping[receiver_idx])]["imag"]};
+                          [pol_string][std::to_string(antenna_id)]["imag"]};
           } catch (const std::exception &err) {
             std::cout << "Gain not found for channel "
                       << std::to_string(args.min_freq_channel + i) << " pol "
@@ -797,6 +997,10 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
           }
 
           float mag = val.real() * val.real() + val.imag() * val.imag();
+          if (mag < 1e-12f) {
+            val = {1.0f, 0.0f};
+            mag = 1.0f;
+          }
           // we take the conjugate and divide by the magnitude to
           // correct for both the phase and the amplitude.
           output[i][j][receiver_idx] = {val.real() / mag, -val.imag() / mag};
@@ -807,6 +1011,91 @@ inline typename T::AntennaGains get_gains_structure(CommonArgs &args) {
         }
       }
     }
+  }
+  return output;
+};
+
+// Canonical-order version of get_gains_structure.  Iterates canonical receiver
+// indices 0..NR_RECEIVERS-1 using the supplied canonical_mapping (canonical_idx
+// → antenna_id), producing gains[channel][pol][canonical_idx].  Unused slots
+// (antenna_id == -1) receive identity gain {1,0}.  Pol 0 → "XX", pol 1 → "YY"
+// — matching the reorder kernel's convention that pol 0 = X in samples_reordered.
+template <typename T>
+inline typename T::AntennaGains
+get_gains_structure_canonical(
+    CommonArgs &args,
+    const std::unordered_map<int, int> &canonical_mapping) {
+  typename T::AntennaGains output{};
+  for (int i = 0; i < T::NR_FPGA_CHANNELS; ++i) {
+    for (int j = 0; j < T::NR_POLARIZATIONS; ++j) {
+      const std::string pol_string = (j == 0) ? "XX" : "YY";
+      for (int k = 0; k < T::NR_RECEIVERS; ++k) {
+        auto it = canonical_mapping.find(k);
+        int antenna_id = (it != canonical_mapping.end()) ? it->second : -1;
+        std::complex<float> val = {1.0f, 0.0f};
+        if (antenna_id >= 0) {
+          try {
+            val = {
+                args.gains["weights"][std::to_string(args.min_freq_channel + i)]
+                          [pol_string][std::to_string(antenna_id)]["real"],
+                args.gains["weights"][std::to_string(args.min_freq_channel + i)]
+                          [pol_string][std::to_string(antenna_id)]["imag"]};
+          } catch (const std::exception &) {
+            std::cout << "Gain not found for channel "
+                      << std::to_string(args.min_freq_channel + i) << " pol "
+                      << pol_string << " canonical_idx " << k
+                      << " (antenna " << antenna_id << ")\n";
+            val = {1.0f, 0.0f};
+          }
+        }
+        float mag = val.real() * val.real() + val.imag() * val.imag();
+        if (mag < 1e-12f) mag = 1.0f;
+        output[i][j][k] = {val.real() / mag, -val.imag() / mag};
+        std::cout << "Canonical gain for channel " << args.min_freq_channel + i
+                  << ", pol " << pol_string << " canonical_idx " << k
+                  << " (antenna " << antenna_id << "): "
+                  << val.real() << " + " << val.imag() << "j.\n";
+      }
+    }
+  }
+  return output;
+}
+
+// Load per-antenna fine-channel delay corrections (nanoseconds) from a JSON
+// file.  The JSON is a flat object keyed by physical antenna ID (string), e.g.
+// {"0": 12.5, "1": -3.2}.  Antennas absent from the file receive delay 0.
+template <typename T>
+inline typename T::AntennaDelays
+get_fine_delays_structure(CommonArgs &args) {
+  typename T::AntennaDelays output{};
+  std::fill(output.begin(), output.end(), 0.0f);
+
+  std::ifstream f(args.fine_delays_filename);
+  if (!f.is_open()) {
+    throw std::runtime_error("Cannot open fine-delays file: " +
+                             args.fine_delays_filename);
+  }
+  json delays_json = json::parse(f);
+
+  // Use canonical mapping when available (post-reorder receiver order); fall
+  // back to hardware flat mapping when no stream-antenna-map file was loaded.
+  const bool use_canonical = !args.canonical_antenna_mapping.empty();
+  for (int recv_idx = 0; recv_idx < (int)T::NR_RECEIVERS; ++recv_idx) {
+    int antenna_id;
+    if (use_canonical) {
+      auto it = args.canonical_antenna_mapping.find(recv_idx);
+      antenna_id = (it != args.canonical_antenna_mapping.end()) ? it->second : -1;
+    } else {
+      auto it = args.antenna_mapping.find(recv_idx);
+      antenna_id = (it != args.antenna_mapping.end()) ? it->second : recv_idx;
+    }
+    std::string key = std::to_string(antenna_id);
+    float delay_ns = (antenna_id >= 0 && delays_json.contains(key))
+                         ? delays_json[key].get<float>() : 0.0f;
+    output[recv_idx] = delay_ns;
+    std::cout << "Fine delay for receiver " << recv_idx
+              << " (antenna " << antenna_id << "): " << delay_ns
+              << " ns\n";
   }
   return output;
 };

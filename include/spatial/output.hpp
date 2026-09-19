@@ -60,14 +60,20 @@ public:
 template <typename T> class SingleHostMemoryOutput : public Output {
 
 public:
+  // Time axis must match T::NR_TIME_STEPS_PER_FINE_CHANNEL (packet_formats.hpp), not the raw
+  // T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET -- the pipeline's beamformer
+  // output shrinks to the per-fine-channel length once channelization is active, and this
+  // landing buffer must match what execute_pipeline's cudaMemcpyAsync actually transfers.
   using BeamOutput =
       __half[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_BEAMS]
-            [T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET][2];
+            [T::NR_TIME_STEPS_PER_FINE_CHANNEL][2];
   static constexpr int NR_BASELINES =
       T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
   using Visibilities = float[T::NR_CHANNELS][T::NR_BASELINES_UNPADDED]
                             [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS][2];
-  using Arrivals = bool[T::NR_CHANNELS][T::NR_PACKETS_FOR_CORRELATION + 2]
+  // Pre-channelization: arrivals are packet-level (one bit per raw FPGA/coarse channel), matching
+  // T::ArrivalsOutputType / packet_data->get_arrivals_size(), not the widened T::NR_CHANNELS.
+  using Arrivals = bool[T::NR_FPGA_CHANNELS][T::NR_PACKETS_FOR_CORRELATION + 2]
                        [T::NR_FPGA_SOURCES];
   using Eigenvalues = typename T::EigenvalueOutputType;
   using Eigenvectors = typename T::EigenvectorOutputType;

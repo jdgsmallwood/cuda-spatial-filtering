@@ -4,6 +4,14 @@
 #define NUMBER_BEAMS 1
 #endif
 
+#ifndef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#endif
+
+#ifndef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
+#endif
+
 void writeVectorToCSV(const std::vector<float> &times,
                       const std::string &filename) {
   std::ofstream file(filename);
@@ -50,6 +58,9 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
   constexpr int nr_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
+  constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
+  constexpr int num_lambda_fine_channel_edge_trim =
+      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -57,7 +68,8 @@ int main(int argc, char *argv[]) {
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_padded_receivers,
                    nr_lambda_padded_receivers_per_block,
-                   nr_correlation_blocks_to_integrate, true, 256>;
+                   nr_correlation_blocks_to_integrate, true, 256,
+                   num_lambda_fine_channels, num_lambda_fine_channel_edge_trim>;
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
@@ -67,6 +79,9 @@ int main(int argc, char *argv[]) {
   auto fpga_delays = build_fpga_delay_array<nr_fpga_sources>(args, true);
 
   auto gains = get_gains_structure<Config>(args);
+  const bool use_canonical = !args.canonical_recv_perm.empty();
+  const auto &active_mapping =
+      use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
   ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
@@ -83,7 +98,13 @@ int main(int argc, char *argv[]) {
         make_default_filename("visibilities", args.min_freq_channel,
                               num_lambda_channels, args.fpga_id_vec);
   }
+  write_stream_mapping_csv(
+      args, audit_sidecar_filename(args.output_filename),
+      nr_lambda_receivers_per_packet, nr_lambda_polarizations);
   HighFive::File vis_file(args.output_filename, HighFive::File::Truncate);
+  write_hdf5_run_audit(
+      vis_file, args, argc, argv, nr_lambda_receivers_per_packet,
+      nr_lambda_polarizations);
   // auto beam_writer = std::make_unique<
   //     HDF5RawBeamWriter<Config::BeamOutputType, Config::ArrivalsOutputType>>(
   //    beam_file);
@@ -102,8 +123,8 @@ int main(int argc, char *argv[]) {
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
-          args.min_freq_channel + num_lambda_channels - 1,
-          &args.antenna_mapping);
+          args.min_freq_channel + Config::NR_CHANNELS - 1,
+          &active_mapping, 100, 0, use_canonical);
 
   auto eigen_filename =
       make_default_filename("eigendata", args.min_freq_channel,
@@ -113,10 +134,22 @@ int main(int argc, char *argv[]) {
   //      Config::EigenvalueOutputType,
   //      Config::EigenvectorOutputType>>(eigen_file);
 
-  auto fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
-      num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations, "",
-      100, args.redis_channels_per_write);
-  // auto fft_writer = nullptr;
+  // RedisBeamFFTWriter feeds the whole-band post-beamform FFT/bandpass path, which
+  // LambdaGPUPipeline permanently skips once fine channelization is active (see
+  // execute_pipeline's NR_FINE_CHANNELS==1 gate) -- spectral resolution then comes from the
+  // fine-channelized beam output directly. Skip constructing (and provisioning Redis keys for)
+  // a writer that would otherwise never receive data.
+  std::unique_ptr<FFTWriter<Config::FFTOutputType>> fft_writer;
+  if constexpr (Config::NR_FINE_CHANNELS == 1) {
+    fft_writer = std::make_unique<RedisBeamFFTWriter<Config::FFTOutputType>>(
+        num_lambda_channels, nr_lambda_beams, nr_lambda_polarizations, "",
+        100, args.redis_channels_per_write);
+  } else {
+    std::cout << "Skipping RedisBeamFFTWriter: whole-band FFT/bandpass output is "
+                 "unavailable with fine channelization enabled "
+                 "(NR_OBSERVING_FINE_CHANNELS > 1)"
+              << std::endl;
+  }
 
   auto output = std::make_shared<BufferedOutput<Config>>(
       std::move(beam_writer), std::move(vis_writer), std::move(eigen_writer),
@@ -131,8 +164,8 @@ int main(int argc, char *argv[]) {
       // zero weight so their noise is never summed into a beam. This covers
       // the unsteered case; when steering is active, compute_steering_weights
       // zeroes them the same way on the first refresh.
-      const auto mapping_it = args.antenna_mapping.find(j);
-      const bool null_input = mapping_it != args.antenna_mapping.end() &&
+      const auto mapping_it = active_mapping.find(j);
+      const bool null_input = mapping_it != active_mapping.end() &&
                               mapping_it->second < 0;
       const __half amplitude = __float2half(null_input ? 0.0f : 1.0f);
       for (auto k = 0; k < nr_lambda_beams; ++k) {
@@ -150,11 +183,16 @@ int main(int argc, char *argv[]) {
   const bool fold_calibration_into_steering =
       !args.beam_targets.empty() && args.apply_gains;
 
+  // Calibration gains for steering must be in canonical receiver order when a
+  // stream-antenna map is loaded; hardware-order gains are used for d_gains.
+  auto calib_gains = (fold_calibration_into_steering && use_canonical)
+      ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+      : gains;
   BeamSteering<Config> beam_steering(
-      args.beam_targets, args.antenna_positions, args.antenna_mapping,
+      args.beam_targets, args.antenna_positions, active_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,
       args.steering_update_interval_seconds, num_buffers,
-      fold_calibration_into_steering ? &gains : nullptr);
+      fold_calibration_into_steering ? &calib_gains : nullptr);
 
   const int integration_blocks =
       args.nr_integration_blocks > 0 ? args.nr_integration_blocks
@@ -167,6 +205,8 @@ int main(int argc, char *argv[]) {
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
+  if (use_canonical)
+    pipeline.set_stream_permutation(args.canonical_recv_perm, args.canonical_pol_perm);
   if (args.apply_gains) {
     if (fold_calibration_into_steering) {
       std::cout << "Folding calibration gains into synthesized steering "
@@ -181,15 +221,37 @@ int main(int argc, char *argv[]) {
     std::cout << "Not applying gains as -a is not selected" << std::endl;
   }
 
+  if (!args.fine_delays_filename.empty()) {
+    if constexpr (Config::NR_FINE_CHANNELS > 1) {
+      std::cerr << "--fine-delays is not supported with fine channelization "
+                   "enabled (NR_OBSERVING_FINE_CHANNELS > 1) -- gpu-filter's "
+                   "own per-antenna delay compensation replaces the retired "
+                   "apply_fine_delay_correction() mechanism (not yet wired "
+                   "up); rebuild with NR_OBSERVING_FINE_CHANNELS=1 or drop "
+                   "--fine-delays."
+                << std::endl;
+      return 1;
+    } else {
+      auto fine_delays = get_fine_delays_structure<Config>(args);
+      pipeline.set_fine_delays(fine_delays.data(),
+                               args.frequency_plan.base_frequency_hz,
+                               args.frequency_plan.channel_bandwidth_hz,
+                               args.min_freq_channel);
+    }
+  }
+
   std::thread processor([&state]() { state.process_packets(); });
   std::thread pipeline_feeder([&state]() { state.pipeline_feeder(); });
 
   output->start_writer_loop();
 
   auto capture = make_packet_captures(args);
-  // Activate the lock-free strided producer path: each capture thread i owns
-  // ring slots i, i+N, i+2N, ... and claims them without producer_mutex.
-  state.nr_capture_threads = static_cast<int>(capture.size());
+  // Activate the lock-free strided producer path only for live capture: each
+  // capture thread i owns ring slots i, i+N, i+2N, ... and claims them
+  // without producer_mutex.  PCAPPacketCapture uses the legacy write_index
+  // producer path and must not enable the strided consumer path.
+  if (args.pcap_filename.empty())
+    state.nr_capture_threads = static_cast<int>(capture.size());
   INFO_LOG("Ring buffer size: {} packets\n", DEFAULT_PACKET_RING_BUFFER_SIZE);
   INFO_LOG("Starting threads....");
   std::vector<std::thread> receiver_threads;

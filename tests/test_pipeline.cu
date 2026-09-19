@@ -1203,10 +1203,13 @@ TEST_F(CudaIsolatedTest, GainsTest) {
                                       Config::NR_POLARIZATIONS>
       gains;
 
-  for (auto i = 0; i < Config::NR_CHANNELS * Config::NR_RECEIVERS *
-                           Config::NR_POLARIZATIONS;
-       ++i) {
-    gains[i] = {static_cast<float>(i), static_cast<float>(i)};
+  // AntennaGains is [channel][polarization][receiver].
+  for (auto pol = 0; pol < Config::NR_POLARIZATIONS; ++pol) {
+    for (auto receiver = 0; receiver < Config::NR_RECEIVERS; ++receiver) {
+      const auto value = static_cast<float>(
+          receiver * Config::NR_POLARIZATIONS + pol);
+      gains[pol * Config::NR_RECEIVERS + receiver] = {value, value};
+    }
   }
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
@@ -1304,10 +1307,13 @@ TEST_F(CudaIsolatedTest, GainsOnlyOneFPGAPresentTest) {
                                       Config::NR_POLARIZATIONS>
       gains;
 
-  for (auto i = 0; i < Config::NR_CHANNELS * Config::NR_RECEIVERS *
-                           Config::NR_POLARIZATIONS;
-       ++i) {
-    gains[i] = {static_cast<float>(i), static_cast<float>(i)};
+  // AntennaGains is [channel][polarization][receiver].
+  for (auto pol = 0; pol < Config::NR_POLARIZATIONS; ++pol) {
+    for (auto receiver = 0; receiver < Config::NR_RECEIVERS; ++receiver) {
+      const auto value = static_cast<float>(
+          receiver * Config::NR_POLARIZATIONS + pol);
+      gains[pol * Config::NR_RECEIVERS + receiver] = {value, value};
+    }
   }
 
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();

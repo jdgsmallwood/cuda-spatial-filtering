@@ -1,12 +1,40 @@
 
 # LAMBDA GPU Signal Processing Pipeline
 
-Real-time radio-astronomy signal processing pipeline for the LAMBDA instrument. Ingests UDP/PCAP
-packet streams from FPGA-based receivers, correlates and beamforms on the GPU via Tensor Core
-Correlator and ccglib, applies adaptive spatial filtering / RFI mitigation via eigendecomposition,
-and writes results to HDF5/PSRDADA/FITS/Redis.
+[![Build](https://github.com/jdgsmallwood/cuda-spatial-filtering/actions/workflows/build.yml/badge.svg)](https://github.com/jdgsmallwood/cuda-spatial-filtering/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
-See `CLAUDE.md` for the full architecture walkthrough, domain gotchas, and toolchain notes.
+Real-time CUDA C++ signal processing pipeline for the LAMBDA radio-astronomy instrument. Ingests
+UDP/PCAP packet streams from FPGA-based receivers, correlates and beamforms on the GPU via Tensor
+Core Correlator and ccglib, applies adaptive spatial filtering and RFI mitigation via
+eigendecomposition, and writes results to HDF5/PSRDADA/FITS/Redis.
+
+## Statement of Need
+
+Low-frequency radio telescopes face an increasingly hostile radio-frequency interference (RFI)
+environment, requiring real-time adaptive spatial filtering that is computationally too demanding
+for CPU-only approaches. Existing GPU correlator frameworks (e.g., xGPU) target standard
+interferometric arrays and do not expose the beamforming, eigendecomposition-based RFI projection,
+or the bespoke LAMBDA FPGA wire-format parsing required for this instrument. This pipeline
+delivers a unified, end-to-end GPU path — from raw FPGA packets to calibrated, RFI-mitigated
+beams and visibilities — sustaining over 4.6 million packets per second with more than 500% real-
+time headroom on the LAMBDA 36-element array.
+
+## Prerequisites
+
+| Dependency | Version | Notes |
+|------------|---------|-------|
+| CUDA | ≥12.6 | cuSOLVER, cuFFT, cuBLAS, cuTENSOR, NVRTC required |
+| cuTENSOR | ≥2.2 | `CUTENSOR_ROOT` must point at a flat `include/lib` layout |
+| HDF5 | ≥1.10 | With C bindings |
+| CFITSIO | ≥4.0 | |
+| CasaCore | ≥3.5 | |
+| PSRDADA | any | `$PSRHOME` must point at install prefix |
+| CMake | ≥3.15 | |
+
+Dependencies in `extern/` (TCC, ccglib, cudawrappers, spdlog, xtensor, argparse, HighFive,
+googletest, redis-plus-plus) are git submodules — run
+`git submodule update --init --recursive` if they are missing.
 
 ## Building
 

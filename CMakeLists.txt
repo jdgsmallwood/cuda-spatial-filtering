@@ -9,7 +9,32 @@ project(
   LANGUAGES CUDA CXX)
 
 # Only do these if this is the main project, and not if it is included through add_subdirectory
+execute_process(
+  COMMAND git -c safe.directory=${CMAKE_SOURCE_DIR} rev-parse HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE SPATIAL_GIT_COMMIT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+if(NOT SPATIAL_GIT_COMMIT)
+  set(SPATIAL_GIT_COMMIT "unknown")
+endif()
+add_compile_definitions(
+  SPATIAL_PROJECT_VERSION="${PROJECT_VERSION}"
+  SPATIAL_GIT_COMMIT="${SPATIAL_GIT_COMMIT}"
+  SPATIAL_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+
+  # Default install prefix to the project root so `make install` puts binaries
+  # under <project-root>/bin/ rather than /usr/local/bin.
+  if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}" CACHE PATH
+        "Install prefix (defaults to project root)" FORCE)
+  endif()
+
+  # Preserve all non-system library paths (e.g. /opt/conda/lib) in the RPATH
+  # of installed binaries so they can find HDF5, CasaCore, etc. at runtime.
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
   # Let's ensure -std=c++xx instead of -std=g++xx
   set(CMAKE_CXX_EXTENSIONS OFF)
@@ -60,7 +85,14 @@ message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
 # FetchContent added in CMake 3.11, downloads during the configure step
 # FetchContent_MakeAvailable was added in CMake 3.14; simpler usage
 include(FetchContent)
-FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+# Build all FetchContent dependencies as static libs so installed binaries
+# don't depend on .so files from the build directory.
+set(BUILD_SHARED_LIBS OFF)
+# Suppress install()/install(EXPORT) rules from external deps — prevents both
+# unwanted installation and CMake generate-time export validation errors (e.g.
+# tcc's libtcc-config export referencing TCCorrelator).  Re-enabled for apps/.
+set(CMAKE_SKIP_INSTALL_RULES TRUE)
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(json)
 # Accumulator library
 # This is header only, so could be replaced with git submodules or FetchContent
@@ -84,14 +116,40 @@ message(STATUS "cudawrappers...")
 FetchContent_Declare(
   cudawrappers
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/cudawrappers
+  EXCLUDE_FROM_ALL
 )
 
 FetchContent_MakeAvailable(cudawrappers)
 
+# gpu-filter: ASTRON's GPU polyphase filterbank (pre-correlation fine channelization).
+# Declared here (before it's ever pulled in transitively) so its own internal
+# FetchContent_Declare(cudawrappers ...) is a no-op per CMake's "first
+# declaration for a given name wins" rule and resolves to our local
+# extern/cudawrappers submodule above instead of hitting the network again.
+# Its other two transitive deps (huge-page-allocator, multi-array) aren't
+# vendored locally -- they're small and fetched fresh from git.astron.nl.
+message(STATUS "gpu-filter...")
+FetchContent_Declare(
+  gpu-filter
+  GIT_REPOSITORY https://git.astron.nl/RD/gpu-filter
+  GIT_TAG 2026-09-03
+  EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(gpu-filter)
+
+# gpu-filter's own libfilter/CMakeLists.txt does
+# target_include_directories(filter PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>) to expose its
+# "libfilter/Foo.h"-style includes -- but CMAKE_SOURCE_DIR is always the top-level project's root
+# (ours, once fetched via FetchContent), not gpu-filter's own root, so that path is wrong here.
+# Same class of bug tcc has (see the target_include_directories(tcc ...) line below); fix it the
+# same way, from outside, using the FetchContent-provided *_SOURCE_DIR variable which is correct
+# regardless of gpu-filter's internal CMAKE_SOURCE_DIR misuse.
+target_include_directories(filter PUBLIC ${gpu-filter_SOURCE_DIR})
 
 FetchContent_Declare(
   xtl
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtl
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(xtl)
 
@@ -99,12 +157,14 @@ FetchContent_MakeAvailable(xtl)
 FetchContent_Declare(
   argparse
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/argparse
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(argparse)
 
 FetchContent_Declare(
   xtensor
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/xtensor
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(xtensor)
 message(STATUS "CMAKE_SOURCE: ${CMAKE_SOURCE_DIR}")
@@ -112,28 +172,47 @@ message(STATUS "CMAKE_SOURCE: ${CMAKE_SOURCE_DIR}")
 FetchContent_Declare(
   tcc
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/tcc
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(tcc)
 
 target_include_directories(tcc PRIVATE ${tcc_SOURCE_DIR})
 message(STATUS "ccglib")
+set(CCGLIB_BUILD_STATIC ON)
 FetchContent_Declare(
   ccglib
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/ccglib
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(ccglib)
 
 target_link_libraries(ccglib PRIVATE xtensor)
 
+set(DISABLE_DBUS ON)       # avoid dbus transitive link dep when building pcap static
+set(BUILD_WITH_LIBNL OFF)  # avoid libnl/nl80211 transitive link dep
+# Avoid libpcap's own independent pkg_check_modules(libibverbs) RDMA-sniffing detection, which
+# would pull in conda's libibverbs.so (and its incompatible versioned libnl-3/libnl-route-3, see
+# the IBVERBS_LIBRARY comment above) into pcap_static regardless of our own app-level
+# find_library(IBVERBS_LIBRARY ...) preference for the system copy. Set as a CACHE entry (not a
+# plain variable) so libpcap's own option(DISABLE_RDMA ... OFF) -- which only creates a CACHE
+# entry if none already exists -- can't reintroduce OFF.
+set(DISABLE_RDMA ON CACHE BOOL "Disable libpcap's RDMA/libibverbs sniffing support" FORCE)
 FetchContent_Declare(
   pcap
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/libpcap
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(pcap)
+# With BUILD_SHARED_LIBS=OFF, libpcap only creates pcap_static, not pcap.
+# Alias it so our code can keep linking against the target named "pcap".
+if(NOT TARGET pcap)
+    add_library(pcap ALIAS pcap_static)
+endif()
 
 FetchContent_Declare(
   spdlog
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/spdlog
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(spdlog)
 target_include_directories(spdlog PRIVATE ${spdlog_SOURCE_DIR})
@@ -151,9 +230,25 @@ find_library(PSRDADA_LIBRARY psrdada ${PSRDADA_ROOT}/lib)
 # machines without an RDMA stack are unaffected. When found, HAVE_IBVERBS is
 # defined globally (gating include/spatial/libibverbs.hpp) and IBVERBS_LIBRARY
 # is linked onto the app/test common targets below.
-# --------------------------------------------
-find_library(IBVERBS_LIBRARY ibverbs)
-find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+#
+# Prefer the *system* libibverbs (/usr/lib/...) over conda's: conda's
+# libibverbs.so is linked against conda's own versioned libnl-3/libnl-route-3
+# (symbol-versioned, e.g. nl_send_simple@libnl_3), which is incompatible with
+# this container's system libnl-3 (built without symbol versioning) --
+# picking up conda's libibverbs alongside system libnl at link time produces
+# "undefined reference to nl_*@libnl_3" / missing-libnl-route-3 errors. Using
+# system libibverbs keeps the whole libibverbs+libnl-3+libnl-route-3 stack
+# self-consistent. Requires libibverbs-dev + libnl-route-3-dev installed
+# (see Dockerfile); falls back to an unrestricted search (which may find
+# conda's copy) if the system package isn't present.
+find_library(IBVERBS_LIBRARY ibverbs PATHS /usr/lib/x86_64-linux-gnu NO_DEFAULT_PATH)
+find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h PATHS /usr/include NO_DEFAULT_PATH)
+if(NOT IBVERBS_LIBRARY)
+  find_library(IBVERBS_LIBRARY ibverbs)
+endif()
+if(NOT IBVERBS_INCLUDE_DIR)
+  find_path(IBVERBS_INCLUDE_DIR infiniband/verbs.h)
+endif()
 if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
   message(STATUS "libibverbs found (${IBVERBS_LIBRARY}) -- ibverbs capture backend enabled")
   add_compile_definitions(HAVE_IBVERBS)
@@ -181,6 +276,7 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
     SOURCE_DIR _deps/hiredis
     OVERRIDE_FIND_PACKAGE
+    EXCLUDE_FROM_ALL
 )
 #FetchContent_MakeAvailable(hiredis)
 
@@ -195,15 +291,21 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
     GIT_TAG origin/master#1.3.11   # or latest stable
     GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
 )
 set(REDIS_PLUS_PLUS_CXX_STANDARD 17)
-set(REDIS_PLUS_PLUS_BUILD_TEST OFF)
-set(REDIS_PLUS_PLUS_BUILD_SHARED ON)
+set(REDIS_PLUS_PLUS_BUILD_TEST OFF CACHE BOOL "" FORCE)
+set(REDIS_PLUS_PLUS_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(redis_plus_plus)
+# With BUILD_SHARED_LIBS=OFF, redis++ only creates redis++_static, not redis++.
+if(NOT TARGET redis++)
+    add_library(redis++ ALIAS redis++_static)
+endif()
 
 FetchContent_Declare(
   HighFive
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/highfive
+  EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(HighFive)
 
@@ -211,33 +313,31 @@ FetchContent_MakeAvailable(HighFive)
 set(BUILD_TESTING ${USER_BUILD_TESTING} CACHE BOOL "Enable testing" FORCE)
 message(STATUS "Testing build is ${BUILD_TESTING}")
 
-if(${USER_BUILD_TESTING} STREQUAL "OFF")
-  set(NR_OBSERVING_BUFFERS "3" CACHE STRING "Number of buffers")
-  set(NR_OBSERVING_FPGA_SOURCES "1" CACHE STRING "Number of FPGA sources")
-  set(NR_OBSERVING_CHANNELS "8" CACHE STRING "Number of lambda channels")
-  set(NR_OBSERVING_RECEIVERS_PER_PACKET "10" CACHE STRING "Number of receivers per packet")
-  set(NR_OBSERVING_PADDED_RECEIVERS "32" CACHE STRING "Should be next multiple of 32 above total receivers (per packet receivers * nr_fpga_sources)")
-  # Keep at 32 even when NR_OBSERVING_PADDED_RECEIVERS=64: going to 64/block collapses
-  # blocks/channel from 3 to 1 (triangular formula), cutting TCC grid size by 3x.
-  set(NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK "32" CACHE STRING "TCC tile size — must be 32, 48, or 64. Keep at 32 unless NR_PADDED_RECEIVERS >= 96")
-  set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets to correlate")
-  set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
-  set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
+set(NR_OBSERVING_BUFFERS "3" CACHE STRING "Number of buffers")
+set(NR_OBSERVING_FPGA_SOURCES "1" CACHE STRING "Number of FPGA sources")
+set(NR_OBSERVING_CHANNELS "8" CACHE STRING "Number of lambda channels")
+set(NR_OBSERVING_RECEIVERS_PER_PACKET "10" CACHE STRING "Number of receivers per packet")
+set(NR_OBSERVING_PADDED_RECEIVERS "32" CACHE STRING "Should be next multiple of 32 above total receivers (per packet receivers * nr_fpga_sources)")
+# Keep at 32 even when NR_OBSERVING_PADDED_RECEIVERS=64: going to 64/block collapses
+# blocks/channel from 3 to 1 (triangular formula), cutting TCC grid size by 3x.
+set(NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK "32" CACHE STRING "TCC tile size — must be 32, 48, or 64. Keep at 32 unless NR_PADDED_RECEIVERS >= 96")
+set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets to correlate")
+set(NR_OBSERVING_FINE_CHANNELS "32" CACHE STRING "Fine channels per coarse/FPGA channel from the gpu-filter PFB (1 = disabled). Compute cost of TCC/ccglib/cuSOLVER scales ~linearly with NR_OBSERVING_CHANNELS * NR_OBSERVING_FINE_CHANNELS.")
+set(NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM "2" CACHE STRING "Fine channels dropped from each edge of every coarse channel's fine-channel breakdown before correlation, to discard the FPGA coarse channelizer's own 32/27-oversampling guard-band aliasing (ignored when NR_OBSERVING_FINE_CHANNELS=1).")
+set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
+set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
 
 add_compile_definitions(
     NR_OBSERVING_BUFFERS=${NR_OBSERVING_BUFFERS}
-    NR_OBSERVING_FPGA_SOURCES=${NR_OBSERVING_FPGA_SOURCES}
-    NR_OBSERVING_CHANNELS=${NR_OBSERVING_CHANNELS}
     NR_OBSERVING_RECEIVERS_PER_PACKET=${NR_OBSERVING_RECEIVERS_PER_PACKET}
-    NR_OBSERVING_PADDED_RECEIVERS=${NR_OBSERVING_PADDED_RECEIVERS}
     NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK=${NR_OBSERVING_PADDED_RECEIVERS_PER_BLOCK}
     NR_OBSERVING_PACKETS_FOR_CORRELATION=${NR_OBSERVING_PACKETS_FOR_CORRELATION}
     NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE=${NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE}
     NR_OBSERVING_PACKET_WORKER_THREADS=${NR_OBSERVING_PACKET_WORKER_THREADS}
   )
 
+set(CMAKE_SKIP_INSTALL_RULES FALSE)
 add_subdirectory(apps)
-endif()
 
 # Silence warnings from external dependencies
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/extern)
