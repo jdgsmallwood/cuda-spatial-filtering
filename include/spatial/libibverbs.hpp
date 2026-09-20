@@ -11,10 +11,12 @@
 #include <arpa/inet.h>
 #include <cassert>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <fstream>
 #include <getopt.h>
 #include <ifaddrs.h>
@@ -267,7 +269,18 @@ inline QpSetup setup_qp(const std::string &ifname, int port, int num_frames,
   s.pd = ibv_alloc_pd(s.ctx);
   if (!s.pd) throw std::runtime_error("ibv_alloc_pd failed for " + ifname);
 
-  s.cq = ibv_create_cq(s.ctx, num_frames, nullptr, nullptr, 0);
+  // CQ depth is deliberately larger than the WR count (num_frames): if
+  // completions arrive faster than the polling thread drains them -- e.g. a
+  // burst of already-arrived packets flooding in the instant the QP goes
+  // live, after the multi-second NVRTC startup compile during which nothing
+  // was polling yet -- a CQ sized exactly to num_frames can overrun. mlx5's
+  // behaviour on CQ overrun is to silently enter a permanent error state
+  // and stop generating completions entirely, with no exception/error text
+  // from this code (which doesn't check for the async IBV_EVENT_CQ_ERR
+  // event) -- previously observed as a hard, deterministic stall at a fixed
+  // packet count early in every run, unaffected by fixes to the downstream
+  // WR-repost logic.
+  s.cq = ibv_create_cq(s.ctx, num_frames * 4, nullptr, nullptr, 0);
   if (!s.cq) throw std::runtime_error("ibv_create_cq failed for " + ifname);
 
   s.qp = init_qp(s.ctx, s.pd, s.cq, static_cast<uint32_t>(num_frames), max_recv_sge);
@@ -337,8 +350,10 @@ public:
   // KernelSocketPacketCapture so the apps' existing per-NIC threading is
   // unchanged. `buffer_size` is accepted only for signature parity with
   // KernelSocketPacketCapture; captured frames always land in MTU-sized slots.
-  LibibverbsPacketCapture(std::string &ifname, int port, int buffer_size)
-      : ifname_(ifname), port_(port) {
+  LibibverbsPacketCapture(std::string &ifname, int port, int buffer_size,
+                          int thread_id = 0, int nr_threads = 1)
+      : ifname_(ifname), port_(port), thread_id_(thread_id),
+        nr_threads_(nr_threads) {
     (void)buffer_size;
 
     auto s = libibverbs_detail::setup_qp(ifname_, port_, num_frames, /*max_recv_sge=*/2);
@@ -358,20 +373,75 @@ public:
     if (!mr_)
       throw std::runtime_error("ibv_reg_mr failed for " + ifname_);
 
-    // Pre-post every receive WR so the QP can absorb bursts immediately.
-    for (int jframe = 0; jframe < num_frames; ++jframe)
-      repost(jframe);
-
     INFO_LOG("libibverbs capture ready on {} (udp port {})", ifname_, port_);
   }
 
   ~LibibverbsPacketCapture() override {
     libibverbs_detail::QpSetup s{ctx_, pd_, cq_, qp_, flow_};
     libibverbs_detail::teardown_qp(s);
+    if (ring_mr_)
+      ibv_dereg_mr(ring_mr_);
+    if (header_ring_zc_mr_)
+      ibv_dereg_mr(header_ring_zc_mr_);
     if (mr_)
       ibv_dereg_mr(mr_);
     if (cpu_buffer_)
       free(cpu_buffer_);
+  }
+
+  // Register the ProcessorState ring and replace the staging receive buffer
+  // with the ring slots themselves. This is called after state construction,
+  // because the ring does not exist when the capture object is created.
+  void arm_zero_copy(ProcessorStateBase &state) override {
+    if (zero_copy_) return;
+    void *base = state.packet_ring_base();
+    const size_t bytes = state.packet_ring_bytes();
+    const size_t stride = state.packet_ring_slot_stride();
+    const size_t offset = state.packet_ring_slot_offset();
+    if (!base || bytes == 0 || stride == 0 || state.packet_ring_slot_count() == 0)
+      throw std::runtime_error("ibverbs zero-copy requires a ProcessorState packet ring");
+    if (state.slot_data_capacity() < 64)
+      throw std::runtime_error("ibverbs zero-copy packet ring slot is too small");
+
+    ring_mr_ = ibv_reg_mr(pd_, base, bytes, IBV_ACCESS_LOCAL_WRITE);
+    if (!ring_mr_)
+      throw std::runtime_error("ibv_reg_mr failed for the ProcessorState packet ring");
+
+    direct_slot_bytes_ = state.slot_data_capacity();
+    const size_t slots_per_thread =
+        state.packet_ring_slot_count() /
+        static_cast<size_t>(std::max(1, nr_threads_));
+    active_frames_ = static_cast<int>(std::min<size_t>(num_frames, slots_per_thread));
+    if (active_frames_ <= 0)
+      throw std::runtime_error("packet ring has no slots for this ibverbs capture thread");
+
+    header_ring_zc_.assign(static_cast<size_t>(active_frames_) * kHeaderBytes, 0);
+    header_ring_zc_mr_ = ibv_reg_mr(pd_, header_ring_zc_.data(),
+                                    header_ring_zc_.size(),
+                                    IBV_ACCESS_LOCAL_WRITE);
+    if (!header_ring_zc_mr_)
+      throw std::runtime_error("ibv_reg_mr failed for the zero-copy header ring");
+
+    frame_slot_indices_.resize(active_frames_);
+    frame_slot_ptrs_.resize(active_frames_);
+    std::vector<void *> ptrs(active_frames_);
+    // Match KernelSocketPacketCapture's strided ownership: capture thread i
+    // owns ring slots i, i+N, i+2N, ... . Starting every cursor at zero
+    // makes all QPs reserve the same slots and stalls after the initial window.
+    next_linear_ = static_cast<uint64_t>(thread_id_);
+    const int reserved = state.reserve_write_batch_strided(
+        thread_id_, next_linear_, active_frames_, ptrs.data(),
+        frame_slot_indices_.data());
+    if (reserved != active_frames_) {
+      throw std::runtime_error("could not reserve initial ibverbs zero-copy ring slots");
+    }
+    for (int i = 0; i < active_frames_; ++i) {
+      frame_slot_ptrs_[i] = ptrs[i];
+      post_direct_recv(i, ptrs[i]);
+    }
+    zero_copy_ = true;
+    INFO_LOG("ibverbs zero-copy ring capture armed on {} ({} frames, {} bytes/slot)",
+             ifname_, num_frames, direct_slot_bytes_);
   }
 
   // Busy-poll the CQ and copy each completed frame into the shared CPU ring
@@ -380,54 +450,220 @@ public:
   // to keep shared-ring contention low at 1M+ pps.
   void get_packets(ProcessorStateBase &state) override {
     INFO_LOG("libibverbs receiver thread started for {}", ifname_);
+    // Same opt-in affinity as KernelSocketPacketCapture (SPATIAL_CAPTURE_CPUS,
+    // one entry per capture thread). Unlike that backend's blocking poll()+
+    // recvmmsg, this thread busy-spins ibv_poll_cq() continuously -- leaving
+    // it unpinned means the scheduler can park it on one of this host's
+    // NIC-softirq-saturated cores, or let it collide with another capture
+    // thread or a worker thread on the same core, causing severe head-of-line
+    // blocking that (given fairly consistent thread-creation/scheduling order
+    // across runs on this box) can reproduce as a deterministic early stall.
+    {
+      const int cpu =
+          nth_cpu_from_list(std::getenv("SPATIAL_CAPTURE_CPUS"), thread_id_);
+      if (cpu >= 0) {
+        cpu_set_t cs;
+        CPU_ZERO(&cs);
+        CPU_SET(cpu, &cs);
+        if (pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs) == 0)
+          INFO_LOG("ibverbs capture thread {} pinned to CPU {}", thread_id_, cpu);
+        else
+          INFO_LOG("ibverbs capture thread {}: failed to pin to CPU {}",
+                    thread_id_, cpu);
+      }
+    }
+    if (!zero_copy_) {
+      // The constructor cannot post receives yet: zero-copy arming happens
+      // after ProcessorState allocates the ring. Keep the legacy staging path
+      // identical, but defer its initial WRs until we know which mode is used.
+      for (int jframe = 0; jframe < num_frames; ++jframe)
+        repost(jframe);
+    }
     ibv_wc wc[POLL_BATCH];
+    // Diagnostic: safe, no syscalls beyond ibv_poll_cq itself -- just a
+    // periodic wall-clock-gated counter dump so we can see whether this
+    // thread is actually looping (and how fast) versus genuinely blocked
+    // somewhere, without risking a diagnostic that can itself hang (an
+    // earlier version called ibv_get_async_event() here, which blocks by
+    // default -- removed after it looked like it might be the reason a test
+    // run produced zero log output for the entire capture window).
+    uint64_t empty_polls = 0;
+    uint64_t total_polls = 0;
+    uint64_t nonzero_polls = 0;
+    auto last_diag = std::chrono::steady_clock::now();
 
     while (state.running.load(std::memory_order_acquire)) {
       int n = ibv_poll_cq(cq_, POLL_BATCH, wc);
+      ++total_polls;
+      if (total_polls <= 20) {
+        std::cerr << "ITER ibverbs " << ifname_ << " thread " << thread_id_
+                  << " iter=" << total_polls << " n=" << n << std::endl;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_diag > std::chrono::seconds(2)) {
+        last_diag = now;
+        // Bypass spatial::Logger entirely for this one -- straight to
+        // stderr, which the shell capture already reliably picks up,
+        // in case the shared logger singleton has its own issue.
+        std::cerr << "DIAG ibverbs " << ifname_ << " thread " << thread_id_
+                  << ": " << total_polls << " polls, " << nonzero_polls
+                  << " nonzero, " << empty_polls
+                  << " empty, received=" << state.packets_received.load()
+                  << std::endl;
+      }
       if (n == 0) {
+        ++empty_polls;
         continue;
       }
+      ++nonzero_polls;
       if (n < 0) {
         ERROR_LOG("ibv_poll_cq failed on {}", ifname_);
         break;
       }
 
-      std::lock_guard<std::mutex> lock(state.producer_mutex);
+      std::unique_lock<std::mutex> legacy_lock(state.producer_mutex,
+                                                std::defer_lock);
+      if (!zero_copy_) legacy_lock.lock();
       for (int i = 0; i < n; ++i) {
         const uint32_t jframe = static_cast<uint32_t>(wc[i].wr_id & 0xFFFFFFFF);
-        uint8_t *frame = cpu_buffer_ + static_cast<size_t>(jframe) * MTU;
+        uint8_t *frame = zero_copy_
+                             ? static_cast<uint8_t *>(frame_slot_ptrs_[jframe])
+                             : cpu_buffer_ + static_cast<size_t>(jframe) * MTU;
 
         if (wc[i].status != IBV_WC_SUCCESS) {
           ERROR_LOG("ibverbs WC error on {}: {}", ifname_,
                     ibv_wc_status_str(wc[i].status));
-          repost(jframe); // don't lose the slot
+          if (zero_copy_) {
+            const int ring_index = frame_slot_indices_[jframe];
+            state.abandon_write_batch(1, &ring_index);
+            // Same "never lose the frame slot" reasoning as the success
+            // path below -- retry rather than dropping this WR on a
+            // transient ring-full condition.
+            void *replacement = nullptr;
+            int replacement_index = -1;
+            const auto retry_deadline2 =
+                std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (state.running.load(std::memory_order_acquire)) {
+              if (state.reserve_write_batch_strided(thread_id_, next_linear_,
+                                                     1, &replacement,
+                                                     &replacement_index) == 1)
+                break;
+              if (std::chrono::steady_clock::now() > retry_deadline2) {
+                std::cerr << "TIMEOUT ibverbs " << ifname_ << " thread "
+                          << thread_id_
+                          << " stuck reserving replacement slot (WC-error "
+                             "path) for 3s"
+                          << std::endl;
+                break;
+              }
+              _mm_pause();
+            }
+            if (replacement != nullptr) {
+              frame_slot_indices_[jframe] = replacement_index;
+              frame_slot_ptrs_[jframe] = replacement;
+              post_direct_recv(jframe, replacement);
+            }
+          } else {
+            repost(jframe); // don't lose the staging slot
+          }
           continue;
         }
 
+        // wc.byte_len is the total across ALL posted SGEs. The legacy
+        // (non-zero-copy) path posts a single SGE holding the whole raw
+        // frame, so len == frame length there; the zero-copy path posts two
+        // (header discard + payload-only landing zone), so len includes
+        // TOTAL_HDR_SIZE header bytes the ring slot itself never received.
         const int len = static_cast<int>(wc[i].byte_len);
+        const int payload_len = zero_copy_ ? (len - TOTAL_HDR_SIZE) : len;
 
-        // The raw QP delivers the full Ethernet frame; recover the source IP
-        // from the captured IP header so OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET
-        // demux (fpga id = third octet of 10.0.<id>.x) works exactly as it does
-        // with recvmmsg's msg_name on the KernelSocket path.
+        // Recover the source IP from the captured IP header so
+        // OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET demux (fpga id = third octet
+        // of 10.0.<id>.x) works exactly as it does with recvmmsg's msg_name
+        // on the KernelSocket path. Zero-copy's header landed separately in
+        // header_ring_zc_[jframe] (not at `frame`, which is payload-only);
+        // the legacy path's single SGE still has the full frame at `frame`.
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        if (len >=
-            static_cast<int>(sizeof(EthernetHeader) + sizeof(IPHeader))) {
+        if (zero_copy_) {
+          const uint8_t *hdr = header_ring_zc_.data() +
+                               static_cast<size_t>(jframe) * kHeaderBytes;
+          const IPHeader *ip =
+              reinterpret_cast<const IPHeader *>(hdr + sizeof(EthernetHeader));
+          addr.sin_addr.s_addr = ip->src_ip; // already network byte order
+        } else if (len >= static_cast<int>(sizeof(EthernetHeader) +
+                                           sizeof(IPHeader))) {
           const IPHeader *ip = reinterpret_cast<const IPHeader *>(
               frame + sizeof(EthernetHeader));
           addr.sin_addr.s_addr = ip->src_ip; // already network byte order
         }
 
-        const int copy_len =
-            std::min<int>(len, static_cast<int>(state.slot_data_capacity()));
-        std::memcpy(state.get_current_write_pointer(), frame, copy_len);
-        state.add_received_packet_metadata(len, addr);
-        state.packets_received += 1;
-        state.get_next_write_pointer();
+        if (zero_copy_) {
+          const int ring_index = frame_slot_indices_[jframe];
+          const int packet_len = std::min<int>(payload_len, direct_slot_bytes_);
+          state.commit_write_batch(1, &ring_index, &packet_len, &addr);
+          state.packets_received += 1;
 
-        repost(jframe); // hand the slot back to the NIC
+          // The completion was already pulled off the hardware CQ (that's
+          // destructive -- it cannot be re-polled), so this WR's frame slot
+          // *must* get a fresh receive buffer posted before moving on, or
+          // this QP's fixed-size frame pool permanently loses one slot. The
+          // shared ring being momentarily full is a brief, self-clearing
+          // condition once workers drain it (proven elsewhere: NICDrops=0
+          // in steady state) -- spin-retry here rather than abandoning the
+          // WR, which previously caused the whole receiver to stall forever
+          // once enough transient misses (typically right at startup, before
+          // workers are warmed up) exhausted the frame pool to zero.
+          void *replacement = nullptr;
+          int replacement_index = -1;
+          const auto retry_deadline =
+              std::chrono::steady_clock::now() + std::chrono::seconds(3);
+          bool timed_out = false;
+          while (state.running.load(std::memory_order_acquire)) {
+            if (state.reserve_write_batch_strided(thread_id_, next_linear_, 1,
+                                                   &replacement,
+                                                   &replacement_index) == 1)
+              break;
+            if (std::chrono::steady_clock::now() > retry_deadline) {
+              std::cerr << "TIMEOUT ibverbs " << ifname_ << " thread "
+                        << thread_id_
+                        << " stuck reserving replacement slot for 3s "
+                           "(next_linear_="
+                        << next_linear_
+                        << ", received=" << state.packets_received.load()
+                        << ") -- giving up on this WR, frame pool shrinks by 1"
+                        << std::endl;
+              timed_out = true;
+              break;
+            }
+            _mm_pause();
+          }
+          if (timed_out) {
+            continue; // don't repost; move on to the next completion in the batch
+          }
+          if (replacement == nullptr) {
+            // Shutdown raced us out of the retry loop; nothing left to post.
+            continue;
+          }
+          frame_slot_indices_[jframe] = replacement_index;
+          frame_slot_ptrs_[jframe] = replacement;
+          post_direct_recv(jframe, replacement);
+        } else {
+          const int copy_len =
+              std::min<int>(len, static_cast<int>(state.slot_data_capacity()));
+          std::memcpy(state.get_current_write_pointer(), frame, copy_len);
+          state.add_received_packet_metadata(len, addr);
+          state.packets_received += 1;
+          state.get_next_write_pointer();
+          repost(jframe); // hand the slot back to the NIC
+        }
       }
+    }
+    if (zero_copy_) {
+      // Outstanding direct receives own uncommitted ring slots. Make them
+      // reclaimable before the processor performs its shutdown drain.
+      for (int i = 0; i < active_frames_; ++i)
+        state.abandon_write_batch(1, &frame_slot_indices_[i]);
     }
     INFO_LOG("libibverbs receiver thread exiting for {}", ifname_);
   }
@@ -440,6 +676,36 @@ private:
               /*separate_header=*/false);
   }
 
+  void post_direct_recv(int frame_id, void *slot) {
+    // Two SGEs, same split as post_recv's separate_header=true path and
+    // LibibverbsGpuDirectPacketCapture: the RAW_PACKET QP delivers the full
+    // Ethernet+IP+UDP frame, but every downstream consumer of a ring slot's
+    // ->data (packet parsing, copy_nt reorder, the correlator) expects
+    // payload-only, matching what KernelSocketPacketCapture's recvmmsg
+    // (over a SOCK_DGRAM socket, which the kernel already strips headers
+    // from) delivers there. A single SGE landing the whole raw frame at
+    // ->data[0] silently shifted every field this path's packets were
+    // parsed as by TOTAL_HDR_SIZE bytes.
+    ibv_sge sge[2] = {};
+    sge[0].addr = reinterpret_cast<uintptr_t>(
+        header_ring_zc_.data() + static_cast<size_t>(frame_id) * kHeaderBytes);
+    sge[0].length = static_cast<uint32_t>(TOTAL_HDR_SIZE);
+    sge[0].lkey = header_ring_zc_mr_->lkey;
+    sge[1].addr = reinterpret_cast<uintptr_t>(slot);
+    sge[1].length = static_cast<uint32_t>(direct_slot_bytes_);
+    sge[1].lkey = ring_mr_->lkey;
+    ibv_recv_wr wr = {};
+    wr.wr_id = static_cast<uint64_t>(frame_id);
+    wr.sg_list = sge;
+    wr.num_sge = 2;
+    ibv_recv_wr *bad_wr = nullptr;
+    if (ibv_post_recv(qp_, &wr, &bad_wr)) {
+      std::cerr << "Failed to post direct ibverbs receive: " << strerror(errno)
+                << " (errno=" << errno << ")" << std::endl;
+      exit(1);
+    }
+  }
+
   std::string ifname_;
   int port_ = 0;
   ibv_context *ctx_ = nullptr;
@@ -449,6 +715,28 @@ private:
   ibv_flow *flow_ = nullptr;
   ibv_mr *mr_ = nullptr;
   uint8_t *cpu_buffer_ = nullptr;
+  ibv_mr *ring_mr_ = nullptr;
+  size_t direct_slot_bytes_ = 0;
+  // Per-frame landing zone for the Ethernet+IP+UDP header bytes a RAW_PACKET
+  // QP delivers ahead of the payload (see TOTAL_HDR_SIZE / post_recv's own
+  // separate_header split, and LibibverbsGpuDirectPacketCapture's own
+  // header_ring_, which this mirrors). post_direct_recv posts every WR with
+  // two SGEs so only the payload lands at the ring slot's data pointer, but
+  // the header bytes still get read back (source IP -> FPGA id demux, see
+  // get_packets()) so each concurrently-outstanding frame_id needs its OWN
+  // slot here -- a single shared buffer races when a poll batch contains
+  // more than one completion (whichever's DMA landed last "wins" the
+  // buffer, not necessarily the one currently being processed).
+  static constexpr int kHeaderBytes = 64; // >= 42 (eth+ip+udp), rounded up
+  std::vector<uint8_t> header_ring_zc_;
+  ibv_mr *header_ring_zc_mr_ = nullptr;
+  bool zero_copy_ = false;
+  int active_frames_ = num_frames;
+  int thread_id_ = 0;
+  int nr_threads_ = 1;
+  uint64_t next_linear_ = 0;
+  std::vector<int> frame_slot_indices_;
+  std::vector<void *> frame_slot_ptrs_;
 
   static constexpr int MTU = 9216;          // >= max jumbo frame, 64B aligned
   static constexpr int TOTAL_HDR_SIZE = 42; // eth(14)+ip(20)+udp(8)

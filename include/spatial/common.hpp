@@ -410,8 +410,8 @@ make_packet_captures(const CommonArgs &args,
       continue;
     }
     if (use_ibverbs) {
-      capture.push_back(std::make_unique<LibibverbsPacketCapture>(
-          nic, args.port, BUFFER_SIZE));
+    capture.push_back(std::make_unique<LibibverbsPacketCapture>(
+        nic, args.port, BUFFER_SIZE, i, nr_nics));
       continue;
     }
 #endif
@@ -437,6 +437,14 @@ inline void arm_gpudirect_captures(std::vector<std::unique_ptr<PacketInput>> &ca
       gpudirect->arm(state);
     }
   }
+}
+
+// Arms CPU-memory ibverbs captures after ProcessorState has allocated its
+// packet ring. Non-ibverbs backends implement this hook as a no-op.
+inline void arm_ibverbs_zero_copy_captures(
+    std::vector<std::unique_ptr<PacketInput>> &captures,
+    ProcessorStateBase &state) {
+  for (auto &c : captures) c->arm_zero_copy(state);
 }
 #endif
 

@@ -530,7 +530,8 @@ template <typename T> struct LambdaPipelineIngest {
                                cudaStream_t stream, cudaStream_t host_stream,
                                void *d_samples_entry, void *d_scales,
                                void *d_gains, void *d_samples_half,
-                               bool dummy_run) {
+                               bool dummy_run,
+                               cudaEvent_t copy_done_event = nullptr) {
     if (!dummy_run && state == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
@@ -546,7 +547,20 @@ template <typename T> struct LambdaPipelineIngest {
         new BufferReleaseContext{.state = state,
                                  .buffer_index = packet_data->buffer_index,
                                  .dummy_run = dummy_run};
-    CUDA_CHECK(cudaLaunchHostFunc(host_stream, release_buffer_host_func, ctx));
+    if (copy_done_event != nullptr) {
+      // Release the host staging buffer only after both asynchronous H2D
+      // copies have consumed it.  The separate host stream keeps the release
+      // callback from stalling the compute stream before scale conversion.
+      CUDA_CHECK(cudaEventRecord(copy_done_event, stream));
+      CUDA_CHECK(cudaStreamWaitEvent(host_stream, copy_done_event, 0));
+      CUDA_CHECK(
+          cudaLaunchHostFunc(host_stream, release_buffer_host_func, ctx));
+    } else {
+      // Callers without a completion event still need correct ordering.  A
+      // callback on an unrelated stream can otherwise recycle packet_data
+      // while either H2D copy is still reading it.
+      CUDA_CHECK(cudaLaunchHostFunc(stream, release_buffer_host_func, ctx));
+    }
 
     // Pre-channelization: operates on the raw FPGA/coarse channel count, not the
     // (possibly fine-channelized) widened T::NR_CHANNELS.

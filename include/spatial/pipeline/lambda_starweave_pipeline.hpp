@@ -72,6 +72,7 @@ private:
   struct PipelineResources {
     cudaStream_t stream = nullptr;
     cudaStream_t host_stream = nullptr;
+    cudaEvent_t ingest_copy_done = nullptr;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
     DevicePtr<typename T::PacketScalesType> scales;
@@ -120,6 +121,8 @@ private:
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
           cudaStreamCreateWithFlags(&host_stream, cudaStreamNonBlocking));
+      CUDA_CHECK(cudaEventCreateWithFlags(&ingest_copy_done,
+                                          cudaEventDisableTiming));
     }
 
     ~PipelineResources() {
@@ -129,6 +132,8 @@ private:
         cudaGraphExecDestroy(graph_corr);
       if (accumulate_done)
         cudaEventDestroy(accumulate_done);
+      if (ingest_copy_done)
+        cudaEventDestroy(ingest_copy_done);
       if (stream)
         cudaStreamDestroy(stream);
       if (host_stream)
@@ -137,6 +142,7 @@ private:
 
     PipelineResources(PipelineResources &&other) noexcept
         : stream(other.stream), host_stream(other.host_stream),
+          ingest_copy_done(other.ingest_copy_done),
           samples_entry(std::move(other.samples_entry)),
           scales(std::move(other.scales)),
           samples_half(std::move(other.samples_half)),
@@ -152,6 +158,7 @@ private:
           accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
       other.host_stream = nullptr;
+      other.ingest_copy_done = nullptr;
       other.graph_align = nullptr;
       other.graph_corr = nullptr;
       other.accumulate_done = nullptr;
@@ -207,7 +214,7 @@ public:
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
-        dummy_run);
+        dummy_run, b.ingest_copy_done);
 
     if (b.graph_align != nullptr) {
       CUDA_CHECK(cudaGraphLaunch(b.graph_align, b.stream));

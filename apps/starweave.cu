@@ -18,6 +18,10 @@
 #define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
 #endif
 
+#ifndef NR_OBSERVING_PACKET_BUFFERS
+#define NR_OBSERVING_PACKET_BUFFERS 8
+#endif
+
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
@@ -28,7 +32,7 @@ int main(int argc, char *argv[]) {
   auto logger = setup_logger(args.debug_logging);
   constexpr int num_buffers = NR_OBSERVING_BUFFERS;
   constexpr int nr_fpga_sources = NR_OBSERVING_FPGA_SOURCES;
-  constexpr size_t num_packet_buffers = 24;
+  constexpr size_t num_packet_buffers = NR_OBSERVING_PACKET_BUFFERS;
   constexpr int num_lambda_channels = NR_OBSERVING_CHANNELS;
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers_per_packet =
@@ -70,10 +74,20 @@ int main(int argc, char *argv[]) {
   const bool use_canonical = !args.canonical_recv_perm.empty();
   const auto &active_mapping =
       use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
-  ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
+  ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE,
+                 NR_OBSERVING_PACKET_WORKER_THREADS>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       args.min_freq_channel, fpga_delays, args.fpga_ids);
+  // Keep the production handoff unchanged by default. Set this environment
+  // variable for a live A/B run; the value itself is intentionally ignored so
+  // `SPATIAL_WORKER_MAILBOXES=0` does not accidentally enable the experiment.
+  if (const char *mailboxes = std::getenv("SPATIAL_WORKER_MAILBOXES");
+      mailboxes != nullptr && std::string(mailboxes) != "0" &&
+      std::string(mailboxes) != "false") {
+    state.use_worker_mailboxes = true;
+    std::cout << "Worker handoff: isolated mailboxes enabled" << std::endl;
+  }
 
   if (!program.is_used("-v")) {
     args.output_filename =
@@ -125,6 +139,13 @@ int main(int argc, char *argv[]) {
 #endif
   if (args.pcap_filename.empty())
     state.nr_capture_threads = static_cast<int>(capture.size());
+#ifdef HAVE_IBVERBS
+  if (args.capture_backend == "ibverbs" &&
+      std::getenv("SPATIAL_IBVERBS_ZERO_COPY") != nullptr) {
+    std::cout << "ibverbs receive mode: direct into packet ring (no staging memcpy)\n";
+    arm_ibverbs_zero_copy_captures(capture, state);
+  }
+#endif
   INFO_LOG("Ring buffer size: {} packets\n", DEFAULT_PACKET_RING_BUFFER_SIZE);
   std::cout << "Starting threads....\n";
   std::vector<std::thread> receiver_threads;
