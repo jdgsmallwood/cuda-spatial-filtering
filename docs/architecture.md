@@ -53,6 +53,21 @@ flowchart LR
 `release_buffer` (on `ProcessorStateBase`) is the hand-back from a `GPUPipeline` once it's done
 reading a buffer, so `ProcessorState` can reuse that ring-buffer slot for new packets.
 
+### CPU worker handoff experiment
+
+`ProcessorState::use_worker_mailboxes` selects an experimental handoff; the default
+remains the shared-counter implementation. Both paths split each producer range across
+the coordinator and helper workers, then wait for all active helpers before checking
+buffer completion. Mailboxes use separate cache lines for coordinator-written request
+generations and worker-written completion generations. Workers publish completion only
+after finishing their copies; an explicit exit flag handles dispatch racing shutdown.
+Task ranges, packet ownership and buffer-release ordering are unchanged.
+
+`bench_processor --four-fpga` compares 32 channels / four FPGAs with four producers and
+three helpers; `--mailboxes` selects the alternative. `--profile-dispatch` measures the
+coordinator's residual barrier wait separately from its own useful work. These are
+synthetic processor measurements; neither mode exercises network capture.
+
 ### 1a. GPUDirect RDMA ingest variant (`LibibverbsGpuDirectPacketCapture`)
 
 An alternative to the `IBV` box above: instead of copying each packet into the CPU ring and later

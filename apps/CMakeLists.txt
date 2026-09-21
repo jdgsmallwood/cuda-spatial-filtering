@@ -1,7 +1,5 @@
 set(NUMBER_BEAMS 1 CACHE STRING "Number of beams to correlate while benchmarking")
 
-set(CMAKE_CUDA_ARCHITECTURES "native")
-
 add_library(gpu_app_common INTERFACE)
 
 message(STATUS "PSRDADA_ROOT is ${PSRDADA_ROOT}")
@@ -13,6 +11,23 @@ target_compile_options(gpu_app_common INTERFACE
     $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=128,2417>)
 # target_compile_options(gpu_app_common INTERFACE
 #     $<$<COMPILE_LANGUAGE:CUDA>:-w>)
+
+# Opt-in: ties the host-code build to this machine's exact CPU ISA, so off by
+# default (production apps stay portable across deployment hosts). Unlocks
+# copy_nt's AVX-512 non-temporal-store path (spatial.hpp) -- the same code
+# path bench_processor's own -march=native flag validated at 3.2->14.7 GB/s
+# (see scripts/profiling/BENCH_PROCESSOR_TUNING.md). Without this flag,
+# __AVX512F__ is never defined and copy_nt silently falls back to its SSE2
+# tier even on hardware that supports AVX-512.
+option(SPATIAL_NATIVE_ARCH "Enable -march=native for host code (ties the build to this CPU)" OFF)
+option(SPATIAL_DIAGNOSTICS "Enable compile-time ingest diagnostics" OFF)
+if(SPATIAL_NATIVE_ARCH)
+    target_compile_options(gpu_app_common INTERFACE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
+endif()
+if(SPATIAL_DIAGNOSTICS)
+    target_compile_definitions(gpu_app_common INTERFACE SPATIAL_DIAGNOSTICS)
+endif()
 target_link_directories(gpu_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 
 target_link_libraries(gpu_app_common INTERFACE
@@ -35,10 +50,10 @@ if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
 endif()
 
 # Observe grid: observe_{NR_FPGAS}_{NR_CHANNELS} for all combinations of
-# FPGA sources (1-4) and channels (8,16,24,32).  PADDED_RECEIVERS is derived
+# FPGA sources (1-4) and channels (8,16,24,32,40,48).  PADDED_RECEIVERS is derived
 # as the next multiple of 32 above NR_FPGAS * NR_OBSERVING_RECEIVERS_PER_PACKET.
 foreach(NR_FPGAS 1 2 3 4)
-    foreach(NR_CHANNELS 8 16 24 32)
+    foreach(NR_CHANNELS 8 16 24 32 40 48)
         set(OBS_TARGET "observe_${NR_FPGAS}_${NR_CHANNELS}")
         math(EXPR _NR_RECEIVERS "${NR_FPGAS} * ${NR_OBSERVING_RECEIVERS_PER_PACKET}")
         math(EXPR _PADDED_RECEIVERS "(${_NR_RECEIVERS} + 31) / 32 * 32")
@@ -56,12 +71,17 @@ endforeach()
 # above -- correlation-only, visibilities-only counterpart to observe (see
 # apps/starweave.cu / LambdaStarweavePipeline).
 foreach(NR_FPGAS 1 2 3 4)
-    foreach(NR_CHANNELS 8 16 24 32)
+    foreach(NR_CHANNELS 8 16 24 32 40 48)
         set(SW_TARGET "starweave_${NR_FPGAS}_${NR_CHANNELS}")
         math(EXPR _NR_RECEIVERS "${NR_FPGAS} * ${NR_OBSERVING_RECEIVERS_PER_PACKET}")
         math(EXPR _PADDED_RECEIVERS "(${_NR_RECEIVERS} + 31) / 32 * 32")
         add_executable(${SW_TARGET} ${PROJECT_SOURCE_DIR}/apps/starweave.cu)
         target_link_libraries(${SW_TARGET} PRIVATE gpu_app_common)
+        # A RAW_PACKET ibverbs QP requires cap_net_raw.  Linux enters secure
+        # loader mode for a file-capability executable and ignores
+        # LD_LIBRARY_PATH, so embed the runtime locations Starweave needs.
+        set_target_properties(${SW_TARGET} PROPERTIES BUILD_RPATH
+            "/data/BLACKMESA_1/sma075/observe-libs;/data/BLACKMESA_1/sma075/psrdada-local/lib;${CMAKE_BINARY_DIR}/_deps/mathdx-build;${CMAKE_BINARY_DIR}/_deps/ccglib-build/src;${CMAKE_BINARY_DIR}/_deps/tcc-build/libtcc;/data/BLACKMESA_1/sma075/miniconda3/lib;/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux/lib")
         target_compile_definitions(${SW_TARGET} PRIVATE
             NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
             NR_OBSERVING_CHANNELS=${NR_CHANNELS}
@@ -79,8 +99,13 @@ target_link_libraries(udp_sender PRIVATE pcap spdlog::spdlog)
 # a friendly error and exits if built without libibverbs, matching the
 # capture-side backend's own --capture-backend=ibverbs error message.
 add_executable(ibverbs_pcap_sender ${PROJECT_SOURCE_DIR}/apps/ibverbs_pcap_sender.cpp)
+# The ibverbs sender includes the GPUDirect relocation kernel and its CUDA
+# launch syntax through libibverbs.hpp, so this .cpp source must be compiled
+# by nvcc rather than the host C++ compiler.
+set_source_files_properties(${PROJECT_SOURCE_DIR}/apps/ibverbs_pcap_sender.cpp
+    PROPERTIES LANGUAGE CUDA)
 target_include_directories(ibverbs_pcap_sender PRIVATE ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(ibverbs_pcap_sender PRIVATE pcap argparse)
+target_link_libraries(ibverbs_pcap_sender PRIVATE pcap argparse spdlog::spdlog tcc)
 if(IBVERBS_LIBRARY AND IBVERBS_INCLUDE_DIR)
     target_link_libraries(ibverbs_pcap_sender PRIVATE ${IBVERBS_LIBRARY})
 endif()
@@ -159,7 +184,7 @@ endforeach()
 set(_OBSERVE_TARGETS)
 set(_STARWEAVE_TARGETS)
 foreach(NR_FPGAS 1 2 3 4)
-    foreach(NR_CHANNELS 8 16 24 32)
+    foreach(NR_CHANNELS 8 16 24 32 40 48)
         list(APPEND _OBSERVE_TARGETS "observe_${NR_FPGAS}_${NR_CHANNELS}")
         list(APPEND _STARWEAVE_TARGETS "starweave_${NR_FPGAS}_${NR_CHANNELS}")
     endforeach()
@@ -172,4 +197,3 @@ install(TARGETS
     udp_sender
     RUNTIME DESTINATION bin
 )
-

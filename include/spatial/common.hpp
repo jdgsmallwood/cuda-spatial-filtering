@@ -410,8 +410,8 @@ make_packet_captures(const CommonArgs &args,
       continue;
     }
     if (use_ibverbs) {
-      capture.push_back(std::make_unique<LibibverbsPacketCapture>(
-          nic, args.port, BUFFER_SIZE));
+    capture.push_back(std::make_unique<LibibverbsPacketCapture>(
+        nic, args.port, BUFFER_SIZE, i, nr_nics));
       continue;
     }
 #endif
@@ -437,6 +437,14 @@ inline void arm_gpudirect_captures(std::vector<std::unique_ptr<PacketInput>> &ca
       gpudirect->arm(state);
     }
   }
+}
+
+// Arms CPU-memory ibverbs captures after ProcessorState has allocated its
+// packet ring. Non-ibverbs backends implement this hook as a no-op.
+inline void arm_ibverbs_zero_copy_captures(
+    std::vector<std::unique_ptr<PacketInput>> &captures,
+    ProcessorStateBase &state) {
+  for (auto &c : captures) c->arm_zero_copy(state);
 }
 #endif
 
@@ -472,6 +480,16 @@ inline void monitor_app_stats(ProcessorStateBase &state,
               << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
+#ifdef SPATIAL_DIAGNOSTICS
+    std::cout << "DIAG MissingByFpgaIndex=[";
+    for (size_t i = 0; i < state.diagnostic_fpga_count; ++i) {
+      if (i != 0)
+        std::cout << ',';
+      std::cout << state.diagnostic_missing_by_fpga[i].load(
+          std::memory_order_relaxed);
+    }
+    std::cout << "]" << std::endl;
+#endif
 
     state.running.store((int)running, std::memory_order_release);
 

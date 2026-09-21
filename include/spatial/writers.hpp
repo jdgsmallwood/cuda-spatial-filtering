@@ -206,7 +206,16 @@ public:
 
 protected:
   virtual void handle_buffer_full() {
-    ERROR_LOG("{} ring buffer is full. Waiting...", std::string(writer_name()));
+    // Rate-limited (at most once/sec) -- register_block() calls this on every
+    // invocation while the buffer stays full, so an unthrottled log here can
+    // emit tens of thousands of lines/sec (observed filling multi-GB of disk
+    // in seconds) whenever the producer outruns the drain thread.
+    static std::chrono::steady_clock::time_point last_log{};
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_log >= std::chrono::seconds(1)) {
+      last_log = now;
+      ERROR_LOG("{} ring buffer is full. Waiting...", std::string(writer_name()));
+    }
     while ((write_idx_.load(std::memory_order_acquire) + 1) % buffer_size_ ==
            read_idx_.load(std::memory_order_acquire)) {
       _mm_pause();

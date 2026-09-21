@@ -53,7 +53,6 @@ target_include_directories(
 target_link_directories(spatial PRIVATE ${PSRDADA_ROOT}/lib)
 
 set_target_properties(spatial PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-set_target_properties(spatial PROPERTIES CUDA_ARCHITECTURES "native")
 
 
 if(CMAKE_BUILD_TYPE MATCHES Debug)
