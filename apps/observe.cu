@@ -93,7 +93,6 @@ int main(int argc, char *argv[]) {
   // hid_t beam_file =
   //    H5Fcreate(beam_filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
   //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-
   if (!program.is_used("-v")) {
     args.output_filename =
         make_default_filename("visibilities", args.min_freq_channel,

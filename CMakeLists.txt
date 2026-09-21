@@ -6,7 +6,7 @@ project(
   CUDASpatialFiltering
   VERSION 0.1
   DESCRIPTION "CUDA implementation of spatial filtering algorithms."
-  LANGUAGES CUDA CXX)
+  LANGUAGES C CUDA CXX)
 
 # Only do these if this is the main project, and not if it is included through add_subdirectory
 execute_process(
@@ -188,14 +188,18 @@ FetchContent_MakeAvailable(ccglib)
 
 target_link_libraries(ccglib PRIVATE xtensor)
 
-set(DISABLE_DBUS ON)       # avoid dbus transitive link dep when building pcap static
-set(BUILD_WITH_LIBNL OFF)  # avoid libnl/nl80211 transitive link dep
-# Avoid libpcap's own independent pkg_check_modules(libibverbs) RDMA-sniffing detection, which
-# would pull in conda's libibverbs.so (and its incompatible versioned libnl-3/libnl-route-3, see
-# the IBVERBS_LIBRARY comment above) into pcap_static regardless of our own app-level
-# find_library(IBVERBS_LIBRARY ...) preference for the system copy. Set as a CACHE entry (not a
-# plain variable) so libpcap's own option(DISABLE_RDMA ... OFF) -- which only creates a CACHE
-# entry if none already exists -- can't reintroduce OFF.
+# These three all avoid libpcap's own independent pkg_check_modules() probes for optional
+# Linux capture backends (dbus/bluetooth monitoring, netlink-genl "any"/802.15.4 support,
+# RDMA/libibverbs sniffing) pulling in conda's copies of dbus/libnl/libibverbs -- which are
+# ABI-incompatible with whatever *this* app links (e.g. conda's libnl-genl-3 pulled into
+# libpcap.so vs. system libnl-route-3 pulled in via IBVERBS_LIBRARY, causing undefined-symbol
+# link errors in every app that links both pcap and ibverbs). Set as CACHE entries (not plain
+# variables -- plain set() here does not reliably override libpcap's own option(...) reads,
+# just like the original DISABLE_RDMA comment below found) so libpcap's own
+# option(BUILD_WITH_LIBNL ... ON) / option(DISABLE_DBUS ... OFF) -- which only create a CACHE
+# entry if none already exists -- can't reintroduce their defaults.
+set(DISABLE_DBUS ON CACHE BOOL "Disable libpcap's D-Bus capture support" FORCE)
+set(BUILD_WITH_LIBNL OFF CACHE BOOL "Disable libpcap's libnl/nl80211 support" FORCE)
 set(DISABLE_RDMA ON CACHE BOOL "Disable libpcap's RDMA/libibverbs sniffing support" FORCE)
 FetchContent_Declare(
   pcap
@@ -325,7 +329,8 @@ set(NR_OBSERVING_PACKETS_FOR_CORRELATION "256" CACHE STRING "Number of packets t
 set(NR_OBSERVING_FINE_CHANNELS "32" CACHE STRING "Fine channels per coarse/FPGA channel from the gpu-filter PFB (1 = disabled). Compute cost of TCC/ccglib/cuSOLVER scales ~linearly with NR_OBSERVING_CHANNELS * NR_OBSERVING_FINE_CHANNELS.")
 set(NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM "2" CACHE STRING "Fine channels dropped from each edge of every coarse channel's fine-channel breakdown before correlation, to discard the FPGA coarse channelizer's own 32/27-oversampling guard-band aliasing (ignored when NR_OBSERVING_FINE_CHANNELS=1).")
 set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
-set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing (pinned to cores 0..N-1)")
+set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing")
+set(NR_OBSERVING_PACKET_BUFFERS "8" CACHE STRING "Number of host packet-assembly buffers used by Starweave")
 
 add_compile_definitions(
     NR_OBSERVING_BUFFERS=${NR_OBSERVING_BUFFERS}
@@ -334,6 +339,7 @@ add_compile_definitions(
     NR_OBSERVING_PACKETS_FOR_CORRELATION=${NR_OBSERVING_PACKETS_FOR_CORRELATION}
     NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE=${NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE}
     NR_OBSERVING_PACKET_WORKER_THREADS=${NR_OBSERVING_PACKET_WORKER_THREADS}
+    NR_OBSERVING_PACKET_BUFFERS=${NR_OBSERVING_PACKET_BUFFERS}
   )
 
 set(CMAKE_SKIP_INSTALL_RULES FALSE)
@@ -349,4 +355,3 @@ if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MODERN_CMAKE_BUILD_TESTING)
   add_subdirectory(tests)
   add_subdirectory(${PROJECT_SOURCE_DIR}/extern/googletest)
 endif()
-

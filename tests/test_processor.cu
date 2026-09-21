@@ -12,6 +12,115 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include "support/synthetic_packets.hpp"
+
+// Exercise the real threaded dispatcher, not process_all_available_packets:
+// four independent producers, partial batches, delayed commits, ring wrap and
+// distinct data at every destination. No window is completed during the feed,
+// so its assembled contents can be inspected after all threads have joined.
+class FourFpgaHandoffTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(FourFpgaHandoffTest, PreservesDataAcrossRingWrapAndDelayedCommits) {
+  using Cfg = LambdaConfig<4, 4, 64, 40, 2, 10, 256, 1, 64, 32, 1>;
+  ProcessorState<Cfg, 3, 256, 3> state(256, 64, 0, {},
+                                      {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+  class Sink : public GPUPipeline {
+    void execute_pipeline(FinalPacketData *, const bool = false) override {
+      ADD_FAILURE() << "Incomplete test window was published";
+    }
+    void dump_visibilities(const uint64_t = 0) override {}
+  } sink;
+  state.set_pipeline(&sink);
+  state.synchronous_pipeline = true;
+  state.use_worker_mailboxes = GetParam();
+  constexpr uint64_t start = 640;
+  auto sample = [](int fp, int ch, int pkt, int t, int r, int p) {
+    return std::complex<int8_t>((fp * 23 + ch * 11 + pkt + t + r + p) % 101,
+                                -1 - (pkt + t * 3 + fp + r + p) % 101);
+  };
+  auto fill = [&](void *dst, int fp, int ch, int pkt) {
+    return test_support::build_lambda_wire_packet<Cfg>(
+        static_cast<uint8_t *>(dst), start + pkt * 64, fp, ch,
+        [&](int t, int r, int p) { return sample(fp, ch, pkt, t, r, p); },
+        [&](int r, int p) { return static_cast<int16_t>(1 + fp * 100 + ch * 20 + r * 2 + p); });
+  };
+  sockaddr_in addr{};
+  const int first_len = fill(state.get_current_write_pointer(), 0, 0, 0);
+  state.add_received_packet_metadata(first_len, addr);
+  state.get_next_write_pointer();
+  state.process_all_available_packets();
+  state.nr_capture_threads = 4;
+  std::thread processor([&] { state.process_packets(); });
+  std::array<std::thread, 4> producers;
+  for (int fp = 0; fp < 4; ++fp) {
+    producers[fp] = std::thread([&, fp] {
+      uint64_t linear = fp;
+      int flat = fp == 0 ? 1 : 0;
+      while (flat < 4 * 128 && state.running.load()) {
+        void *ptrs[31];
+        int indices[31], lengths[31];
+        sockaddr_in addrs[31]{};
+        const int target = std::min(1 + flat % 31, 4 * 128 - flat);
+        const int n = state.reserve_write_batch_strided(fp, linear, target, ptrs, indices);
+        for (int i = 0; i < n; ++i)
+          lengths[i] = fill(ptrs[i], fp, (flat + i) / 128, (flat + i) % 128);
+        if (flat % 17 == 0)
+          std::this_thread::sleep_for(std::chrono::microseconds(20));
+        state.commit_write_batch(n, indices, lengths, addrs);
+        flat += n;
+      }
+    });
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (state.packets_processed.load() < 2048 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  state.shutdown();
+  for (auto &producer : producers) producer.join();
+  processor.join();
+  ASSERT_EQ(state.packets_processed.load(), 2048);
+  EXPECT_EQ(state.packets_discarded.load(), 0);
+  const auto &data = *state.d_samples[0];
+  for (int ch = 0; ch < 4; ++ch)
+    for (int pkt = 0; pkt < 128; ++pkt)
+      for (int fp = 0; fp < 4; ++fp) {
+        ASSERT_TRUE(data.arrivals[0][ch][pkt + 1][fp]);
+        for (int r = 0; r < 10; ++r)
+          for (int p = 0; p < 2; ++p) {
+            ASSERT_EQ((*data.scales)[ch][pkt + 1][fp * 10 + r][p],
+                      1 + fp * 100 + ch * 20 + r * 2 + p);
+            for (int t = 0; t < 64; ++t)
+              ASSERT_EQ((*data.samples)[ch][pkt + 1][fp][t][r][p],
+                        sample(fp, ch, pkt, t, r, p));
+          }
+      }
+}
+
+INSTANTIATE_TEST_SUITE_P(LegacyAndMailboxes, FourFpgaHandoffTest,
+                        ::testing::Values(false, true));
+
+TEST(FourFpgaWorkerRangeTest, DefersBeyondHorizonWithoutAdvancingWatermarks) {
+  using Cfg = LambdaConfig<4, 4, 64, 40, 2, 10, 256, 1, 64, 32, 1>;
+  ProcessorState<Cfg, 3, 256, 3> state(256, 64, 0, {},
+                                      {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+  auto add = [&](uint64_t seq, int fp) {
+    const int length = test_support::build_constant_lambda_wire_packet<Cfg>(
+        static_cast<uint8_t *>(state.get_current_write_pointer()), seq, fp, 0,
+        {2, -2}, 1);
+    state.add_received_packet_metadata(length, {});
+    state.get_next_write_pointer();
+  };
+  add(640, 0);
+  ASSERT_EQ(state.process_work_range({0, 1, 1}), 1);
+  for (int fp = 0; fp < 4; ++fp)
+    add(640 + 4 * 256 * 64, fp);
+  EXPECT_EQ(state.process_work_range({1, 5, 1}), 0);
+  EXPECT_EQ(state.packets_future_queued.load(), 4);
+  EXPECT_EQ(state.packets_stuck_unprocessed.load(), 0);
+  for (int fp = 0; fp < 4; ++fp) {
+    EXPECT_EQ(state.latest_packet_received[0][fp].load(), fp == 0 ? 640 : 0);
+    EXPECT_FALSE(state.d_packet_data[fp + 1]->processed.load());
+  }
+}
 
 TEST(CommonArgsTest, BuildFpgaDelayArrayMapsBySourceIndexUsingFpgaIds) {
   CommonArgs args;
@@ -454,6 +563,72 @@ public:
     processor_state->get_next_write_pointer();
   }
 };
+
+class ProcessorStateHugeDelayBootstrapTest
+    : public ProcessorStateMultipleFPGAWithOctetTest {
+  void SetUp() override {
+    using MapType = std::unordered_map<uint32_t, int>;
+    MapType fpga_ids{{10, 0}, {11, 1}, {12, 2}, {13, 3}};
+    std::array<int64_t, TestMultipleFPGAWithOctetConfig::NR_FPGA_SOURCES>
+        delays = {8'800'000, 0, -80'800'000'000, -16'800'000};
+    processor_state =
+        new ProcessorState<TestMultipleFPGAWithOctetConfig, NR_BUFFERS>(
+            10, TestMultipleFPGAWithOctetConfig::NR_TIME_STEPS_PER_PACKET,
+            0, delays, fpga_ids);
+
+    mock_pipeline = new SimpleMockPipeline();
+    mock_pipeline->set_state(processor_state);
+    processor_state->set_pipeline(mock_pipeline);
+    processor_state->synchronous_pipeline = true;
+  }
+};
+
+TEST_F(ProcessorStateHugeDelayBootstrapTest,
+       FirstPacketInitializesOnceAndLaterStreamsConverge) {
+  constexpr uint64_t canonical_start = 100'000'000'000ULL;
+  constexpr std::array<int64_t, 4> delays = {
+      8'800'000, 0, -80'800'000'000, -16'800'000};
+  // Source 0 arrives first but is 24 samples later in canonical time than
+  // source 2. It remains the one and only reference; the two packets more
+  // than one overlap slot earlier may be discarded, but must not re-seed.
+  constexpr std::array<uint64_t, 4> canonical_offsets = {24, 16, 0, 8};
+
+  for (int source = 0; source < 4; ++source) {
+    const uint64_t sample_count = static_cast<uint64_t>(
+        static_cast<int64_t>(canonical_start + canonical_offsets[source]) +
+        delays[source]);
+    add_packet(sample_count, source, 0, source + 1, source + 10);
+  }
+
+  processor_state->process_all_available_packets();
+
+  // packets_processed is the number of ring packets handled, including the
+  // two intentionally discarded startup packets.
+  EXPECT_EQ(processor_state->packets_processed.load(), 4);
+  EXPECT_EQ(processor_state->packets_discarded.load(), 2);
+  EXPECT_EQ(processor_state->packets_stuck_unprocessed.load(), 0);
+
+  auto *state = static_cast<ProcessorState<
+      TestMultipleFPGAWithOctetConfig, NR_BUFFERS> *>(processor_state);
+  for (int source = 0; source < 4; ++source) {
+    EXPECT_EQ(state->buffers[0].start_seq[source],
+              static_cast<uint64_t>(
+                  static_cast<int64_t>(canonical_start + 24) + delays[source]));
+  }
+
+  // Once every source has advanced beyond the selected startup reference,
+  // all four place normally without changing the established boundaries.
+  for (int source = 0; source < 4; ++source) {
+    const uint64_t sample_count = static_cast<uint64_t>(
+        static_cast<int64_t>(canonical_start + 32) + delays[source]);
+    add_packet(sample_count, source, 0, source + 1, source + 10);
+  }
+  processor_state->process_all_available_packets();
+
+  EXPECT_EQ(processor_state->packets_processed.load(), 8);
+  EXPECT_EQ(processor_state->packets_discarded.load(), 2);
+  EXPECT_EQ(processor_state->packets_stuck_unprocessed.load(), 0);
+}
 
 TEST_F(ProcessorStateTest, ProcessSinglePacketTest) {
   add_packet(1000, 0, 0);

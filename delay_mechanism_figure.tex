@@ -1,0 +1,141 @@
+\begin{figure}[!htbp]
+  \centering
+  \begin{tikzpicture}[node distance=5mm]
+
+  %% --- packet processor tier ---
+  \node[pbox, fill=cHost, draw=blue!50!black]
+    (pkt)
+    {\textbf{1.\;Packet Arrival}
+     \;{\footnotesize\itshape(CPU)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Each packet carries source identity and packet counter.\\
+     $\bullet$\;Counters define the packet-time grid for every FPGA stream.};
+
+  \node[pbox, fill=cHost!70, draw=blue!50!black, below=of pkt]
+    (coarse)
+    {\textbf{2.\;Coarse Delay Alignment}
+     \;{\footnotesize\itshape(packet processor)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Configured integer delay $d_f$ per FPGA source.\\
+     $\bullet$\;Destination packet index:
+       $p_\mathrm{out}=p_\mathrm{in}+d_f$.\\
+     $\bullet$\;Packets are written into shifted positions in the
+       correlation-block buffer.\\
+     $\bullet$\;Unfilled positions are zeroed when packets are late or missing.};
+
+  \node[pbox, fill=cHost!55, draw=blue!50!black, below=of coarse]
+    (handoff)
+    {\textbf{3.\;Aligned Host Block}\\[2pt]
+     \footnotesize
+     $\bullet$\;FPGA streams now share a common packet-level time origin.\\
+     $\bullet$\;Residual delay smaller than one packet is left for the GPU.};
+
+  %% --- gpu tier ---
+  \node[pbox, fill=cCuda!35, draw=blue!50!black, below=8mm of handoff]
+    (copy)
+    {\textbf{4.\;Sample Tensor Ingestion}
+     \;{\footnotesize\itshape(GPU)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Copy aligned block to device memory.\\
+     $\bullet$\;Unpack int8 voltages and apply int16 scale factors.};
+
+  \node[pbox, fill=blue!12, draw=blue!50!black, below=of copy]
+    (fine)
+    {\textbf{5.\;Fine Delay Calibration}
+     \;{\footnotesize\itshape(CUDA kernel)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Configured fractional or sub-packet delay
+       $\delta_r(\nu)$ per receiver and channel.\\
+     $\bullet$\;Apply phase ramp or fractional-sample correction before
+       correlation and beamforming.\\
+     $\bullet$\;Output samples are time-aligned on the calibrated array phase
+       centre.};
+
+  \node[pbox, fill=green!10, draw=green!50!black, below=of fine]
+    (use)
+    {\textbf{6.\;Aligned Processing}\\[2pt]
+     \footnotesize
+     $\bullet$\;Cross-correlation sees coherent receiver voltages.\\
+     $\bullet$\;Beamformer weights operate on delay-calibrated samples.};
+
+  %% --- arrows ---
+  \draw[arr] (pkt.south) -- (coarse.north);
+  \draw[arr] (coarse.south) -- (handoff.north);
+  \draw[arr] (handoff.south) -- (copy.north)
+    node[right, midway, xshift=2mm, font=\sffamily\footnotesize]
+    {H2D};
+  \draw[arr] (copy.south) -- (fine.north);
+  \draw[arr] (fine.south) -- (use.north);
+
+  %% --- left bars ---
+  \fill[cHost!35, rounded corners=2pt]
+    ([xshift=-10mm]pkt.north west) rectangle ([xshift=-7mm]handoff.south west);
+  \draw[blue!35, rounded corners=2pt]
+    ([xshift=-10mm]pkt.north west) rectangle ([xshift=-7mm]handoff.south west);
+  \node[rotate=90, anchor=center,
+        font=\sffamily\tiny\itshape, text=blue!55!black]
+    at ($([xshift=-8.5mm]pkt.north west)!0.5!([xshift=-8.5mm]handoff.south west)$)
+    {integer packet delay};
+
+  \fill[cCuda!20, rounded corners=2pt]
+    ([xshift=-10mm]copy.north west) rectangle ([xshift=-7mm]use.south west);
+  \draw[green!40!gray, rounded corners=2pt]
+    ([xshift=-10mm]copy.north west) rectangle ([xshift=-7mm]use.south west);
+  \node[rotate=90, anchor=center,
+        font=\sffamily\tiny\itshape, text=green!45!black]
+    at ($([xshift=-8.5mm]copy.north west)!0.5!([xshift=-8.5mm]use.south west)$)
+    {sub-packet calibration};
+
+  %% --- delay decomposition box ---
+  \node[
+    draw=cSolve!70!black,
+    fill=cSolve!15,
+    rounded corners=4pt,
+    align=left,
+    font=\sffamily\footnotesize,
+    text width=43mm,
+    right=9mm of fine
+  ] (decomp)
+  {\textbf{Delay decomposition}\\[2pt]
+   total delay per signal path:\\[1pt]
+   $\tau_r(\nu)
+      = D_f T_\mathrm{pkt}
+      + \delta_r(\nu)$\\[2pt]
+   $D_f$: integer packet offset\\
+   $\delta_r(\nu)$: residual fine delay};
+
+  \draw[arr, cSolve!70!black] (decomp.west) -- (fine.east);
+
+  %% --- packet grid sketch ---
+  \node[
+    draw=gray!55,
+    fill=gray!8,
+    rounded corners=4pt,
+    align=center,
+    font=\sffamily\tiny,
+    text width=41mm,
+    right=9mm of coarse
+  ] (grid)
+  {
+  \textbf{Packet-level shift}\\[2pt]
+  \begin{tabular}{c|cccc}
+    src A & $p$ & $p{+}1$ & $p{+}2$ & $p{+}3$ \\
+    src B &     & $p$     & $p{+}1$ & $p{+}2$
+  \end{tabular}\\[3pt]
+  source B delayed by one packet slot
+  };
+
+  \draw[arr, gray!70] (grid.west) -- (coarse.east);
+
+  \end{tikzpicture}
+  \caption{%
+    Two-stage delay handling.  The packet processor applies coarse integer
+    packet delays by shifting each FPGA stream into the appropriate packet
+    positions of the host correlation-block buffer; gaps caused by missing or
+    late packets are zero-filled.  After host-to-device transfer, the CUDA
+    pipeline applies the remaining fine delay calibration, typically smaller
+    than one packet and potentially frequency dependent, before correlation and
+    beamforming.
+  }
+  \label{fig:delay-mechanism}
+\end{figure}

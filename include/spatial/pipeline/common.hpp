@@ -530,7 +530,9 @@ template <typename T> struct LambdaPipelineIngest {
                                cudaStream_t stream, cudaStream_t host_stream,
                                void *d_samples_entry, void *d_scales,
                                void *d_gains, void *d_samples_half,
-                               bool dummy_run) {
+                               bool dummy_run,
+                               cudaEvent_t copy_done_event = nullptr,
+                               bool launch_release_callback = true) {
     if (!dummy_run && state == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
@@ -542,11 +544,37 @@ template <typename T> struct LambdaPipelineIngest {
                     packet_data->get_scales_element_size(), cudaMemcpyDefault,
                     stream);
 
-    auto *ctx =
-        new BufferReleaseContext{.state = state,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    CUDA_CHECK(cudaLaunchHostFunc(host_stream, release_buffer_host_func, ctx));
+    if (!dummy_run && !launch_release_callback) {
+      if (copy_done_event == nullptr) {
+        throw std::logic_error(
+            "event-polled buffer release requires a completion event");
+      }
+      // The owning pipeline polls this event and returns the host buffer. No CUDA host callback
+      // is queued, avoiding callback-worker starvation and keeping release_buffer() out of CUDA's
+      // internal callback threads.
+      CUDA_CHECK(cudaEventRecord(copy_done_event, stream));
+    } else if (copy_done_event != nullptr) {
+      auto *ctx =
+          new BufferReleaseContext{.state = state,
+                                   .buffer_index = packet_data->buffer_index,
+                                   .dummy_run = dummy_run};
+      // Release the host staging buffer only after both asynchronous H2D
+      // copies have consumed it.  The separate host stream keeps the release
+      // callback from stalling the compute stream before scale conversion.
+      CUDA_CHECK(cudaEventRecord(copy_done_event, stream));
+      CUDA_CHECK(cudaStreamWaitEvent(host_stream, copy_done_event, 0));
+      CUDA_CHECK(
+          cudaLaunchHostFunc(host_stream, release_buffer_host_func, ctx));
+    } else {
+      auto *ctx =
+          new BufferReleaseContext{.state = state,
+                                   .buffer_index = packet_data->buffer_index,
+                                   .dummy_run = dummy_run};
+      // Callers without a completion event still need correct ordering.  A
+      // callback on an unrelated stream can otherwise recycle packet_data
+      // while either H2D copy is still reading it.
+      CUDA_CHECK(cudaLaunchHostFunc(stream, release_buffer_host_func, ctx));
+    }
 
     // Pre-channelization: operates on the raw FPGA/coarse channel count, not the
     // (possibly fine-channelized) widened T::NR_CHANNELS.
@@ -560,11 +588,10 @@ template <typename T> struct LambdaPipelineIngest {
 };
 
 // Pre-correlation fine channelization via ASTRON's gpu-filter (ppf::Filter), a GPU polyphase
-// filterbank. One ppf::Filter instance per coarse/FPGA channel -- FilterArgs has no "channel of
-// channels" axis (confirmed against libfilter/Filter.cc's launch grid, which is
-// (nrPolarizations, nrReceivers, nrSamplesPerChannel/16) with no coarse-channel dimension), and
-// each instance's FIR stage carries PFB history that must not mix data from different coarse
-// channels.
+// filterbank. FilterArgs has no "channel of channels" axis (confirmed against
+// libfilter/Filter.cc's launch grid, which is (nrPolarizations, nrReceivers,
+// nrSamplesPerChannel/16) with no coarse-channel dimension), so each coarse channel is launched
+// separately over its own input/output slice.
 //
 // Ring-buffer mode is intentionally left off (FilterArgs::ringBufferSize stays nullopt): with it
 // off, Filter::launchAsync carries zero cross-call state (confirmed by reading Filter.cc -- it
@@ -574,9 +601,10 @@ template <typename T> struct LambdaPipelineIngest {
 // that input must include NR_TAPS-1 trailing look-ahead samples past the "real" data;
 // reorder_to_filter_input (spatial.cuh) zero-pads them at the end of every buffer rather than
 // carrying continuity across buffers -- a known, accepted per-buffer edge transient for v1.
-// Because there's no cross-call state, this is also what makes concurrent multi-buffer use of the
-// same Filter instances (LambdaGPUPipeline's normal mode of operation) and CUDA graph capture
-// both safe.
+// Because there's no cross-call state, one Filter object can launch every coarse-channel slice,
+// including concurrent launches from the pipeline's multiple streams. This matters because the
+// Filter constructor NVRTC-compiles its kernel: constructing one identical object per coarse
+// channel needlessly compiled the same kernel 48 times for starweave_4_48.
 //
 // Native per-antenna delay compensation (FilterArgs::delays, applied during channelization in the
 // frequency domain) is intentionally left disabled here -- wiring real delay values through is
@@ -620,7 +648,7 @@ template <typename T> struct FineChannelizer {
       __half2[NR_COARSE][NR_FINE][NR_SAMPLES_PER_FINE_CHANNEL / NR_TIMES_PER_OUTPUT_BLOCK]
              [T::NR_RECEIVERS][T::NR_POLARIZATIONS][NR_TIMES_PER_OUTPUT_BLOCK];
 
-  std::vector<std::unique_ptr<ppf::Filter>> filters;
+  std::unique_ptr<ppf::Filter> filter;
 
   explicit FineChannelizer(CUdevice cu_device) {
     cu::Device device(cu_device);
@@ -638,14 +666,10 @@ template <typename T> struct FineChannelizer {
     args.fft.mirror = false;
     args.output.sampleFormat = ppf::FilterArgs::fp16;
 
-    INFO_LOG("FineChannelizer: constructing {} gpu-filter instances ({} fine channels each, {} "
-             "samples/fine-channel, {} taps) -- this JIT-compiles {} nearly-identical NVRTC "
-             "kernels and may take a while",
-             NR_COARSE, NR_FINE, NR_SAMPLES_PER_FINE_CHANNEL, NR_TAPS, NR_COARSE);
-    filters.reserve(NR_COARSE);
-    for (size_t c = 0; c < NR_COARSE; ++c) {
-      filters.push_back(std::make_unique<ppf::Filter>(device, args));
-    }
+    INFO_LOG("FineChannelizer: constructing one shared gpu-filter instance for {} coarse "
+             "channels ({} fine channels each, {} samples/fine-channel, {} taps)",
+             NR_COARSE, NR_FINE, NR_SAMPLES_PER_FINE_CHANNEL, NR_TAPS);
+    filter = std::make_unique<ppf::Filter>(device, args);
   }
 
   // Launches one Filter per coarse channel on the given stream. d_filter_input/d_filter_output
@@ -670,7 +694,7 @@ template <typename T> struct FineChannelizer {
     for (size_t c = 0; c < NR_COARSE; ++c) {
       cu::DeviceMemory in((CUdeviceptr)((char *)d_filter_input + c * in_bytes_per_channel));
       cu::DeviceMemory out((CUdeviceptr)((char *)d_filter_output + c * out_bytes_per_channel));
-      filters[c]->launchAsync(cuStream, out, in);
+      filter->launchAsync(cuStream, out, in);
     }
   }
 };
