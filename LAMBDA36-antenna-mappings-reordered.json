@@ -1,0 +1,290 @@
+{
+  "1": {
+    "Name": 1,
+    "east": -16.773,
+    "north": 8.696,
+    "ADC": 18,
+    "ALVEO": "A0",
+    "PORT": " P2"
+  },
+  "2": {
+    "Name": 2,
+    "east": -3.352,
+    "north": 4.189,
+    "ADC": 1,
+    "ALVEO": "A2",
+    "PORT": " P0"
+  },
+  "3": {
+    "Name": 3,
+    "east": -4.978,
+    "north": 2.732,
+    "ADC": 1,
+    "ALVEO": "A2",
+    "PORT": " P0"
+  },
+  "4": {
+    "Name": 4,
+    "east": 2.3,
+    "north": 5.235,
+    "ADC": 2,
+    "ALVEO": "A2",
+    "PORT": " P1"
+  },
+  "5": {
+    "Name": 5,
+    "east": 0.837,
+    "north": 4.11,
+    "ADC": 3,
+    "ALVEO": "A2",
+    "PORT": " P2"
+  },
+  "6": {
+    "Name": 6,
+    "east": -1.024,
+    "north": 6.134,
+    "ADC": 2,
+    "ALVEO": "A2",
+    "PORT": " P1"
+  },
+  "7": {
+    "Name": 7,
+    "east": -6.015,
+    "north": -2.721,
+    "ADC": 5,
+    "ALVEO": "A2",
+    "PORT": " P4"
+  },
+  "8": {
+    "Name": 8,
+    "east": -1.925,
+    "north": 0.17,
+    "ADC": 6,
+    "ALVEO": "A3",
+    "PORT": " P0"
+  },
+  "9": {
+    "Name": 9,
+    "east": -6.113,
+    "north": -0.038,
+    "ADC": 5,
+    "ALVEO": "A2",
+    "PORT": " P4"
+  },
+  "10": {
+    "Name": 10,
+    "east": -2.804,
+    "north": 1.786,
+    "ADC": 4,
+    "ALVEO": "A2",
+    "PORT": " P3"
+  },
+  "11": {
+    "Name": 11,
+    "east": -3.994,
+    "north": -4.987,
+    "ADC": 11,
+    "ALVEO": "A1",
+    "PORT": " P0"
+  },
+  "12": {
+    "Name": 22,
+    "east": -1.028,
+    "north": -1.394,
+    "ADC": 10,
+    "ALVEO": "A3",
+    "PORT": " P4"
+  },
+  "13": {
+    "Name": 13,
+    "east": -4.108,
+    "north": -2.648,
+    "ADC": 11,
+    "ALVEO": "A1",
+    "PORT": " P0"
+  },
+  "14": {
+    "Name": 14,
+    "east": 1.915,
+    "north": -18.699,
+    "ADC": 19,
+    "ALVEO": "A0",
+    "PORT": " P3"
+  },
+  "15": {
+    "Name": 15,
+    "east": -2.269,
+    "north": -6.491,
+    "ADC": 12,
+    "ALVEO": "A1",
+    "PORT": " P1"
+  },
+  "16": {
+    "Name": 16,
+    "east": -0.852,
+    "north": -5.374,
+    "ADC": 12,
+    "ALVEO": "A1",
+    "PORT": " P1"
+  },
+  "17": {
+    "Name": 17,
+    "east": 5.331,
+    "north": -2.672,
+    "ADC": 15,
+    "ALVEO": "A1",
+    "PORT": " P4"
+  },
+  "18": {
+    "Name": 18,
+    "east": 2.064,
+    "north": -4.383,
+    "ADC": 16,
+    "ALVEO": "A0",
+    "PORT": " P0"
+  },
+  "19": {
+    "Name": 28,
+    "east": 2.203,
+    "north": 2.904,
+    "ADC": 7,
+    "ALVEO": "A3",
+    "PORT": " P1"
+  },
+  "20": {
+    "Name": 20,
+    "east": -4.471,
+    "north": 1.064,
+    "ADC": 4,
+    "ALVEO": "A2",
+    "PORT": " P3"
+  },
+  "21": {
+    "Name": 21,
+    "east": -3.246,
+    "north": -1.023,
+    "ADC": 6,
+    "ALVEO": "A3",
+    "PORT": " P0"
+  },
+  "22": {
+    "Name": 12,
+    "east": -1.946,
+    "north": -3.131,
+    "ADC": 10,
+    "ALVEO": "A3",
+    "PORT": " P4"
+  },
+  "23": {
+    "Name": 23,
+    "east": 0.453,
+    "north": -3.085,
+    "ADC": 13,
+    "ALVEO": "A1",
+    "PORT": " P2"
+  },
+  "24": {
+    "Name": 24,
+    "east": 0.891,
+    "north": -1.225,
+    "ADC": 13,
+    "ALVEO": "A1",
+    "PORT": " P2"
+  },
+  "25": {
+    "Name": 25,
+    "east": 3.587,
+    "north": -5.706,
+    "ADC": 16,
+    "ALVEO": "A0",
+    "PORT": " P0"
+  },
+  "26": {
+    "Name": 26,
+    "east": 3.231,
+    "north": -2.206,
+    "ADC": 14,
+    "ALVEO": "A1",
+    "PORT": " P3"
+  },
+  "27": {
+    "Name": 30,
+    "east": 3.71,
+    "north": 1.519,
+    "ADC": 9,
+    "ALVEO": "A3",
+    "PORT": " P3"
+  },
+  "28": {
+    "Name": 19,
+    "east": 0.482,
+    "north": 1.173,
+    "ADC": 7,
+    "ALVEO": "A3",
+    "PORT": " P1"
+  },
+  "29": {
+    "Name": 29,
+    "east": -0.75,
+    "north": 3.375,
+    "ADC": 3,
+    "ALVEO": "A2",
+    "PORT": " P2"
+  },
+  "30": {
+    "Name": 27,
+    "east": 2.152,
+    "north": 0.608,
+    "ADC": 9,
+    "ALVEO": "A3",
+    "PORT": " P3"
+  },
+  "31": {
+    "Name": 34,
+    "east": 4.064,
+    "north": 3.257,
+    "ADC": 8,
+    "ALVEO": "A3",
+    "PORT": " P2"
+  },
+  "32": {
+    "Name": 32,
+    "east": 5.865,
+    "north": -0.901,
+    "ADC": 14,
+    "ALVEO": "A1",
+    "PORT": " P3"
+  },
+  "33": {
+    "Name": 33,
+    "east": 3.761,
+    "north": -3.937,
+    "ADC": 15,
+    "ALVEO": "A1",
+    "PORT": " P4"
+  },
+  "34": {
+    "Name": 31,
+    "east": 5.851,
+    "north": 1.663,
+    "ADC": 8,
+    "ALVEO": "A3",
+    "PORT": " P2"
+  },
+  "35": {
+    "Name": 35,
+    "east": 5.881,
+    "north": 3.46,
+    "ADC": 17,
+    "ALVEO": "A0",
+    "PORT": " P1"
+  },
+  "36": {
+    "Name": 36,
+    "east": 14.896,
+    "north": 12.985,
+    "ADC": 20,
+    "ALVEO": "A0",
+    "PORT": " P4"
+  }
+}
