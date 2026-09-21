@@ -281,7 +281,7 @@ int main(int argc, char *argv[]) {
   }
 
   ProjectionWeightApplicator<Config> beam_weight_updater(
-      "output_eigenvectors_2.hdf5");
+      "output_eigenvectors_4.hdf5");
 
   BeamWeightsT<Config> projected = beam_weight_updater.apply_latest(
       /*beam_idx=*/1,

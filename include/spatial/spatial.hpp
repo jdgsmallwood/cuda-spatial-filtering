@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <pcap/pcap.h>
@@ -184,6 +185,15 @@ public:
   // Legacy mode (nr_capture_threads == 0): reserve_write_batch() under
   // producer_mutex, write_index watermark — unchanged.
   static constexpr int MAX_CAPTURE_THREADS = 8;
+#ifdef SPATIAL_DIAGNOSTICS
+  // Updated only when a completed assembly buffer is already being scanned
+  // for missing packets. This keeps attribution entirely off the packet hot
+  // path while allowing monitor_app_stats() to identify the FPGA/QP behind a
+  // loss burst.
+  std::array<std::atomic<uint64_t>, MAX_CAPTURE_THREADS>
+      diagnostic_missing_by_fpga{};
+  size_t diagnostic_fpga_count = 0;
+#endif
   struct alignas(64) ThreadClaim {
     std::atomic<uint64_t> linear{0};
   };
@@ -244,6 +254,16 @@ public:
   // into slots size their iovecs/copies with this.
   virtual size_t slot_data_capacity() const { return BUFFER_SIZE; }
 
+  // Optional DMA-registration layout hooks. Non-ProcessorState test fakes
+  // retain inert defaults; ibverbs uses these to receive directly into the
+  // packet ring rather than staging through a second buffer.
+  virtual void *packet_ring_base() const { return nullptr; }
+  virtual size_t packet_ring_bytes() const { return 0; }
+  virtual size_t packet_ring_slot_stride() const { return 0; }
+  virtual size_t packet_ring_slot_offset() const { return 0; }
+  virtual size_t packet_ring_slot_count() const { return 0; }
+  virtual size_t input_buffer_count() const { return 0; }
+
   virtual void release_buffer(const int buffer_index) = 0;
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
   virtual void process_all_available_packets() = 0;
@@ -277,6 +297,22 @@ template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000, int WORKER_COUNT = 3>
 class ProcessorState : public ProcessorStateBase {
 public:
+  size_t input_buffer_count() const override { return NR_INPUT_BUFFERS; }
+  struct alignas(64) WorkRange {
+    int start;
+    int end;
+    int stride{1};
+  };
+
+  // Experimental A/B switch, set before starting processor threads. Keep the
+  // established handoff as default until integrated throughput is validated.
+  bool use_worker_mailboxes = false;
+  bool profile_worker_dispatch = false;
+  uint64_t dispatch_batches = 0;
+  uint64_t dispatch_slots = 0;
+  uint64_t dispatch_wait_ns = 0;
+  uint64_t dispatch_total_ns = 0;
+
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
   // Pointer array kept for API compatibility; all slots come from one
   // contiguous pool so d_packet_data[i] = &d_packet_data_pool[i].  The
@@ -312,6 +348,10 @@ public:
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
+#ifdef SPATIAL_DIAGNOSTICS
+    static_assert(T::NR_FPGA_SOURCES <= MAX_CAPTURE_THREADS);
+    diagnostic_fpga_count = T::NR_FPGA_SOURCES;
+#endif
     this->fpga_ids = fpga_ids_;
     for (auto &row : latest_packet_received)
       for (auto &v : row)
@@ -459,7 +499,29 @@ public:
   int packet_index_for_buffer(uint64_t sample_count, size_t fpga_index,
                               int buffer_index) const {
     const uint64_t buffer_start = buffers[buffer_index].start_seq[fpga_index];
-    return static_cast<int>((sample_count - buffer_start) / NR_BETWEEN_SAMPLES);
+    // sample_count < buffer_start is the *normal* case this function must
+    // detect correctly (every packet before its buffer's window opens hits
+    // it, and callers rely on a properly negative result to discard/defer
+    // it) -- computing the difference in uint64_t underflows and wraps to a
+    // huge positive value instead, which the final `int` cast then
+    // truncates essentially arbitrarily (sometimes staying visibly out of
+    // range, sometimes wrapping back into what looks like a small, "valid"
+    // in-buffer index). This was latent for small FPGA delays (tens of
+    // millions, per alveo_delays.json) but became a serious problem with a
+    // FPGA-restart-sized delay (~-80.8 billion, 2026-09-20 32-channel test):
+    // sample_count and buffer_start differ by roughly that much, so nearly
+    // every packet from that source hit the underflow. Do the subtraction
+    // in signed 64-bit (both operands are always well within int64_t's
+    // range, so this cannot itself overflow) and clamp before the final
+    // narrowing cast, so a legitimately huge mismatch clamps to an
+    // unambiguous "very out of range" sentinel instead of wrapping.
+    const int64_t diff = static_cast<int64_t>(sample_count) -
+                         static_cast<int64_t>(buffer_start);
+    const int64_t index64 = diff / static_cast<int64_t>(NR_BETWEEN_SAMPLES);
+    constexpr int64_t kClampBound = 1'000'000'000; // far beyond any real buffer size
+    if (index64 < -kClampBound) return static_cast<int>(-kClampBound);
+    if (index64 > kClampBound) return static_cast<int>(kClampBound);
+    return static_cast<int>(index64);
   }
 
   enum class PacketLocationStatus {
@@ -596,11 +658,12 @@ public:
     // copy to correct place or leave it.
     for (int buffer_num = 0; buffer_num < NR_INPUT_BUFFERS; ++buffer_num) {
       const int buffer_index = (current_buf + buffer_num) % NR_INPUT_BUFFERS;
-      const int packet_index =
+      int packet_index =
           packet_index_for_buffer(sample_count, fpga_index, buffer_index);
 
-      // should be < -1 as the -1th packet is useful for us due to inter-FPGA
-      // drift.
+      // packet_index -1 is the useful inter-FPGA overlap packet. Anything
+      // earlier predates the one-shot timeline chosen by the first valid
+      // packet and may be discarded; buffer boundaries are never rewritten.
       if (buffer_num == 0 && packet_index < -1) [[unlikely]] {
         // This means that this packet is less than the lowest possible
         // start token. Maybe an out-of-order packet that's coming in?
@@ -697,16 +760,32 @@ public:
 
     const int fpga_index = fpga_ids[fpga_id];
     const int64_t fpga_delay = fpga_delays_packet_aligned[fpga_index];
+    const int64_t canonical_first =
+        static_cast<int64_t>(first_count) - fpga_delay;
+
+    // Initialization is a one-time operation. Clearing defensively prevents
+    // stale/duplicate ordering entries if a test or future recovery path
+    // explicitly invokes it again before any buffer has been released.
+    while (!buffer_ordering_queue.empty()) buffer_ordering_queue.pop();
+
     for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
       for (auto j = 0; j < T::NR_FPGA_SOURCES; ++j) {
         // need to minus the delay for whichever FPGA the reference is, then add
         // the delay for the alveo this is.
-        buffers[i].start_seq[j] =
-            first_count - fpga_delay + fpga_delays_packet_aligned[j] +
-            i * NR_PACKETS_FOR_CORRELATION * NR_BETWEEN_SAMPLES;
-        buffers[i].end_seq[j] =
-            first_count - fpga_delay + fpga_delays_packet_aligned[j] +
-            ((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) * NR_BETWEEN_SAMPLES;
+        const int64_t start_seq =
+            canonical_first + fpga_delays_packet_aligned[j] +
+            static_cast<int64_t>(i * NR_PACKETS_FOR_CORRELATION *
+                                 NR_BETWEEN_SAMPLES);
+        const int64_t end_seq =
+            canonical_first + fpga_delays_packet_aligned[j] +
+            static_cast<int64_t>(((i + 1) * NR_PACKETS_FOR_CORRELATION - 1) *
+                                 NR_BETWEEN_SAMPLES);
+        if (start_seq < 0 || end_seq < 0) {
+          throw std::runtime_error(
+              "Configured FPGA delays produce a negative packet sequence");
+        }
+        buffers[i].start_seq[j] = static_cast<uint64_t>(start_seq);
+        buffers[i].end_seq[j] = static_cast<uint64_t>(end_seq);
         buffers[i].is_ready = true;
         INFO_LOG(
             "[BufferInitialization] Buffer {} for FPGA {} goes from {} to {}",
@@ -803,14 +882,21 @@ public:
     }
 
     if (!buffer_init_flag.load(std::memory_order_acquire)) [[unlikely]] {
-      static std::mutex init_mutex;
-      std::lock_guard<std::mutex> lock(init_mutex);
+      // The first valid packet defines a common observation time. The exact
+      // configured FPGA delays translate that one reference into the four
+      // corresponding raw counter values. Initialize once and never rewrite
+      // live buffer boundaries: a few packets that predate this startup point
+      // may be discarded, but all streams converge naturally within their
+      // small initial skew and steady-state processing remains coherent.
+      std::lock_guard<std::mutex> lock(buffer_bootstrap_mutex);
       if (!buffer_init_flag.load(std::memory_order_relaxed)) {
-        INFO_LOG("Initializing buffers...");
+        INFO_LOG("Initializing buffers once from first valid packet: FPGA {} "
+                 "sample_count={}",
+                 parsed.fpga_id, parsed.sample_count);
         initialize_buffers(parsed.sample_count, parsed.fpga_id);
         buffer_init_flag.store(true, std::memory_order_release);
       }
-    };
+    }
     copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
     if (*parsed.original_packet_processed) [[likely]] {
       if (processed_accum) {
@@ -930,9 +1016,10 @@ public:
         for (int fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
           // we wait for halfway through the next buffer to be complete to avoid
           // missing out of order packets.
-          if (latest_packet_received[channel][fpga].load(
-                  std::memory_order_acquire) <
-              end_seq[fpga] + NR_BETWEEN_SAMPLES / 2) {
+          const uint64_t latest = latest_packet_received[channel][fpga].load(
+              std::memory_order_acquire);
+          const uint64_t threshold = end_seq[fpga] + NR_BETWEEN_SAMPLES / 2;
+          if (latest < threshold) {
             all_fpgas_complete = false;
             if (i == 0) {
               return;
@@ -944,7 +1031,7 @@ public:
           buffer.is_populated[channel] = true;
         }
       }
-      
+
       if (buffer.is_populated.all()) {
         buffers_complete.push_back(buf_idx);
       }
@@ -1083,18 +1170,66 @@ public:
       per_thread_my_read[tid] = static_cast<uint64_t>(tid);
 
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
-    constexpr int REGULAR_BATCH_SIZE = 6000;
+    // Upper bound on how many slots a single dispatch_and_wait() call below
+    // may be asked to process for one capture thread's turn in the
+    // round-robin `for (tid...)` loop. dispatch_and_wait() blocks until
+    // every slot in its batch is committed, and per_thread_read_linear[tid]
+    // (this thread's published *progress*, as opposed to per_thread_claim,
+    // its published *reservation* watermark) only advances once the whole
+    // call returns -- so a large cap here does not just risk one slow
+    // thread starving the other three of a turn (the case the surrounding
+    // per-thread loop's own comment already calls out), it means progress
+    // is only ever visible in large, infrequent jumps.
+    // For KernelSocketPacketCapture this was rarely the limiting factor:
+    // reservation there happens synchronously with the recvmmsg batch that
+    // fills it (capped at BATCH_SIZE=256 packets), so per_thread_claim
+    // naturally tracks real arrival and rarely approaches this cap.
+    // LibibverbsPacketCapture's zero-copy path reserves active_frames_
+    // (~1024) receive buffers up front to keep the RDMA pipeline fed, and
+    // then continuously reserves one replacement per completion regardless
+    // of how far ahead of actual processing that puts it -- confirmed by
+    // direct measurement (2026-09-20) that with the 6000 cap, a single
+    // dispatch_and_wait() call for one thread's ~1500-slot backlog was
+    // still not complete after 30+ seconds, during which the other three
+    // threads' already-committed data went completely unprocessed and
+    // per_thread_read_linear (hence Stats' "Processed" counter) never
+    // advanced from zero. Reducing the cap to match KernelSocketPacketCapture's
+    // own natural batch granularity fixes this for zero-copy while being a
+    // no-op for the kernel-socket path (whose batches essentially never
+    // reach this size in the first place).
+    // At 48+ channels the producer rate is high enough that dispatching 256
+    // claimed slots can run well ahead of CQ completions and park every worker
+    // on an as-yet-uncommitted receive. Keep the already-proven 256-slot path
+    // bit-for-bit for <=40 channels; larger compile-time channel targets use a
+    // fixed 64-slot handoff matching the ibverbs CQ poll batch. This is not an
+    // adaptive receive batch.
+    constexpr int REGULAR_BATCH_SIZE =
+        (T::NR_FPGA_CHANNELS >= 48) ? 64 : 256;
+    uint64_t dispatch_generation = 0;
 
     // Distribute `slots` items (each `stride` ring-index steps apart, starting
-    // at `base_ring`) across WORKER_COUNT workers, signal, and spin-wait.
+    // at `base_ring`) across the processor thread plus WORKER_COUNT helpers.
+    // The processor used to spin while every byte was copied by the helpers;
+    // making it process one slice adds useful copy bandwidth without adding a
+    // thread or another task-completion synchronization.
     // Write all task ranges before any release store so workers see consistent
     // state from their acquire load on worker_has_task.
     auto dispatch_and_wait = [&](int base_ring, int slots, int stride) {
-      const int per_worker = (slots + WORKER_COUNT - 1) / WORKER_COUNT;
-      int items_done = 0;
+      using DispatchClock = std::chrono::steady_clock;
+      const auto dispatch_start = profile_worker_dispatch ? DispatchClock::now()
+                                                          : DispatchClock::time_point{};
+      const uint64_t generation = ++dispatch_generation;
+      const int lane_count = WORKER_COUNT + 1;
+      const int per_lane = (slots + lane_count - 1) / lane_count;
+      const int main_items = std::min(per_lane, slots);
+      const WorkRange main_task = {
+          base_ring,
+          (base_ring + main_items * stride) % (int)RING_BUFFER_SIZE,
+          stride};
+      int items_done = main_items;
       int workers_with_tasks = 0;
       for (int i = 0; i < WORKER_COUNT; ++i) {
-        const int items = std::min(per_worker, slots - items_done);
+        const int items = std::min(per_lane, slots - items_done);
         if (items == 0) break;
         const int w_start =
             (base_ring + items_done * stride) % (int)RING_BUFFER_SIZE;
@@ -1104,10 +1239,20 @@ public:
         ++workers_with_tasks;
         items_done += items;
       }
-      num_workers_with_tasks.store(workers_with_tasks,
-                                   std::memory_order_relaxed);
-      for (int i = 0; i < workers_with_tasks; ++i)
-        worker_has_task[i].store(true, std::memory_order_release);
+      if (use_worker_mailboxes) {
+        for (int i = 0; i < workers_with_tasks; ++i)
+          worker_mailboxes[i].requested.store(generation, std::memory_order_release);
+      } else {
+        num_workers_with_tasks.store(workers_with_tasks,
+                                     std::memory_order_relaxed);
+        for (int i = 0; i < workers_with_tasks; ++i)
+          worker_has_task[i].store(true, std::memory_order_release);
+      }
+      const uint64_t main_processed = process_work_range(main_task);
+      if (main_processed)
+        packets_processed.fetch_add(main_processed, std::memory_order_relaxed);
+      const auto wait_start = profile_worker_dispatch ? DispatchClock::now()
+                                                      : DispatchClock::time_point{};
       // Wait for the workers to actually FINISH the dispatched slices.
       // Breaking out early on !running (the old behaviour) let the
       // completion check below run concurrently with in-flight worker
@@ -1118,11 +1263,31 @@ public:
       // committed-spin bails on !running), so only stop waiting once every
       // worker has exited (workers_alive == 0) and its pending decrements
       // can no longer come.
-      while (num_workers_with_tasks.load(std::memory_order_acquire) > 0) {
-        if (!running.load(std::memory_order_relaxed) &&
-            workers_alive.load(std::memory_order_acquire) == 0)
-          break;
-        _mm_pause();
+      if (use_worker_mailboxes) {
+        for (int i = 0; i < workers_with_tasks; ++i) {
+          while (worker_mailboxes[i].completed.load(std::memory_order_acquire) != generation) {
+            // A worker may exit just before a shutdown-time dispatch. An
+            // exited worker cannot have an in-flight copy; active workers
+            // must still finish before completion checks run.
+            if (worker_mailboxes[i].exited.load(std::memory_order_acquire))
+              break;
+            _mm_pause();
+          }
+        }
+      } else {
+        while (num_workers_with_tasks.load(std::memory_order_acquire) > 0) {
+          if (!running.load(std::memory_order_relaxed) &&
+              workers_alive.load(std::memory_order_acquire) == 0)
+            break;
+          _mm_pause();
+        }
+      }
+      if (profile_worker_dispatch) {
+        const auto end = DispatchClock::now();
+        ++dispatch_batches;
+        dispatch_slots += slots;
+        dispatch_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end - wait_start).count();
+        dispatch_total_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end - dispatch_start).count();
       }
     };
 
@@ -1139,9 +1304,31 @@ public:
               per_thread_claim[tid].linear.load(std::memory_order_acquire);
           if (claim <= per_thread_my_read[tid]) continue;
 
-          const int slots = static_cast<int>(
+          int slots = static_cast<int>(
               std::min((claim - per_thread_my_read[tid]) / (uint64_t)stride,
                        (uint64_t)REGULAR_BATCH_SIZE));
+
+          if constexpr (T::NR_FPGA_CHANNELS >= 48) {
+            // ibverbs publishes reservations in per_thread_claim before the
+            // NIC has completed DMA into every slot. At 48-channel rate the
+            // 1024-WR receive window is large enough that dispatching the
+            // whole claimed range can park every worker on uncommitted slots,
+            // preventing already-completed prefixes from being released back
+            // to the receivers. Hand workers only the contiguous committed
+            // prefix. Slots cannot be reused until per_thread_read_linear is
+            // advanced below, so their committed state remains stable after
+            // this acquire scan.
+            int committed_slots = 0;
+            int ring_index = static_cast<int>(
+                per_thread_my_read[tid] % RING_BUFFER_SIZE);
+            while (committed_slots < slots &&
+                   d_packet_data[ring_index]->committed.load(
+                       std::memory_order_acquire)) {
+              ++committed_slots;
+              ring_index = (ring_index + stride) % RING_BUFFER_SIZE;
+            }
+            slots = committed_slots;
+          }
           if (slots == 0) continue;
 
           dispatch_and_wait(
@@ -1196,6 +1383,50 @@ public:
     std::cout << "Processor thread exiting\n";
   };
 
+  __attribute__((hot)) uint64_t process_work_range(const WorkRange &task) {
+    std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
+    // A zero horizon disables future-packet deferral. With asynchronous H2D
+    // recycling, producers can outrun the available windows: those packets
+    // would otherwise advance completion watermarks without landing anywhere.
+    // A stale, smaller snapshot is safe: the future queue retries after release.
+    get_global_max_packet_array(global_max);
+    auto [start, end, stride] = task;
+    int idx = start;
+    uint64_t local_processed = 0;
+
+    while (idx != end) {
+      auto *entry = d_packet_data[idx];
+
+      constexpr int PREFETCH_DIST = 12;
+      const int pre_idx = (idx + PREFETCH_DIST * stride) % RING_BUFFER_SIZE;
+      auto *pre_entry = d_packet_data[pre_idx];
+      __builtin_prefetch(pre_entry, 0, 1);
+      __builtin_prefetch(pre_entry->data, 0, 1);
+      __builtin_prefetch(&pre_entry->committed, 0, 1);
+      __builtin_prefetch(pre_entry->data + 192, 0, 1);
+      __builtin_prefetch(pre_entry->data + 768, 0, 1);
+      __builtin_prefetch(pre_entry->data + 1536, 0, 1);
+
+      bool bailed = false;
+      while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
+        if (!running.load(std::memory_order_relaxed)) {
+          bailed = true;
+          break;
+        }
+        _mm_pause();
+      }
+      if (bailed)
+        break;
+      if (entry->length > 0 &&
+          !entry->processed.load(std::memory_order_relaxed)) {
+        process_packet_data(entry, idx, global_max, &local_processed);
+      }
+      idx = (idx + stride) % RING_BUFFER_SIZE;
+    }
+
+    return local_processed;
+  }
+
   __attribute__((hot)) void worker_thread_fn(int worker_id) {
     std::cout << "Starting worker with id " << worker_id << std::endl;
     // Affinity is opt-in via SPATIAL_WORKER_CPUS="4,5,6" (one entry per
@@ -1212,7 +1443,29 @@ public:
                 << std::endl;
     }
 
-    std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
+    if (use_worker_mailboxes) {
+      auto &mailbox = worker_mailboxes[worker_id];
+      uint64_t completed = 0;
+      while (true) {
+        const uint64_t requested = mailbox.requested.load(std::memory_order_acquire);
+        if (requested == completed) {
+          if (!running.load(std::memory_order_relaxed)) {
+            mailbox.exited.store(true, std::memory_order_release);
+            workers_alive.fetch_sub(1, std::memory_order_acq_rel);
+            return;
+          }
+          _mm_pause();
+          continue;
+        }
+        const uint64_t count = process_work_range(worker_tasks[worker_id]);
+        if (count)
+          packets_processed.fetch_add(count, std::memory_order_relaxed);
+        completed = requested;
+        // Publishes all copies and arrival flags. Coordinator acquires this
+        // before checking buffer completion or overwriting this worker's task.
+        mailbox.completed.store(completed, std::memory_order_release);
+      }
+    }
 
     while (true) {
       // Spin-wait for a task signal from the main thread, or exit.
@@ -1227,63 +1480,8 @@ public:
         _mm_pause();
       }
 
-      auto [start, end, stride] = worker_tasks[worker_id];
-
-      int idx = start;
-      // Accumulate this slice's processed count locally; flush once below so
-      // the global atomic isn't hammered per packet across all workers.
-      uint64_t local_processed = 0;
-
-      while (idx != end) {
-
-        auto *entry = d_packet_data[idx];
-
-        // Prefetch ahead scaled by stride so the lookahead in real slots stays
-        // constant regardless of the striding factor.
-        //
-        // Three regions to cover per slot:
-        //   [A] The slot pointer itself (pointer array → L3)
-        //   [B] data[0]: vptr + CustomHeader area — needed by parse()
-        //   [C] &committed: the metadata fields (length/processed/committed) live
-        //       AFTER data[] in memory (offset ~DATA_CAPACITY), so they are in
-        //       a completely separate cache line from the packet data.  Without
-        //       this prefetch the worker's first committed.load() is a DRAM miss
-        //       (~200 ns) because the previous two prefetches only cover the
-        //       start of data[].
-        //   [D-F] Stride into the payload so the hardware stream-prefetcher gets
-        //       an early start on the 40 cache lines of PacketDataStructure.
-        constexpr int PREFETCH_DIST = 12;
-        const int pre_idx = (idx + PREFETCH_DIST * stride) % RING_BUFFER_SIZE;
-        auto *pre_entry = d_packet_data[pre_idx];
-        __builtin_prefetch(pre_entry, 0, 1);                         // [A]
-        __builtin_prefetch(pre_entry->data, 0, 1);                   // [B] CL0
-        __builtin_prefetch(&pre_entry->committed, 0, 1);             // [C] metadata CL
-        __builtin_prefetch(pre_entry->data + 192, 0, 1);             // [D] ~3rd CL of payload
-        __builtin_prefetch(pre_entry->data + 768, 0, 1);             // [E] ~12th CL
-        __builtin_prefetch(pre_entry->data + 1536, 0, 1);            // [F] ~24th CL
-
-        // Wait for the producer to commit this slot before processing.
-        // In the common case (single-phase legacy path or fast producer) this
-        // never spins; the acquire pairs with commit_write_batch's release.
-        // At shutdown a producer may have reserved (committed=false) and then
-        // bailed without committing -- break out so the slice always
-        // terminates and dispatch_and_wait can rely on workers finishing.
-        bool bailed = false;
-        while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
-          if (!running.load(std::memory_order_relaxed)) {
-            bailed = true;
-            break;
-          }
-          _mm_pause();
-        }
-        if (bailed)
-          break;
-        if (entry->length > 0 &&
-            !entry->processed.load(std::memory_order_relaxed)) {
-          process_packet_data(entry, idx, global_max, &local_processed);
-        }
-        idx = (idx + stride) % RING_BUFFER_SIZE;
-      }
+      const uint64_t local_processed =
+          process_work_range(worker_tasks[worker_id]);
 
       if (local_processed) {
         packets_processed.fetch_add(local_processed, std::memory_order_relaxed);
@@ -1335,6 +1533,20 @@ public:
       cpu_start = clock::now();
       // INFO_LOG("Zeroing missing packets...");
       d_samples[current_buf]->zero_missing_packets();
+#ifdef SPATIAL_DIAGNOSTICS
+      for (size_t channel = 0; channel < T::NR_FPGA_CHANNELS; ++channel) {
+        for (size_t packet = 0; packet < NR_PACKETS_FOR_CORRELATION;
+             ++packet) {
+          for (size_t fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
+            if (!d_samples[current_buf]
+                     ->arrivals[0][channel][packet + 1][fpga]) {
+              diagnostic_missing_by_fpga[fpga].fetch_add(
+                  1, std::memory_order_relaxed);
+            }
+          }
+        }
+      }
+#endif
       packets_missing += d_samples[current_buf]->get_num_missing_packets();
       cpu_end = clock::now();
       // DEBUG_LOG("CPU time for zeroing packets: {} us",
@@ -1509,6 +1721,22 @@ public:
     return T::PacketEntryType::DATA_CAPACITY;
   }
 
+  void *packet_ring_base() const override {
+    return static_cast<void *>(d_packet_data_pool);
+  }
+  size_t packet_ring_bytes() const override {
+    return sizeof(typename T::PacketEntryType) * RING_BUFFER_SIZE;
+  }
+  size_t packet_ring_slot_stride() const override {
+    return sizeof(typename T::PacketEntryType);
+  }
+  size_t packet_ring_slot_offset() const override {
+    const auto *entry = d_packet_data_pool;
+    return reinterpret_cast<const uint8_t *>(&entry->data) -
+           reinterpret_cast<const uint8_t *>(entry);
+  }
+  size_t packet_ring_slot_count() const override { return RING_BUFFER_SIZE; }
+
   // Lock-free strided override: no mutex, no shared write_index.
   // Thread thread_id owns slots thread_id, thread_id+N, thread_id+2N, ...
   // my_linear is the caller's monotonic counter (local to the capture thread).
@@ -1625,25 +1853,26 @@ private:
   std::condition_variable buffer_available_cv;
   std::array<std::atomic<uint64_t>, T::NR_FPGA_SOURCES> global_max_end_seq{0};
   std::atomic<bool> buffer_init_flag{false};
+  // Serializes the one permitted startup initialization. Buffer boundaries
+  // are never re-seeded once published to packet-processing workers.
+  std::mutex buffer_bootstrap_mutex;
   std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
       fpga_delays_packet_aligned;
   std::array<int, T::NR_FPGA_SOURCES> fpga_delays_subpacket;
 
   std::array<int16_t, 256> fpga_index_lut;
-  // Each WorkRange is on its own cache line to prevent false sharing between
-  // the main thread writing and workers reading.
-  struct alignas(64) WorkRange {
-    int start;
-    int end;
-    int stride{1};
-  };
-
   // Per-worker task signaling. Main writes worker_tasks[i] then stores true
   // (release) to worker_has_task[i]. Workers spin-acquire on worker_has_task
   // and read the task without any mutex. Workers store false (relaxed) then
   // decrement num_workers_with_tasks (acq_rel) to signal completion.
   std::array<std::atomic<bool>, WORKER_COUNT> worker_has_task;
   std::array<WorkRange, WORKER_COUNT> worker_tasks;
+  struct WorkerMailbox {
+    alignas(64) std::atomic<uint64_t> requested{0}; // coordinator writes
+    alignas(64) std::atomic<uint64_t> completed{0}; // worker writes
+    std::atomic<bool> exited{false};
+  };
+  std::array<WorkerMailbox, WORKER_COUNT> worker_mailboxes;
   std::atomic<int> num_workers_with_tasks = 0;
   // Number of worker threads that have not yet exited; lets
   // dispatch_and_wait distinguish "workers still finishing their slices"
@@ -1657,6 +1886,9 @@ private:
     workers_alive.store(WORKER_COUNT, std::memory_order_release);
     for (int i = 0; i < WORKER_COUNT; i++) {
       worker_has_task[i].store(false);
+      worker_mailboxes[i].requested.store(0, std::memory_order_relaxed);
+      worker_mailboxes[i].completed.store(0, std::memory_order_relaxed);
+      worker_mailboxes[i].exited.store(false, std::memory_order_relaxed);
       workers.emplace_back(&ProcessorState::worker_thread_fn, this, i);
     };
   };
@@ -1677,6 +1909,11 @@ public:
   // (KernelSocketPacketCapture via SO_RXQ_OVFL / VMA equivalent).  Returns 0
   // for backends that don't track drops (PCAP, ibverbs).
   virtual uint32_t get_drops() const { return 0; }
+
+  // Optional backend initialization after the ProcessorState/ring exists.
+  // Kernel and pcap inputs do nothing; ibverbs uses this hook to register the
+  // packet ring and post receives directly into ring slots.
+  virtual void arm_zero_copy(ProcessorStateBase & /*state*/) {}
 
   virtual ~PacketInput() = default;
 };
@@ -1754,6 +1991,30 @@ public:
       msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
     }
 
+    // Opt-in local-staging path (SPATIAL_CAPTURE_STAGE_LOCAL): on this box the
+    // ring buffer is first-touch-allocated on the GPU's NUMA node (see
+    // ProcessorState's constructor), but two of the three live NICs are on
+    // the *other* socket -- every recvmmsg into a ring slot directly is a
+    // small, kernel-mediated cross-socket copy_to_user for those threads'
+    // capture. Staging into a buffer this thread first-touches itself (so
+    // it lands node-local, same node this thread is pinned to via
+    // SPATIAL_CAPTURE_CPUS) keeps recvmmsg's own copy local/cheap, and moves
+    // the unavoidable cross-socket traffic into one bulk streaming-store
+    // copy per batch instead of many small per-datagram ones. Off by
+    // default: it's an extra copy, and whether bulking the cross-socket
+    // traffic actually wins depends on the interconnect/traffic pattern --
+    // measure before enabling.
+    const bool use_local_stage =
+        std::getenv("SPATIAL_CAPTURE_STAGE_LOCAL") != nullptr;
+    std::vector<char> local_stage;
+    if (use_local_stage) {
+      // First touch (the zero-init below) happens on this thread, so the
+      // pages land on whatever NUMA node this thread is currently pinned to.
+      local_stage.assign(static_cast<size_t>(BATCH_SIZE) * slot_cap, 0);
+      INFO_LOG("Capture thread {}: local-staging enabled ({} KB)", thread_id_,
+               local_stage.size() / 1024);
+    }
+
     std::cout << "Receiver thread started for ifname " << ifname << std::endl;
 
     void *slot_ptrs[BATCH_SIZE];
@@ -1792,7 +2053,10 @@ public:
                                             reserve_target, slot_ptrs,
                                             slot_indices);
       for (int i = 0; i < reserved; ++i) {
-        iovecs[i].iov_base = slot_ptrs[i];
+        iovecs[i].iov_base = use_local_stage
+                                 ? static_cast<void *>(local_stage.data() +
+                                                        i * slot_cap)
+                                 : slot_ptrs[i];
         iovecs[i].iov_len = slot_cap;
         msgs[i].msg_hdr.msg_namelen = sizeof(client_addrs[i]);
         msgs[i].msg_hdr.msg_control = nullptr;
@@ -1828,6 +2092,16 @@ public:
           kernel_drops.store(*reinterpret_cast<uint32_t *>(CMSG_DATA(cm)),
                              std::memory_order_relaxed);
           break;
+        }
+      }
+
+      // Bulk-copy the batch out of the local staging buffer into the real
+      // (possibly remote-NUMA) ring slots. One streaming-store pass per
+      // batch instead of recvmmsg's own per-datagram cross-socket copy.
+      if (use_local_stage) {
+        for (int i = 0; i < ret_val; ++i) {
+          copy_nt(slot_ptrs[i], local_stage.data() + i * slot_cap,
+                  slot_cap);
         }
       }
 

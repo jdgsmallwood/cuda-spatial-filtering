@@ -61,6 +61,19 @@ static void pin_to_numa_node(int node) {
   sched_setaffinity(0, sizeof(set), &set);
 }
 
+static void pin_bench_thread(const char *env_name, int index) {
+  const char *list = std::getenv(env_name);
+  if (!list) return;
+  const int cpu = nth_cpu_from_list(list, index);
+  if (cpu < 0 || cpu >= CPU_SETSIZE)
+    throw std::runtime_error(std::string("Invalid CPU list: ") + env_name);
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  CPU_SET(cpu, &set);
+  if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
+    throw std::runtime_error(std::string("Cannot set affinity: ") + env_name);
+}
+
 // Fixed representative configs for the LAMBDA instrument.  These are
 // compile-time constants so the same binary benchmarks all shapes without
 // needing to rebuild with different -DNR_OBSERVING_* values.
@@ -89,6 +102,7 @@ struct BenchResult {
   double elapsed;
   double packets_per_sec;
   double gb_per_sec;
+  uint64_t dispatch_batches, dispatch_slots, dispatch_wait_ns, dispatch_total_ns;
 };
 
 // Local equivalent of pipeline/common.hpp's BufferReleaseContext.
@@ -119,6 +133,7 @@ class NullPipeline : public GPUPipeline {
   // used in run_processor_bench.
   static constexpr int NUM_BUFS = 8;
   void *d_bufs_[NUM_BUFS]{};
+  void *d_scales_[NUM_BUFS]{};
   cudaStream_t streams_[NUM_BUFS]{};
   const bool with_h2d_;
 
@@ -146,6 +161,8 @@ public:
         }
         if (d_bufs_[i])
           cudaFree(d_bufs_[i]);
+        if (d_scales_[i])
+          cudaFree(d_scales_[i]);
       }
     }
   }
@@ -163,6 +180,11 @@ public:
       CUDA_CHECK(cudaMemcpyAsync(d_bufs_[idx], packet_data->get_samples_ptr(),
                                  packet_data->get_samples_elements_size(),
                                  cudaMemcpyHostToDevice, streams_[idx]));
+      if (!d_scales_[idx])
+        CUDA_CHECK(cudaMalloc(&d_scales_[idx], packet_data->get_scales_element_size()));
+      CUDA_CHECK(cudaMemcpyAsync(d_scales_[idx], packet_data->get_scales_ptr(),
+                                 packet_data->get_scales_element_size(),
+                                 cudaMemcpyHostToDevice, streams_[idx]));
       // Release callback on the SAME stream — fires after H2D completes.
       auto *ctx =
           new H2DReleaseContext{.state = state_,
@@ -179,8 +201,9 @@ public:
   void dump_visibilities(const uint64_t = 0) override {}
 };
 
-template <typename Config>
-BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
+template <typename Config, int WORKER_COUNT = 6, int PRODUCER_COUNT = 3>
+BenchResult run_processor_bench(double duration_s, bool with_h2d = false,
+                               bool mailboxes = false, bool profile = false) {
   constexpr size_t PKT_BYTES =
       sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader) +
       sizeof(CustomHeader) + sizeof(typename Config::PacketPayloadType);
@@ -209,12 +232,13 @@ BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
   // 10-core-per-socket box (the feeder sleeps in synchronous mode).  More of
   // either oversubscribes the socket and collapses throughput (12 busy
   // threads measured ~0.7 GB/s: spin-waits get descheduled).
-  constexpr int WORKER_COUNT = 6;
   ProcessorState<Config, NR_INPUT_BUFFERS, DEFAULT_PACKET_RING_BUFFER_SIZE,
                  WORKER_COUNT>
       state(Config::NR_PACKETS_FOR_CORRELATION,
             Config::NR_TIME_STEPS_PER_PACKET,
             /*min_freq_channel=*/0, fpga_delays, fpga_ids);
+  state.use_worker_mailboxes = mailboxes;
+  state.profile_worker_dispatch = profile;
 
   NullPipeline pipeline(with_h2d);
   state.set_pipeline(&pipeline);
@@ -241,7 +265,6 @@ BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
   // full batches.  Correct since the completion-watermark fix in
   // copy_data_to_input_buffer_if_able (deferred packets no longer complete
   // buffers prematurely) -- see scripts/profiling/BENCH_PROCESSOR_TUNING.md.
-  constexpr int PRODUCER_COUNT = 3;
   state.nr_capture_threads = PRODUCER_COUNT;
 
   const auto sample_fn = [](int, int, int) {
@@ -264,7 +287,10 @@ BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
   constexpr size_t CUSTOM_OFF =
       sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader);
 
-  std::thread processor([&state]() { state.process_packets(); });
+  std::thread processor([&state]() {
+    pin_bench_thread("SPATIAL_BENCH_PROCESSOR_CPUS", 0);
+    state.process_packets();
+  });
   std::thread feeder([&state]() { state.pipeline_feeder(); });
 
   // Bounded-skew throttle.  Real FPGA streams stay roughly sequence-aligned
@@ -289,6 +315,7 @@ BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
   // flushed through reserve/fill/commit so the ring sees large contiguous
   // claims.
   auto producer_fn = [&](int tid) {
+    pin_bench_thread("SPATIAL_BENCH_PRODUCER_CPUS", tid);
     constexpr int RBATCH = 128;
     void *slot_ptrs[RBATCH];
     int slot_indices[RBATCH];
@@ -426,6 +453,10 @@ BenchResult run_processor_bench(double duration_s, bool with_h2d = false) {
   r.packets_per_sec = packets_processed / elapsed;
   r.gb_per_sec =
       static_cast<double>(packets_processed) * PKT_BYTES / elapsed / 1e9;
+  r.dispatch_batches = state.dispatch_batches;
+  r.dispatch_slots = state.dispatch_slots;
+  r.dispatch_wait_ns = state.dispatch_wait_ns;
+  r.dispatch_total_ns = state.dispatch_total_ns;
   return r;
 }
 
@@ -447,6 +478,12 @@ static void print_result(const BenchResult &r) {
       (unsigned long long)r.buffers_completed, r.elapsed, r.bytes_per_packet,
       r.packets_per_sec, r.gb_per_sec);
   std::fflush(stdout);
+  if (r.dispatch_batches)
+    std::printf("[Dispatch] batches=%llu slots=%llu wait_ns=%llu total_ns=%llu\n",
+                (unsigned long long)r.dispatch_batches,
+                (unsigned long long)r.dispatch_slots,
+                (unsigned long long)r.dispatch_wait_ns,
+                (unsigned long long)r.dispatch_total_ns);
 }
 
 int main(int argc, char *argv[]) {
@@ -466,6 +503,15 @@ int main(int argc, char *argv[]) {
             "mirrors LambdaGPUPipeline's ingest path)")
       .default_value(false)
       .implicit_value(true);
+  program.add_argument("--four-fpga")
+      .help("Only 32 channels / 4 FPGAs, four producers and three helpers (production worker count)")
+      .default_value(false).implicit_value(true);
+  program.add_argument("--mailboxes")
+      .help("Use isolated worker mailboxes in the --four-fpga comparison")
+      .default_value(false).implicit_value(true);
+  program.add_argument("--profile-dispatch")
+      .help("Measure dispatch and barrier wait time in --four-fpga mode (adds timing overhead)")
+      .default_value(false).implicit_value(true);
 
   try {
     program.parse_args(argc, argv);
@@ -477,6 +523,14 @@ int main(int argc, char *argv[]) {
 
   const double duration_s = program.get<double>("--duration");
   const bool with_h2d = program.get<bool>("--with-h2d");
+  const bool four_fpga = program.get<bool>("--four-fpga");
+  const bool mailboxes = program.get<bool>("--mailboxes");
+  const bool profile = program.get<bool>("--profile-dispatch");
+  if (duration_s <= 0 || !std::isfinite(duration_s) ||
+      ((mailboxes || profile) && !four_fpga)) {
+    std::cerr << "Use a positive finite duration; --mailboxes/--profile-dispatch require --four-fpga\n";
+    return 1;
+  }
 
   // Redirect the default stdout spdlog logger to a file so INFO_LOG calls
   // from ProcessorState don't pollute the benchmark's stdout output.
@@ -488,7 +542,8 @@ int main(int argc, char *argv[]) {
   logger->set_level(spdlog::level::warn);
   spatial::Logger::set(logger);
 
-  std::cout << "bench_processor: 8 configs x " << duration_s << "s each";
+  std::cout << "bench_processor: " << (four_fpga ? "32ch/4fpga producers=4 workers=3" : "8 configs")
+            << " duration=" << duration_s << " handoff=" << (mailboxes ? "mailboxes" : "legacy");
   if (with_h2d)
     std::cout << "  [--with-h2d: async H2D transfer + callback enabled]";
   std::cout << std::endl;
@@ -504,6 +559,11 @@ int main(int argc, char *argv[]) {
     return r;
   };
 
+  if (four_fpga) {
+    print_result(run_silent([&]{ return run_processor_bench<Cfg32ch4fpga, 3, 4>(
+        duration_s, with_h2d, mailboxes, profile); }));
+    return 0;
+  }
   print_result(run_silent([&]{ return run_processor_bench<Cfg1ch1fpga> (duration_s, with_h2d); }));
   print_result(run_silent([&]{ return run_processor_bench<Cfg8ch1fpga> (duration_s, with_h2d); }));
   print_result(run_silent([&]{ return run_processor_bench<Cfg16ch1fpga>(duration_s, with_h2d); }));

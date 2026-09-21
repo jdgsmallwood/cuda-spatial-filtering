@@ -73,6 +73,7 @@ scripts/**/*.json
 scripts/**/*.pcap
 scripts/**/*.csv
 scripts/**/*.sh
+!scripts/run_starweave.sh
 scripts/.venv
 **/__pycache__/*
 *.hdf5
@@ -83,7 +84,20 @@ scripts/.venv
 //*.ms/*
 *.zip
 
+# Local build and runtime artifacts
+/bin/
+/app.log
+/ctest_log.txt
+/dump.rdb
+/example_hdr.hdr
+/output_timings.csv
+/pgplot.png
+/starweave-*-source-snapshot-*.tar.gz
+/LAMBDA36-antenna-mappings-reordered.json
+/alveo_delays.json
+/nr-signal-eigenvalues.json
+/weights.json
+
 # DSPSR files
 *.ar
 *.zap
-

@@ -72,6 +72,7 @@ private:
   struct PipelineResources {
     cudaStream_t stream = nullptr;
     cudaStream_t host_stream = nullptr;
+    cudaEvent_t ingest_copy_done = nullptr;
 
     DevicePtr<typename T::InputPacketSamplesType> samples_entry;
     DevicePtr<typename T::PacketScalesType> scales;
@@ -120,6 +121,8 @@ private:
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
           cudaStreamCreateWithFlags(&host_stream, cudaStreamNonBlocking));
+      CUDA_CHECK(cudaEventCreateWithFlags(&ingest_copy_done,
+                                          cudaEventDisableTiming));
     }
 
     ~PipelineResources() {
@@ -129,6 +132,8 @@ private:
         cudaGraphExecDestroy(graph_corr);
       if (accumulate_done)
         cudaEventDestroy(accumulate_done);
+      if (ingest_copy_done)
+        cudaEventDestroy(ingest_copy_done);
       if (stream)
         cudaStreamDestroy(stream);
       if (host_stream)
@@ -137,6 +142,7 @@ private:
 
     PipelineResources(PipelineResources &&other) noexcept
         : stream(other.stream), host_stream(other.host_stream),
+          ingest_copy_done(other.ingest_copy_done),
           samples_entry(std::move(other.samples_entry)),
           scales(std::move(other.scales)),
           samples_half(std::move(other.samples_half)),
@@ -152,6 +158,7 @@ private:
           accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
       other.host_stream = nullptr;
+      other.ingest_copy_done = nullptr;
       other.graph_align = nullptr;
       other.graph_corr = nullptr;
       other.accumulate_done = nullptr;
@@ -179,6 +186,16 @@ private:
   typename T::AntennaGains *d_gains;
   std::unique_ptr<FineChannelizer<T>> channelizer_;
   std::vector<PipelineResources> buffers;
+  // One H2D completion event per host packet-assembly buffer. A host buffer cannot be handed
+  // back to ProcessorState (and therefore cannot be submitted again) until its own event has
+  // completed, so these events are never re-recorded while an earlier wait is outstanding.
+  // The old one-event-per-GPU-stream scheme violated that ownership relationship when several
+  // host buffers were queued on the same stream and eventually stopped running release callbacks.
+  std::vector<cudaEvent_t> host_buffer_copy_done;
+  std::unique_ptr<std::atomic<bool>[]> host_buffer_release_pending;
+  size_t host_buffer_release_count = 0;
+  std::atomic<bool> buffer_reclaimer_running{false};
+  std::thread buffer_reclaimer_thread;
   int *d_subpacket_delays;
   int *d_stream_perm_recv = nullptr; // [NR_RECEIVERS*NR_POL] canonical->src flat recv; identity by default
   int *d_stream_perm_pol = nullptr;  // [NR_RECEIVERS*NR_POL] canonical->src hw pol slot; identity by default
@@ -204,10 +221,78 @@ public:
     }
     visibilities_missing_packets += packet_data->get_num_missing_packets();
 
+    cudaEvent_t copy_done_event = b.ingest_copy_done;
+    if (!dummy_run) {
+      if (host_buffer_copy_done.empty()) {
+        const size_t count = this->state_->input_buffer_count();
+        if (count == 0) {
+          throw std::logic_error(
+              "ProcessorState did not report its host input-buffer count");
+        }
+        host_buffer_copy_done.resize(count, nullptr);
+        for (auto &event : host_buffer_copy_done) {
+          CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+        }
+        host_buffer_release_count = count;
+        host_buffer_release_pending =
+            std::make_unique<std::atomic<bool>[]>(count);
+        for (size_t i = 0; i < count; ++i)
+          host_buffer_release_pending[i].store(false,
+                                               std::memory_order_relaxed);
+        buffer_reclaimer_running.store(true, std::memory_order_release);
+        buffer_reclaimer_thread = std::thread([this] {
+          while (buffer_reclaimer_running.load(std::memory_order_acquire)) {
+            bool found_pending = false;
+            for (size_t i = 0; i < host_buffer_release_count; ++i) {
+              if (!host_buffer_release_pending[i].load(
+                      std::memory_order_acquire))
+                continue;
+              found_pending = true;
+              const cudaError_t status =
+                  cudaEventQuery(host_buffer_copy_done[i]);
+              if (status == cudaSuccess) {
+                // Clear ownership before release_buffer() publishes the buffer. The feeder may
+                // legitimately submit that buffer again as soon as release_buffer() returns.
+                host_buffer_release_pending[i].store(
+                    false, std::memory_order_release);
+                this->state_->release_buffer(static_cast<int>(i));
+              } else if (status != cudaErrorNotReady) {
+                std::cerr << "CUDA buffer reclaimer event query failed for host buffer "
+                          << i << ": " << cudaGetErrorString(status) << std::endl;
+                buffer_reclaimer_running.store(false,
+                                                std::memory_order_release);
+                break;
+              }
+            }
+            if (!found_pending)
+              std::this_thread::sleep_for(std::chrono::microseconds(50));
+            else
+              _mm_pause();
+          }
+        });
+        INFO_LOG("Starweave ingest created {} per-host-buffer H2D completion events",
+                 count);
+      }
+      const int host_buffer_index = packet_data->buffer_index;
+      if (host_buffer_index < 0 ||
+          static_cast<size_t>(host_buffer_index) >= host_buffer_copy_done.size()) {
+        throw std::out_of_range("packet_data host buffer index is out of range");
+      }
+      if (host_buffer_release_pending[host_buffer_index].load(
+              std::memory_order_acquire)) {
+        throw std::logic_error(
+            "host packet buffer was resubmitted before its H2D completion");
+      }
+      copy_done_event = host_buffer_copy_done[host_buffer_index];
+    }
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
-        dummy_run);
+        dummy_run, copy_done_event, dummy_run);
+    if (!dummy_run) {
+      host_buffer_release_pending[packet_data->buffer_index].store(
+          true, std::memory_order_release);
+    }
 
     if (b.graph_align != nullptr) {
       CUDA_CHECK(cudaGraphLaunch(b.graph_align, b.stream));
@@ -243,6 +328,7 @@ public:
     if (!dummy_run) {
       current_buffer = (current_buffer + 1) % num_buffers;
     }
+
   }
 
   // Part 1: permute + apply integer delays -> samples_aligned, then reorder receivers
@@ -433,7 +519,7 @@ public:
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
 
-    if (std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr) {
+    {
       bool all_ok = true;
       for (auto &b : buffers) {
         if (!capture_graph(
@@ -471,6 +557,21 @@ public:
   };
 
   ~LambdaStarweavePipeline() {
+    buffer_reclaimer_running.store(false, std::memory_order_release);
+    if (buffer_reclaimer_thread.joinable())
+      buffer_reclaimer_thread.join();
+    // All host-stream waits/callbacks must retire before their per-host-buffer events are
+    // destroyed. cudaStreamSynchronize also makes shutdown errors visible to CUDA_CHECK.
+    for (auto &b : buffers) {
+      if (b.stream)
+        CUDA_CHECK(cudaStreamSynchronize(b.stream));
+      if (b.host_stream)
+        CUDA_CHECK(cudaStreamSynchronize(b.host_stream));
+    }
+    for (auto event : host_buffer_copy_done) {
+      if (event)
+        CUDA_CHECK(cudaEventDestroy(event));
+    }
     if (visibilities_reset_done)
       cudaEventDestroy(visibilities_reset_done);
     if (d_visibilities_accumulator)

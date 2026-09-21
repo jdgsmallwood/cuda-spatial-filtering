@@ -1,0 +1,115 @@
+\begin{figure}[!htbp]
+  \centering
+  \begin{tikzpicture}[node distance=6mm]
+
+  %% --- Wire packet ---
+  \node[pbox, fill=cHost!55, draw=blue!45!black]
+    (wire)
+    {\textbf{Custom UDP Payload}\\[2pt]
+     \footnotesize
+     $\bullet$\;Packet header: FPGA/source ID, channel index, packet counter, timestamp.\\
+     $\bullet$\;Payload: channelised voltage samples.\\
+     $\bullet$\;Quantisation: packed signed int8 samples.\\
+     $\bullet$\;Scale metadata: int16 per-packet or per-channel scale factors.};
+
+  %% --- Parsed packet ---
+  \node[pbox, fill=cHost, draw=blue!45!black, below=of wire]
+    (parsed)
+    {\textbf{Parsed Packet Record}
+     \;{\footnotesize\itshape(CPU)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Validate header and packet counter.\\
+     $\bullet$\;Map stream $\to$ FPGA source and frequency channel.\\
+     $\bullet$\;Compute destination offset in correlation-block buffer.\\
+     $\bullet$\;Detect gaps and mark missing packets for zero-fill.};
+
+  %% --- Correlation block ---
+  \node[pbox, fill=cHost!70, draw=blue!45!black, below=of parsed]
+    (block)
+    {\textbf{Assembled Correlation Block}
+     \;{\footnotesize\itshape(CPU buffer)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Layout grouped by channel, FPGA source, receiver, and time sample.\\
+     $\bullet$\;Inter-FPGA packet-delay offsets applied before hand-off.\\
+     $\bullet$\;Missing packets replaced by zeros.\\
+     $\bullet$\;Triple-buffered host memory for overlap with GPU processing.};
+
+  %% --- GPU representation ---
+  \node[pbox, fill=cCuda!35, draw=blue!45!black, below=of block]
+    (gpu)
+    {\textbf{GPU Sample Tensor}
+     \;{\footnotesize\itshape(CUDA)}\\[2pt]
+     \footnotesize
+     $\bullet$\;Host-to-device copy of int8 samples and int16 scales.\\
+     $\bullet$\;Unpack and type-convert:
+       int8, int16 $\to$ int32 $\to$ float16.\\
+     $\bullet$\;Fine delay calibration and receiver padding to $N_\mathrm{pad}$.\\
+     $\bullet$\;Tensor layout matched to correlation and beamforming kernels.};
+
+  %% --- downstream users ---
+  \node[wbox] (corr) at ([xshift=-22mm,yshift=-22mm]gpu.south)
+    {\textbf{Correlation}\\[2pt]
+     float16 samples\\
+     $\to$ float32 visibilities};
+
+  \node[wbox] (beam) at ([xshift=22mm,yshift=-22mm]gpu.south)
+    {\textbf{Beamforming}\\[2pt]
+     calibrated samples\\
+     $\to$ beam voltages};
+
+  \begin{scope}[on background layer]
+    \node[draw=cOut!60!gray, dashed, rounded corners=6pt,
+          fill=cOut!22, inner sep=4mm,
+          fit=(corr)(beam)] (uses) {};
+  \end{scope}
+  \node[above, font=\sffamily\footnotesize\itshape, text=gray!70!black]
+    at (uses.north) {GPU Consumers};
+
+  %% --- arrows ---
+  \draw[arr] (wire) -- (parsed)
+    node[right, midway, xshift=2mm, font=\sffamily\footnotesize]
+    {parse};
+
+  \draw[arr] (parsed) -- (block)
+    node[right, midway, xshift=2mm, font=\sffamily\footnotesize]
+    {place};
+
+  \draw[arr] (block) -- (gpu)
+    node[right, midway, xshift=2mm, font=\sffamily\footnotesize]
+    {copy};
+
+  \coordinate (fan) at ([yshift=-5mm]gpu.south);
+  \draw[thick] (gpu.south) -- (fan);
+  \draw[arr] (fan) -| (corr.north);
+  \draw[arr] (fan) -| (beam.north);
+
+  %% --- side annotations ---
+  \node[
+    draw=gray!55,
+    fill=gray!8,
+    rounded corners=4pt,
+    align=left,
+    font=\sffamily\footnotesize,
+    text width=36mm,
+    right=9mm of parsed
+  ] (key)
+  {\textbf{Main conversions}\\[2pt]
+   packet stream $\to$ indexed records\\
+   records $\to$ dense block\\
+   int8 samples $\to$ float16\\
+   int16 scales $\to$ float16 gain};
+
+  \draw[arr, gray!70] (key.west) -- (parsed.east);
+
+  \end{tikzpicture}
+  \caption{%
+    Packet format and data conversions from the custom UDP wire format to the
+    GPU sample tensor.  The CPU packet processor parses headers, maps packets
+    into correlation-block offsets, applies coarse inter-FPGA packet alignment,
+    and zero-fills missing data.  The GPU pipeline then copies the assembled
+    int8 samples and int16 scale factors, unpacks and converts them to the
+    floating-point representation required by the correlation and beamforming
+    stages.
+  }
+  \label{fig:packet-format-conversions}
+\end{figure}
