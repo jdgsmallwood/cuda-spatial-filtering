@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 #include "spatial/packet_formats.hpp"
+#include "spatial/deripple.hpp"
 #include "spatial/pointing.hpp"
 #include "spatial/spatial.hpp"
 #include <algorithm>
@@ -8,6 +9,10 @@
 #include <cmath>
 #include <complex>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cufftXt.h>
@@ -103,7 +108,7 @@ inline BeamWeightsT<T> compute_steering_weights(
     const FrequencyPlan &frequency_plan, int min_freq_channel,
     const ArrayLocation &array_location,
     std::chrono::system_clock::time_point utc_time,
-    const typename T::AntennaGains *calibration_gains = nullptr) {
+    const typename T::FineAntennaGains *calibration_gains = nullptr) {
   BeamWeightsT<T> result{};
 
   for (size_t b = 0; b < T::NR_BEAMS; ++b) {
@@ -128,8 +133,9 @@ inline BeamWeightsT<T> compute_steering_weights(
     }
 
     for (size_t chan = 0; chan < T::NR_CHANNELS; ++chan) {
-      double frequency_hz = channel_to_frequency_hz(
-          min_freq_channel + static_cast<int>(chan), frequency_plan);
+      double frequency_hz = processing_channel_to_frequency_hz(
+          chan, min_freq_channel, frequency_plan, T::NR_FINE_CHANNELS,
+          T::NR_FINE_CHANNEL_EDGE_TRIM);
       double phase_scale =
           -2.0 * M_PI * frequency_hz / kSpeedOfLightMetresPerSecond;
 
@@ -155,18 +161,11 @@ inline BeamWeightsT<T> compute_steering_weights(
             phase_scale * (dc.l * enu.east + dc.m * enu.north + dc.n * enu.up);
         std::complex<double> steering_phasor(std::cos(phase), std::sin(phase));
 
-        // calibration_gains is loaded per coarse/FPGA channel (see get_gains_structure) and
-        // applied uniformly across every fine channel within it -- chan here ranges over the
-        // widened T::NR_CHANNELS (coarse*NR_EFFECTIVE_FINE_CHANNELS + effective_fine, where
-        // NR_EFFECTIVE_FINE_CHANNELS accounts for the edge-trimmed fine channels dropped by
-        // channelizer_output_to_corr_input), so map back down to the coarse index before indexing
-        // the NR_FPGA_CHANNELS-sized AntennaGains array.
-        const size_t coarse_chan = chan / T::NR_EFFECTIVE_FINE_CHANNELS;
         for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
           std::complex<double> calibration_gain =
               calibration_gains
                   ? std::complex<double>(
-                        (*calibration_gains)[coarse_chan][pol][receiver_idx])
+                        (*calibration_gains)[chan][pol][receiver_idx])
                   : std::complex<double>(1.0, 0.0);
 
           std::complex<double> final_weight =
@@ -234,7 +233,8 @@ template <typename T> struct BeamSteering {
                FrequencyPlan frequency_plan, int min_freq_channel,
                ArrayLocation array_location, double update_interval_seconds,
                int num_buffers,
-               const typename T::AntennaGains *calibration_gains = nullptr)
+               const typename T::FineAntennaGains *calibration_gains = nullptr,
+               const std::string &fixed_utc = "")
       : targets_(std::move(targets)),
         antenna_positions_(std::move(antenna_positions)),
         antenna_mapping_(std::move(antenna_mapping)),
@@ -242,6 +242,18 @@ template <typename T> struct BeamSteering {
         array_location_(array_location),
         update_interval_(update_interval_seconds),
         calibration_gains_(calibration_gains) {
+    if (!fixed_utc.empty()) {
+      std::tm parsed{};
+      std::istringstream in(fixed_utc);
+      in >> std::get_time(&parsed, "%Y-%m-%dT%H:%M:%SZ");
+      if (in.fail() || in.peek() != std::char_traits<char>::eof())
+        throw std::invalid_argument("--steering-utc must be YYYY-MM-DDTHH:MM:SSZ");
+      const std::time_t epoch = timegm(&parsed);
+      if (epoch == static_cast<std::time_t>(-1))
+        throw std::invalid_argument("invalid --steering-utc epoch");
+      fixed_time_ = std::chrono::system_clock::from_time_t(epoch);
+      INFO_LOG("BeamSteering: fixed replay sky epoch {}", fixed_utc);
+    }
     buffers_.reserve(num_buffers);
     if (!targets_.empty()) {
       INFO_LOG("BeamSteering: tracking {} beam target(s) with {:.1f}s update interval",
@@ -278,7 +290,7 @@ template <typename T> struct BeamSteering {
     // last_update_ starts at the epoch, so the very first call -- during the
     // constructor's warmup run -- is immediately overdue and synthesizes real
     // weights right away rather than running on placeholder h_weights.
-    const auto now = std::chrono::system_clock::now();
+    const auto now = fixed_time_.value_or(std::chrono::system_clock::now());
     const double elapsed_s =
         std::chrono::duration<double>(now - last_update_).count();
 
@@ -326,7 +338,8 @@ private:
   ArrayLocation array_location_;
   // seconds-as-double, comparable directly against system_clock durations.
   std::chrono::duration<double> update_interval_;
-  const typename T::AntennaGains *calibration_gains_;
+  const typename T::FineAntennaGains *calibration_gains_;
+  std::optional<std::chrono::system_clock::time_point> fixed_time_;
 
   std::vector<RegisteredBuffer> buffers_;
   BeamWeights current_weights_{};
@@ -531,7 +544,9 @@ template <typename T> struct LambdaPipelineIngest {
                                void *d_samples_entry, void *d_scales,
                                void *d_gains, void *d_samples_half,
                                bool dummy_run,
-                               cudaEvent_t copy_done_event = nullptr) {
+                               cudaEvent_t copy_done_event = nullptr,
+                               bool launch_release_callback = true,
+                               cudaEvent_t profile_after_copy = nullptr) {
     if (!dummy_run && state == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
@@ -542,12 +557,23 @@ template <typename T> struct LambdaPipelineIngest {
     cudaMemcpyAsync(d_scales, (void *)packet_data->get_scales_ptr(),
                     packet_data->get_scales_element_size(), cudaMemcpyDefault,
                     stream);
+    if (profile_after_copy != nullptr)
+      CUDA_CHECK(cudaEventRecord(profile_after_copy, stream));
 
-    auto *ctx =
-        new BufferReleaseContext{.state = state,
-                                 .buffer_index = packet_data->buffer_index,
-                                 .dummy_run = dummy_run};
-    if (copy_done_event != nullptr) {
+    if (!dummy_run && !launch_release_callback) {
+      if (copy_done_event == nullptr) {
+        throw std::logic_error(
+            "event-polled buffer release requires a completion event");
+      }
+      // The owning pipeline polls this event and returns the host buffer. No CUDA host callback
+      // is queued, avoiding callback-worker starvation and keeping release_buffer() out of CUDA's
+      // internal callback threads.
+      CUDA_CHECK(cudaEventRecord(copy_done_event, stream));
+    } else if (copy_done_event != nullptr) {
+      auto *ctx =
+          new BufferReleaseContext{.state = state,
+                                   .buffer_index = packet_data->buffer_index,
+                                   .dummy_run = dummy_run};
       // Release the host staging buffer only after both asynchronous H2D
       // copies have consumed it.  The separate host stream keeps the release
       // callback from stalling the compute stream before scale conversion.
@@ -556,6 +582,10 @@ template <typename T> struct LambdaPipelineIngest {
       CUDA_CHECK(
           cudaLaunchHostFunc(host_stream, release_buffer_host_func, ctx));
     } else {
+      auto *ctx =
+          new BufferReleaseContext{.state = state,
+                                   .buffer_index = packet_data->buffer_index,
+                                   .dummy_run = dummy_run};
       // Callers without a completion event still need correct ordering.  A
       // callback on an unrelated stream can otherwise recycle packet_data
       // while either H2D copy is still reading it.
@@ -574,11 +604,10 @@ template <typename T> struct LambdaPipelineIngest {
 };
 
 // Pre-correlation fine channelization via ASTRON's gpu-filter (ppf::Filter), a GPU polyphase
-// filterbank. One ppf::Filter instance per coarse/FPGA channel -- FilterArgs has no "channel of
-// channels" axis (confirmed against libfilter/Filter.cc's launch grid, which is
-// (nrPolarizations, nrReceivers, nrSamplesPerChannel/16) with no coarse-channel dimension), and
-// each instance's FIR stage carries PFB history that must not mix data from different coarse
-// channels.
+// filterbank. FilterArgs has no "channel of channels" axis (confirmed against
+// libfilter/Filter.cc's launch grid, which is (nrPolarizations, nrReceivers,
+// nrSamplesPerChannel/16) with no coarse-channel dimension), so each coarse channel is launched
+// separately over its own input/output slice.
 //
 // Ring-buffer mode is intentionally left off (FilterArgs::ringBufferSize stays nullopt): with it
 // off, Filter::launchAsync carries zero cross-call state (confirmed by reading Filter.cc -- it
@@ -588,9 +617,10 @@ template <typename T> struct LambdaPipelineIngest {
 // that input must include NR_TAPS-1 trailing look-ahead samples past the "real" data;
 // reorder_to_filter_input (spatial.cuh) zero-pads them at the end of every buffer rather than
 // carrying continuity across buffers -- a known, accepted per-buffer edge transient for v1.
-// Because there's no cross-call state, this is also what makes concurrent multi-buffer use of the
-// same Filter instances (LambdaGPUPipeline's normal mode of operation) and CUDA graph capture
-// both safe.
+// Because there's no cross-call state, one Filter object can launch every coarse-channel slice,
+// including concurrent launches from the pipeline's multiple streams. This matters because the
+// Filter constructor NVRTC-compiles its kernel: constructing one identical object per coarse
+// channel needlessly compiled the same kernel 48 times for starweave_4_48.
 //
 // Native per-antenna delay compensation (FilterArgs::delays, applied during channelization in the
 // frequency domain) is intentionally left disabled here -- wiring real delay values through is
@@ -634,9 +664,26 @@ template <typename T> struct FineChannelizer {
       __half2[NR_COARSE][NR_FINE][NR_SAMPLES_PER_FINE_CHANNEL / NR_TIMES_PER_OUTPUT_BLOCK]
              [T::NR_RECEIVERS][T::NR_POLARIZATIONS][NR_TIMES_PER_OUTPUT_BLOCK];
 
-  std::vector<std::unique_ptr<ppf::Filter>> filters;
+  std::unique_ptr<ppf::Filter> filter;
+  DevicePtr<float> deripple_gains_;
+  std::string deripple_response_id_;
+
+  const float *deripple_gains() const { return deripple_gains_.get(); }
+  const std::string &deripple_response_id() const { return deripple_response_id_; }
 
   explicit FineChannelizer(CUdevice cu_device) {
+    if (!coarse_pfb_deripple_config_path().empty()) {
+      auto config = load_coarse_pfb_deripple(
+          coarse_pfb_deripple_config_path(), T::NR_FINE_CHANNELS,
+          T::NR_FINE_CHANNEL_EDGE_TRIM);
+      deripple_gains_ = make_device_ptr<float>(
+          config.voltage_gains.size() * sizeof(float));
+      CUDA_CHECK(cudaMemcpy(deripple_gains_.get(), config.voltage_gains.data(),
+                            config.voltage_gains.size() * sizeof(float),
+                            cudaMemcpyHostToDevice));
+      deripple_response_id_ = config.response_id;
+      INFO_LOG("Fine-channel de-ripple enabled: response {}", deripple_response_id_);
+    }
     cu::Device device(cu_device);
 
     ppf::FilterArgs args;
@@ -652,14 +699,10 @@ template <typename T> struct FineChannelizer {
     args.fft.mirror = false;
     args.output.sampleFormat = ppf::FilterArgs::fp16;
 
-    INFO_LOG("FineChannelizer: constructing {} gpu-filter instances ({} fine channels each, {} "
-             "samples/fine-channel, {} taps) -- this JIT-compiles {} nearly-identical NVRTC "
-             "kernels and may take a while",
-             NR_COARSE, NR_FINE, NR_SAMPLES_PER_FINE_CHANNEL, NR_TAPS, NR_COARSE);
-    filters.reserve(NR_COARSE);
-    for (size_t c = 0; c < NR_COARSE; ++c) {
-      filters.push_back(std::make_unique<ppf::Filter>(device, args));
-    }
+    INFO_LOG("FineChannelizer: constructing one shared gpu-filter instance for {} coarse "
+             "channels ({} fine channels each, {} samples/fine-channel, {} taps)",
+             NR_COARSE, NR_FINE, NR_SAMPLES_PER_FINE_CHANNEL, NR_TAPS);
+    filter = std::make_unique<ppf::Filter>(device, args);
   }
 
   // Launches one Filter per coarse channel on the given stream. d_filter_input/d_filter_output
@@ -684,7 +727,7 @@ template <typename T> struct FineChannelizer {
     for (size_t c = 0; c < NR_COARSE; ++c) {
       cu::DeviceMemory in((CUdeviceptr)((char *)d_filter_input + c * in_bytes_per_channel));
       cu::DeviceMemory out((CUdeviceptr)((char *)d_filter_output + c * out_bytes_per_channel));
-      filters[c]->launchAsync(cuStream, out, in);
+      filter->launchAsync(cuStream, out, in);
     }
   }
 };

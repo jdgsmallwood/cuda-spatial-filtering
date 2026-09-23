@@ -296,11 +296,17 @@ int main(int argc, char *argv[]) {
   const bool use_canonical = !args.canonical_recv_perm.empty();
   const auto &active_mapping =
       use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
-  typename Config::AntennaGains calibration_gains{};
+  typename Config::FineAntennaGains calibration_gains{};
   if (fold_calibration_into_steering) {
-    calibration_gains = use_canonical
-        ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
-        : get_gains_structure<Config>(args);
+    if constexpr (Config::NR_FINE_CHANNELS > 1) {
+      calibration_gains = get_fine_beam_gains_structure<Config>(args, active_mapping);
+    } else {
+      const auto coarse_gains = use_canonical
+          ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+          : get_gains_structure<Config>(args);
+      for (size_t channel = 0; channel < Config::NR_CHANNELS; ++channel)
+        calibration_gains[channel] = coarse_gains[channel];
+    }
   }
 
   BeamSteering<Config> beam_steering(

@@ -168,6 +168,12 @@ public:
   std::atomic<uint64_t> packets_future_queued = 0;
   std::atomic<uint64_t> packets_stuck_unprocessed = 0;
   uint64_t pipeline_runs_queued = 0;
+#ifdef SPATIAL_DIAGNOSTICS
+  std::atomic<uint64_t> diagnostic_buffer_releases{0};
+  std::atomic<uint64_t> diagnostic_buffer_handoffs{0};
+  std::atomic<uint64_t> diagnostic_empty_buffer_waits{0};
+  std::atomic<uint64_t> diagnostic_processor_dispatches{0};
+#endif
   // Set on the first packet discarded because its freq_channel falls outside
   // [MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + NR_CHANNELS). Used to emit a
   // one-time warning -- this is the most common cause of "everything discarded,
@@ -185,6 +191,19 @@ public:
   // Legacy mode (nr_capture_threads == 0): reserve_write_batch() under
   // producer_mutex, write_index watermark — unchanged.
   static constexpr int MAX_CAPTURE_THREADS = 8;
+#ifdef SPATIAL_DIAGNOSTICS
+  std::array<std::atomic<uint64_t>, MAX_CAPTURE_THREADS>
+      diagnostic_reserve_processed_waits{};
+  std::array<std::atomic<uint64_t>, MAX_CAPTURE_THREADS>
+      diagnostic_reserve_read_waits{};
+  // Updated only when a completed assembly buffer is already being scanned
+  // for missing packets. This keeps attribution entirely off the packet hot
+  // path while allowing monitor_app_stats() to identify the FPGA/QP behind a
+  // loss burst.
+  std::array<std::atomic<uint64_t>, MAX_CAPTURE_THREADS>
+      diagnostic_missing_by_fpga{};
+  size_t diagnostic_fpga_count = 0;
+#endif
   struct alignas(64) ThreadClaim {
     std::atomic<uint64_t> linear{0};
   };
@@ -253,15 +272,17 @@ public:
   virtual size_t packet_ring_slot_stride() const { return 0; }
   virtual size_t packet_ring_slot_offset() const { return 0; }
   virtual size_t packet_ring_slot_count() const { return 0; }
+  virtual size_t input_buffer_count() const { return 0; }
 
   virtual void release_buffer(const int buffer_index) = 0;
+  virtual void print_extended_diagnostics() {}
   virtual void set_pipeline(GPUPipeline *pipeline) = 0;
   virtual void process_all_available_packets() = 0;
 
   virtual void handle_buffer_completion(bool force_flush = false) = 0;
 
-  // GPUDirect ingest support (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md,
-  // libibverbs.hpp's LibibverbsGpuDirectPacketCapture). Resolves where a
+  // GPUDirect ingest support (see libibverbs.hpp's
+  // LibibverbsGpuDirectPacketCapture). Resolves where a
   // packet with the given (sample_count, fpga_id, freq_channel) belongs,
   // using the same placement arithmetic as the reactive
   // copy_data_to_input_buffer_if_able path (locate_packet()), and returns the
@@ -287,6 +308,7 @@ template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000, int WORKER_COUNT = 3>
 class ProcessorState : public ProcessorStateBase {
 public:
+  size_t input_buffer_count() const override { return NR_INPUT_BUFFERS; }
   struct alignas(64) WorkRange {
     int start;
     int end;
@@ -337,6 +359,10 @@ public:
       : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
+#ifdef SPATIAL_DIAGNOSTICS
+    static_assert(T::NR_FPGA_SOURCES <= MAX_CAPTURE_THREADS);
+    diagnostic_fpga_count = T::NR_FPGA_SOURCES;
+#endif
     this->fpga_ids = fpga_ids_;
     for (auto &row : latest_packet_received)
       for (auto &v : row)
@@ -816,6 +842,10 @@ public:
     using ConcreteEntry = typename T::PacketEntryType;
     ProcessedPacket parsed =
         static_cast<ConcreteEntry *>(pkt)->ConcreteEntry::parse();
+    if (parsed.payload == nullptr) [[unlikely]] {
+      packets_discarded.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
     // DEBUG_LOG(
     //     "Processing packet: sample_count={}, freq_channel={}, fpga_id={}, "
     //     "payload={} bytes",
@@ -901,6 +931,35 @@ public:
     }
   }
 
+  void print_extended_diagnostics() override {
+#ifdef SPATIAL_DIAGNOSTICS
+    std::lock_guard<std::mutex> lock(future_packet_queue_mutex);
+    std::cout << "DIAG FutureQueue=[";
+    for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
+      if (i) std::cout << ',';
+      const auto horizon = global_max_end_seq[i].load(std::memory_order_relaxed);
+      const auto &queue = future_packet_queue[i];
+      std::cout << "fpga" << i << ":size=" << queue.size()
+                << ":head_minus_horizon="
+                << (queue.empty() ? 0 : static_cast<int64_t>(queue.top().packet_num)
+                                          - static_cast<int64_t>(horizon));
+    }
+    std::cout << "] ReserveProcessedWaits=[";
+    for (int i = 0; i < nr_capture_threads; ++i) {
+      if (i) std::cout << ',';
+      std::cout << diagnostic_reserve_processed_waits[i].load(
+          std::memory_order_relaxed);
+    }
+    std::cout << "] ReserveReadWaits=[";
+    for (int i = 0; i < nr_capture_threads; ++i) {
+      if (i) std::cout << ',';
+      std::cout << diagnostic_reserve_read_waits[i].load(
+          std::memory_order_relaxed);
+    }
+    std::cout << "]" << std::endl;
+#endif
+  }
+
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
   __attribute__((hot)) void release_buffer(const int buffer_index) {
@@ -932,6 +991,9 @@ public:
       buffer.is_ready = true;
       buffer_ordering_queue.push({buf_idx, buffer.start_seq[0]});
     }
+#ifdef SPATIAL_DIAGNOSTICS
+    diagnostic_buffer_releases.fetch_add(1, std::memory_order_relaxed);
+#endif
     buffer_available_cv.notify_one();
     // INFO_LOG("[ProcessorState] added buffer index {} back to queue with "
     //          "start_seq {}",
@@ -946,8 +1008,16 @@ public:
     // INFO_LOG("advancing to next buffer...");
     BufferOrder b;
     std::unique_lock<std::mutex> lock(buffer_index_mutex);
-    buffer_available_cv.wait(lock,
-                             [this] { return !buffer_ordering_queue.empty(); });
+#ifdef SPATIAL_DIAGNOSTICS
+    if (buffer_ordering_queue.empty())
+      diagnostic_empty_buffer_waits.fetch_add(1, std::memory_order_relaxed);
+#endif
+    buffer_available_cv.wait(lock, [this] {
+      return !buffer_ordering_queue.empty() ||
+             !running.load(std::memory_order_acquire);
+    });
+    if (buffer_ordering_queue.empty())
+      return -1;
     b = buffer_ordering_queue.top();
     buffer_ordering_queue.pop();
     lock.unlock();
@@ -1007,22 +1077,6 @@ public:
           if (latest < threshold) {
             all_fpgas_complete = false;
             if (i == 0) {
-              // TEMP DIAGNOSTIC: rate-limited dump of exactly which
-              // (channel, fpga) is blocking buffer-0 completion, and by how
-              // much, when this happens repeatedly without ever resolving.
-              // See docs/ibverbs-zerocopy-handoff.md 32ch investigation.
-              static std::chrono::steady_clock::time_point last_stall_log{};
-              const auto now = std::chrono::steady_clock::now();
-              if (now - last_stall_log > std::chrono::seconds(1)) {
-                last_stall_log = now;
-                INFO_LOG("[StallDiag] buf_idx={} channel={} fpga={} "
-                         "latest_packet_received={} threshold={} gap={} "
-                         "end_seq={}",
-                         buf_idx, channel, fpga, latest, threshold,
-                         static_cast<int64_t>(threshold) -
-                             static_cast<int64_t>(latest),
-                         end_seq[fpga]);
-              }
               return;
             }
             break;
@@ -1093,16 +1147,12 @@ public:
 
   // Drain future-queued packets that have come into the horizon
   // (packet_num <= global_max) back through process_packet_data(), and run
-  // the stall safety net for streams stuck beyond it.  Called from the
-  // processor loop every iteration; try_to_lock so it never blocks capture
-  // threads that are mid-deferral.
+  // the stall safety net for streams stuck beyond it. Completion must wait
+  // for this short queue lock: skipping a drain when a capture thread happens
+  // to be enqueueing can finalize a buffer before its deferred data lands.
   void drain_future_packets(
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
-    std::unique_lock<std::mutex> lock(future_packet_queue_mutex,
-                                      std::try_to_lock);
-    if (!lock.owns_lock()) {
-      return;
-    }
+    std::unique_lock<std::mutex> lock(future_packet_queue_mutex);
     for (int i = 0; i < T::NR_FPGA_SOURCES; ++i) {
       while (!future_packet_queue[i].empty()) {
         auto pkt = future_packet_queue[i].top();
@@ -1198,8 +1248,14 @@ public:
     // own natural batch granularity fixes this for zero-copy while being a
     // no-op for the kernel-socket path (whose batches essentially never
     // reach this size in the first place).
-    constexpr int REGULAR_BATCH_SIZE = 256;
+    // At 48+ channels, use a 64-slot handoff matching the ibverbs CQ poll
+    // batch; lower channel counts retain the 256-slot dispatch limit. Both
+    // paths check the committed prefix before dispatching below, since a
+    // claimed but uncommitted receive can deadlock at 40 channels too.
+    constexpr int REGULAR_BATCH_SIZE =
+        (T::NR_FPGA_CHANNELS >= 48) ? 64 : 256;
     uint64_t dispatch_generation = 0;
+    int idle_iterations = 0;
 
     // Distribute `slots` items (each `stride` ring-index steps apart, starting
     // at `base_ring`) across the processor thread plus WORKER_COUNT helpers.
@@ -1269,28 +1325,10 @@ public:
           }
         }
       } else {
-        // TEMP DIAGNOSTIC: rate-limited heartbeat so a stall inside this
-        // otherwise-silent spin is visible instead of indistinguishable
-        // from process_packets() simply not being called at all. See
-        // docs/ibverbs-zerocopy-handoff.md 32ch investigation.
-        auto wait_diag_start = std::chrono::steady_clock::now();
-        auto last_wait_diag = wait_diag_start;
         while (num_workers_with_tasks.load(std::memory_order_acquire) > 0) {
           if (!running.load(std::memory_order_relaxed) &&
               workers_alive.load(std::memory_order_acquire) == 0)
             break;
-          const auto now = std::chrono::steady_clock::now();
-          if (now - last_wait_diag > std::chrono::seconds(1)) {
-            last_wait_diag = now;
-            std::cerr << "DIAG dispatch_and_wait: stuck waiting for workers "
-                         "for "
-                      << std::chrono::duration_cast<std::chrono::seconds>(
-                             now - wait_diag_start)
-                             .count()
-                      << "s, num_workers_with_tasks="
-                      << num_workers_with_tasks.load() << " gen="
-                      << generation << std::endl;
-          }
           _mm_pause();
         }
       }
@@ -1316,14 +1354,35 @@ public:
               per_thread_claim[tid].linear.load(std::memory_order_acquire);
           if (claim <= per_thread_my_read[tid]) continue;
 
-          const int slots = static_cast<int>(
+          int slots = static_cast<int>(
               std::min((claim - per_thread_my_read[tid]) / (uint64_t)stride,
                        (uint64_t)REGULAR_BATCH_SIZE));
+
+          // ibverbs publishes reservations in per_thread_claim before the NIC
+          // has completed DMA into every slot. Dispatching an uncommitted slot
+          // can park a worker while its capture thread is waiting to reserve a
+          // replacement and is therefore unable to retire later CQ entries.
+          // Only hand workers the contiguous committed prefix. The same
+          // circular wait occurs at 40 channels, not just at 48+ channels.
+          // Slots cannot be reused until per_thread_read_linear advances.
+          int committed_slots = 0;
+          int ring_index = static_cast<int>(
+              per_thread_my_read[tid] % RING_BUFFER_SIZE);
+          while (committed_slots < slots &&
+                 d_packet_data[ring_index]->committed.load(
+                     std::memory_order_acquire)) {
+            ++committed_slots;
+            ring_index = (ring_index + stride) % RING_BUFFER_SIZE;
+          }
+          slots = committed_slots;
           if (slots == 0) continue;
 
           dispatch_and_wait(
               static_cast<int>(per_thread_my_read[tid] % RING_BUFFER_SIZE),
               slots, stride);
+#ifdef SPATIAL_DIAGNOSTICS
+          diagnostic_processor_dispatches.fetch_add(1, std::memory_order_relaxed);
+#endif
 
           per_thread_my_read[tid] += (uint64_t)slots * stride;
           per_thread_read_linear[tid].linear.store(per_thread_my_read[tid],
@@ -1332,9 +1391,20 @@ public:
         }
 
         if (!any_processed) [[unlikely]] {
+          // Future-queued packets keep their ring slots unprocessed until the
+          // buffer horizon catches up. If every capture thread is waiting to
+          // reuse one of those slots, no new batch arrives to trigger the
+          // usual drain below. Service the queue while idle so this circular
+          // wait cannot stop the stream. Throttle the check to keep the idle
+          // spin path cheap when there is no queued work.
+          if (++idle_iterations == 1024) {
+            handle_buffer_completion();
+            idle_iterations = 0;
+          }
           _mm_pause();
           continue;
         }
+        idle_iterations = 0;
       } else {
         // Legacy mode: single producer advances write_index under mutex.
         const int current_write_index =
@@ -1344,25 +1414,29 @@ public:
             (int)RING_BUFFER_SIZE;
 
         if (available <= 0) [[unlikely]] {
+          if (++idle_iterations == 1024) {
+            handle_buffer_completion();
+            idle_iterations = 0;
+          }
           _mm_pause();
           continue;
         }
+        idle_iterations = 0;
 
         const int to_process = std::min(available, REGULAR_BATCH_SIZE);
         const int slice_end =
             (current_read_index + to_process) % (int)RING_BUFFER_SIZE;
 
         dispatch_and_wait(current_read_index, to_process, 1);
+#ifdef SPATIAL_DIAGNOSTICS
+        diagnostic_processor_dispatches.fetch_add(1, std::memory_order_relaxed);
+#endif
 
         current_read_index = slice_end;
         read_index.store(current_read_index, std::memory_order_release);
       }
 
       if (--packets_until_completion_check == 0) {
-        // Before checking buffer completion drain any packets from the
-        // queue that should be in this buffer
-        get_global_max_packet_array(global_max);
-        drain_future_packets(global_max);
         handle_buffer_completion();
         packets_until_completion_check = num_loops_before_completion_check;
       }
@@ -1398,27 +1472,10 @@ public:
       __builtin_prefetch(pre_entry->data + 1536, 0, 1);
 
       bool bailed = false;
-      // TEMP DIAGNOSTIC: rate-limited heartbeat -- if a specific ring slot
-      // is reserved but never committed, this spins forever with no other
-      // visible symptom than dispatch_and_wait() never returning. See
-      // docs/ibverbs-zerocopy-handoff.md 32ch investigation.
-      auto commit_wait_start = std::chrono::steady_clock::now();
-      auto last_commit_diag = commit_wait_start;
       while (!entry->committed.load(std::memory_order_acquire)) [[unlikely]] {
         if (!running.load(std::memory_order_relaxed)) {
           bailed = true;
           break;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (now - last_commit_diag > std::chrono::seconds(1)) {
-          last_commit_diag = now;
-          std::cerr << "DIAG process_work_range: stuck waiting for slot "
-                    << idx << " to commit for "
-                    << std::chrono::duration_cast<std::chrono::seconds>(
-                           now - commit_wait_start)
-                           .count()
-                    << "s (task start=" << start << " end=" << end
-                    << " stride=" << stride << ")" << std::endl;
         }
         _mm_pause();
       }
@@ -1508,6 +1565,12 @@ public:
           "Pipeline has not been set. Ensure that set_pipeline has been "
           "called on ProcessorState class.");
     }
+    // A GPU H2D completion may have released a host buffer and extended the
+    // packet horizon since the last batch. Place every newly eligible queued
+    // packet before deciding whether that buffer is complete.
+    std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
+    get_global_max_packet_array(global_max);
+    drain_future_packets(global_max);
     using clock = std::chrono::high_resolution_clock;
     auto cpu_start = clock::now();
     auto cpu_end = clock::now();
@@ -1537,9 +1600,26 @@ public:
       //  Then advance to next buffer and keep iterating.
 
       buffer.is_ready = false;
+#ifdef SPATIAL_DIAGNOSTICS
+      diagnostic_buffer_handoffs.fetch_add(1, std::memory_order_relaxed);
+#endif
       cpu_start = clock::now();
       // INFO_LOG("Zeroing missing packets...");
       d_samples[current_buf]->zero_missing_packets();
+#ifdef SPATIAL_DIAGNOSTICS
+      for (size_t channel = 0; channel < T::NR_FPGA_CHANNELS; ++channel) {
+        for (size_t packet = 0; packet < NR_PACKETS_FOR_CORRELATION;
+             ++packet) {
+          for (size_t fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
+            if (!d_samples[current_buf]
+                     ->arrivals[0][channel][packet + 1][fpga]) {
+              diagnostic_missing_by_fpga[fpga].fetch_add(
+                  1, std::memory_order_relaxed);
+            }
+          }
+        }
+      }
+#endif
       packets_missing += d_samples[current_buf]->get_num_missing_packets();
       cpu_end = clock::now();
       // DEBUG_LOG("CPU time for zeroing packets: {} us",
@@ -1580,6 +1660,8 @@ public:
       cpu_start = clock::now();
       current_buf = advance_to_next_buffer();
       cpu_end = clock::now();
+      if (current_buf < 0)
+        return;
     }
     // DEBUG_LOG("CPU time for advancing to next buffer: {} us",
     //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
@@ -1592,13 +1674,14 @@ public:
   void shutdown() {
     // Workers and pipeline_feeder both spin-check running and exit naturally.
     running.store(0, std::memory_order_release);
+    buffer_available_cv.notify_all();
   };
 
   void pipeline_feeder() {
     std::cout << "Pipeline feeder starting up...\n";
     // Lock-free SPSC consumer: spin briefly on empty, then sleep to avoid
-    // burning 100% CPU.  Buffer period ≈ 256/15500 s ≈ 16.5ms; a 200µs
-    // sleep wastes at most ~1.2% of that period in latency.
+    // burning 100% CPU.  The 40-channel live configuration emits about
+    // 56.5 buffers/s (17.7 ms each), so a 200 us sleep adds little latency.
     int spin_count = 0;
     while (running.load(std::memory_order_acquire) == 1) {
       const uint64_t h = pipeline_q_head_.v.load(std::memory_order_relaxed);
@@ -1743,10 +1826,16 @@ public:
     for (int b = 0; b < max_n; ++b) {
       // Ring-full: spin until the consumer has advanced this thread's
       // per_thread_read_linear far enough to free this slot for reuse.
-      while (my_linear -
-                 per_thread_read_linear[thread_id].linear.load(
-                     std::memory_order_acquire) >=
-             RING_BUFFER_SIZE) {
+      const auto read_is_full = [&] {
+        return my_linear - per_thread_read_linear[thread_id].linear.load(
+                               std::memory_order_acquire) >= RING_BUFFER_SIZE;
+      };
+#ifdef SPATIAL_DIAGNOSTICS
+      if (read_is_full())
+        diagnostic_reserve_read_waits[thread_id].fetch_add(
+            1, std::memory_order_relaxed);
+#endif
+      while (read_is_full()) {
         if (!running.load(std::memory_order_acquire))
           return reserved;
         _mm_pause();
@@ -1755,6 +1844,11 @@ public:
       // Fine-grained check: wait until the consumer (or abandon_write_batch)
       // has marked this specific slot as fully processed so we don't
       // overwrite data still held by future_packet_queue.
+#ifdef SPATIAL_DIAGNOSTICS
+      if (!d_packet_data[slot]->processed.load(std::memory_order_acquire))
+        diagnostic_reserve_processed_waits[thread_id].fetch_add(
+            1, std::memory_order_relaxed);
+#endif
       while (!d_packet_data[slot]->processed.load(std::memory_order_acquire)) {
         if (!running.load(std::memory_order_acquire))
           return reserved;

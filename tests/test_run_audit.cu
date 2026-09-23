@@ -19,9 +19,12 @@ static std::string audit_temp(const char *suffix) {
 TEST(HDF5RunAuditTest, EmbedsManifestAndBidirectionalMappings) {
   const std::string hdf_path = audit_temp(".h5");
   const std::string config_path = audit_temp(".json");
+  const std::string deripple_path = audit_temp(".json");
   { std::ofstream out(config_path); out << R"({"source":"test"})"; }
+  { std::ofstream out(deripple_path); out << R"({"response_id":"test-response"})"; }
   CommonArgs args;
   args.config_filename = config_path;
+  args.deripple_config_filename = deripple_path;
   args.stream_antenna_map_filename = "missing-map.json";
   args.config = {{"normalised", 17}};
   args.fpga_id_vec = {9, 4};
@@ -45,6 +48,8 @@ TEST(HDF5RunAuditTest, EmbedsManifestAndBidirectionalMappings) {
   EXPECT_EQ(manifest["command_line"], json::array({"observe_2_2"}));
   EXPECT_EQ(manifest["normalized"]["selected_fpga_ids"], json::array({9, 4}));
   EXPECT_EQ(manifest["input_files"]["config"]["content"], R"({"source":"test"})");
+  EXPECT_EQ(manifest["input_files"]["deripple"]["content"],
+            R"({"response_id":"test-response"})");
   EXPECT_FALSE(manifest["input_files"]["stream_antenna_map"]["present"]);
   EXPECT_TRUE(manifest["build"].contains("git_commit"));
   EXPECT_EQ(manifest["forward_mapping"].size(), 8);
@@ -69,4 +74,5 @@ TEST(HDF5RunAuditTest, EmbedsManifestAndBidirectionalMappings) {
   EXPECT_EQ(rev[4 * 8 + 3], -1);
   EXPECT_EQ(rev[4 * 8 + 7], 1);
   fs::remove(config_path);
+  fs::remove(deripple_path);
 }

@@ -185,9 +185,18 @@ int main(int argc, char *argv[]) {
 
   // Calibration gains for steering must be in canonical receiver order when a
   // stream-antenna map is loaded; hardware-order gains are used for d_gains.
-  auto calib_gains = (fold_calibration_into_steering && use_canonical)
-      ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
-      : gains;
+  typename Config::FineAntennaGains calib_gains{};
+  if (fold_calibration_into_steering) {
+    if constexpr (Config::NR_FINE_CHANNELS > 1) {
+      calib_gains = get_fine_beam_gains_structure<Config>(args, active_mapping);
+    } else {
+      const auto coarse_gains = use_canonical
+          ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+          : gains;
+      for (size_t channel = 0; channel < Config::NR_CHANNELS; ++channel)
+        calib_gains[channel] = coarse_gains[channel];
+    }
+  }
   BeamSteering<Config> beam_steering(
       args.beam_targets, args.antenna_positions, active_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,

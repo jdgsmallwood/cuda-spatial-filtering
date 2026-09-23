@@ -330,7 +330,8 @@ public:
           FineChannelizer<T>::NR_SAMPLES_PER_FINE_CHANNEL,
           FineChannelizer<T>::NR_TIMES_PER_OUTPUT_BLOCK>(
           (const __half2 *)b.channelizer_output.get(),
-          (__half *)b.samples_consolidated_col_maj.get(), b.stream);
+          (__half *)b.samples_consolidated_col_maj.get(), b.stream,
+          channelizer_->deripple_gains());
     } else {
       tensor_16.runPermutation("packetToPlanar", alpha,
                                (__half *)b.samples_half.get(),

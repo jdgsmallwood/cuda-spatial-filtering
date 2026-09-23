@@ -47,6 +47,7 @@ inline void write_hdf5_run_audit(HighFive::File &file,
   add_file("signal_eigenvalues", args.nr_signal_eigenvectors_filename);
   add_file("beam_weights", args.beam_weights_filename);
   add_file("targets", args.targets_filename);
+  add_file("deripple", args.deripple_config_filename);
   manifest["normalized"] = {
       {"config", args.config}, {"gains", args.gains},
       {"beam_weights", args.beam_weights}, {"targets", args.targets},
@@ -166,4 +167,3 @@ inline void write_hdf5_run_audit(HighFive::File &file,
       "global_datastream_id,fpga_input_index,fpga_id,fpga_stream_id,"
       "zeroed_after_reorder");
 }
-

@@ -1,7 +1,5 @@
 set(NUMBER_BEAMS 1 CACHE STRING "Number of beams to correlate while benchmarking")
 
-set(CMAKE_CUDA_ARCHITECTURES "native")
-
 add_library(gpu_app_common INTERFACE)
 
 message(STATUS "PSRDADA_ROOT is ${PSRDADA_ROOT}")
@@ -22,11 +20,32 @@ target_compile_options(gpu_app_common INTERFACE
 # __AVX512F__ is never defined and copy_nt silently falls back to its SSE2
 # tier even on hardware that supports AVX-512.
 option(SPATIAL_NATIVE_ARCH "Enable -march=native for host code (ties the build to this CPU)" OFF)
+option(SPATIAL_DIAGNOSTICS "Enable compile-time ingest diagnostics" OFF)
 if(SPATIAL_NATIVE_ARCH)
     target_compile_options(gpu_app_common INTERFACE
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
 endif()
+if(SPATIAL_DIAGNOSTICS)
+    target_compile_definitions(gpu_app_common INTERFACE SPATIAL_DIAGNOSTICS)
+endif()
 target_link_directories(gpu_app_common INTERFACE ${PSRDADA_ROOT}/lib)
+
+# File capabilities (used by RAW_PACKET ibverbs) make the dynamic loader ignore
+# LD_LIBRARY_PATH.  Derive normal runtime locations from this build; sites may
+# supply any additional compatibility-library directories at configure time.
+set(SPATIAL_EXTRA_RUNTIME_LIBRARY_DIRS "" CACHE STRING
+    "Additional runtime library directories for capability-bearing executables")
+set(SPATIAL_APP_BUILD_RPATH
+    ${PSRDADA_ROOT}/lib
+    ${CMAKE_BINARY_DIR}/_deps/mathdx-build
+    ${CMAKE_BINARY_DIR}/_deps/ccglib-build/src
+    ${CMAKE_BINARY_DIR}/_deps/tcc-build/libtcc
+    ${SPATIAL_EXTRA_RUNTIME_LIBRARY_DIRS})
+if(DEFINED ENV{CONDA_PREFIX})
+    list(APPEND SPATIAL_APP_BUILD_RPATH
+        "$ENV{CONDA_PREFIX}/lib"
+        "$ENV{CONDA_PREFIX}/targets/x86_64-linux/lib")
+endif()
 
 target_link_libraries(gpu_app_common INTERFACE
     spatial CUDA::cudart cuda cutensor HighFive::HighFive
@@ -79,7 +98,7 @@ foreach(NR_FPGAS 1 2 3 4)
         # loader mode for a file-capability executable and ignores
         # LD_LIBRARY_PATH, so embed the runtime locations Starweave needs.
         set_target_properties(${SW_TARGET} PROPERTIES BUILD_RPATH
-            "/data/BLACKMESA_1/sma075/observe-libs;/data/BLACKMESA_1/sma075/psrdada-local/lib;${CMAKE_BINARY_DIR}/_deps/mathdx-build;${CMAKE_BINARY_DIR}/_deps/ccglib-build/src;${CMAKE_BINARY_DIR}/_deps/tcc-build/libtcc;/data/BLACKMESA_1/sma075/miniconda3/lib;/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux/lib")
+            "${SPATIAL_APP_BUILD_RPATH}")
         target_compile_definitions(${SW_TARGET} PRIVATE
             NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
             NR_OBSERVING_CHANNELS=${NR_CHANNELS}
@@ -125,6 +144,98 @@ target_link_libraries(adaptive_beamformed_bandpass PRIVATE gpu_app_common)
 
 add_executable(pulsar_fold ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
 target_link_libraries(pulsar_fold PRIVATE gpu_app_common)
+
+add_executable(pointing_enu ${PROJECT_SOURCE_DIR}/apps/pointing_enu.cpp
+    $<TARGET_OBJECTS:pointing>)
+target_include_directories(pointing_enu PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(pointing_enu PRIVATE ${CASACORE_LIBRARIES})
+
+# Commissioning/science pulsar target: the known-good four-FPGA, 40-coarse-
+# channel ingest shape, followed by the configured 32-way fine PFB (28 bins
+# retained per coarse channel).  Keep this separate from the cache-shaped
+# pulsar_fold target so a routine CMake reconfigure cannot silently build an
+# 8-channel/one-FPGA binary for a 4x40 observation.
+add_executable(pulsar_fold_4_40 ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
+target_link_libraries(pulsar_fold_4_40 PRIVATE gpu_app_common)
+target_compile_definitions(pulsar_fold_4_40 PRIVATE
+    NR_OBSERVING_FPGA_SOURCES=4
+    NR_OBSERVING_CHANNELS=40
+    NR_OBSERVING_PADDED_RECEIVERS=64
+)
+# cap_net_raw puts the executable in secure-loader mode, which ignores
+# LD_LIBRARY_PATH. Embed the same runtime locations as the proven Starweave
+# ibverbs binaries.
+set_target_properties(pulsar_fold_4_40 PROPERTIES BUILD_RPATH
+    "${SPATIAL_APP_BUILD_RPATH}")
+
+# Voltage-output control target matching the 24-coarse-channel backend mode.
+# This provides an independent check of the detected-intensity/DSPSR path.
+add_executable(pulsar_fold_4_24 ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
+target_link_libraries(pulsar_fold_4_24 PRIVATE gpu_app_common)
+target_compile_definitions(pulsar_fold_4_24 PRIVATE
+    NR_OBSERVING_FPGA_SOURCES=4
+    NR_OBSERVING_CHANNELS=24
+    NR_OBSERVING_PADDED_RECEIVERS=64
+)
+set_target_properties(pulsar_fold_4_24 PROPERTIES BUILD_RPATH
+    "${SPATIAL_APP_BUILD_RPATH}")
+
+# Detected Stokes-I variant for folding on a single GPU.  Calibration and
+# coherent beamforming still operate on complex X/Y fine-channel voltages;
+# only the final DADA product is reduced to |X|^2 + |Y|^2.
+add_executable(pulsar_fold_intensity_4_40 ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
+target_link_libraries(pulsar_fold_intensity_4_40 PRIVATE gpu_app_common)
+target_compile_definitions(pulsar_fold_intensity_4_40 PRIVATE
+    NR_OBSERVING_FPGA_SOURCES=4
+    NR_OBSERVING_CHANNELS=40
+    NR_OBSERVING_PADDED_RECEIVERS=64
+    PULSAR_DADA_DETECTED_INTENSITY=1
+)
+set_target_properties(pulsar_fold_intensity_4_40 PROPERTIES BUILD_RPATH
+    "${SPATIAL_APP_BUILD_RPATH}")
+
+# Smaller control point for the single-GPU pulsar path.  This uses the same
+# four FPGA ingest, fine channelizer, calibration and detected-intensity output
+# as the 40-channel target, but only channels [min, min+24).
+add_executable(pulsar_fold_intensity_4_24 ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
+target_link_libraries(pulsar_fold_intensity_4_24 PRIVATE gpu_app_common)
+target_compile_definitions(pulsar_fold_intensity_4_24 PRIVATE
+    NR_OBSERVING_FPGA_SOURCES=4
+    NR_OBSERVING_CHANNELS=24
+    NR_OBSERVING_PADDED_RECEIVERS=64
+    PULSAR_DADA_DETECTED_INTENSITY=1
+)
+set_target_properties(pulsar_fold_intensity_4_24 PROPERTIES BUILD_RPATH
+    "${SPATIAL_APP_BUILD_RPATH}")
+
+# Compact four-FPGA replay targets: one coarse channel keeps a >10-second
+# synthetic PCAP small enough for routine end-to-end DSPSR validation.
+foreach(_mode voltage intensity)
+    set(_target "pulsar_fold_replay_${_mode}_4_1")
+    add_executable(${_target} ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
+    target_link_libraries(${_target} PRIVATE gpu_app_common)
+    target_compile_definitions(${_target} PRIVATE
+        NR_OBSERVING_FPGA_SOURCES=4
+        NR_OBSERVING_CHANNELS=1
+        NR_OBSERVING_PADDED_RECEIVERS=64
+    )
+    if(_mode STREQUAL "intensity")
+        target_compile_definitions(${_target} PRIVATE PULSAR_DADA_DETECTED_INTENSITY=1)
+    endif()
+    set_target_properties(${_target} PROPERTIES BUILD_RPATH
+        "${SPATIAL_APP_BUILD_RPATH}")
+endforeach()
+
+add_executable(pulsar_fold_intensity_4_32 ${PROJECT_SOURCE_DIR}/apps/pulsar-fold.cu)
+target_link_libraries(pulsar_fold_intensity_4_32 PRIVATE gpu_app_common)
+target_compile_definitions(pulsar_fold_intensity_4_32 PRIVATE
+    NR_OBSERVING_FPGA_SOURCES=4
+    NR_OBSERVING_CHANNELS=32
+    NR_OBSERVING_PADDED_RECEIVERS=64
+    PULSAR_DADA_DETECTED_INTENSITY=1
+)
+set_target_properties(pulsar_fold_intensity_4_32 PROPERTIES BUILD_RPATH
+    "${SPATIAL_APP_BUILD_RPATH}")
 
 # Microbenchmark binaries.
 # bench_processor feeds synthetic packets, so it needs the tests/support headers.
@@ -192,6 +303,7 @@ install(TARGETS
     ${_OBSERVE_TARGETS}
     ${_STARWEAVE_TARGETS}
     ${_STANDARD_APPS}
+    pulsar_fold_4_40
     udp_sender
     RUNTIME DESTINATION bin
 )

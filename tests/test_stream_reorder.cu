@@ -210,6 +210,36 @@ TEST_F(StreamReorderTest, IdentityPermExactBeamValue) {
   }
 }
 
+// Packet scales are stored on the flattened receiver axis, so an FPGA's local
+// receiver r must read scale[fpga * NR_RECEIVERS_PER_PACKET + r].  Give every
+// FPGA/receiver/polarization a distinct sentinel value to catch a missing FPGA
+// offset in scale_and_convert_to_half_kernel.
+TEST_F(StreamReorderTest, PacketScalesUseFpgaReceiverOffset) {
+  auto constant_sample = [](size_t, size_t, int, int, int, int) {
+    return std::complex<int8_t>{1, 0};
+  };
+  auto distinct_scale = [](size_t, size_t fpga, int, int receiver, int pol) {
+    return static_cast<int16_t>(1 + 10 * fpga + 2 * receiver + pol);
+  };
+
+  auto r = do_run(test_support::make_unity_beam_weights<RC>(),
+                  constant_sample, distinct_scale);
+  const auto &beam = *r.output->beam_data;
+
+  // pol 0: 1 + 3 + 11 + 13 = 28
+  // pol 1: 2 + 4 + 12 + 14 = 32
+  constexpr float expected_real[RC::NR_POLARIZATIONS] = {28.0f, 32.0f};
+  for (size_t pol = 0; pol < RC::NR_POLARIZATIONS; ++pol) {
+    for (size_t t = 0; t < NR_SAMPLES; ++t) {
+      EXPECT_NEAR(__half2float(beam[0][pol][0][t][0]), expected_real[pol],
+                  0.6f)
+          << "pol=" << pol << " t=" << t;
+      EXPECT_NEAR(__half2float(beam[0][pol][0][t][1]), 0.0f, 0.6f)
+          << "pol=" << pol << " t=" << t;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Test 2: cross-FPGA permutation + pol swap, no fine delays, no gains
 //

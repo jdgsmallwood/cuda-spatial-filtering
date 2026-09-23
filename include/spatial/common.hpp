@@ -10,6 +10,7 @@
 // Self-guarded: expands to nothing unless the build defined HAVE_IBVERBS.
 #include "spatial/libibverbs.hpp"
 #include "spatial/writers.hpp"
+#include "spatial/deripple.hpp"
 #include <algorithm>
 #include <argparse/argparse.hpp>
 #include <arpa/inet.h>
@@ -36,6 +37,7 @@
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifndef NUMBER_BEAMS
@@ -217,6 +219,8 @@ struct CommonArgs {
   int port = 36001;
   int packets_to_receive = 0;
   double steering_update_interval_seconds = 180.0;
+  // Fixed sky epoch for deterministic offline replay. Empty means wall UTC.
+  std::string steering_utc;
   std::string capture_backend = "kernel";
   int busy_poll_us = 0;
   json config;
@@ -240,6 +244,9 @@ struct CommonArgs {
   std::vector<int> canonical_recv_perm;
   std::vector<int> canonical_pol_perm;
   std::string stream_antenna_map_filename;
+  std::string dada_header_filename = "header.hdr";
+  std::string deripple_config_filename;
+  std::vector<int> beam_excluded_antennas;
   std::unordered_map<int, int> nr_signal_eigenvectors;
   bool shrink_eigenvalues = false;
   bool detect_signal_eigenmodes = false;
@@ -401,7 +408,7 @@ make_packet_captures(const CommonArgs &args,
     auto nic = args.fpga_names[i];
 #ifdef HAVE_IBVERBS
     if (use_ibverbs_gpudirect) {
-      // GPUDirect ingest path (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md):
+      // GPUDirect ingest path:
       // constructed here like every other backend, but needs an explicit
       // arm() call once the app's pipeline/ProcessorState exist -- see
       // arm_gpudirect_captures() below, called separately from main().
@@ -480,6 +487,35 @@ inline void monitor_app_stats(ProcessorStateBase &state,
               << std::endl;
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
+#ifdef SPATIAL_DIAGNOSTICS
+    std::cout << "DIAG BufferHandoffs="
+              << state.diagnostic_buffer_handoffs.load(std::memory_order_relaxed)
+              << " BufferReleases="
+              << state.diagnostic_buffer_releases.load(std::memory_order_relaxed)
+              << " EmptyBufferWaits="
+              << state.diagnostic_empty_buffer_waits.load(std::memory_order_relaxed)
+              << " ProcessorDispatches="
+              << state.diagnostic_processor_dispatches.load(std::memory_order_relaxed)
+              << " ClaimReadGap=[";
+    for (int tid = 0; tid < state.nr_capture_threads; ++tid) {
+      if (tid) std::cout << ',';
+      const auto claimed = state.per_thread_claim[tid].linear.load(
+          std::memory_order_relaxed);
+      const auto read = state.per_thread_read_linear[tid].linear.load(
+          std::memory_order_relaxed);
+      std::cout << (claimed - read);
+    }
+    std::cout << "]" << std::endl;
+    state.print_extended_diagnostics();
+    std::cout << "DIAG MissingByFpgaIndex=[";
+    for (size_t i = 0; i < state.diagnostic_fpga_count; ++i) {
+      if (i != 0)
+        std::cout << ',';
+      std::cout << state.diagnostic_missing_by_fpga[i].load(
+          std::memory_order_relaxed);
+    }
+    std::cout << "]" << std::endl;
+#endif
 
     state.running.store((int)running, std::memory_order_release);
 
@@ -563,7 +599,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
   program.add_argument("-i", "--network-interface")
       .help("Network interface to bind on (comma-separated for multiple)")
-      .default_value(std::string("enp216s0np0"))
+      .default_value(std::string("lo"))
       .store_into(args.ifname);
 
   program.add_argument("-L", "--port")
@@ -679,6 +715,11 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(180.0)
       .store_into(args.steering_update_interval_seconds);
 
+  program.add_argument("--steering-utc")
+      .help("Fixed UTC epoch for offline sky steering (YYYY-MM-DDTHH:MM:SSZ)")
+      .default_value(std::string(""))
+      .store_into(args.steering_utc);
+
   program.add_argument("--redis-channels-per-write")
       .help("Channels written to Redis per output block (0 = all). Smaller "
             "values cap the TS.MADD payload via round-robin rotation, keeping "
@@ -708,8 +749,34 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       .default_value(std::string(""))
       .store_into(args.stream_antenna_map_filename);
 
+  program.add_argument("--dada-header")
+      .help("PSRDADA ASCII header file used by pulsar-fold")
+      .default_value(std::string("header.hdr"))
+      .store_into(args.dada_header_filename);
+
+  program.add_argument("--deripple-config")
+      .help("Optional runtime coarse-PFB amplitude correction for fine-channel "
+            "samples, visibilities, spectra and beams")
+      .default_value(std::string(""))
+      .store_into(args.deripple_config_filename);
+
+  std::string beam_excluded_antennas_csv;
+  program.add_argument("--beam-excluded-antennas")
+      .help("Comma-separated physical antenna IDs whose coherent-beam "
+            "weights must be forced to zero")
+      .default_value(std::string(""))
+      .store_into(beam_excluded_antennas_csv);
+
   try {
     program.parse_args(argc, argv);
+    if (!beam_excluded_antennas_csv.empty()) {
+      std::stringstream excluded(beam_excluded_antennas_csv);
+      std::string token;
+      while (std::getline(excluded, token, ',')) {
+        if (!token.empty())
+          args.beam_excluded_antennas.push_back(std::stoi(token));
+      }
+    }
     std::ifstream f(args.config_filename);
     args.config = json::parse(f);
 
@@ -811,8 +878,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
     // FPGA-ID → NIC name table.  config.json "network_interfaces" populates this
     // so you can pass -i 0,1,2,3 instead of the full interface names:
-    //   "network_interfaces": {"0": "enp134s0np0", "1": "enp134s0np0",
-    //                          "2": "enp175s0np0", "3": "enp216s0np0"}
+    //   "network_interfaces": {"0": "nic0", "1": "nic1"}
     std::unordered_map<int, std::string> fpga_to_ifname;
     if (args.config.contains("network_interfaces")) {
       for (const auto &[fpga_str, ifname] :
@@ -825,10 +891,8 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     }
 
     // Reverse map (NIC name → FPGA ID) kept for backward-compat when full
-    // interface names are passed directly on -i.  Hardcoded defaults cover the
-    // physical LAMBDA host; config entries are added on top.
-    std::unordered_map<std::string, int> ifname_to_fpga{
-        {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
+    // interface names are passed directly on -i. Config entries define the mapping.
+    std::unordered_map<std::string, int> ifname_to_fpga;
     for (const auto &[id, name] : fpga_to_ifname)
       ifname_to_fpga[name] = id;
 
@@ -937,6 +1001,19 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
     INFO_LOG("Could not determine GPU NUMA node; not pinning to a NUMA node");
   }
 
+  coarse_pfb_deripple_config_path() = args.deripple_config_filename;
+#if defined(NR_OBSERVING_FINE_CHANNELS) && defined(NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM)
+  if (!args.deripple_config_filename.empty()) {
+    if (NR_OBSERVING_FINE_CHANNELS <= 1)
+      throw std::runtime_error(
+          "--deripple-config requires a fine-channel build "
+          "(NR_OBSERVING_FINE_CHANNELS > 1)");
+    // Preflight before an app opens its HDF5 output in truncate mode.
+    (void)load_coarse_pfb_deripple(args.deripple_config_filename,
+                                   NR_OBSERVING_FINE_CHANNELS,
+                                   NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM);
+  }
+#endif
   return args;
 }
 
@@ -1066,6 +1143,94 @@ get_gains_structure_canonical(
       }
     }
   }
+  return output;
+}
+
+// Load the calibration that is folded into tracked coherent-beam weights.
+// Unlike AntennaGains (the legacy pre-PFB coarse-channel correction), this
+// table has one independent complex value for every *retained processing/fine
+// channel*. JSON keys are min_freq_channel + processing-channel index; for a
+// 4x40, 32-way PFB with two bins trimmed per edge and min channel 176, that is
+// 1120 keys numbered 176..1295. The explicit channel_axis marker prevents a
+// legacy 40-key coarse weights file from being silently broadcast over fine
+// bins.
+template <typename T>
+inline typename T::FineAntennaGains get_fine_beam_gains_structure(
+    const CommonArgs &args,
+    const std::unordered_map<int, int> &receiver_to_antenna) {
+  if (!args.deripple_config_filename.empty()) {
+    const auto deripple = load_coarse_pfb_deripple(
+        args.deripple_config_filename, T::NR_FINE_CHANNELS,
+        T::NR_FINE_CHANNEL_EDGE_TRIM);
+    validate_deripple_calibration(args.gains, deripple);
+  }
+  if (args.gains.value("channel_axis", std::string{}) !=
+      "fine_processing_index") {
+    throw std::runtime_error(
+        "Fine-channel beam calibration requires gains JSON metadata "
+        "channel_axis=\"fine_processing_index\"; refusing to broadcast a "
+        "coarse-channel solution over the fine channels");
+  }
+  if (!args.gains.contains("weights") || !args.gains["weights"].is_object())
+    throw std::runtime_error("Fine-channel gains JSON has no weights object");
+
+  std::unordered_set<std::string> excluded_receptors;
+  if (args.gains.contains("excluded_receptors")) {
+    for (const auto &entry : args.gains.at("excluded_receptors")) {
+      const int antenna_id = entry.at("antenna_id").get<int>();
+      const std::string polarization = entry.at("polarization").get<std::string>();
+      if (polarization != "XX" && polarization != "YY")
+        throw std::runtime_error(
+            "Fine-channel gains excluded_receptors polarization must be XX or YY");
+      excluded_receptors.insert(std::to_string(antenna_id) + ":" + polarization);
+    }
+  }
+
+  typename T::FineAntennaGains output{};
+  for (size_t chan = 0; chan < T::NR_CHANNELS; ++chan) {
+    const std::string channel_key =
+        std::to_string(args.min_freq_channel + static_cast<int>(chan));
+    for (size_t pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
+      const std::string pol_key = pol == 0 ? "XX" : "YY";
+      for (size_t receiver = 0; receiver < T::NR_RECEIVERS; ++receiver) {
+        const auto mapping_it =
+            receiver_to_antenna.find(static_cast<int>(receiver));
+        const int antenna_id = mapping_it == receiver_to_antenna.end()
+                                   ? -1
+                                   : mapping_it->second;
+        if (antenna_id < 0) {
+          output[chan][pol][receiver] = {1.0f, 0.0f};
+          continue;
+        }
+
+        const std::string antenna_key = std::to_string(antenna_id);
+        if (excluded_receptors.count(antenna_key + ":" + pol_key) != 0) {
+          output[chan][pol][receiver] = {0.0f, 0.0f};
+          continue;
+        }
+        try {
+          const auto &entry = args.gains.at("weights").at(channel_key)
+                                  .at(pol_key).at(antenna_key);
+          const std::complex<float> measured{
+              entry.at("real").get<float>(), entry.at("imag").get<float>()};
+          const float magnitude_squared = std::norm(measured);
+          if (!std::isfinite(magnitude_squared) || magnitude_squared < 1e-12f)
+            throw std::runtime_error("zero or non-finite complex gain");
+          // Beam weights need the inverse measured antenna response.
+          output[chan][pol][receiver] = std::conj(measured) / magnitude_squared;
+        } catch (const std::exception &error) {
+          throw std::runtime_error(
+              "Invalid/missing fine beam gain at processing channel " +
+              channel_key + ", pol " + pol_key + ", antenna " +
+              antenna_key + ": " + error.what());
+        }
+      }
+    }
+  }
+
+  std::cout << "Loaded strict per-fine-channel beam calibration: "
+            << T::NR_CHANNELS << " channels x " << T::NR_POLARIZATIONS
+            << " polarizations\n";
   return output;
 }
 

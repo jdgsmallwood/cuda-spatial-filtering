@@ -60,6 +60,37 @@ inline double channel_to_frequency_hz(int absolute_channel_index,
                                       plan.channel_bandwidth_hz;
 }
 
+// Sky frequency of a channel in the post-PFB processing axis.  With fine
+// channelisation disabled, processing_channel_index is simply a coarse-channel
+// offset.  The Lambda second-stage PFB is 32/27 oversampled; after trimming two
+// bins from each edge, the 28 retained bin centres span -0.5..+0.5 of one
+// coarse channel in steps of 1/27.  Adjacent coarse channels therefore share
+// their boundary bin.  This is the same convention used by
+// lambda_commissioning.utils.fine_channel_freqs.
+inline double processing_channel_to_frequency_hz(
+    size_t processing_channel_index, int min_coarse_channel,
+    const FrequencyPlan &plan, size_t nr_fine_channels,
+    size_t fine_channel_edge_trim, double fine_oversample_denominator = 27.0) {
+  if (nr_fine_channels <= 1)
+    return channel_to_frequency_hz(
+        min_coarse_channel + static_cast<int>(processing_channel_index), plan);
+
+  const size_t nr_effective_fine_channels =
+      nr_fine_channels - 2 * fine_channel_edge_trim;
+  const size_t coarse_offset =
+      processing_channel_index / nr_effective_fine_channels;
+  const size_t retained_fine_index =
+      processing_channel_index % nr_effective_fine_channels;
+  const double offset_in_coarse_channels =
+      (static_cast<double>(retained_fine_index) -
+       (static_cast<double>(nr_effective_fine_channels) - 1.0) / 2.0) /
+      fine_oversample_denominator;
+
+  return channel_to_frequency_hz(
+             min_coarse_channel + static_cast<int>(coarse_offset), plan) +
+         offset_in_coarse_channels * plan.channel_bandwidth_hz;
+}
+
 // Direction cosines in the local East-North-Up frame:
 // l = sin(az)*cos(el), m = cos(az)*cos(el), n = sin(el).
 struct DirectionCosines {

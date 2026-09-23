@@ -253,7 +253,8 @@ template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
 __global__ void
 channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
-                                        __half *corr_input) {
+                                        __half *corr_input,
+                                        const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   const size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
                        NR_BLOCKS_FOR_CORRELATION * NR_RECEIVERS *
@@ -299,8 +300,14 @@ channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
             2 /* COMPLEX */;
 
     const __half2 sample = filter_output[src_idx];
-    corr_input[dst_idx] = sample.x;
-    corr_input[dst_idx + 1] = sample.y;
+    if (deripple_gains) {
+      const float gain = deripple_gains[effective_fine];
+      corr_input[dst_idx] = __float2half(__half2float(sample.x) * gain);
+      corr_input[dst_idx + 1] = __float2half(__half2float(sample.y) * gain);
+    } else {
+      corr_input[dst_idx] = sample.x;
+      corr_input[dst_idx + 1] = sample.y;
+    }
     idx += stride;
   }
 }
@@ -309,7 +316,8 @@ template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_PADDED_RECEIVERS,
           size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
 void channelizer_output_to_corr_input(const __half2 *filter_output,
-                                      __half *corr_input, cudaStream_t stream) {
+                                      __half *corr_input, cudaStream_t stream,
+                                      const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   constexpr size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
                            NR_BLOCKS_FOR_CORRELATION * NR_RECEIVERS *
@@ -320,7 +328,8 @@ void channelizer_output_to_corr_input(const __half2 *filter_output,
       NR_FPGA_CHANNELS, NR_FINE_CHANNELS, NR_EDGE_TRIM, NR_POLARIZATIONS, NR_RECEIVERS,
       NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
       NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(filter_output,
-                                                          corr_input);
+                                                          corr_input,
+                                                          deripple_gains);
 }
 
 // Gathers FineChannelizer<T>::FilterOutputType directly into per-(fine-channel,receiver,pol) power
@@ -338,7 +347,7 @@ template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
 __global__ void channelizer_output_to_antenna_power_kernel(
     const __half2 *__restrict__ filter_output, float *__restrict__ output_data,
-    int DOWNSAMPLE_FACTOR) {
+    int DOWNSAMPLE_FACTOR, const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   constexpr size_t NR_BLOCKS_PER_FINE_CHANNEL =
       NR_SAMPLES_PER_FINE_CHANNEL / NR_TIMES_PER_OUTPUT_BLOCK;
@@ -387,7 +396,12 @@ __global__ void channelizer_output_to_antenna_power_kernel(
   const size_t dst_idx =
       ((size_t)c * NR_POLARIZATIONS + pol) * NR_RECEIVERS * num_output_freqs +
       (size_t)rx * num_output_freqs + out_idx;
-  output_data[dst_idx] = final_val;
+  if (deripple_gains) {
+    const float gain = deripple_gains[effective_fine];
+    output_data[dst_idx] = final_val * gain * gain;
+  } else {
+    output_data[dst_idx] = final_val;
+  }
 }
 
 template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
@@ -395,7 +409,8 @@ template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
 void channelizer_output_to_antenna_power(const __half2 *filter_output,
                                          float *output_data, int DOWNSAMPLE_FACTOR,
-                                         cudaStream_t stream) {
+                                         cudaStream_t stream,
+                                         const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   constexpr size_t NR_CHANNELS = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS;
   const int num_output_freqs = NR_SAMPLES_PER_FINE_CHANNEL / DOWNSAMPLE_FACTOR;
@@ -405,7 +420,8 @@ void channelizer_output_to_antenna_power(const __half2 *filter_output,
       NR_TIMES_PER_OUTPUT_BLOCK><<<dim3((num_output_freqs + 255) / 256, NR_RECEIVERS,
                                         NR_CHANNELS * NR_POLARIZATIONS),
                                    256, 0, stream>>>(filter_output, output_data,
-                                                     DOWNSAMPLE_FACTOR);
+                                                     DOWNSAMPLE_FACTOR,
+                                                     deripple_gains);
 }
 
 // Gathers FineChannelizer<T>::FilterOutputType directly into the beamforming-ready
@@ -419,7 +435,8 @@ template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_RECEIVERS_PER_PACKET,
           size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
 __global__ void channelizer_output_to_col_maj_cons_kernel(
-    const __half2 *__restrict__ filter_output, __half *__restrict__ output) {
+    const __half2 *__restrict__ filter_output, __half *__restrict__ output,
+    const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
   constexpr size_t COMPLEX = 2;
@@ -461,7 +478,10 @@ __global__ void channelizer_output_to_col_maj_cons_kernel(
         time_in_block;
 
     const __half2 sample_value = filter_output[src_idx];
-    output[idx] = (z == 0) ? sample_value.x : sample_value.y;
+    const __half value = (z == 0) ? sample_value.x : sample_value.y;
+    output[idx] = deripple_gains
+        ? __float2half(__half2float(value) * deripple_gains[effective_fine])
+        : value;
     idx += stride;
   }
 }
@@ -470,7 +490,8 @@ template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_RECEIVERS_PER_PACKET,
           size_t NR_SAMPLES_PER_FINE_CHANNEL, size_t NR_TIMES_PER_OUTPUT_BLOCK>
 void channelizer_output_to_col_maj_cons(const __half2 *filter_output,
-                                        __half *output, cudaStream_t stream) {
+                                        __half *output, cudaStream_t stream,
+                                        const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   constexpr size_t NR_FPGA_SOURCES = NR_RECEIVERS / NR_RECEIVERS_PER_PACKET;
   constexpr size_t COMPLEX = 2;
@@ -482,7 +503,8 @@ void channelizer_output_to_col_maj_cons(const __half2 *filter_output,
   channelizer_output_to_col_maj_cons_kernel<
       NR_FPGA_CHANNELS, NR_FINE_CHANNELS, NR_EDGE_TRIM, NR_POLARIZATIONS, NR_RECEIVERS,
       NR_RECEIVERS_PER_PACKET, NR_SAMPLES_PER_FINE_CHANNEL,
-      NR_TIMES_PER_OUTPUT_BLOCK><<<blocks, threads, 0, stream>>>(filter_output, output);
+      NR_TIMES_PER_OUTPUT_BLOCK><<<blocks, threads, 0, stream>>>(
+          filter_output, output, deripple_gains);
 }
 
 template <size_t NR_CHANNELS, size_t NR_POLARIZATIONS, size_t NR_RECEIVERS,
@@ -865,6 +887,7 @@ __global__ void scale_and_convert_to_half_kernel(
 
   int scale_ptr = channel_idx * NR_PACKETS * NR_RECEIVERS * NR_POLARIZATIONS +
                   packet_idx * NR_RECEIVERS * NR_POLARIZATIONS +
+                  fpga_idx * NR_RECEIVERS_PER_PACKET * NR_POLARIZATIONS +
                   receiver_pol_idx;
   int scale_val_int = static_cast<int>(d_scale[scale_ptr]);
 
@@ -907,8 +930,7 @@ __global__ void scale_and_convert_to_half_kernel(
 // ---- GPU-resident missing-packet zero-fill (GPUDirect ingest) ------------
 //
 // Device-side equivalent of LambdaFinalPacketData::zero_missing_packets()
-// (packet_formats.hpp) for the GPUDirect ingest path (see
-// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md): once
+// (packet_formats.hpp) for the GPUDirect ingest path: once
 // `scales` is device memory (relocated there directly by the capture
 // backend instead of landing in a pinned host buffer), the host-side loop
 // in LambdaFinalPacketData can no longer touch it, so this kernel does the

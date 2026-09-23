@@ -35,6 +35,46 @@ TEST(PointingTest, ChannelToFrequencyHzIsLinearInChannelIndex) {
   EXPECT_DOUBLE_EQ(channel_to_frequency_hz(-3, plan), 1.0e9 - 3 * 1.0e5);
 }
 
+TEST(PointingTest, ProcessingFrequencyWithoutFineChannelsMatchesCoarseGrid) {
+  FrequencyPlan plan{/*base_frequency_hz=*/15.234375e6,
+                     /*channel_bandwidth_hz=*/781250.0};
+  for (size_t chan = 0; chan < 40; ++chan) {
+    EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                         chan, 176, plan, /*nr_fine_channels=*/1,
+                         /*fine_channel_edge_trim=*/0),
+                     channel_to_frequency_hz(176 + static_cast<int>(chan), plan));
+  }
+}
+
+TEST(PointingTest, FineProcessingGridUses32Over27OversamplingConvention) {
+  FrequencyPlan plan{/*base_frequency_hz=*/15.234375e6,
+                     /*channel_bandwidth_hz=*/781250.0};
+  constexpr int min_coarse = 176;
+  constexpr size_t fine = 32;
+  constexpr size_t trim = 2;
+  constexpr size_t kept = fine - 2 * trim;
+  const double coarse_center = channel_to_frequency_hz(min_coarse, plan);
+
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       0, min_coarse, plan, fine, trim),
+                   coarse_center - 0.5 * plan.channel_bandwidth_hz);
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       kept - 1, min_coarse, plan, fine, trim),
+                   coarse_center + 0.5 * plan.channel_bandwidth_hz);
+  EXPECT_NEAR(processing_channel_to_frequency_hz(
+                  1, min_coarse, plan, fine, trim) -
+                  processing_channel_to_frequency_hz(
+                      0, min_coarse, plan, fine, trim),
+              plan.channel_bandwidth_hz / 27.0, 1e-6);
+
+  // The last retained bin of coarse N and the first retained bin of N+1 are
+  // the same physical boundary frequency.
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       kept - 1, min_coarse, plan, fine, trim),
+                   processing_channel_to_frequency_hz(
+                       kept, min_coarse, plan, fine, trim));
+}
+
 TEST(PointingTest, ToMjdUtcUnixEpochIs40587) {
   EXPECT_DOUBLE_EQ(to_mjd_utc(std::chrono::system_clock::time_point{}),
                    40587.0);

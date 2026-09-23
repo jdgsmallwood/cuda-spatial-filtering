@@ -62,9 +62,6 @@ int main(int argc, char *argv[]) {
       std::complex<__half>[Config::NR_CHANNELS][nr_lambda_polarizations]
                           [2 * nr_lambda_beams]
                           [Config::NR_TIME_STEPS_PER_FINE_CHANNEL];
-  const std::unordered_map<std::string, int> ifname_to_fpga{
-      {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
-
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
     throw std::runtime_error("The number of network interfaces does not match "
@@ -161,11 +158,17 @@ int main(int argc, char *argv[]) {
   const bool use_canonical = !args.canonical_recv_perm.empty();
   const auto &active_mapping =
       use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
-  typename Config::AntennaGains calibration_gains{};
+  typename Config::FineAntennaGains calibration_gains{};
   if (fold_calibration_into_steering) {
-    calibration_gains = use_canonical
-        ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
-        : get_gains_structure<Config>(args);
+    if constexpr (Config::NR_FINE_CHANNELS > 1) {
+      calibration_gains = get_fine_beam_gains_structure<Config>(args, active_mapping);
+    } else {
+      const auto coarse_gains = use_canonical
+          ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
+          : get_gains_structure<Config>(args);
+      for (size_t channel = 0; channel < Config::NR_CHANNELS; ++channel)
+        calibration_gains[channel] = coarse_gains[channel];
+    }
   }
 
   BeamSteering<Config> beam_steering(

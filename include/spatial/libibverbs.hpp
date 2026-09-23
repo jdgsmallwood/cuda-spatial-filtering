@@ -28,6 +28,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#ifdef SPATIAL_DIAGNOSTICS
+#include <sys/resource.h>
+#endif
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
@@ -46,7 +49,7 @@
 // ---------------------------------------------------------------------------
 // Shared NIC/QP/flow-steering setup, used by both LibibverbsPacketCapture
 // (CPU-memory ingest) and LibibverbsGpuDirectPacketCapture (GPUDirect RDMA
-// ingest, see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md).
+// ingest).
 // Factored out to file scope (rather than private methods on one class) so
 // neither class needs to inherit from the other -- their receive-path memory
 // layouts are different enough (single CPU buffer vs. GPU-resident landing
@@ -345,7 +348,7 @@ private:
 
 public:
   // Construct a raw-packet capture bound to one NIC (`ifname`, e.g.
-  // "enp216s0np0"), steering UDP traffic destined to `port` into a dedicated
+  // "eth0"), steering UDP traffic destined to `port` into a dedicated
   // RAW_PACKET QP. One object (and one capture thread) per NIC -- mirrors
   // KernelSocketPacketCapture so the apps' existing per-NIC threading is
   // unchanged. `buffer_size` is accepted only for signature parity with
@@ -480,20 +483,17 @@ public:
         repost(jframe);
     }
     ibv_wc wc[POLL_BATCH];
-    // Diagnostic: safe, no syscalls beyond ibv_poll_cq itself -- just a
-    // periodic wall-clock-gated counter dump so we can see whether this
-    // thread is actually looping (and how fast) versus genuinely blocked
-    // somewhere, without risking a diagnostic that can itself hang (an
-    // earlier version called ibv_get_async_event() here, which blocks by
-    // default -- removed after it looked like it might be the reason a test
-    // run produced zero log output for the entire capture window).
+#ifdef SPATIAL_DIAGNOSTICS
     uint64_t empty_polls = 0;
     uint64_t total_polls = 0;
     uint64_t nonzero_polls = 0;
+    uint64_t completed_cqes = 0;
     auto last_diag = std::chrono::steady_clock::now();
+#endif
 
     while (state.running.load(std::memory_order_acquire)) {
       int n = ibv_poll_cq(cq_, POLL_BATCH, wc);
+#ifdef SPATIAL_DIAGNOSTICS
       ++total_polls;
       if (total_polls <= 20) {
         std::cerr << "ITER ibverbs " << ifname_ << " thread " << thread_id_
@@ -502,20 +502,31 @@ public:
       const auto now = std::chrono::steady_clock::now();
       if (now - last_diag > std::chrono::seconds(2)) {
         last_diag = now;
+        struct rusage usage {};
+        getrusage(RUSAGE_THREAD, &usage);
         // Bypass spatial::Logger entirely for this one -- straight to
         // stderr, which the shell capture already reliably picks up,
         // in case the shared logger singleton has its own issue.
         std::cerr << "DIAG ibverbs " << ifname_ << " thread " << thread_id_
                   << ": " << total_polls << " polls, " << nonzero_polls
                   << " nonzero, " << empty_polls
-                  << " empty, received=" << state.packets_received.load()
+                  << " empty, cqes=" << completed_cqes
+                  << ", voluntary_cs=" << usage.ru_nvcsw
+                  << ", involuntary_cs=" << usage.ru_nivcsw
+                  << ", received=" << state.packets_received.load()
                   << std::endl;
       }
+#endif
       if (n == 0) {
+#ifdef SPATIAL_DIAGNOSTICS
         ++empty_polls;
+#endif
         continue;
       }
+#ifdef SPATIAL_DIAGNOSTICS
       ++nonzero_polls;
+      completed_cqes += static_cast<uint64_t>(n);
+#endif
       if (n < 0) {
         ERROR_LOG("ibv_poll_cq failed on {}", ifname_);
         break;
@@ -524,6 +535,12 @@ public:
       std::unique_lock<std::mutex> legacy_lock(state.producer_mutex,
                                                 std::defer_lock);
       if (!zero_copy_) legacy_lock.lock();
+      // Retire every completion already removed from the CQ before any
+      // replacement reservation is allowed to wait for ring space. Otherwise
+      // a mid-batch wait can strand later completions that the consumer needs
+      // in order to release that space.
+      uint32_t frames_to_repost[POLL_BATCH];
+      int frames_to_repost_count = 0;
       for (int i = 0; i < n; ++i) {
         const uint32_t jframe = static_cast<uint32_t>(wc[i].wr_id & 0xFFFFFFFF);
         uint8_t *frame = zero_copy_
@@ -536,33 +553,7 @@ public:
           if (zero_copy_) {
             const int ring_index = frame_slot_indices_[jframe];
             state.abandon_write_batch(1, &ring_index);
-            // Same "never lose the frame slot" reasoning as the success
-            // path below -- retry rather than dropping this WR on a
-            // transient ring-full condition.
-            void *replacement = nullptr;
-            int replacement_index = -1;
-            const auto retry_deadline2 =
-                std::chrono::steady_clock::now() + std::chrono::seconds(3);
-            while (state.running.load(std::memory_order_acquire)) {
-              if (state.reserve_write_batch_strided(thread_id_, next_linear_,
-                                                     1, &replacement,
-                                                     &replacement_index) == 1)
-                break;
-              if (std::chrono::steady_clock::now() > retry_deadline2) {
-                std::cerr << "TIMEOUT ibverbs " << ifname_ << " thread "
-                          << thread_id_
-                          << " stuck reserving replacement slot (WC-error "
-                             "path) for 3s"
-                          << std::endl;
-                break;
-              }
-              _mm_pause();
-            }
-            if (replacement != nullptr) {
-              frame_slot_indices_[jframe] = replacement_index;
-              frame_slot_ptrs_[jframe] = replacement;
-              post_direct_recv(jframe, replacement);
-            }
+            frames_to_repost[frames_to_repost_count++] = jframe;
           } else {
             repost(jframe); // don't lose the staging slot
           }
@@ -603,51 +594,7 @@ public:
           const int packet_len = std::min<int>(payload_len, direct_slot_bytes_);
           state.commit_write_batch(1, &ring_index, &packet_len, &addr);
           state.packets_received += 1;
-
-          // The completion was already pulled off the hardware CQ (that's
-          // destructive -- it cannot be re-polled), so this WR's frame slot
-          // *must* get a fresh receive buffer posted before moving on, or
-          // this QP's fixed-size frame pool permanently loses one slot. The
-          // shared ring being momentarily full is a brief, self-clearing
-          // condition once workers drain it (proven elsewhere: NICDrops=0
-          // in steady state) -- spin-retry here rather than abandoning the
-          // WR, which previously caused the whole receiver to stall forever
-          // once enough transient misses (typically right at startup, before
-          // workers are warmed up) exhausted the frame pool to zero.
-          void *replacement = nullptr;
-          int replacement_index = -1;
-          const auto retry_deadline =
-              std::chrono::steady_clock::now() + std::chrono::seconds(3);
-          bool timed_out = false;
-          while (state.running.load(std::memory_order_acquire)) {
-            if (state.reserve_write_batch_strided(thread_id_, next_linear_, 1,
-                                                   &replacement,
-                                                   &replacement_index) == 1)
-              break;
-            if (std::chrono::steady_clock::now() > retry_deadline) {
-              std::cerr << "TIMEOUT ibverbs " << ifname_ << " thread "
-                        << thread_id_
-                        << " stuck reserving replacement slot for 3s "
-                           "(next_linear_="
-                        << next_linear_
-                        << ", received=" << state.packets_received.load()
-                        << ") -- giving up on this WR, frame pool shrinks by 1"
-                        << std::endl;
-              timed_out = true;
-              break;
-            }
-            _mm_pause();
-          }
-          if (timed_out) {
-            continue; // don't repost; move on to the next completion in the batch
-          }
-          if (replacement == nullptr) {
-            // Shutdown raced us out of the retry loop; nothing left to post.
-            continue;
-          }
-          frame_slot_indices_[jframe] = replacement_index;
-          frame_slot_ptrs_[jframe] = replacement;
-          post_direct_recv(jframe, replacement);
+          frames_to_repost[frames_to_repost_count++] = jframe;
         } else {
           const int copy_len =
               std::min<int>(len, static_cast<int>(state.slot_data_capacity()));
@@ -657,6 +604,37 @@ public:
           state.get_next_write_pointer();
           repost(jframe); // hand the slot back to the NIC
         }
+      }
+
+      for (int i = 0; i < frames_to_repost_count; ++i) {
+        const uint32_t jframe = frames_to_repost[i];
+        void *replacement = nullptr;
+        int replacement_index = -1;
+        const auto retry_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (state.running.load(std::memory_order_acquire)) {
+          if (state.reserve_write_batch_strided(thread_id_, next_linear_, 1,
+                                                 &replacement,
+                                                 &replacement_index) == 1)
+            break;
+          if (std::chrono::steady_clock::now() > retry_deadline) {
+            std::cerr << "TIMEOUT ibverbs " << ifname_ << " thread "
+                      << thread_id_
+                      << " stuck reserving replacement slot for 3s "
+                         "(next_linear_="
+                      << next_linear_
+                      << ", received=" << state.packets_received.load()
+                      << ") -- giving up on this WR, frame pool shrinks by 1"
+                      << std::endl;
+            break;
+          }
+          _mm_pause();
+        }
+        if (replacement == nullptr)
+          continue;
+        frame_slot_indices_[jframe] = replacement_index;
+        frame_slot_ptrs_[jframe] = replacement;
+        post_direct_recv(jframe, replacement);
       }
     }
     if (zero_copy_) {
@@ -745,8 +723,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// GPUDirect RDMA ingest (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md
-// and docs/architecture.md's GPUDirect section).
+// GPUDirect RDMA ingest (see docs/architecture.md's GPUDirect section).
 //
 // UNVERIFIED IN THIS ENVIRONMENT: this class was written and reviewed but
 // never compiled -- this container has no libibverbs-dev / infiniband/verbs.h

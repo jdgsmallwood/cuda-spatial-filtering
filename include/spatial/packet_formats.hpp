@@ -222,15 +222,25 @@ struct LambdaPacketEntry
 
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
-    uint32_t offset = 0;
-    if (length > sizeof(PacketScaleStructure) + sizeof(PacketDataStructure) +
-                     sizeof(CustomHeader)) {
-      offset = 42;
-    }
-    if (length < MIN_PCAP_HEADER_SIZE) [[unlikely]] {
+    constexpr size_t bare_packet_size =
+        sizeof(CustomHeader) +
+        sizeof(PacketPayload<PacketScaleStructure, PacketDataStructure>);
+    constexpr size_t ethernet_header_size =
+        sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader);
+    constexpr size_t framed_packet_size = ethernet_header_size + bare_packet_size;
+    // ibverbs zero-copy lands CustomHeader+payload without Ethernet/IP/UDP;
+    // the kernel socket and legacy ibverbs paths land the complete frame.
+    // A partial payload must never be parsed: process_packet_data copies the
+    // entire samples array and would otherwise read stale ring-slot bytes.
+    if (length < MIN_PCAP_HEADER_SIZE ||
+        (length != static_cast<int>(bare_packet_size) &&
+         length < static_cast<int>(framed_packet_size))) [[unlikely]] {
       this->processed.store(true, std::memory_order_relaxed);
       return {};
     }
+    const uint32_t offset = length == static_cast<int>(bare_packet_size)
+                                ? 0
+                                : static_cast<uint32_t>(ethernet_header_size);
 
     const CustomHeader *__restrict__ custom =
         (const CustomHeader *)(base + offset);
@@ -452,6 +462,10 @@ struct LambdaConfig {
   // Calibration gains are loaded per *coarse* channel from JSON and applied by
   // scale_and_convert_to_half before channelization -- see get_gains_structure() in common.hpp.
   using AntennaGains = std::array<PolArray, NR_FPGA_CHANNELS>;
+  // Calibration folded into coherent beam weights is instead indexed by the
+  // post-PFB processing channel.  This preserves independent complex gain
+  // solutions for every retained fine channel.
+  using FineAntennaGains = std::array<PolArray, NR_CHANNELS>;
 
   // Per-antenna delay in nanoseconds, one per receiver.
   using AntennaDelays = std::array<float, NR_RECEIVERS>;

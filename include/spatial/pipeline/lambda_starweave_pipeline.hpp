@@ -186,10 +186,22 @@ private:
   typename T::AntennaGains *d_gains;
   std::unique_ptr<FineChannelizer<T>> channelizer_;
   std::vector<PipelineResources> buffers;
+  // One H2D completion event per host packet-assembly buffer. A host buffer cannot be handed
+  // back to ProcessorState (and therefore cannot be submitted again) until its own event has
+  // completed, so these events are never re-recorded while an earlier wait is outstanding.
+  // The old one-event-per-GPU-stream scheme violated that ownership relationship when several
+  // host buffers were queued on the same stream and eventually stopped running release callbacks.
+  std::vector<cudaEvent_t> host_buffer_copy_done;
+  std::unique_ptr<std::atomic<bool>[]> host_buffer_release_pending;
+  size_t host_buffer_release_count = 0;
+  std::atomic<bool> buffer_reclaimer_running{false};
+  std::thread buffer_reclaimer_thread;
   int *d_subpacket_delays;
   int *d_stream_perm_recv = nullptr; // [NR_RECEIVERS*NR_POL] canonical->src flat recv; identity by default
   int *d_stream_perm_pol = nullptr;  // [NR_RECEIVERS*NR_POL] canonical->src hw pol slot; identity by default
-  int visibilities_start_seq_num;
+  uint64_t visibilities_start_seq_num = 0;
+  uint64_t visibilities_end_seq_num = 0;
+  bool visibilities_have_seq = false;
   static constexpr int visibilities_total_packets_per_block =
       T::NR_FPGA_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int visibilities_missing_packets;
@@ -206,15 +218,87 @@ public:
                         const bool dummy_run = false) override {
     auto &b = buffers[current_buffer];
 
-    if (visibilities_start_seq_num == -1) {
-      visibilities_start_seq_num = packet_data->start_seq_id;
+    if (!dummy_run) {
+      if (!visibilities_have_seq) {
+        visibilities_start_seq_num = packet_data->start_seq_id;
+        visibilities_have_seq = true;
+      }
+      visibilities_end_seq_num = packet_data->end_seq_id;
+      visibilities_missing_packets += packet_data->get_num_missing_packets();
     }
-    visibilities_missing_packets += packet_data->get_num_missing_packets();
 
+    cudaEvent_t copy_done_event = b.ingest_copy_done;
+    if (!dummy_run) {
+      if (host_buffer_copy_done.empty()) {
+        const size_t count = this->state_->input_buffer_count();
+        if (count == 0) {
+          throw std::logic_error(
+              "ProcessorState did not report its host input-buffer count");
+        }
+        host_buffer_copy_done.resize(count, nullptr);
+        for (auto &event : host_buffer_copy_done) {
+          CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+        }
+        host_buffer_release_count = count;
+        host_buffer_release_pending =
+            std::make_unique<std::atomic<bool>[]>(count);
+        for (size_t i = 0; i < count; ++i)
+          host_buffer_release_pending[i].store(false,
+                                               std::memory_order_relaxed);
+        buffer_reclaimer_running.store(true, std::memory_order_release);
+        buffer_reclaimer_thread = std::thread([this] {
+          while (buffer_reclaimer_running.load(std::memory_order_acquire)) {
+            bool found_pending = false;
+            for (size_t i = 0; i < host_buffer_release_count; ++i) {
+              if (!host_buffer_release_pending[i].load(
+                      std::memory_order_acquire))
+                continue;
+              found_pending = true;
+              const cudaError_t status =
+                  cudaEventQuery(host_buffer_copy_done[i]);
+              if (status == cudaSuccess) {
+                // Clear ownership before release_buffer() publishes the buffer. The feeder may
+                // legitimately submit that buffer again as soon as release_buffer() returns.
+                host_buffer_release_pending[i].store(
+                    false, std::memory_order_release);
+                this->state_->release_buffer(static_cast<int>(i));
+              } else if (status != cudaErrorNotReady) {
+                std::cerr << "CUDA buffer reclaimer event query failed for host buffer "
+                          << i << ": " << cudaGetErrorString(status) << std::endl;
+                buffer_reclaimer_running.store(false,
+                                                std::memory_order_release);
+                break;
+              }
+            }
+            if (!found_pending)
+              std::this_thread::sleep_for(std::chrono::microseconds(50));
+            else
+              _mm_pause();
+          }
+        });
+        INFO_LOG("Starweave ingest created {} per-host-buffer H2D completion events",
+                 count);
+      }
+      const int host_buffer_index = packet_data->buffer_index;
+      if (host_buffer_index < 0 ||
+          static_cast<size_t>(host_buffer_index) >= host_buffer_copy_done.size()) {
+        throw std::out_of_range("packet_data host buffer index is out of range");
+      }
+      if (host_buffer_release_pending[host_buffer_index].load(
+              std::memory_order_acquire)) {
+        throw std::logic_error(
+            "host packet buffer was resubmitted before its H2D completion");
+      }
+      copy_done_event = host_buffer_copy_done[host_buffer_index];
+    }
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
-        dummy_run, b.ingest_copy_done);
+        dummy_run, copy_done_event, dummy_run);
+    if (!dummy_run) {
+      host_buffer_release_pending[packet_data->buffer_index].store(
+          true, std::memory_order_release);
+    }
 
     if (b.graph_align != nullptr) {
       CUDA_CHECK(cudaGraphLaunch(b.graph_align, b.stream));
@@ -250,6 +334,7 @@ public:
     if (!dummy_run) {
       current_buffer = (current_buffer + 1) % num_buffers;
     }
+
   }
 
   // Part 1: permute + apply integer delays -> samples_aligned, then reorder receivers
@@ -294,7 +379,8 @@ public:
                                        T::NR_PADDED_RECEIVERS,
                                        NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
           (const __half2 *)b.channelizer_output.get(),
-          (__half *)b.correlator_input.get(), b.stream);
+          (__half *)b.correlator_input.get(), b.stream,
+          channelizer_->deripple_gains());
     } else {
       aligned_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
                             T::NR_RECEIVERS_PER_PACKET,
@@ -371,6 +457,10 @@ public:
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
                           sizeof(TrimmedVisibilities)));
+    // accumulate_visibilities uses atomicAdd, including during constructor warmup.
+    // cudaMalloc does not promise zero-filled memory.
+    CUDA_CHECK(cudaMemset(d_visibilities_accumulator, 0,
+                          sizeof(TrimmedVisibilities)));
     CUDA_CHECK(cudaEventCreateWithFlags(&visibilities_reset_done,
                                         cudaEventDisableTiming));
 
@@ -440,7 +530,7 @@ public:
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
 
-    if (std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr) {
+    {
       bool all_ok = true;
       for (auto &b : buffers) {
         if (!capture_graph(
@@ -473,11 +563,26 @@ public:
       cudaDeviceSynchronize();
     }
 
-    visibilities_start_seq_num = -1;
+    visibilities_have_seq = false;
     visibilities_missing_packets = 0;
   };
 
   ~LambdaStarweavePipeline() {
+    buffer_reclaimer_running.store(false, std::memory_order_release);
+    if (buffer_reclaimer_thread.joinable())
+      buffer_reclaimer_thread.join();
+    // All host-stream waits/callbacks must retire before their per-host-buffer events are
+    // destroyed. cudaStreamSynchronize also makes shutdown errors visible to CUDA_CHECK.
+    for (auto &b : buffers) {
+      if (b.stream)
+        CUDA_CHECK(cudaStreamSynchronize(b.stream));
+      if (b.host_stream)
+        CUDA_CHECK(cudaStreamSynchronize(b.host_stream));
+    }
+    for (auto event : host_buffer_copy_done) {
+      if (event)
+        CUDA_CHECK(cudaEventDestroy(event));
+    }
     if (visibilities_reset_done)
       cudaEventDestroy(visibilities_reset_done);
     if (d_visibilities_accumulator)
@@ -529,6 +634,12 @@ public:
     int current_num_integrated_units_processed = num_correlation_units_integrated;
     INFO_LOG("Current num integrated units processed is {}",
              current_num_integrated_units_processed);
+    if (current_num_integrated_units_processed == 0) {
+      return;
+    }
+    if (!visibilities_have_seq) {
+      throw std::logic_error("Cannot dump visibilities without a real packet sequence");
+    }
     for (auto &buf : buffers) {
       cudaStreamWaitEvent(buffers[0].stream, buf.accumulate_done, 0);
     }
@@ -536,9 +647,11 @@ public:
         current_num_integrated_units_processed *
         visibilities_total_packets_per_block;
     size_t block_num = output_->register_visibilities_block(
-        visibilities_start_seq_num, end_seq_num, visibilities_missing_packets,
+        visibilities_start_seq_num,
+        end_seq_num == 0 ? visibilities_end_seq_num : end_seq_num,
+        visibilities_missing_packets,
         visibilities_total_packets);
-    visibilities_start_seq_num = -1;
+    visibilities_have_seq = false;
     visibilities_missing_packets = 0;
     if (block_num != std::numeric_limits<size_t>::max()) {
       void *landing_pointer =

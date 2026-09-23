@@ -165,7 +165,8 @@ public:
           FineChannelizer<T>::NR_TIMES_PER_OUTPUT_BLOCK>(
           (const __half2 *)d_channelizer_output[current_buffer],
           (float *)d_cufft_downsampled_output[current_buffer],
-          T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer]);
+          T::FFT_DOWNSAMPLE_FACTOR, streams[current_buffer],
+          channelizer_->deripple_gains());
     } else {
       tensor_16.runPermutation(
           "packetToCUFFTInput", alpha, (__half *)d_samples_half[current_buffer],

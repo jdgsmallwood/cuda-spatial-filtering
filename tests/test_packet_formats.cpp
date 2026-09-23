@@ -168,6 +168,38 @@ TEST(PacketFormatTests, TestShortPacketHandledGracefully) {
   EXPECT_TRUE(pkt.processed.load());
 }
 
+TEST(PacketFormatTests, TestTruncatedPayloadRejected) {
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  auto pkt = create_valid_test_packet<Config>(1, 0, 3);
+  ASSERT_EQ(pkt.length, 2664);
+  pkt.length -= 4; // Header remains readable; last complex samples are absent.
+  pkt.processed.store(false);
+
+  const auto result = pkt.parse();
+  EXPECT_EQ(result.payload, nullptr);
+  EXPECT_EQ(result.payload_size, 0u);
+  EXPECT_TRUE(pkt.processed.load());
+}
+
+TEST(PacketFormatTests, TestIbverbsPayloadOnlyLayoutAccepted) {
+  using Config = LambdaConfig<8, 1, 64, 10, 2, 10, 1, 1, 32, 32, 10000>;
+  auto pkt = create_valid_test_packet<Config>(1234, 2, 7);
+  constexpr size_t network_headers =
+      sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader);
+  std::memmove(pkt.data, pkt.data + network_headers,
+               pkt.length - network_headers);
+  pkt.length -= network_headers;
+
+  const auto result = pkt.parse();
+  ASSERT_NE(result.payload, nullptr);
+  EXPECT_EQ(result.sample_count, 1234u);
+  EXPECT_EQ(result.fpga_id, 2u);
+  EXPECT_EQ(result.freq_channel, 7u);
+  EXPECT_EQ(result.payload_size,
+            static_cast<uint32_t>(sizeof(Config::PacketPayloadType)));
+  EXPECT_EQ(result.payload->data[63][9][1], std::complex<int8_t>(63, 9));
+}
+
 TEST(PacketFormatTests, TestSampleDataAtMultiplePositions) {
   // The builder fills data[t][r][p] = complex<int8_t>(t, r).
   // Verify several scattered (t, r, p) positions to confirm the parse()

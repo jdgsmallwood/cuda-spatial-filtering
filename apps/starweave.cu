@@ -79,15 +79,6 @@ int main(int argc, char *argv[]) {
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       args.min_freq_channel, fpga_delays, args.fpga_ids);
-  // Keep the production handoff unchanged by default. Set this environment
-  // variable for a live A/B run; the value itself is intentionally ignored so
-  // `SPATIAL_WORKER_MAILBOXES=0` does not accidentally enable the experiment.
-  if (const char *mailboxes = std::getenv("SPATIAL_WORKER_MAILBOXES");
-      mailboxes != nullptr && std::string(mailboxes) != "0" &&
-      std::string(mailboxes) != "false") {
-    state.use_worker_mailboxes = true;
-    std::cout << "Worker handoff: isolated mailboxes enabled" << std::endl;
-  }
 
   if (!program.is_used("-v")) {
     args.output_filename =
@@ -105,7 +96,9 @@ int main(int argc, char *argv[]) {
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
-          args.min_freq_channel + Config::NR_CHANNELS - 1,
+          // HDF5 min/max describe FPGA coarse channels; the visibility
+          // dataset's channel axis contains the post-PFB fine bins.
+          args.min_freq_channel + Config::NR_FPGA_CHANNELS - 1,
           &active_mapping, 100, 0, use_canonical);
 
   // No beam/eigen/FFT output -- BufferedOutput tolerates null writers for the
@@ -140,8 +133,7 @@ int main(int argc, char *argv[]) {
   if (args.pcap_filename.empty())
     state.nr_capture_threads = static_cast<int>(capture.size());
 #ifdef HAVE_IBVERBS
-  if (args.capture_backend == "ibverbs" &&
-      std::getenv("SPATIAL_IBVERBS_ZERO_COPY") != nullptr) {
+  if (args.capture_backend == "ibverbs") {
     std::cout << "ibverbs receive mode: direct into packet ring (no staging memcpy)\n";
     arm_ibverbs_zero_copy_captures(capture, state);
   }

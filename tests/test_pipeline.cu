@@ -1401,8 +1401,9 @@ TEST_F(CudaIsolatedTest, ComputeSteeringWeightsMatchesGeometricPhaseFormula) {
 
   constexpr double kHalfPrecisionTolerance = 2e-3;
   for (size_t chan = 0; chan < Config::NR_CHANNELS; ++chan) {
-    double frequency_hz = channel_to_frequency_hz(
-        min_freq_channel + static_cast<int>(chan), frequency_plan);
+    double frequency_hz = processing_channel_to_frequency_hz(
+        chan, min_freq_channel, frequency_plan, Config::NR_FINE_CHANNELS,
+        Config::NR_FINE_CHANNEL_EDGE_TRIM);
     double phase_scale =
         -2.0 * M_PI * frequency_hz / kSpeedOfLightMetresPerSecond;
 
@@ -1431,6 +1432,57 @@ TEST_F(CudaIsolatedTest, ComputeSteeringWeightsMatchesGeometricPhaseFormula) {
     }
   }
 };
+
+TEST_F(CudaIsolatedTest, BeamCalibrationIsAppliedIndependentlyPerFineChannel) {
+  using FineConfig = LambdaConfig<
+      1, 1, 64, 4, 2, 4, 1, 1, 32, 32, 1, false, 4,
+      /*NR_FINE_CHANNELS=*/8, /*NR_FINE_CHANNEL_EDGE_TRIM=*/1>;
+  static_assert(FineConfig::NR_CHANNELS == 6);
+
+  typename FineConfig::FineAntennaGains corrections{};
+  for (size_t chan = 0; chan < FineConfig::NR_CHANNELS; ++chan) {
+    for (size_t pol = 0; pol < FineConfig::NR_POLARIZATIONS; ++pol) {
+      for (size_t receiver = 0; receiver < FineConfig::NR_RECEIVERS;
+           ++receiver) {
+        const float phase = 0.17f * static_cast<float>(chan) +
+                            0.03f * static_cast<float>(pol) +
+                            0.01f * static_cast<float>(receiver);
+        corrections[chan][pol][receiver] = std::polar(1.0f, phase);
+      }
+    }
+  }
+
+  const std::vector<BeamTarget> targets{BeamTarget{"zenith"}};
+  const std::unordered_map<int, int> mapping{
+      {0, 10}, {1, 11}, {2, 12}, {3, 13}};
+  const std::unordered_map<int, ENUPosition> positions{
+      {10, {}}, {11, {}}, {12, {}}, {13, {}}};
+  const FrequencyPlan frequency_plan{/*base_frequency_hz=*/100.0e6,
+                                     /*channel_bandwidth_hz=*/781250.0};
+
+  const auto weights = compute_steering_weights<FineConfig>(
+      targets, positions, mapping, frequency_plan, /*min_freq_channel=*/176,
+      ArrayLocation{}, std::chrono::system_clock::now(), &corrections);
+
+  constexpr float tolerance = 2e-3f;
+  for (size_t chan = 0; chan < FineConfig::NR_CHANNELS; ++chan) {
+    for (size_t pol = 0; pol < FineConfig::NR_POLARIZATIONS; ++pol) {
+      for (size_t receiver = 0; receiver < FineConfig::NR_RECEIVERS;
+           ++receiver) {
+        const auto actual = weights.weights[chan][pol][0][receiver];
+        const std::complex<float> expected =
+            corrections[chan][pol][receiver] /
+            static_cast<float>(FineConfig::NR_RECEIVERS);
+        EXPECT_NEAR(__half2float(actual.real()), expected.real(), tolerance)
+            << "fine_chan=" << chan << " pol=" << pol
+            << " receiver=" << receiver;
+        EXPECT_NEAR(__half2float(actual.imag()), expected.imag(), tolerance)
+            << "fine_chan=" << chan << " pol=" << pol
+            << " receiver=" << receiver;
+      }
+    }
+  }
+}
 
 TEST_F(CudaIsolatedTest, ComputeSteeringWeightsZeroesNullAntennas) {
   // Receivers mapped to a negative antenna ID (-100 in AntennaMapRegistry =

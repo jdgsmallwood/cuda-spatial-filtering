@@ -410,7 +410,8 @@ public:
           T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_PADDED_RECEIVERS,
           NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
           (const __half2 *)b.channelizer_output.get(),
-          (__half *)b.correlator_input.get(), b.stream);
+          (__half *)b.correlator_input.get(), b.stream,
+          channelizer_->deripple_gains());
     } else {
       tensor_16.runPermutation(
           "packetToPadding", alpha_16,

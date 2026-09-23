@@ -6,7 +6,7 @@ project(
   CUDASpatialFiltering
   VERSION 0.1
   DESCRIPTION "CUDA implementation of spatial filtering algorithms."
-  LANGUAGES CUDA CXX)
+  LANGUAGES C CUDA CXX)
 
 # Only do these if this is the main project, and not if it is included through add_subdirectory
 execute_process(

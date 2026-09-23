@@ -122,6 +122,49 @@ TEST(FourFpgaWorkerRangeTest, DefersBeyondHorizonWithoutAdvancingWatermarks) {
   }
 }
 
+TEST(FourFpgaWorkerRangeTest, DrainsEligibleFuturePacketWhileCaptureIsIdle) {
+  using Cfg = LambdaConfig<4, 4, 64, 40, 2, 10, 256, 1, 64, 32, 1>;
+  ProcessorState<Cfg, 3, 256, 3> state(256, 64, 0, {},
+                                      {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+  class Sink : public GPUPipeline {
+    void execute_pipeline(FinalPacketData *, const bool = false) override {}
+    void dump_visibilities(const uint64_t = 0) override {}
+  } sink;
+  state.set_pipeline(&sink);
+  state.synchronous_pipeline = true;
+
+  auto add = [&](uint64_t seq) {
+    const int length = test_support::build_constant_lambda_wire_packet<Cfg>(
+        static_cast<uint8_t *>(state.get_current_write_pointer()), seq, 0, 0,
+        {2, -2}, 1);
+    state.add_received_packet_metadata(length, {});
+    state.get_next_write_pointer();
+  };
+  constexpr uint64_t start = 640;
+  add(start);
+  ASSERT_EQ(state.process_work_range({0, 1, 1}), 1);
+  add(start + 3 * 256 * 64 + 128);
+  ASSERT_EQ(state.process_work_range({1, 2, 1}), 0);
+  ASSERT_FALSE(state.d_packet_data[1]->processed.load());
+
+  // A released assembly buffer moves the horizon over the queued packet.
+  // No capture thread publishes another ring batch. The processor's idle path
+  // must still drain the queued packet so a receiver can reuse its slot.
+  state.release_buffer(0);
+  state.nr_capture_threads = 4;
+  std::thread processor([&] { state.process_packets(); });
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(2);
+  while (!state.d_packet_data[1]->processed.load() &&
+         std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const bool drained = state.d_packet_data[1]->processed.load();
+  state.shutdown();
+  processor.join();
+  EXPECT_TRUE(drained);
+  EXPECT_TRUE(state.d_samples[0]->arrivals[0][0][3][0]);
+}
+
 TEST(CommonArgsTest, BuildFpgaDelayArrayMapsBySourceIndexUsingFpgaIds) {
   CommonArgs args;
   args.fpga_id_vec = {0, 2, 3};

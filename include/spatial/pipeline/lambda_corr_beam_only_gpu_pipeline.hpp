@@ -376,7 +376,8 @@ public:
           T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_PADDED_RECEIVERS,
           NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
           (const __half2 *)d_channelizer_output[i],
-          (__half *)d_correlator_input[i], streams[i]);
+          (__half *)d_correlator_input[i], streams[i],
+          channelizer_->deripple_gains());
     } else {
       packet_to_corr_input<T::NR_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
                            T::NR_RECEIVERS_PER_PACKET,

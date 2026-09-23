@@ -1,10 +1,11 @@
 #include "dada_def.h"
 #include "spatial/common.hpp"
+#include "spatial/deripple.hpp"
+#include <optional>
 
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
-
   CommonArgs args = parse_common_args(program, argc, argv);
 
   std::signal(SIGINT, signal_handler);
@@ -13,6 +14,10 @@ int main(int argc, char *argv[]) {
 
   constexpr int nr_fpga_sources = NR_OBSERVING_FPGA_SOURCES;
   constexpr size_t num_packet_buffers = 24;
+  // Four ibverbs QPs keep about 4096 receive slots posted. At 40 channels,
+  // deferred packets can occupy several thousand more slots before their
+  // assembly windows become available. Keep headroom for both populations.
+  constexpr size_t packet_ring_size = 32768;
   constexpr int num_lambda_channels = NR_OBSERVING_CHANNELS;
   constexpr int nr_lambda_polarizations = 2;
   constexpr int nr_lambda_receivers_per_packet =
@@ -35,18 +40,17 @@ int main(int argc, char *argv[]) {
       nr_lambda_receivers_per_packet, nr_lambda_packets_for_correlation,
       nr_lambda_beams, nr_lambda_padded_receivers,
       nr_lambda_padded_receivers_per_block, nr_correlation_blocks_to_integrate,
-      true, fft_downsample_factor>;
+      true, fft_downsample_factor, NR_OBSERVING_FINE_CHANNELS,
+      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM>;
 
-  // 2x as there will be original & RFI mitigated beams.
-  using FFTOutputType =
-      float[NR_OBSERVING_CHANNELS][nr_lambda_polarizations][2 * nr_lambda_beams]
-           [nr_lambda_time_steps_per_packet - 10];
-
-  using BeamOutputType =
-      __half[2 * nr_lambda_beams][NR_OBSERVING_PACKETS_FOR_CORRELATION]
-            [NR_OBSERVING_CHANNELS * (nr_lambda_time_steps_per_packet - 2 * 5)];
-  const std::unordered_map<std::string, int> ifname_to_fpga{
-      {"enp216s0np0", 3}, {"enp175s0np0", 2}, {"enp134s0np0", 1}};
+  std::optional<CoarsePfbDeripple> deripple;
+  if (!args.deripple_config_filename.empty()) {
+    deripple = load_coarse_pfb_deripple(
+        args.deripple_config_filename, Config::NR_FINE_CHANNELS,
+        Config::NR_FINE_CHANNEL_EDGE_TRIM);
+    std::cout << "Using pulsar-output de-ripple response "
+              << deripple->response_id << "\n";
+  }
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
@@ -56,71 +60,30 @@ int main(int argc, char *argv[]) {
 
   auto fpga_delays = build_fpga_delay_array<nr_fpga_sources>(args);
 
-  ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
+  ProcessorState<Config, num_packet_buffers, packet_ring_size>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
       args.min_freq_channel, fpga_delays, args.fpga_ids);
 
-  std::cout << "Creating FFT Writer" << std::endl;
-  std::string filename = make_default_filename(
-      "beam_fft", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
+  // The only production output of this app is the PSRDADA ring.  Keep the
+  // Output object non-null (the pipeline uses that as its output-enable bit),
+  // but do not create the old diagnostic FFT/eigen HDF5 writers: at 1120 fine
+  // channels they consume substantial memory and I/O without helping DSPSR.
+  std::string audit_filename = make_default_filename(
+      "pulsar_fold", args.min_freq_channel, num_lambda_channels,
+      args.fpga_id_vec);
   write_stream_mapping_csv(
-      args, audit_sidecar_filename(filename),
+      args, audit_sidecar_filename(audit_filename),
       nr_lambda_receivers_per_packet, nr_lambda_polarizations);
-  std::string beam_filename = make_default_filename(
-      "beam", args.min_freq_channel, num_lambda_channels, args.fpga_id_vec);
-
-  HighFive::File fft_beam_file(filename, HighFive::File::Truncate);
-  write_hdf5_run_audit(
-      fft_beam_file, args, argc, argv, nr_lambda_receivers_per_packet,
-      nr_lambda_polarizations);
-  //  HighFive::File beam_file(beam_filename, HighFive::File::Truncate);
-  // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
-  //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
-  //     "beam-fft:");
-  auto fft_writer = std::make_unique<HDF5BeamFFTWriter<FFTOutputType>>(
-      fft_beam_file, args.min_freq_channel,
-      args.min_freq_channel + num_lambda_channels - 1);
-
-  auto beam_writer = nullptr;
-  //   std::make_unique<
-  // BinaryRawBeamWriter<BeamOutputType, Config::ArrivalsOutputType>>(
-  // beam_filename, false);
-
-  std::cout << "Creating Eigen Writer\n";
-  std::string eigen_filename =
-      make_default_filename("eigendata", args.min_freq_channel,
-                            num_lambda_channels, args.fpga_id_vec);
-
-  HighFive::File eigendata_file(eigen_filename, HighFive::File::Truncate);
-  // auto fft_writer = std::make_unique<RedisBeamFFTWriter<FFTOutputType>>(
-  //     Config::NR_CHANNELS, 2 * nr_lambda_beams, Config::NR_POLARIZATIONS,
-  //     "beam-fft:");
-  //
-  using Eigenvalues =
-      float[Config::NR_CHANNELS][Config::NR_POLARIZATIONS][nr_lambda_receivers];
-  using Eigenvectors =
-      std::complex<float>[Config::NR_CHANNELS][Config::NR_POLARIZATIONS]
-                         [nr_lambda_receivers][nr_lambda_receivers];
-  auto eigen_writer =
-      std::make_unique<HDF5EigenWriter<Eigenvalues, Eigenvectors>>(
-          eigendata_file);
-
-  std::cout << "Creating Output Handler\n";
-
-  auto output =
-      std::make_shared<BufferedOutput<Config, FFTOutputType, Eigenvalues,
-                                      Eigenvectors, BeamOutputType>>(
-          std::move(beam_writer), nullptr, std::move(eigen_writer),
-          std::move(fft_writer));
-  output->start_writer_loop();
+  auto output = std::make_shared<BufferedOutput<Config>>(
+      nullptr, nullptr, nullptr, nullptr);
 
   std::cout << "Loading weights...\n";
-  BeamWeightsT<Config> h_weights;
+  BeamWeightsT<Config> h_weights{};
 
   if (args.beam_weights_filename == "") {
     std::cout << "using default beam weights...\n";
-    for (auto i = 0; i < num_lambda_channels; ++i) {
+    for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
       for (auto j = 0; j < nr_lambda_receivers; ++j) {
         for (auto k = 0; k < nr_lambda_beams; ++k) {
           for (auto l = 0; l < nr_lambda_polarizations; ++l) {
@@ -133,7 +96,8 @@ int main(int argc, char *argv[]) {
     }
   } else {
     std::cout << "using bespoke beam weights...\n";
-    for (auto i = 0; i < num_lambda_channels; ++i) {
+    for (auto i = 0; i < Config::NR_CHANNELS; ++i) {
+      const auto coarse_i = i / Config::NR_EFFECTIVE_FINE_CHANNELS;
       for (auto f = 0; f < Config::NR_FPGA_SOURCES; ++f) {
         int fpga_id = args.fpga_id_vec[f];
         for (auto k = 0; k < Config::NR_RECEIVERS_PER_PACKET; ++k) {
@@ -151,12 +115,12 @@ int main(int argc, char *argv[]) {
               h_weights.weights[i][l][j][receiver_idx] = std::complex<__half>(
                   __float2half(
                       args.beam_weights
-                          ["weights"][std::to_string(args.min_freq_channel + i)]
+                          ["weights"][std::to_string(args.min_freq_channel + coarse_i)]
                           [pol_string][std::to_string(
                               args.antenna_mapping[receiver_idx])]["real"]),
                   __float2half(
                       args.beam_weights
-                          ["weights"][std::to_string(args.min_freq_channel + i)]
+                          ["weights"][std::to_string(args.min_freq_channel + coarse_i)]
                           [pol_string][std::to_string(
                               args.antenna_mapping[receiver_idx])]["imag"]));
             }
@@ -175,36 +139,98 @@ int main(int argc, char *argv[]) {
   const bool use_canonical = !args.canonical_recv_perm.empty();
   const auto &active_mapping =
       use_canonical ? args.canonical_antenna_mapping : args.antenna_mapping;
-  typename Config::AntennaGains calibration_gains{};
+  auto beam_mapping = active_mapping;
+  for (int excluded_antenna : args.beam_excluded_antennas) {
+    bool found = false;
+    for (auto &[receiver_idx, antenna_id] : beam_mapping) {
+      if (antenna_id == excluded_antenna) {
+        antenna_id = -1;
+        found = true;
+        std::cout << "Excluding physical antenna " << excluded_antenna
+                  << " from coherent beam (receiver " << receiver_idx << ")\n";
+      }
+    }
+    if (!found)
+      throw std::runtime_error("Requested beam exclusion antenna " +
+                               std::to_string(excluded_antenna) +
+                               " is absent from the active stream map");
+  }
+  typename Config::FineAntennaGains calibration_gains{};
   if (fold_calibration_into_steering) {
-    calibration_gains = use_canonical
-        ? get_gains_structure_canonical<Config>(args, args.canonical_antenna_mapping)
-        : get_gains_structure<Config>(args);
+    calibration_gains = get_fine_beam_gains_structure<Config>(
+        args, beam_mapping);
   }
 
-  // LambdaPulsarFoldPipeline runs with a single GPU buffer, so num_buffers = 1.
+  // The DADA sink rotates three GPU buffers to overlap host transfer,
+  // channelization/beamforming, and DADA output transfer.
   BeamSteering<Config> beam_steering(
-      args.beam_targets, args.antenna_positions, active_mapping,
+      args.beam_targets, args.antenna_positions, beam_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,
-      args.steering_update_interval_seconds, /*num_buffers=*/1,
-      fold_calibration_into_steering ? &calibration_gains : nullptr);
+      args.steering_update_interval_seconds, /*num_buffers=*/3,
+      fold_calibration_into_steering ? &calibration_gains : nullptr,
+      args.steering_utc);
 
   std::cout << "Initializing pipeline...\n";
   key_t rfi_dada_key = 0xbeef;
-  LambdaPulsarFoldPipeline<Config, false> pipeline(
+#ifdef PULSAR_DADA_DETECTED_INTENSITY
+  LambdaPulsarFoldPipeline<Config, false, true> pipeline(
+#else
+  LambdaPulsarFoldPipeline<Config, false, false> pipeline(
+#endif
       &h_weights, args.nr_signal_eigenvectors, args.min_freq_channel,
-      DADA_DEFAULT_BLOCK_KEY, "header.hdr", rfi_dada_key,
-      std::move(beam_steering));
+      DADA_DEFAULT_BLOCK_KEY, args.dada_header_filename, rfi_dada_key,
+      std::move(beam_steering), deripple ? &*deripple : nullptr);
 
   state.set_pipeline(&pipeline);
   pipeline.set_state(&state);
   pipeline.set_output(output);
   if (use_canonical)
     pipeline.set_stream_permutation(args.canonical_recv_perm, args.canonical_pol_perm);
+
+  // The DADA header is published from the pipeline constructor, before its
+  // CUDA warm-up. DSPSR may still need substantially longer than that warm-up
+  // to build its coherent-dedispersion plan on the shared GPU. The launcher
+  // creates this sentinel only after DSPSR reports "prepared in"; do not open
+  // capture sockets until then or finite buffers merely hide a startup overrun.
+  if (const char *ready_file = std::getenv("SPATIAL_CAPTURE_READY_FILE")) {
+    std::cout << "Waiting for downstream-ready sentinel: " << ready_file
+              << std::endl;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(120);
+    while (!std::ifstream(ready_file).good() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!std::ifstream(ready_file).good())
+      throw std::runtime_error(
+          "timed out waiting for downstream consumer readiness");
+    std::cout << "Downstream consumer is prepared; capture may start."
+              << std::endl;
+  }
   std::cout << "Initializing packet capture...\n";
   auto capture = make_packet_captures(args, 512 * 1024 * 1024);
-  state.nr_capture_threads = static_cast<int>(capture.size());
-  INFO_LOG("Ring buffer size: {} packets\n", DEFAULT_PACKET_RING_BUFFER_SIZE);
+  // The ibverbs direct-to-ring arming step reserves its initial WR slots via
+  // reserve_write_batch_strided().  Publish the producer count first so each
+  // QP gets a disjoint lane (i, i+N, i+2N, ...).  Arming while this is still
+  // zero makes every QP use stride one and overlap another QP's reservations,
+  // pairing one FPGA's payload with another FPGA's source-IP metadata.
+  // PCAPPacketCapture uses the legacy sequential write_index path. Only live
+  // NIC captures publish the per-thread claims consumed by strided mode.
+  state.nr_capture_threads = args.pcap_filename.empty()
+                                 ? static_cast<int>(capture.size())
+                                 : 0;
+#ifdef HAVE_IBVERBS
+  // Keep capture ownership consistent with ProcessorState's four-producer
+  // strided consumer.  Without arming this path, LibibverbsPacketCapture
+  // falls back to its legacy shared sequential writer while process_packets()
+  // consumes per-thread strided claims; the 6144-slot ring then fills with
+  // Received=6144, Processed=0 and cannot make forward progress.
+  if (args.pcap_filename.empty() && args.capture_backend == "ibverbs") {
+    std::cout << "ibverbs receive mode: direct into packet ring (no staging memcpy)\n";
+    arm_ibverbs_zero_copy_captures(capture, state);
+  }
+#endif
+  INFO_LOG("Ring buffer size: {} packets\n", packet_ring_size);
   std::cout << "Starting threads...\n";
   std::vector<std::thread> receiver_threads;
   for (auto i = 0; i < (int)capture.size(); ++i) {
@@ -243,8 +269,6 @@ int main(int argc, char *argv[]) {
   cudaDeviceSynchronize();
 
   std::cout << "Stopping writers...\n";
-  output->running_ = false;
-  output->stop_writers();
   FLUSH_LOG();
   spdlog::shutdown();
   std::cout << "Shutdown complete.\n";

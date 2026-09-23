@@ -1,6 +1,87 @@
 #pragma once
+#include "spatial/deripple.hpp"
+#include <condition_variable>
+#include <cstdlib>
+#include <deque>
+#include <exception>
+#include <mutex>
 
-template <typename T, bool RFI_MITIGATE = false>
+// Compact the coarse-major retained fine-channel axis for PSRDADA. With the
+// 32/27 PFB and 28 retained bins, adjacent coarse channels contain two copies
+// of the same boundary-centre frequency. Keep all copies through calibration
+// and beamforming, then omit the first bin of coarse channels 1..N-1 so DSPSR
+// receives the 40*27+1 unique frequencies as one uniform axis.
+template <size_t NR_INPUT_CHANNELS, size_t NR_OUTPUT_CHANNELS,
+          size_t NR_EFFECTIVE_FINE_CHANNELS, size_t NR_TIMES,
+          size_t NR_POLS, size_t NR_BEAMS>
+__global__ void compact_shared_fine_boundaries_kernel(const float *input,
+                                                       float *output) {
+  constexpr size_t INNER = NR_POLS * 2;
+  constexpr size_t N = NR_BEAMS * NR_TIMES * NR_OUTPUT_CHANNELS * INNER;
+  const size_t output_index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (output_index >= N)
+    return;
+
+  const size_t scalar_in_pol = output_index % INNER;
+  const size_t output_channel = (output_index / INNER) % NR_OUTPUT_CHANNELS;
+  const size_t beam_time = output_index / (INNER * NR_OUTPUT_CHANNELS);
+
+  size_t input_channel = output_channel;
+  if constexpr (NR_OUTPUT_CHANNELS != NR_INPUT_CHANNELS) {
+    if (output_channel >= NR_EFFECTIVE_FINE_CHANNELS) {
+      const size_t after_first_coarse =
+          output_channel - NR_EFFECTIVE_FINE_CHANNELS;
+      const size_t coarse =
+          1 + after_first_coarse / (NR_EFFECTIVE_FINE_CHANNELS - 1);
+      const size_t fine =
+          1 + after_first_coarse % (NR_EFFECTIVE_FINE_CHANNELS - 1);
+      input_channel = coarse * NR_EFFECTIVE_FINE_CHANNELS + fine;
+    }
+  }
+
+  output[output_index] = input[(beam_time * NR_INPUT_CHANNELS + input_channel) *
+                               INNER + scalar_in_pol];
+}
+
+template <size_t NR_INPUT_CHANNELS, size_t NR_OUTPUT_CHANNELS,
+          size_t NR_EFFECTIVE_FINE_CHANNELS, size_t NR_TIMES,
+          size_t NR_POLS, size_t NR_BEAMS>
+__global__ void detect_intensity_and_compact_shared_fine_boundaries_kernel(
+    const float *input, float *output) {
+  constexpr size_t N = NR_BEAMS * NR_TIMES * NR_OUTPUT_CHANNELS;
+  const size_t output_index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (output_index >= N)
+    return;
+
+  const size_t output_channel = output_index % NR_OUTPUT_CHANNELS;
+  const size_t beam_time = output_index / NR_OUTPUT_CHANNELS;
+  size_t input_channel = output_channel;
+  if constexpr (NR_OUTPUT_CHANNELS != NR_INPUT_CHANNELS) {
+    if (output_channel >= NR_EFFECTIVE_FINE_CHANNELS) {
+      const size_t after_first_coarse =
+          output_channel - NR_EFFECTIVE_FINE_CHANNELS;
+      const size_t coarse =
+          1 + after_first_coarse / (NR_EFFECTIVE_FINE_CHANNELS - 1);
+      const size_t fine =
+          1 + after_first_coarse % (NR_EFFECTIVE_FINE_CHANNELS - 1);
+      input_channel = coarse * NR_EFFECTIVE_FINE_CHANNELS + fine;
+    }
+  }
+
+  const size_t input_base =
+      (beam_time * NR_INPUT_CHANNELS + input_channel) * NR_POLS * 2;
+  float intensity = 0.0f;
+#pragma unroll
+  for (size_t pol = 0; pol < NR_POLS; ++pol) {
+    const float re = input[input_base + pol * 2];
+    const float im = input[input_base + pol * 2 + 1];
+    intensity += re * re + im * im;
+  }
+  output[output_index] = intensity;
+}
+
+template <typename T, bool RFI_MITIGATE = false,
+          bool DETECTED_INTENSITY = false>
 class LambdaPulsarFoldPipeline : public GPUPipeline {
   static_assert((T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) %
                         T::NR_FINE_CHANNELS ==
@@ -81,6 +162,18 @@ private:
                                 [NR_TIME_STEPS_PER_FINE_CHANNEL][COMPLEX];
   using BeamOutput = float[num_beams][NR_TIME_STEPS_PER_FINE_CHANNEL]
                           [T::NR_CHANNELS][T::NR_POLARIZATIONS][COMPLEX];
+  static constexpr size_t NR_DADA_CHANNELS =
+      T::NR_FINE_CHANNELS > 1
+          ? T::NR_FPGA_CHANNELS * (T::NR_EFFECTIVE_FINE_CHANNELS - 1) + 1
+          : T::NR_CHANNELS;
+  using DadaVoltageOutput =
+      float[num_beams][NR_TIME_STEPS_PER_FINE_CHANNEL][NR_DADA_CHANNELS]
+           [T::NR_POLARIZATIONS][COMPLEX];
+  using DadaIntensityOutput =
+      float[num_beams][NR_TIME_STEPS_PER_FINE_CHANNEL][NR_DADA_CHANNELS];
+  using DadaBeamOutput = std::conditional_t<DETECTED_INTENSITY,
+                                             DadaIntensityOutput,
+                                             DadaVoltageOutput>;
 
   using BeamWeights = BeamWeightsT<T>;
   using ChosenBeamWeights =
@@ -150,11 +243,13 @@ private:
           samples_reordered(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_consolidated(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType,
+                                 T::NR_FINE_CHANNELS == 1>()),
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_padding(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType,
+                                 RFI_MITIGATE && T::NR_FINE_CHANNELS == 1>()),
           channelizer_input(
               make_device_ptr<typename FineChannelizer<T>::FilterInputType>()),
           channelizer_output(
@@ -162,42 +257,51 @@ private:
           beam_output(make_device_ptr<BeamOutput>()),
           weights(make_device_ptr<BeamWeights>()),
           weights_permuted(make_device_ptr<BeamWeights>()),
-          weights_updated(make_device_ptr<BeamWeights>()),
-          weights_rfi_mitigated(make_device_ptr<RFIMitigatedBeamWeights>()),
+          weights_updated(make_device_ptr_if<BeamWeights, RFI_MITIGATE>()),
+          weights_rfi_mitigated(
+              make_device_ptr_if<RFIMitigatedBeamWeights, RFI_MITIGATE>()),
           weights_beamformer(make_device_ptr<ChosenBeamWeights>()),
           beamformer_output(make_device_ptr<BeamformerOutput>()),
           samples_padded(
-              make_device_ptr<typename T::PaddedPacketSamplesType>()),
-          correlator_input(make_device_ptr<CorrelatorInput>()),
-          correlator_output(make_device_ptr<CorrelatorOutput>()),
-          visibilities_baseline(make_device_ptr<Visibilities>()),
-          visibilities_trimmed_baseline(make_device_ptr<TrimmedVisibilities>()),
-          visibilities_trimmed(make_device_ptr<TrimmedVisibilities>()),
-          decomp_visibilities(make_device_ptr<DecompositionVisibilities>()),
-          projection_matrix(make_device_ptr<ProjectionMatrix>()),
-          float_projection_matrix(make_device_ptr<FloatProjectionMatrix>()),
-          eigenvalues(make_device_ptr<Eigenvalues>()),
+              make_device_ptr_if<typename T::PaddedPacketSamplesType,
+                                 RFI_MITIGATE && T::NR_FINE_CHANNELS == 1>()),
+          correlator_input(make_device_ptr_if<CorrelatorInput, RFI_MITIGATE>()),
+          correlator_output(make_device_ptr_if<CorrelatorOutput, RFI_MITIGATE>()),
+          visibilities_baseline(make_device_ptr_if<Visibilities, RFI_MITIGATE>()),
+          visibilities_trimmed_baseline(
+              make_device_ptr_if<TrimmedVisibilities, RFI_MITIGATE>()),
+          visibilities_trimmed(
+              make_device_ptr_if<TrimmedVisibilities, RFI_MITIGATE>()),
+          decomp_visibilities(
+              make_device_ptr_if<DecompositionVisibilities, RFI_MITIGATE>()),
+          projection_matrix(make_device_ptr_if<ProjectionMatrix, RFI_MITIGATE>()),
+          float_projection_matrix(
+              make_device_ptr_if<FloatProjectionMatrix, RFI_MITIGATE>()),
+          eigenvalues(make_device_ptr_if<Eigenvalues, RFI_MITIGATE>()),
           cusolver_info(
-              make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))) {
+              make_device_ptr_if<int, RFI_MITIGATE>(
+                  CUSOLVER_BATCH_SIZE * sizeof(int))) {
       // Stream Creation
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
           cudaStreamCreateWithFlags(&host_stream, cudaStreamNonBlocking));
 
-      CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle));
-      CUSOLVER_CHECK(cusolverDnCreateParams(&cusolver_params));
-      CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle, stream));
+      if constexpr (RFI_MITIGATE) {
+        CUSOLVER_CHECK(cusolverDnCreate(&cusolver_handle));
+        CUSOLVER_CHECK(cusolverDnCreateParams(&cusolver_params));
+        CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle, stream));
 
-      CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
-          cusolver_handle, cusolver_params, CUSOLVER_EIG_MODE_VECTOR,
-          CUBLAS_FILL_MODE_UPPER, T::NR_RECEIVERS, CUDA_C_32F,
-          reinterpret_cast<void *>(decomp_visibilities.get()), T::NR_RECEIVERS,
-          CUDA_R_32F, reinterpret_cast<void *>(eigenvalues.get()), CUDA_C_32F,
-          &cusolver_work_device_size, &cusolver_work_host_size,
-          CUSOLVER_BATCH_SIZE));
+        CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
+            cusolver_handle, cusolver_params, CUSOLVER_EIG_MODE_VECTOR,
+            CUBLAS_FILL_MODE_UPPER, T::NR_RECEIVERS, CUDA_C_32F,
+            reinterpret_cast<void *>(decomp_visibilities.get()), T::NR_RECEIVERS,
+            CUDA_R_32F, reinterpret_cast<void *>(eigenvalues.get()), CUDA_C_32F,
+            &cusolver_work_device_size, &cusolver_work_host_size,
+            CUSOLVER_BATCH_SIZE));
 
-      cusolver_work_device = make_device_ptr<void>(cusolver_work_device_size);
-      cusolver_work_host = std::malloc(cusolver_work_host_size);
+        cusolver_work_device = make_device_ptr<void>(cusolver_work_device_size);
+        cusolver_work_host = std::malloc(cusolver_work_host_size);
+      }
 
       const std::complex<float> alpha_ccglib = {1, 0};
       const std::complex<float> beta_ccglib = {0, 0};
@@ -212,8 +316,9 @@ private:
           ccglib::ValueType::float32, ccglib::mma::opt, alpha_ccglib,
           beta_ccglib);
 
-      gemm_weight_projection_handle =
-          std::make_unique<ccglib::pipeline::Pipeline>(
+      if constexpr (RFI_MITIGATE) {
+        gemm_weight_projection_handle =
+            std::make_unique<ccglib::pipeline::Pipeline>(
               T::NR_CHANNELS * T::NR_POLARIZATIONS, T::NR_BEAMS,
               T::NR_RECEIVERS, T::NR_RECEIVERS, cu_device, stream,
               ccglib::complex_interleaved, ccglib::complex_interleaved,
@@ -221,6 +326,7 @@ private:
               ccglib::mma::row_major, ccglib::ValueType::float16,
               ccglib::ValueType::float16, ccglib::mma::opt, alpha_ccglib,
               beta_ccglib);
+      }
       CUBLAS_CHECK(cublasCreate(&cublas_handle));
       CUBLAS_CHECK(cublasSetStream(cublas_handle, stream));
     }
@@ -422,7 +528,6 @@ private:
   dada_hdu_t *rfi_hdu;
 
   char *obs_header;
-  char *d_obs_header;
 
   BeamWeights *h_weights;
   // See the comment on this member in LambdaGPUPipeline (pipeline.hpp above)
@@ -433,6 +538,69 @@ private:
   int *d_stream_perm_recv = nullptr;
   int *d_stream_perm_pol  = nullptr;
   std::unique_ptr<FineChannelizer<T>> channelizer_;
+  std::vector<DevicePtr<DadaBeamOutput>> dada_beam_outputs_;
+  bool async_dada_writer = false;
+  std::vector<cudaEvent_t> dada_compute_done;
+  cudaStream_t dada_copy_stream = nullptr;
+  std::vector<bool> gpu_buffer_free;
+  std::deque<int> dada_ready_queue;
+  std::mutex dada_writer_mutex;
+  std::condition_variable dada_writer_cv;
+  std::thread dada_writer_thread;
+  bool dada_writer_stopping = false;
+  std::exception_ptr dada_writer_error;
+  std::string deripple_response_id_;
+  // Release packet-assembly buffers by polling one H2D completion event per
+  // host buffer. CUDA host callbacks can starve when the DADA sink blocks or
+  // another CUDA client (DSPSR) shares the device; once callbacks stop, all
+  // input buffers remain owned and capture stalls despite zero NIC drops.
+  std::vector<cudaEvent_t> host_buffer_copy_done;
+  std::unique_ptr<std::atomic<bool>[]> host_buffer_release_pending;
+  size_t host_buffer_release_count = 0;
+  std::atomic<bool> buffer_reclaimer_running{false};
+  std::thread buffer_reclaimer_thread;
+
+  void run_dada_writer() {
+    try {
+      while (true) {
+        int index;
+        {
+          std::unique_lock<std::mutex> lock(dada_writer_mutex);
+          dada_writer_cv.wait(lock, [this] {
+            return dada_writer_stopping || !dada_ready_queue.empty();
+          });
+          if (dada_ready_queue.empty())
+            return;
+          index = dada_ready_queue.front();
+          dada_ready_queue.pop_front();
+        }
+        CUDA_CHECK(cudaEventSynchronize(dada_compute_done[index]));
+        uint64_t block_id = 0;
+        char *block = ipcio_open_block_write(hdu->data_block, &block_id);
+        if (!block)
+          throw std::runtime_error("pulsar DADA writer could not open a data block");
+        const uint64_t block_size =
+            ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
+        CUDA_CHECK(cudaMemcpyAsync(block, dada_beam_outputs_[index].get(),
+                                   block_size, cudaMemcpyDefault,
+                                   dada_copy_stream));
+        CUDA_CHECK(cudaStreamSynchronize(dada_copy_stream));
+        if (ipcio_close_block_write(hdu->data_block, block_size) < 0)
+          throw std::runtime_error("pulsar DADA writer could not close a data block");
+        {
+          std::lock_guard<std::mutex> lock(dada_writer_mutex);
+          gpu_buffer_free[index] = true;
+        }
+        dada_writer_cv.notify_all();
+      }
+    } catch (...) {
+      {
+        std::lock_guard<std::mutex> lock(dada_writer_mutex);
+        dada_writer_error = std::current_exception();
+      }
+      dada_writer_cv.notify_all();
+    }
+  }
 
 public:
   void set_stream_permutation(const std::vector<int> &recv_perm,
@@ -452,7 +620,17 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    auto &b = buffers[current_buffer];
+    const int gpu_buffer_index = current_buffer;
+    if (async_dada_writer && !dummy_run) {
+      std::unique_lock<std::mutex> lock(dada_writer_mutex);
+      dada_writer_cv.wait(lock, [this, gpu_buffer_index] {
+        return gpu_buffer_free[gpu_buffer_index] || dada_writer_error != nullptr;
+      });
+      if (dada_writer_error)
+        std::rethrow_exception(dada_writer_error);
+      gpu_buffer_free[gpu_buffer_index] = false;
+    }
+    auto &b = buffers[gpu_buffer_index];
     // Re-steer tracked beams if due -- inert no-op when steering is disabled
     // (no --targets-filename). A due refresh enqueues the new weights onto
     // *every* buffer's stream in this one call, so all buffers always run
@@ -467,14 +645,93 @@ public:
     INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
+    const char *timing_env = std::getenv("PULSAR_CUDA_STAGE_TIMING");
+    const bool time_stages = T::NR_FINE_CHANNELS > 1 && !dummy_run &&
+                             !async_dada_writer &&
+                             dada_key != 0 && timing_env &&
+                             timing_env[0] == '1';
+    cudaEvent_t stage_events[11]{};
+    if (time_stages) {
+      for (auto &event : stage_events)
+        CUDA_CHECK(cudaEventCreate(&event));
+      CUDA_CHECK(cudaEventRecord(stage_events[0], b.stream));
+    }
+
+    cudaEvent_t copy_done_event = nullptr;
+    if (!dummy_run) {
+      if (host_buffer_copy_done.empty()) {
+        const size_t count = this->state_->input_buffer_count();
+        if (count == 0)
+          throw std::logic_error(
+              "ProcessorState did not report its host input-buffer count");
+        host_buffer_copy_done.resize(count, nullptr);
+        for (auto &event : host_buffer_copy_done)
+          CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+        host_buffer_release_count = count;
+        host_buffer_release_pending =
+            std::make_unique<std::atomic<bool>[]>(count);
+        for (size_t i = 0; i < count; ++i)
+          host_buffer_release_pending[i].store(false,
+                                               std::memory_order_relaxed);
+        buffer_reclaimer_running.store(true, std::memory_order_release);
+        buffer_reclaimer_thread = std::thread([this] {
+          while (buffer_reclaimer_running.load(std::memory_order_acquire)) {
+            bool found_pending = false;
+            for (size_t i = 0; i < host_buffer_release_count; ++i) {
+              if (!host_buffer_release_pending[i].load(
+                      std::memory_order_acquire))
+                continue;
+              found_pending = true;
+              const cudaError_t status =
+                  cudaEventQuery(host_buffer_copy_done[i]);
+              if (status == cudaSuccess) {
+                host_buffer_release_pending[i].store(
+                    false, std::memory_order_release);
+                this->state_->release_buffer(static_cast<int>(i));
+              } else if (status != cudaErrorNotReady) {
+                std::cerr << "CUDA buffer reclaimer event query failed for host buffer "
+                          << i << ": " << cudaGetErrorString(status) << std::endl;
+                buffer_reclaimer_running.store(false,
+                                                std::memory_order_release);
+                break;
+              }
+            }
+            if (!found_pending)
+              std::this_thread::sleep_for(std::chrono::microseconds(50));
+            else
+              _mm_pause();
+          }
+        });
+        INFO_LOG("Pulsar ingest created {} per-host-buffer H2D completion events",
+                 count);
+      }
+      const int host_buffer_index = packet_data->buffer_index;
+      if (host_buffer_index < 0 ||
+          static_cast<size_t>(host_buffer_index) >= host_buffer_copy_done.size())
+        throw std::out_of_range("packet_data host buffer index is out of range");
+      if (host_buffer_release_pending[host_buffer_index].load(
+              std::memory_order_acquire))
+        throw std::logic_error(
+            "host packet buffer was resubmitted before its H2D completion");
+      copy_done_event = host_buffer_copy_done[host_buffer_index];
+    }
+
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
-        dummy_run);
+        dummy_run, copy_done_event, dummy_run,
+        time_stages ? stage_events[1] : nullptr);
+    if (time_stages)
+      CUDA_CHECK(cudaEventRecord(stage_events[2], b.stream));
+    if (!dummy_run)
+      host_buffer_release_pending[packet_data->buffer_index].store(
+          true, std::memory_order_release);
 
     tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_pre_align.get(), b.stream);
+    if (time_stages)
+      CUDA_CHECK(cudaEventRecord(stage_events[3], b.stream));
 
     // Pre-channelization: samples_pre_align/samples_aligned/samples_reordered are all
     // HalfPacketSamplesType-family buffers, shaped by the raw FPGA/coarse channel count.
@@ -483,6 +740,8 @@ public:
                         T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
                         T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
                         T::NR_FPGA_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+    if (time_stages)
+      CUDA_CHECK(cudaEventRecord(stage_events[4], b.stream));
 
     reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
                            T::NR_TIME_STEPS_PER_PACKET, T::NR_FPGA_CHANNELS,
@@ -490,6 +749,8 @@ public:
         (__half *)b.samples_aligned.get(),
         (__half *)b.samples_reordered.get(),
         d_stream_perm_recv, d_stream_perm_pol, b.stream);
+    if (time_stages)
+      CUDA_CHECK(cudaEventRecord(stage_events[5], b.stream));
 
     if constexpr (T::NR_FINE_CHANNELS > 1) {
       reorder_to_filter_input<
@@ -499,8 +760,14 @@ public:
           T::NR_FINE_CHANNELS>((__half *)b.samples_reordered.get(),
                                (float2 *)b.channelizer_input.get(), b.stream);
 
+      if (time_stages)
+        CUDA_CHECK(cudaEventRecord(stage_events[6], b.stream));
+
       channelizer_->launchAsync(b.stream, b.channelizer_input.get(),
                                 b.channelizer_output.get());
+
+      if (time_stages)
+        CUDA_CHECK(cudaEventRecord(stage_events[7], b.stream));
 
       channelizer_output_to_col_maj_cons<
           T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS, T::NR_FINE_CHANNEL_EDGE_TRIM,
@@ -508,7 +775,10 @@ public:
           FineChannelizer<T>::NR_SAMPLES_PER_FINE_CHANNEL,
           FineChannelizer<T>::NR_TIMES_PER_OUTPUT_BLOCK>(
           (const __half2 *)b.channelizer_output.get(),
-          (__half *)b.samples_consolidated_col_maj.get(), b.stream);
+          (__half *)b.samples_consolidated_col_maj.get(), b.stream,
+          channelizer_->deripple_gains());
+      if (time_stages)
+        CUDA_CHECK(cudaEventRecord(stage_events[8], b.stream));
 
       if constexpr (RFI_MITIGATE) {
         channelizer_output_to_corr_input<
@@ -516,7 +786,8 @@ public:
             T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_PADDED_RECEIVERS,
             NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
             (const __half2 *)b.channelizer_output.get(),
-            (__half *)b.correlator_input.get(), b.stream);
+            (__half *)b.correlator_input.get(), b.stream,
+            channelizer_->deripple_gains());
       }
     } else {
       tensor_16.runPermutation("alignedToPlanar", alpha,
@@ -719,6 +990,8 @@ public:
     tensor_32.runPermutation("beamCCGLIBtoOutput", alpha_32,
                              (float *)b.beamformer_output.get(),
                              (float *)b.beam_output.get(), b.stream);
+    if (time_stages)
+      CUDA_CHECK(cudaEventRecord(stage_events[9], b.stream));
 
     if (beam_debug()) {
       // Copy the full beam output to host and report min/max/mean so we can
@@ -754,46 +1027,39 @@ public:
       // follows uses `output_` (not PSRDADA) and is intentionally left
       // outside this guard.
       if (dada_key != 0) {
-        if (!header_written) {
-          std::cout << "writing header...\n";
-          uint64_t rfi_header_size = 0;
-          uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
-          char *header = ipcbuf_get_next_write(hdu->header_block);
-          cudaMemcpyAsync(header, d_obs_header, header_size, cudaMemcpyDefault,
-                          b.stream);
-
-          if constexpr (RFI_MITIGATE) {
-
-            rfi_header_size = ipcbuf_get_bufsz(rfi_hdu->header_block);
-            char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
-
-            cudaMemcpyAsync(rfi_header, d_obs_header, header_size,
-                            cudaMemcpyDefault, b.stream);
-          }
-
-          // // Enable EOD so that subsequent transfers will move to the next
-          // buffer
-          // // in the header block
-          // if (ipcbuf_enable_eod(hdu->header_block) < 0) {
-          //   multilog(log, LOG_ERR, "Could not enable EOD on Header Block\n");
-          // }
-
-          cudaDeviceSynchronize();
-          // flag the header block for this "observation" as filled
-          if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0) {
-            multilog(log, LOG_ERR, "could not mark filled Header Block\n");
-            std::cout << "could not mark filled header block...\n";
-          }
-
-          if constexpr (RFI_MITIGATE) {
-            if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) <
-                0) {
-              multilog(log, LOG_ERR, "could not mark filled Header Block\n");
-              std::cout << "could not mark filled header block...\n";
-            }
-          }
-          header_written = true;
+        constexpr size_t nr_dada_scalars =
+            sizeof(DadaBeamOutput) / sizeof(float);
+        constexpr int threads = 256;
+        constexpr int blocks =
+            static_cast<int>((nr_dada_scalars + threads - 1) / threads);
+        if constexpr (DETECTED_INTENSITY) {
+          detect_intensity_and_compact_shared_fine_boundaries_kernel<
+              T::NR_CHANNELS, NR_DADA_CHANNELS,
+              T::NR_EFFECTIVE_FINE_CHANNELS, NR_TIME_STEPS_PER_FINE_CHANNEL,
+              T::NR_POLARIZATIONS, num_beams>
+              <<<blocks, threads, 0, b.stream>>>(
+                  reinterpret_cast<const float *>(b.beam_output.get()),
+                  reinterpret_cast<float *>(dada_beam_outputs_[gpu_buffer_index].get()));
+        } else {
+          compact_shared_fine_boundaries_kernel<
+              T::NR_CHANNELS, NR_DADA_CHANNELS,
+              T::NR_EFFECTIVE_FINE_CHANNELS, NR_TIME_STEPS_PER_FINE_CHANNEL,
+              T::NR_POLARIZATIONS, num_beams>
+              <<<blocks, threads, 0, b.stream>>>(
+                  reinterpret_cast<const float *>(b.beam_output.get()),
+                  reinterpret_cast<float *>(dada_beam_outputs_[gpu_buffer_index].get()));
         }
+        CUDA_CHECK(cudaGetLastError());
+
+        if (async_dada_writer) {
+          CUDA_CHECK(cudaEventRecord(dada_compute_done[gpu_buffer_index],
+                                     b.stream));
+          {
+            std::lock_guard<std::mutex> lock(dada_writer_mutex);
+            dada_ready_queue.push_back(gpu_buffer_index);
+          }
+          dada_writer_cv.notify_one();
+        } else {
 
         uint64_t block_size = ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
         // write 1 block worth of data block via the "block" method
@@ -809,8 +1075,10 @@ public:
           // control how much gets written using the block_size.
           // can toggle polarization from outer to inner dimensions
           // in order to control how many polarizations get written out.
-          cudaMemcpyAsync(block, (char *)b.beam_output.get(), block_size,
+          cudaMemcpyAsync(block, (char *)dada_beam_outputs_[gpu_buffer_index].get(), block_size,
                           cudaMemcpyDefault, b.stream);
+          if (time_stages)
+            CUDA_CHECK(cudaEventRecord(stage_events[10], b.stream));
 
           if constexpr (RFI_MITIGATE) {
 
@@ -823,11 +1091,41 @@ public:
               std::cout << "open block write failed\n";
             }
             // This is a big hack it will only take the X pol right now.
-            cudaMemcpyAsync(rfi_block, (char *)b.beam_output.get() + block_size,
+            cudaMemcpyAsync(rfi_block,
+                            (char *)dada_beam_outputs_[gpu_buffer_index].get() + block_size,
                             rfi_block_size, cudaMemcpyDefault, b.stream);
           }
 
           cudaDeviceSynchronize();
+
+          if (time_stages) {
+            static uint64_t timed_blocks = 0;
+            static float stage_ms_total[10]{};
+            for (int i = 0; i < 10; ++i) {
+              float ms = 0.0f;
+              CUDA_CHECK(cudaEventElapsedTime(&ms, stage_events[i],
+                                              stage_events[i + 1]));
+              stage_ms_total[i] += ms;
+            }
+            if (++timed_blocks % 16 == 0) {
+              std::cout << "PULSAR_CUDA_STAGE_MS blocks=" << timed_blocks
+                        << " h2d=" << stage_ms_total[0] / 16.0f
+                        << " scale=" << stage_ms_total[1] / 16.0f
+                        << " permute=" << stage_ms_total[2] / 16.0f
+                        << " delay=" << stage_ms_total[3] / 16.0f
+                        << " reorder=" << stage_ms_total[4] / 16.0f
+                        << " filter_input=" << stage_ms_total[5] / 16.0f
+                        << " filterbank=" << stage_ms_total[6] / 16.0f
+                        << " filter_output=" << stage_ms_total[7] / 16.0f
+                        << " beam=" << stage_ms_total[8] / 16.0f
+                        << " detect_copy=" << stage_ms_total[9] / 16.0f
+                        << std::endl;
+              for (float &total : stage_ms_total)
+                total = 0.0f;
+            }
+            for (auto &event : stage_events)
+              CUDA_CHECK(cudaEventDestroy(event));
+          }
 
           if (ipcio_close_block_write(hdu->data_block, block_size) < 0) {
             multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
@@ -838,6 +1136,7 @@ public:
               multilog(log, LOG_ERR, "ipcio_close_block_write failed\n");
             }
           }
+        }
         }
       } // end PSRDADA beam streaming (dada_key != 0)
 
@@ -866,15 +1165,17 @@ public:
       }
     }
 
-    // Rotate buffer indices
+    if (async_dada_writer && !dummy_run)
+      current_buffer = (current_buffer + 1) % num_buffers;
   }
   LambdaPulsarFoldPipeline(
       BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
       const int min_freq_channel, key_t dada_key, std::string header_filename,
-      key_t rfi_dada_key, BeamSteering<T> beam_steering)
+      key_t rfi_dada_key, BeamSteering<T> beam_steering,
+      const CoarsePfbDeripple *deripple = nullptr)
 
-      : num_buffers(1), h_weights(h_weights),
+      : num_buffers((dada_key != 0 && !RFI_MITIGATE) ? 3 : 1), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
                    T::NR_CHANNELS,
@@ -886,6 +1187,7 @@ public:
         tensor_32(extent, CUTENSOR_R_32F, 128),
         NR_SIGNAL_EIGENVECTORS(nr_signal_eigenvectors), header_written(false),
         min_freq_channel(min_freq_channel), dada_key(dada_key),
+        async_dada_writer(dada_key != 0 && !RFI_MITIGATE),
         rfi_dada_key(rfi_dada_key) {
     std::cout << "Pulsar Fold instantiated with NR_CHANNELS: " << T::NR_CHANNELS
               << ", NR_RECEIVERS: " << T::NR_RECEIVERS
@@ -897,6 +1199,14 @@ public:
               << ", NR_BEAMS: " << num_beams << std::endl;
     std::cout << "[PulsarFoldPipeline] beam output size is "
               << sizeof(BeamOutput) << " bytes." << std::endl;
+    std::cout << "[PulsarFoldPipeline] PSRDADA output has "
+              << NR_DADA_CHANNELS << " unique channels and block size "
+              << sizeof(DadaBeamOutput) << " bytes." << std::endl;
+    if (deripple) {
+      if (deripple->voltage_gains.size() != T::NR_EFFECTIVE_FINE_CHANNELS)
+        throw std::runtime_error("De-ripple table does not match retained fine bins");
+      deripple_response_id_ = deripple->response_id;
+    }
 
     const size_t NUM_TOTAL_BATCHES = num_beams * T::NR_CHANNELS *
                                      T::NR_POLARIZATIONS *
@@ -913,7 +1223,6 @@ public:
     hdu = nullptr;
     rfi_hdu = nullptr;
     obs_header = nullptr;
-    d_obs_header = nullptr;
     if (dada_key != 0) {
       log = multilog_open("pulsar_fold_writer", 0);
       multilog_add(log, stderr);
@@ -921,8 +1230,23 @@ public:
       dada_hdu_set_key(hdu, dada_key);
       // connect to HDU
       if (dada_hdu_connect(hdu) < 0) {
-        multilog(log, LOG_ERR, "could not connect to HDU\n");
+        throw std::runtime_error("could not connect to PSRDADA HDU");
       }
+
+      const uint64_t configured_block_size =
+          ipcbuf_get_bufsz((ipcbuf_t *)hdu->data_block);
+      constexpr uint64_t required_block_size =
+          sizeof(DadaBeamOutput) / (RFI_MITIGATE ? 2 : 1);
+      if (configured_block_size != required_block_size) {
+        dada_hdu_disconnect(hdu);
+        throw std::runtime_error(
+            "PSRDADA data block size mismatch: ring has " +
+            std::to_string(configured_block_size) + " bytes, pulsar-fold "
+            "requires exactly " + std::to_string(required_block_size) +
+            " bytes. Recreate only this ring with the required block size.");
+      }
+      std::cout << "[PulsarFoldPipeline] PSRDADA block size validated: "
+                << configured_block_size << " bytes\n";
 
       // lock as writer on the HDU
       if (dada_hdu_lock_write(hdu) < 0) {
@@ -948,8 +1272,11 @@ public:
       if (fileread(header_filename.c_str(), obs_header,
                    DADA_DEFAULT_HEADER_SIZE) < 0) {
         free(obs_header);
-        fprintf(stderr, "ERROR: could not read ASCII header from %s\n",
-                header_filename);
+        obs_header = nullptr;
+        dada_hdu_unlock_write(hdu);
+        dada_hdu_disconnect(hdu);
+        throw std::runtime_error("could not read PSRDADA ASCII header from " +
+                                 header_filename);
       }
 
       // Overwrite UTC_START with the current wall-clock UTC so DSPSR folds
@@ -966,10 +1293,46 @@ public:
         else
           fprintf(stderr, "INFO: PSRDADA header UTC_START set to %s\n", utc_start);
       }
+      if (ascii_header_set(obs_header, "DERIPPLE", "%d",
+                           deripple ? 1 : 0) < 0)
+        throw std::runtime_error("Could not set DERIPPLE in PSRDADA header");
+      if (deripple &&
+          ascii_header_set(obs_header, "DRIPRID", "%s",
+                           deripple_response_id_.c_str()) < 0)
+        throw std::runtime_error("Could not set DRIPRID in PSRDADA header");
 
-      cudaMalloc(&d_obs_header, DADA_DEFAULT_HEADER_SIZE);
-      cudaMemcpy(d_obs_header, obs_header, DADA_DEFAULT_HEADER_SIZE,
-                 cudaMemcpyDefault);
+      // Publish metadata before the expensive channelizer/JIT warmup below.
+      // DSPSR cannot build its coherent-dedispersion plan until it sees this
+      // header (about 50 seconds for 1081 channels on this host). Publishing
+      // on the first live data block instead filled the 64-block ring after
+      // only 1.12 seconds and stalled capture while DSPSR was still preparing.
+      const uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
+      if (header_size != DADA_DEFAULT_HEADER_SIZE)
+        throw std::runtime_error(
+            "PSRDADA header block size mismatch: expected " +
+            std::to_string(DADA_DEFAULT_HEADER_SIZE) + ", ring has " +
+            std::to_string(header_size));
+      char *header = ipcbuf_get_next_write(hdu->header_block);
+      if (!header)
+        throw std::runtime_error("could not acquire PSRDADA header block");
+      std::memcpy(header, obs_header, header_size);
+      if (ipcbuf_mark_filled(hdu->header_block, header_size) < 0)
+        throw std::runtime_error("could not publish PSRDADA header block");
+
+      if constexpr (RFI_MITIGATE) {
+        const uint64_t rfi_header_size =
+            ipcbuf_get_bufsz(rfi_hdu->header_block);
+        if (rfi_header_size != header_size)
+          throw std::runtime_error("RFI PSRDADA header block size mismatch");
+        char *rfi_header = ipcbuf_get_next_write(rfi_hdu->header_block);
+        if (!rfi_header)
+          throw std::runtime_error("could not acquire RFI PSRDADA header block");
+        std::memcpy(rfi_header, obs_header, header_size);
+        if (ipcbuf_mark_filled(rfi_hdu->header_block, rfi_header_size) < 0)
+          throw std::runtime_error("could not publish RFI PSRDADA header block");
+      }
+      header_written = true;
+      std::cout << "[PulsarFoldPipeline] PSRDADA header published before GPU warmup\n";
     }
     tensor_16.addTensor(modePacket, "packet");
     tensor_16.addTensor(modePacketPreAlign, "prealign");
@@ -1057,8 +1420,10 @@ public:
       channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device);
     }
     buffers.reserve(num_buffers);
+    dada_beam_outputs_.reserve(num_buffers);
     for (int i = 0; i < num_buffers; ++i) {
       buffers.emplace_back(cu_device);
+      dada_beam_outputs_.push_back(make_device_ptr<DadaBeamOutput>());
 
       // Finalize cuFFT plan for this buffer
       auto &b = buffers.back();
@@ -1091,11 +1456,52 @@ public:
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
     execute_pipeline(&warmup_packet, true);
     cudaDeviceSynchronize();
+    if (async_dada_writer) {
+      gpu_buffer_free.assign(num_buffers, true);
+      dada_compute_done.resize(num_buffers, nullptr);
+      for (auto &event : dada_compute_done)
+        CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+      CUDA_CHECK(cudaStreamCreateWithFlags(&dada_copy_stream,
+                                           cudaStreamNonBlocking));
+      dada_writer_thread = std::thread([this] { run_dada_writer(); });
+    }
   };
 
   ~LambdaPulsarFoldPipeline() {
+    if (async_dada_writer) {
+      {
+        std::lock_guard<std::mutex> lock(dada_writer_mutex);
+        dada_writer_stopping = true;
+      }
+      dada_writer_cv.notify_all();
+      if (dada_writer_thread.joinable())
+        dada_writer_thread.join();
+      if (dada_writer_error)
+        std::cerr << "Pulsar DADA writer failed before shutdown" << std::endl;
+      for (auto event : dada_compute_done)
+        if (event) cudaEventDestroy(event);
+      if (dada_copy_stream)
+        cudaStreamDestroy(dada_copy_stream);
+    }
+    buffer_reclaimer_running.store(false, std::memory_order_release);
+    if (buffer_reclaimer_thread.joinable())
+      buffer_reclaimer_thread.join();
+    for (auto &b : buffers) {
+      if (b.stream)
+        CUDA_CHECK(cudaStreamSynchronize(b.stream));
+      if (b.host_stream)
+        CUDA_CHECK(cudaStreamSynchronize(b.host_stream));
+    }
+    for (auto event : host_buffer_copy_done) {
+      if (event)
+        CUDA_CHECK(cudaEventDestroy(event));
+    }
     if (d_stream_perm_recv) cudaFree(d_stream_perm_recv);
     if (d_stream_perm_pol)  cudaFree(d_stream_perm_pol);
+    if (obs_header) {
+      free(obs_header);
+      obs_header = nullptr;
+    }
     // Mirror the constructor: nothing to tear down when the PSRDADA sink was
     // disabled (dada_key == 0), and hdu/log are left null in that case.
     if (dada_key == 0)
@@ -1132,7 +1538,21 @@ public:
   }
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {
-    // nothing to do.
+    if (async_dada_writer) {
+      std::unique_lock<std::mutex> lock(dada_writer_mutex);
+      dada_writer_cv.wait(lock, [this] {
+        if (dada_writer_error)
+          return true;
+        if (!dada_ready_queue.empty())
+          return false;
+        for (bool free : gpu_buffer_free)
+          if (!free)
+            return false;
+        return true;
+      });
+      if (dada_writer_error)
+        std::rethrow_exception(dada_writer_error);
+    }
   }
 
   virtual void set_subpacket_delays(int *delays_subpacket) {
