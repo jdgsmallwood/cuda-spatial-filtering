@@ -62,11 +62,11 @@ inline double channel_to_frequency_hz(int absolute_channel_index,
 
 // Sky frequency of a channel in the post-PFB processing axis.  With fine
 // channelisation disabled, processing_channel_index is simply a coarse-channel
-// offset.  The Lambda second-stage PFB is 32/27 oversampled; after trimming two
-// bins from each edge, the 28 retained bin centres span -0.5..+0.5 of one
-// coarse channel in steps of 1/27.  Adjacent coarse channels therefore share
-// their boundary bin.  This is the same convention used by
-// lambda_commissioning.utils.fine_channel_freqs.
+// offset. For a complex FFT-shifted N-bin PFB, original bin N/2 is at the
+// coarse centre and raw bin j is (j-N/2) fine-bin spacings away. With 32/27
+// oversampling and a 2+2 internal trim, raw bins 2..29 are retained and
+// adjacent coarse channels share raw 29 / raw 2 at the same frequency. The
+// DADA output selects raw bins 3..29, giving 27 centres per coarse channel.
 inline double processing_channel_to_frequency_hz(
     size_t processing_channel_index, int min_coarse_channel,
     const FrequencyPlan &plan, size_t nr_fine_channels,
@@ -82,8 +82,8 @@ inline double processing_channel_to_frequency_hz(
   const size_t retained_fine_index =
       processing_channel_index % nr_effective_fine_channels;
   const double offset_in_coarse_channels =
-      (static_cast<double>(retained_fine_index) -
-       (static_cast<double>(nr_effective_fine_channels) - 1.0) / 2.0) /
+      (static_cast<double>(retained_fine_index + fine_channel_edge_trim) -
+       static_cast<double>(nr_fine_channels / 2)) /
       fine_oversample_denominator;
 
   return channel_to_frequency_hz(

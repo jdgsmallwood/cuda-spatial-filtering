@@ -73,7 +73,7 @@ scripts/**/*.json
 scripts/**/*.pcap
 scripts/**/*.csv
 scripts/**/*.sh
-!scripts/run_starweave.sh
+!scripts/run_starspin.sh
 !scripts/run_pulsar_replay.sh
 scripts/.venv
 **/__pycache__/*

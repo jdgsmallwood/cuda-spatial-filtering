@@ -63,6 +63,45 @@ add_executable(
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
+add_executable(ProcessorDirectNicTests test_direct_nic_workers.cu)
+target_link_libraries(ProcessorDirectNicTests PRIVATE test_support)
+target_compile_definitions(ProcessorDirectNicTests PRIVATE
+    SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1)
+
+add_executable(ProcessorDirectNicBatchTests test_direct_nic_workers.cu)
+target_link_libraries(ProcessorDirectNicBatchTests PRIVATE test_support)
+target_compile_definitions(ProcessorDirectNicBatchTests PRIVATE
+    SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1
+    SPATIAL_BATCH_PACKET_WATERMARKS=1)
+
+add_executable(ProcessorDirectNicBatchOptimizedTests test_direct_nic_workers.cu)
+target_link_libraries(ProcessorDirectNicBatchOptimizedTests PRIVATE test_support)
+target_compile_definitions(ProcessorDirectNicBatchOptimizedTests PRIVATE
+    SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1
+    SPATIAL_BATCH_PACKET_WATERMARKS=1 SPATIAL_BATCH_NT_FENCE=1
+    SPATIAL_TOUCHED_WATERMARKS=1)
+
+add_executable(ProcessorDirectNicBatchOptimizedBatchedTests test_direct_nic_workers.cu)
+target_link_libraries(ProcessorDirectNicBatchOptimizedBatchedTests PRIVATE test_support)
+target_compile_definitions(ProcessorDirectNicBatchOptimizedBatchedTests PRIVATE
+    SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1
+    SPATIAL_BATCH_PACKET_WATERMARKS=1 SPATIAL_BATCH_NT_FENCE=1
+    SPATIAL_TOUCHED_WATERMARKS=1 SPATIAL_DIRECT_BATCH_TARGET=192
+    SPATIAL_DIRECT_BATCH_WAIT_US=200)
+
+add_executable(ProcessorDirectNicTraceTests test_direct_nic_workers.cu)
+target_link_libraries(ProcessorDirectNicTraceTests PRIVATE test_support)
+target_compile_definitions(ProcessorDirectNicTraceTests PRIVATE
+    SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1
+    SPATIAL_BATCH_PACKET_WATERMARKS=1 SPATIAL_BATCH_NT_FENCE=1
+    SPATIAL_TOUCHED_WATERMARKS=1 SPATIAL_DIRECT_BATCH_TARGET=192
+    SPATIAL_DIRECT_BATCH_WAIT_US=200 SPATIAL_TIMING_DIAGNOSTICS=1
+    SPATIAL_INGEST_TRACE=1 SPATIAL_COORDINATOR_AFFINITY=1)
+
+add_executable(IngestTraceTests test_ingest_trace.cpp)
+target_include_directories(IngestTraceTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(IngestTraceTests PRIVATE GTest::gtest_main)
+
 add_executable(
   IbverbsPlacementTests test_ibverbs_placement.cu
 )
@@ -107,10 +146,10 @@ target_link_libraries(CorrBeamPipelineTests PRIVATE test_support)
 set_target_properties(CorrBeamPipelineTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 
 add_executable(
-  StarweaveTests test_starweave_pipeline.cu
+  StarspinTests test_starspin_pipeline.cu
 )
-target_link_libraries(StarweaveTests PRIVATE test_support)
-set_target_properties(StarweaveTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+target_link_libraries(StarspinTests PRIVATE test_support)
+set_target_properties(StarspinTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 
 add_executable(
   AdaptivePipelineTests test_adaptive_pipeline.cu
@@ -166,9 +205,9 @@ add_executable(FineChannelizedCorrBeamTests test_fine_channelized_corr_beam.cu)
 target_link_libraries(FineChannelizedCorrBeamTests PRIVATE test_support)
 set_target_properties(FineChannelizedCorrBeamTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 
-add_executable(FineChannelizedStarweaveTests test_fine_channelized_starweave.cu)
-target_link_libraries(FineChannelizedStarweaveTests PRIVATE test_support)
-set_target_properties(FineChannelizedStarweaveTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+add_executable(FineChannelizedStarspinTests test_fine_channelized_starspin.cu)
+target_link_libraries(FineChannelizedStarspinTests PRIVATE test_support)
+set_target_properties(FineChannelizedStarspinTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 
 # Standalone processor-path benchmark (not a gtest — run directly).
 # Measures process_all_available_packets() throughput plus hash-lookup,
@@ -178,17 +217,29 @@ target_link_libraries(benchmark_processor PRIVATE test_app_common)
 set_target_properties(benchmark_processor PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 
 include(GoogleTest)
+gtest_discover_tests(IngestTraceTests)
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests DISCOVERY_TIMEOUT 60)
 gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
+gtest_discover_tests(ProcessorDirectNicTests)
+gtest_discover_tests(ProcessorDirectNicBatchTests TEST_PREFIX "Batch.")
 gtest_discover_tests(IbverbsPlacementTests)
 gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)
 gtest_discover_tests(PulsarFoldTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(CorrBeamPipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
-gtest_discover_tests(StarweaveTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+gtest_discover_tests(StarspinTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
+
+# Run the same visibility/value tests with registered huge-page input buffers.
+add_executable(StarspinTHPTests test_starspin_pipeline.cu)
+target_link_libraries(StarspinTHPTests PRIVATE test_support)
+target_compile_definitions(StarspinTHPTests PRIVATE
+    SPATIAL_THP_INPUT_BUFFERS=1
+    SPATIAL_THP_OUTPUT_BUFFERS=1)
+gtest_discover_tests(StarspinTHPTests TEST_PREFIX "THP."
+  PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(RunAuditTests)
 gtest_discover_tests(AdaptivePipelineTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 gtest_discover_tests(FineDelayTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
@@ -207,7 +258,7 @@ gtest_discover_tests(CoarsePfbDerippleTests PROPERTIES ENVIRONMENT "${TEST_CUDA_
 add_test(NAME CoarsePfbDeripplePythonTests
   COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test_coarse_pfb_deripple.py)
 gtest_discover_tests(FineChannelizedCorrBeamTests PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
-gtest_discover_tests(FineChannelizedStarweaveTests
+gtest_discover_tests(FineChannelizedStarspinTests
   DISCOVERY_TIMEOUT 60
   PROPERTIES ENVIRONMENT "${TEST_CUDA_ENV}")
 

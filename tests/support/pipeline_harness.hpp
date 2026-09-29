@@ -97,13 +97,13 @@ make_corr_beam_only_pipeline(int num_buffers, BeamWeightsT<Config> *weights,
       num_buffers, weights, std::move(beam_steering));
 }
 
-// Constructs a LambdaStarweavePipeline (correlation-only, visibilities-only --
+// Constructs a LambdaStarspinPipeline (correlation-only, visibilities-only --
 // no beamforming, so unlike the factories above there's no BeamWeightsT/BeamSteering
 // to construct at all).
 template <typename Config>
-std::unique_ptr<LambdaStarweavePipeline<Config>>
-make_starweave_pipeline(int num_buffers) {
-  return std::make_unique<LambdaStarweavePipeline<Config>>(num_buffers);
+std::unique_ptr<LambdaStarspinPipeline<Config>>
+make_starspin_pipeline(int num_buffers) {
+  return std::make_unique<LambdaStarspinPipeline<Config>>(num_buffers);
 }
 
 // Constructs a LambdaPulsarFoldPipeline with its PSRDADA sink disabled

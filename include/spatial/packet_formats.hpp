@@ -1,11 +1,20 @@
 #pragma once
 #include "spatial/logging.hpp"
 #include <atomic>
+#include <cerrno>
 #include <complex>
+#include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <netinet/in.h>
+#include <sched.h>
+#include <stdexcept>
+#include <string>
+#include <sys/mman.h>
 #include <sys/time.h>
 #include <unistd.h>
 #define BUFFER_SIZE 4096
@@ -77,6 +86,42 @@ struct LambdaFinalPacketData : public FinalPacketData {
   PacketSamplesType *samples = nullptr;
   PacketScalesType *scales = nullptr;
   ArrivalsType *arrivals = nullptr;
+#ifdef SPATIAL_THP_INPUT_BUFFERS
+  void *sample_mapping = nullptr;
+  size_t sample_mapping_bytes = 0;
+
+  static int input_buffer_cpu(const cpu_set_t &allowed) {
+    if (const char *text = std::getenv("SPATIAL_INPUT_BUFFER_CPU")) {
+      char *end = nullptr;
+      const long requested = std::strtol(text, &end, 10);
+      if (end == text || *end != '\0' || requested < 0 ||
+          requested >= CPU_SETSIZE)
+        throw std::runtime_error("invalid SPATIAL_INPUT_BUFFER_CPU");
+      return static_cast<int>(requested);
+    }
+    int device = 0;
+    cudaDeviceProp prop{};
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaGetDeviceProperties(&prop, device) != cudaSuccess)
+      return -1;
+    char pci_id[32];
+    std::snprintf(pci_id, sizeof(pci_id), "%04x:%02x:%02x.0",
+                  prop.pciDomainID, prop.pciBusID, prop.pciDeviceID);
+    std::ifstream node_file(std::string("/sys/bus/pci/devices/") + pci_id +
+                            "/numa_node");
+    int node = -1;
+    node_file >> node;
+    if (node < 0) return -1;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+      if (!CPU_ISSET(cpu, &allowed)) continue;
+      if (std::ifstream("/sys/devices/system/cpu/cpu" +
+                        std::to_string(cpu) + "/node" +
+                        std::to_string(node)).good())
+        return cpu;
+    }
+    return -1;
+  }
+#endif
 
   void *get_samples_ptr() override { return (void *)samples; };
   void *get_scales_ptr() override { return (void *)scales; };
@@ -127,7 +172,62 @@ struct LambdaFinalPacketData : public FinalPacketData {
   };
 
   LambdaFinalPacketData() {
-
+#ifdef SPATIAL_THP_INPUT_BUFFERS
+    // One huge-page-advised, CUDA-registered slab for the H2D inputs. A
+    // first-touch CPU override places only these GPU-bound pages on the GPU's
+    // NUMA node; NIC receive rings retain their own local NUMA placement.
+    cpu_set_t old_affinity;
+    bool restore_affinity = false;
+    if (sched_getaffinity(0, sizeof(old_affinity), &old_affinity) != 0)
+      throw std::runtime_error("cannot query input-buffer allocation affinity");
+    const int cpu = input_buffer_cpu(old_affinity);
+    if (cpu >= 0) {
+      cpu_set_t target;
+      CPU_ZERO(&target);
+      CPU_SET(cpu, &target);
+      if (sched_setaffinity(0, sizeof(target), &target) != 0)
+        throw std::runtime_error("cannot pin input-buffer allocation CPU");
+      restore_affinity = true;
+    }
+    constexpr size_t alignment = 2 * 1024 * 1024;
+    const size_t input_bytes = sizeof(PacketSamplesType) + sizeof(PacketScalesType);
+    sample_mapping_bytes = input_bytes + alignment;
+    sample_mapping = mmap(nullptr, sample_mapping_bytes,
+                          PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                          -1, 0);
+    bool registered = false;
+    if (sample_mapping != MAP_FAILED) {
+      const uintptr_t aligned =
+          (reinterpret_cast<uintptr_t>(sample_mapping) + alignment - 1) &
+          ~(uintptr_t(alignment) - 1);
+      samples = reinterpret_cast<PacketSamplesType *>(aligned);
+      scales = reinterpret_cast<PacketScalesType *>(aligned + sizeof(PacketSamplesType));
+      if (madvise(samples, input_bytes, MADV_HUGEPAGE) == 0) {
+        std::memset(samples, 0, input_bytes);
+        registered = cudaHostRegister(samples, input_bytes,
+                                      cudaHostRegisterDefault) == cudaSuccess;
+      }
+      if (!registered) {
+        cudaGetLastError();
+        munmap(sample_mapping, sample_mapping_bytes);
+      }
+    }
+    if (!registered) {
+      sample_mapping = nullptr;
+      sample_mapping_bytes = 0;
+      samples = nullptr;
+      scales = nullptr;
+      CUDA_CHECK(cudaHostAlloc((void **)&samples, sizeof(PacketSamplesType),
+                               cudaHostAllocDefault));
+      CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(PacketScalesType),
+                               cudaHostAllocDefault));
+      std::memset(samples, 0, sizeof(PacketSamplesType));
+      std::memset(scales, 0, sizeof(PacketScalesType));
+    }
+    if (restore_affinity &&
+        sched_setaffinity(0, sizeof(old_affinity), &old_affinity) != 0)
+      throw std::runtime_error("cannot restore input-buffer allocation affinity");
+#else
     // allocate samples
     CUDA_CHECK(cudaHostAlloc((void **)&samples, sizeof(PacketSamplesType),
                              cudaHostAllocDefault));
@@ -136,13 +236,24 @@ struct LambdaFinalPacketData : public FinalPacketData {
     CUDA_CHECK(cudaHostAlloc((void **)&scales, sizeof(PacketScalesType),
                              cudaHostAllocDefault));
     std::memset(scales, 0, sizeof(PacketScalesType));
+#endif
     CUDA_CHECK(cudaHostAlloc((void **)&arrivals, sizeof(ArrivalsType),
                              cudaHostAllocDefault));
     std::memset(arrivals, 0, sizeof(ArrivalsType));
   };
   ~LambdaFinalPacketData() {
+#ifdef SPATIAL_THP_INPUT_BUFFERS
+    if (sample_mapping) {
+      CUDA_CHECK(cudaHostUnregister(samples));
+      munmap(sample_mapping, sample_mapping_bytes);
+    } else {
+      CUDA_CHECK(cudaFreeHost(samples));
+      CUDA_CHECK(cudaFreeHost(scales));
+    }
+#else
     CUDA_CHECK(cudaFreeHost(samples));
     CUDA_CHECK(cudaFreeHost(scales));
+#endif
     CUDA_CHECK(cudaFreeHost(arrivals));
   };
 };
@@ -300,7 +411,8 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           size_t NR_CORRELATED_BLOCKS_TO_ACCUMULATE_T,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false,
           size_t FFT_DOWNSAMPLE_FACTOR_T = 128, size_t NR_FINE_CHANNELS_T = 1,
-          size_t NR_FINE_CHANNEL_EDGE_TRIM_T = 0>
+          size_t NR_FINE_CHANNEL_EDGE_TRIM_T = 0,
+          size_t NR_ACTIVE_RECEIVERS_T = NR_RECEIVERS_T>
 struct LambdaConfig {
 
   static constexpr size_t NR_FPGA_CHANNELS = NR_CHANNELS_T;
@@ -319,6 +431,10 @@ struct LambdaConfig {
   static constexpr size_t NR_FPGA_SOURCES = NR_FPGA_SOURCES_T;
   static constexpr size_t NR_TIME_STEPS_PER_PACKET = NR_TIME_STEPS_PER_PACKET_T;
   static constexpr size_t NR_RECEIVERS = NR_RECEIVERS_T;
+  // The packet layout can include disconnected receiver slots. Starspin
+  // correlates only the leading connected slots after canonical reordering.
+  static constexpr size_t NR_ACTIVE_RECEIVERS = NR_ACTIVE_RECEIVERS_T;
+  static_assert(NR_ACTIVE_RECEIVERS > 0 && NR_ACTIVE_RECEIVERS <= NR_RECEIVERS);
   static constexpr size_t NR_POLARIZATIONS = NR_POLARIZATIONS_T;
   static constexpr size_t NR_RECEIVERS_PER_PACKET = NR_RECEIVERS_PER_PACKET_T;
   static constexpr size_t NR_PACKETS_FOR_CORRELATION =
@@ -332,7 +448,7 @@ struct LambdaConfig {
   static constexpr size_t NR_BASELINES =
       NR_PADDED_RECEIVERS * (NR_PADDED_RECEIVERS + 1) / 2;
   static constexpr size_t NR_BASELINES_UNPADDED =
-      NR_RECEIVERS * (NR_RECEIVERS + 1) / 2;
+      NR_ACTIVE_RECEIVERS * (NR_ACTIVE_RECEIVERS + 1) / 2;
   static constexpr size_t COMPLEX = 2;
 
   static constexpr size_t NR_TIME_STEPS_FOR_CORRELATION =

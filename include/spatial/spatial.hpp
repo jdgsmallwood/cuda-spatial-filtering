@@ -1,5 +1,6 @@
 #pragma once
 #include "spatial/logging.hpp"
+#include "spatial/ingest_trace.hpp"
 #include "spatial/packet_formats.hpp"
 #include "spatial/pipeline_base.hpp"
 #include <complex>
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <immintrin.h>
 #include <limits>
 #include <mutex>
@@ -22,8 +24,10 @@
 #include <pcap/pcap.h>
 #include <poll.h>
 #include <queue>
+#include <shared_mutex>
 #include <stdatomic.h>
 #include <sys/mman.h>
+#include <sched.h>
 #include <sys/time.h>
 
 #define MIN_PCAP_HEADER_SIZE 64
@@ -74,11 +78,11 @@ inline Result nearest_multiple(int64_t x, int64_t k) {
 // buffers): streaming stores bypass the cache and skip the read-for-ownership
 // a normal memcpy incurs, roughly halving memory traffic for data the CPU
 // never reads back — the GPU DMAs it out.  Falls back to memcpy when the
-// destination or size isn't vector-aligned.  The sfence is required: NT
-// stores are weakly ordered and must be globally visible before the release
-// store that publishes the packet as processed.
+// destination or size isn't vector-aligned. The default sfence makes NT
+// stores visible before publishing the packet. A worker may defer this fence
+// until its batch ends because buffer completion waits for that worker.
 inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
-                    size_t n) {
+                    size_t n, bool defer_fence = false) {
 #if defined(__AVX512F__)
   // 64-byte NT stores (40 ops for 2560 B vs 160 SSE2 ops) — Zen 4 / Skylake-X+
   if ((reinterpret_cast<uintptr_t>(dst) & 63) == 0 && (n & 63) == 0) {
@@ -89,7 +93,7 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
           reinterpret_cast<__m512i *>(d + i),
           _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s + i)));
     }
-    _mm_sfence();
+    if (!defer_fence) _mm_sfence();
     return;
   }
 #endif
@@ -102,7 +106,7 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
           reinterpret_cast<__m256i *>(d + i),
           _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s + i)));
     }
-    _mm_sfence();
+    if (!defer_fence) _mm_sfence();
     return;
   }
 #elif defined(__SSE2__) || defined(__x86_64__)
@@ -114,7 +118,7 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
           reinterpret_cast<__m128i *>(d + i),
           _mm_loadu_si128(reinterpret_cast<const __m128i *>(s + i)));
     }
-    _mm_sfence();
+    if (!defer_fence) _mm_sfence();
     return;
   }
 #endif
@@ -147,6 +151,11 @@ inline int nth_cpu_from_list(const char *list, int n) {
 // forward declaration of GPUPipeline.
 class GPUPipeline;
 
+inline bool spatial_verbose_diagnostics_enabled() {
+  const char *value = std::getenv("SPATIAL_VERBOSE_DIAGNOSTICS");
+  return value && std::strcmp(value, "1") == 0;
+}
+
 class ProcessorStateBase {
 public:
   int current_buffer = 0;
@@ -154,6 +163,18 @@ public:
   std::atomic<int> read_index = 0;
   std::unordered_map<uint32_t, int> fpga_ids;
   bool synchronous_pipeline = false;
+  const int completion_poll_us = spatial::completion_poll_interval_us(
+      std::getenv("SPATIAL_COMPLETION_POLL_US"));
+#ifdef SPATIAL_COORDINATOR_AFFINITY
+  const int coordinator_cpu = spatial::coordinator_cpu_from_env(
+      std::getenv("SPATIAL_COORDINATOR_CPU"));
+#endif
+  // Avoid a member-initializer lambda: NVCC 12.8 crashes on it when this
+  // class also contains the timing probes.
+  const bool verbose_diagnostics = spatial_verbose_diagnostics_enabled();
+#ifdef SPATIAL_INGEST_TRACE
+  spatial::IngestTrace ingest_trace;
+#endif
   std::atomic<int> running = 1;
   // Atomic: incremented concurrently by every receiver thread.
   std::atomic<uint64_t> packets_received = 0;
@@ -173,6 +194,62 @@ public:
   std::atomic<uint64_t> diagnostic_buffer_handoffs{0};
   std::atomic<uint64_t> diagnostic_empty_buffer_waits{0};
   std::atomic<uint64_t> diagnostic_processor_dispatches{0};
+#endif
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+  struct alignas(64) TimingProbe {
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> total_ns{0};
+    std::atomic<uint64_t> max_ns{0};
+    void record(uint64_t ns) {
+      count.fetch_add(1, std::memory_order_relaxed);
+      total_ns.fetch_add(ns, std::memory_order_relaxed);
+      uint64_t old = max_ns.load(std::memory_order_relaxed);
+      while (old < ns && !max_ns.compare_exchange_weak(
+                             old, ns, std::memory_order_relaxed)) {}
+    }
+  };
+  std::array<TimingProbe, 8> timing_ring_full;
+  std::array<TimingProbe, 8> timing_worker_batch;
+  std::array<TimingProbe, 8> timing_worker_completion_pause;
+  TimingProbe timing_completion_lock_wait;
+  TimingProbe timing_completion_check;
+  TimingProbe timing_buffer_handoff;
+  TimingProbe timing_zero_missing;
+  TimingProbe timing_buffer_flight;
+
+  void print_timing_diagnostics() const {
+    const auto print = [](const TimingProbe &p) {
+      std::cout << p.count.load(std::memory_order_relaxed) << ':'
+                << p.total_ns.load(std::memory_order_relaxed) / 1000000 << ':'
+                << p.max_ns.load(std::memory_order_relaxed) / 1000;
+    };
+    std::cout << "TIMING count:total_ms:max_us RingFull=[";
+    for (int i = 0; i < nr_capture_threads; ++i) {
+      if (i) std::cout << ',';
+      print(timing_ring_full[i]);
+    }
+    std::cout << "] WorkerBatch=[";
+    for (int i = 0; i < nr_capture_threads; ++i) {
+      if (i) std::cout << ',';
+      print(timing_worker_batch[i]);
+    }
+    std::cout << "] CompletionPause=[";
+    for (int i = 0; i < nr_capture_threads; ++i) {
+      if (i) std::cout << ',';
+      print(timing_worker_completion_pause[i]);
+    }
+    std::cout << "] CompletionLockWait=";
+    print(timing_completion_lock_wait);
+    std::cout << " CompletionCheck=";
+    print(timing_completion_check);
+    std::cout << " BufferHandoff=";
+    print(timing_buffer_handoff);
+    std::cout << " ZeroMissing=";
+    print(timing_zero_missing);
+    std::cout << " BufferFlight=";
+    print(timing_buffer_flight);
+    std::cout << std::endl;
+  }
 #endif
   // Set on the first packet discarded because its freq_channel falls outside
   // [MIN_FREQ_CHANNEL, MIN_FREQ_CHANNEL + NR_CHANNELS). Used to emit a
@@ -269,6 +346,8 @@ public:
   // packet ring rather than staging through a second buffer.
   virtual void *packet_ring_base() const { return nullptr; }
   virtual size_t packet_ring_bytes() const { return 0; }
+  virtual void *packet_ring_base_for_thread(int) const { return packet_ring_base(); }
+  virtual size_t packet_ring_bytes_for_thread(int) const { return packet_ring_bytes(); }
   virtual size_t packet_ring_slot_stride() const { return 0; }
   virtual size_t packet_ring_slot_offset() const { return 0; }
   virtual size_t packet_ring_slot_count() const { return 0; }
@@ -318,6 +397,12 @@ public:
   // Experimental A/B switch, set before starting processor threads. Keep the
   // established handoff as default until integrated throughput is validated.
   bool use_worker_mailboxes = false;
+#ifdef SPATIAL_DIRECT_NIC_WORKERS
+  // Each worker drains its own NIC ring. The processor thread only checks
+  // completed windows; it does not dispatch packet-copy work.
+  std::shared_mutex completion_mutex;
+  std::atomic<bool> completion_requested{false};
+#endif
   bool profile_worker_dispatch = false;
   uint64_t dispatch_batches = 0;
   uint64_t dispatch_slots = 0;
@@ -325,12 +410,16 @@ public:
   uint64_t dispatch_total_ns = 0;
 
   typename T::PacketFinalDataType *d_samples[NR_INPUT_BUFFERS];
-  // Pointer array kept for API compatibility; all slots come from one
-  // contiguous pool so d_packet_data[i] = &d_packet_data_pool[i].  The
-  // contiguous layout keeps ring slots in L3 as the processor threads stride
-  // through them.
+  // Logical ring index to slot pointer. Normal builds use one shared pool;
+  // SPATIAL_PER_NIC_RING maps each NIC's strided logical slots into its own
+  // contiguous, NUMA-local pool.
   typename T::PacketEntryType *d_packet_data[RING_BUFFER_SIZE];
   typename T::PacketEntryType *d_packet_data_pool = nullptr;
+#ifdef SPATIAL_PER_NIC_RING
+  static_assert(RING_BUFFER_SIZE % T::NR_FPGA_SOURCES == 0);
+  std::array<typename T::PacketEntryType *, T::NR_FPGA_SOURCES>
+      d_packet_data_nic_pools{};
+#endif
   size_t MIN_FREQ_CHANNEL;
   size_t NR_BETWEEN_SAMPLES;
   size_t NR_PACKETS_FOR_CORRELATION;
@@ -341,6 +430,13 @@ public:
       latest_packet_received[T::NR_FPGA_CHANNELS][T::NR_FPGA_SOURCES];
   mutable std::mutex buffer_index_mutex;
   GPUPipeline *pipeline_;
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+  std::array<std::atomic<uint64_t>, NR_INPUT_BUFFERS> timing_handoff_start_ns{};
+  static uint64_t timing_now_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+#endif
 
   // CAS-loop atomic max: updates *target to max(*target, val).
   static void atomic_max_u64(std::atomic<uint64_t> &target, uint64_t val) {
@@ -382,11 +478,53 @@ public:
     for (auto &f : modified_since_last_completion_check)
       f.store(false, std::memory_order_relaxed);
     try {
-      // Single allocation for all ring slots keeps them contiguous in memory.
-      // The individual d_packet_data[i] pointers still work for all existing
-      // call sites, but the hardware prefetcher can now stride through the
-      // ring.  2 MB-aligned + MADV_HUGEPAGE so the multi-hundred-MB pool is
-      // backed by huge pages, cutting dTLB misses while striding the ring.
+      // 2 MB-aligned receive slots; the experimental layout first-touches
+      // each NIC's pool while pinned to that NIC's NUMA node.
+#ifdef SPATIAL_PER_NIC_RING
+      constexpr size_t slots_per_nic = RING_BUFFER_SIZE / T::NR_FPGA_SOURCES;
+      cpu_set_t original_affinity;
+      const bool have_affinity =
+          sched_getaffinity(0, sizeof(original_affinity), &original_affinity) == 0;
+      for (int nic = 0; nic < T::NR_FPGA_SOURCES; ++nic) {
+        const int node = nth_cpu_from_list(
+            std::getenv("SPATIAL_RING_NUMA_NODES"), nic);
+        if (node >= 0) {
+          std::ifstream cpulist("/sys/devices/system/node/node" +
+                                std::to_string(node) + "/cpulist");
+          std::string first_cpu;
+          if (!std::getline(cpulist, first_cpu) || first_cpu.empty())
+            throw std::runtime_error("cannot find CPUs for NIC NUMA node");
+          cpu_set_t node_affinity;
+          CPU_ZERO(&node_affinity);
+          CPU_SET(std::stoi(first_cpu), &node_affinity);
+          if (sched_setaffinity(0, sizeof(node_affinity), &node_affinity) != 0)
+            throw std::runtime_error("cannot pin ring initialization to NIC NUMA node");
+        }
+        void *raw = nullptr;
+        if (posix_memalign(&raw, 2 * 1024 * 1024,
+                           sizeof(typename T::PacketEntryType) * slots_per_nic) != 0)
+          throw std::bad_alloc();
+        // First-touch every page while pinned to the NIC's NUMA node.
+        std::memset(raw, 0, sizeof(typename T::PacketEntryType) * slots_per_nic);
+#ifdef MADV_HUGEPAGE
+        madvise(raw, sizeof(typename T::PacketEntryType) * slots_per_nic,
+               MADV_HUGEPAGE);
+#endif
+        auto *pool = static_cast<typename T::PacketEntryType *>(raw);
+        d_packet_data_nic_pools[nic] = pool;
+        for (size_t slot = 0; slot < slots_per_nic; ++slot) {
+          new (&pool[slot]) typename T::PacketEntryType();
+          auto *entry = &pool[slot];
+          d_packet_data[slot * T::NR_FPGA_SOURCES + nic] = entry;
+          entry->processed.store(true, std::memory_order_relaxed);
+          entry->committed.store(false, std::memory_order_relaxed);
+        }
+        if (have_affinity)
+          sched_setaffinity(0, sizeof(original_affinity), &original_affinity);
+        INFO_LOG("NIC {} ring: {} slots, requested NUMA node {}", nic,
+                 slots_per_nic, node);
+      }
+#else
       const size_t pool_bytes =
           sizeof(typename T::PacketEntryType) * RING_BUFFER_SIZE;
       void *raw = nullptr;
@@ -403,6 +541,7 @@ public:
         d_packet_data[i]->processed.store(true, std::memory_order_relaxed);
         d_packet_data[i]->committed.store(false, std::memory_order_relaxed);
       }
+#endif
 
       for (auto i = 0; i < NR_INPUT_BUFFERS; ++i) {
         d_samples[i] = new typename T::PacketFinalDataType();
@@ -618,11 +757,29 @@ public:
     return sizeof(typename T::PacketScaleStructure);
   }
 
+  struct BatchWatermarks {
+    std::array<std::array<uint64_t, T::NR_FPGA_SOURCES>,
+               T::NR_FPGA_CHANNELS> latest{};
+    std::array<bool, T::NR_FPGA_CHANNELS> modified{};
+#ifdef SPATIAL_TOUCHED_WATERMARKS
+    std::array<uint16_t, T::NR_FPGA_CHANNELS> touched{};
+    size_t touched_count = 0;
+    void mark_modified(size_t channel) {
+      if (!modified[channel]) {
+        modified[channel] = true;
+        touched[touched_count++] = static_cast<uint16_t>(channel);
+      }
+    }
+#endif
+  };
+
   __attribute__((hot)) void copy_data_to_input_buffer_if_able(
       ProcessedPacket<typename T::PacketScaleStructure,
                       typename T::PacketDataStructure> &pkt,
       const int current_read_index,
-      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max) {
+      const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
+      BatchWatermarks *batch_watermarks = nullptr,
+      bool defer_nt_fence = false) {
     int fpga_index_i =
         pkt.fpga_id < fpga_index_lut.size() ? fpga_index_lut[pkt.fpga_id] : -1;
     if (fpga_index_i < 0) [[unlikely]] {
@@ -661,8 +818,13 @@ public:
     // the watermark when the drain re-processes them through the copy path
     // below; genuinely jumped streams (never drainable) are force-completed by
     // the stall safety net in drain_future_packets().
-    atomic_max_u64(latest_packet_received[freq_channel][fpga_index],
-                   sample_count);
+    if (batch_watermarks) {
+      auto &latest = batch_watermarks->latest[freq_channel][fpga_index];
+      latest = std::max(latest, sample_count);
+    } else {
+      atomic_max_u64(latest_packet_received[freq_channel][fpga_index],
+                     sample_count);
+    }
 
     bool is_extended = false;
     int num_copied = 0;
@@ -709,7 +871,7 @@ public:
         // streamed past the cache — the CPU never reads this buffer, the GPU
         // DMAs it.  Scales are 40 B and stride-unaligned; plain memcpy.
         copy_nt(&samples, pkt.payload->data,
-                sizeof(typename T::PacketDataStructure));
+                sizeof(typename T::PacketDataStructure), defer_nt_fence);
         std::memcpy(&scales, pkt.payload->scales,
                     sizeof(typename T::PacketScaleStructure));
         arrival = true;
@@ -828,7 +990,9 @@ public:
   __attribute__((hot)) void process_packet_data(
       typename T::PacketEntryType *pkt, const int current_read_index,
       const std::array<uint64_t, T::NR_FPGA_SOURCES> &global_max,
-      uint64_t *processed_accum = nullptr) {
+      uint64_t *processed_accum = nullptr,
+      BatchWatermarks *batch_watermarks = nullptr,
+      bool defer_nt_fence = false) {
 
     // This is where you'd do your actual processing
     // For now, just print the info and simulate some work
@@ -912,7 +1076,8 @@ public:
         buffer_init_flag.store(true, std::memory_order_release);
       }
     }
-    copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max);
+    copy_data_to_input_buffer_if_able(parsed, current_read_index, global_max,
+                                      batch_watermarks, defer_nt_fence);
     if (*parsed.original_packet_processed) [[likely]] {
       if (processed_accum) {
         ++*processed_accum;
@@ -920,8 +1085,15 @@ public:
         packets_processed.fetch_add(1, std::memory_order_relaxed);
       }
     }
-    modified_since_last_completion_check[freq_channel].store(
-        true, std::memory_order_release);
+    if (batch_watermarks) {
+#ifdef SPATIAL_TOUCHED_WATERMARKS
+      batch_watermarks->mark_modified(freq_channel);
+#else
+      batch_watermarks->modified[freq_channel] = true;
+#endif
+    } else
+      modified_since_last_completion_check[freq_channel].store(
+          true, std::memory_order_release);
   };
 
   void
@@ -963,6 +1135,12 @@ public:
   void execute_processing_pipeline_on_buffer(const int buffer_index) {};
 
   __attribute__((hot)) void release_buffer(const int buffer_index) {
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+    const uint64_t handed_off = timing_handoff_start_ns[buffer_index].exchange(
+        0, std::memory_order_relaxed);
+    if (handed_off)
+      timing_buffer_flight.record(timing_now_ns() - handed_off);
+#endif
     // Zero arrivals before taking the lock. Safe: the GPU just finished with
     // this slot, and no processor thread can claim it as current_buffer until
     // is_ready=true and the queue push happen below under buffer_index_mutex.
@@ -1179,6 +1357,22 @@ public:
 
   __attribute__((hot)) void process_packets() {
 
+#ifdef SPATIAL_COORDINATOR_AFFINITY
+    if (coordinator_cpu >= 0) {
+      cpu_set_t cpus;
+      CPU_ZERO(&cpus);
+      CPU_SET(coordinator_cpu, &cpus);
+      if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
+        std::cerr << "Cannot pin completion coordinator to CPU "
+                  << coordinator_cpu << ": " << std::strerror(errno) << '\n';
+        shutdown();
+        return;
+      }
+      std::cout << "Completion coordinator pinned to CPU "
+                << coordinator_cpu << '\n';
+    }
+#endif
+
     // using clock = std::chrono::high_resolution_clock;
     // auto cpu_start = clock::now();
     // auto cpu_end = clock::now();
@@ -1190,6 +1384,53 @@ public:
               << MIN_FREQ_CHANNEL << ", "
               << MIN_FREQ_CHANNEL + T::NR_FPGA_CHANNELS
               << "), NR_FPGA_SOURCES=" << T::NR_FPGA_SOURCES << "\n";
+#ifdef SPATIAL_DIRECT_NIC_WORKERS
+    if (nr_capture_threads > 0) {
+      if (nr_capture_threads != WORKER_COUNT)
+        throw std::logic_error("direct NIC workers require one worker per capture NIC");
+      start_processing_threads();
+      std::cout << "Completion polling interval: " << completion_poll_us << " us\n";
+      while (running.load(std::memory_order_acquire)) {
+        if (buffer_init_flag.load(std::memory_order_acquire)) {
+          // Prevent a stream of new shared locks from starving the window
+          // switch. In-flight copies finish before the exclusive lock lands.
+#ifdef SPATIAL_INGEST_TRACE
+          const uint64_t trace_cpu_start = ingest_trace.enabled()
+              ? spatial::IngestTrace::thread_cpu_ns() : 0;
+          const uint64_t missing_before = packets_missing;
+          uint64_t trace_acquired = 0;
+          const uint64_t trace_start = spatial::IngestTrace::now_ns();
+#endif
+          completion_requested.store(true, std::memory_order_release);
+          {
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+            const uint64_t completion_lock_start = timing_now_ns();
+#endif
+            std::unique_lock<std::shared_mutex> lock(completion_mutex);
+#ifdef SPATIAL_INGEST_TRACE
+            trace_acquired = spatial::IngestTrace::now_ns();
+#endif
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+            timing_completion_lock_wait.record(
+                timing_now_ns() - completion_lock_start);
+#endif
+            handle_buffer_completion();
+          }
+          completion_requested.store(false, std::memory_order_release);
+#ifdef SPATIAL_INGEST_TRACE
+          ingest_trace.record(0, spatial::IngestTrace::CompletionCycle,
+                              trace_start, spatial::IngestTrace::now_ns(),
+                              trace_acquired, packets_missing - missing_before,
+                              trace_cpu_start ? spatial::IngestTrace::thread_cpu_ns() - trace_cpu_start : 0);
+#endif
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(completion_poll_us));
+      }
+      completion_requested.store(false, std::memory_order_release);
+      stop_processing_threads();
+      return;
+    }
+#endif
     start_processing_threads();
     int current_read_index;
     constexpr int num_loops_before_completion_check = 1;
@@ -1248,12 +1489,19 @@ public:
     // own natural batch granularity fixes this for zero-copy while being a
     // no-op for the kernel-socket path (whose batches essentially never
     // reach this size in the first place).
-    // At 48+ channels, use a 64-slot handoff matching the ibverbs CQ poll
-    // batch; lower channel counts retain the 256-slot dispatch limit. Both
-    // paths check the committed prefix before dispatching below, since a
+    // The default 48+ path uses a 64-slot handoff matching the ibverbs CQ
+    // poll batch; lower channel counts use 256. The four-FPGA 48-channel
+    // Starspin target overrides this to 256 after a live CPU-worker A/B test.
+    // Both paths check the committed prefix before dispatching below, since a
     // claimed but uncommitted receive can deadlock at 40 channels too.
     constexpr int REGULAR_BATCH_SIZE =
+#ifdef SPATIAL_PROCESSOR_BATCH_SIZE
+        SPATIAL_PROCESSOR_BATCH_SIZE;
+#else
         (T::NR_FPGA_CHANNELS >= 48) ? 64 : 256;
+#endif
+    static_assert(REGULAR_BATCH_SIZE > 0 && REGULAR_BATCH_SIZE <= 256,
+                  "processor batch size must be between 1 and 256");
     uint64_t dispatch_generation = 0;
     int idle_iterations = 0;
 
@@ -1343,6 +1591,68 @@ public:
 
     while (running.load(std::memory_order_acquire)) [[likely]] {
       if (nr_capture_threads > 0) {
+#ifdef SPATIAL_PER_NIC_RING
+        // One worker owns each NIC's contiguous, local ring. Publish all
+        // committed prefixes together and wait for every copy before buffer
+        // completion, preserving the existing completion barrier.
+        if (nr_capture_threads != WORKER_COUNT)
+          throw std::logic_error("per-NIC workers require one worker per capture NIC");
+        std::array<int, ProcessorStateBase::MAX_CAPTURE_THREADS> slots_by_nic{};
+        bool any_processed = false;
+        for (int tid = 0; tid < nr_capture_threads; ++tid) {
+          const uint64_t claim =
+              per_thread_claim[tid].linear.load(std::memory_order_acquire);
+          if (claim <= per_thread_my_read[tid]) continue;
+          const int stride = nr_capture_threads;
+          int slots = static_cast<int>(std::min(
+              (claim - per_thread_my_read[tid]) / static_cast<uint64_t>(stride),
+              static_cast<uint64_t>(REGULAR_BATCH_SIZE)));
+          int idx = static_cast<int>(per_thread_my_read[tid] % RING_BUFFER_SIZE);
+          int committed = 0;
+          while (committed < slots &&
+                 d_packet_data[idx]->committed.load(std::memory_order_acquire)) {
+            ++committed;
+            idx = (idx + stride) % RING_BUFFER_SIZE;
+          }
+          slots_by_nic[tid] = committed;
+          if (!committed) continue;
+          const int start = static_cast<int>(per_thread_my_read[tid] % RING_BUFFER_SIZE);
+          worker_tasks[tid] = {start,
+                               (start + committed * stride) % static_cast<int>(RING_BUFFER_SIZE),
+                               stride};
+          any_processed = true;
+        }
+        if (!any_processed) [[unlikely]] {
+          if (++idle_iterations == 1024) {
+            handle_buffer_completion();
+            idle_iterations = 0;
+          }
+          _mm_pause();
+          continue;
+        }
+        idle_iterations = 0;
+        const uint64_t generation = ++dispatch_generation;
+        for (int tid = 0; tid < nr_capture_threads; ++tid)
+          if (slots_by_nic[tid])
+            worker_mailboxes[tid].requested.store(generation,
+                                                  std::memory_order_release);
+        for (int tid = 0; tid < nr_capture_threads; ++tid) {
+          if (!slots_by_nic[tid]) continue;
+          while (worker_mailboxes[tid].completed.load(std::memory_order_acquire) !=
+                 generation) {
+            if (worker_mailboxes[tid].exited.load(std::memory_order_acquire))
+              break;
+            _mm_pause();
+          }
+          per_thread_my_read[tid] +=
+              static_cast<uint64_t>(slots_by_nic[tid]) * nr_capture_threads;
+          per_thread_read_linear[tid].linear.store(per_thread_my_read[tid],
+                                                   std::memory_order_release);
+        }
+#ifdef SPATIAL_DIAGNOSTICS
+        diagnostic_processor_dispatches.fetch_add(1, std::memory_order_relaxed);
+#endif
+#else
         // Strided mode: each capture thread owns slots tid, tid+N, tid+2N, ...
         // Process each thread's claimed range independently so a slow or idle
         // thread never stalls the others.
@@ -1405,6 +1715,7 @@ public:
           continue;
         }
         idle_iterations = 0;
+#endif
       } else {
         // Legacy mode: single producer advances write_index under mutex.
         const int current_write_index =
@@ -1449,6 +1760,14 @@ public:
 
   __attribute__((hot)) uint64_t process_work_range(const WorkRange &task) {
     std::array<uint64_t, T::NR_FPGA_SOURCES> global_max{};
+#ifdef SPATIAL_BATCH_PACKET_WATERMARKS
+    BatchWatermarks batch_watermarks;
+#endif
+#ifdef SPATIAL_BATCH_NT_FENCE
+    constexpr bool defer_nt_fence = true;
+#else
+    constexpr bool defer_nt_fence = false;
+#endif
     // A zero horizon disables future-packet deferral. With asynchronous H2D
     // recycling, producers can outrun the available windows: those packets
     // would otherwise advance completion watermarks without landing anywhere.
@@ -1483,11 +1802,46 @@ public:
         break;
       if (entry->length > 0 &&
           !entry->processed.load(std::memory_order_relaxed)) {
-        process_packet_data(entry, idx, global_max, &local_processed);
+        process_packet_data(entry, idx, global_max, &local_processed,
+#ifdef SPATIAL_BATCH_PACKET_WATERMARKS
+                            &batch_watermarks,
+#else
+                            nullptr,
+#endif
+                            defer_nt_fence
+        );
       }
       idx = (idx + stride) % RING_BUFFER_SIZE;
     }
 
+#ifdef SPATIAL_BATCH_NT_FENCE
+    // Buffer completion waits for this worker's shared lock (or mailbox).
+    // One fence per committed batch therefore publishes every streamed sample
+    // before the completion thread can hand the host buffer to CUDA.
+    _mm_sfence();
+#endif
+#ifdef SPATIAL_BATCH_PACKET_WATERMARKS
+    // The caller holds completion_mutex (or waits for this task to finish),
+    // so publish copied data and watermarks before completion can inspect it.
+    const auto publish_channel = [&](size_t channel) {
+      for (size_t fpga = 0; fpga < T::NR_FPGA_SOURCES; ++fpga) {
+        const uint64_t latest = batch_watermarks.latest[channel][fpga];
+        if (latest)
+          atomic_max_u64(latest_packet_received[channel][fpga], latest);
+      }
+      if (batch_watermarks.modified[channel])
+        modified_since_last_completion_check[channel].store(
+            true, std::memory_order_release);
+    };
+#ifdef SPATIAL_TOUCHED_WATERMARKS
+    for (size_t i = 0; i < batch_watermarks.touched_count; ++i) {
+      publish_channel(batch_watermarks.touched[i]);
+    }
+#else
+    for (size_t channel = 0; channel < T::NR_FPGA_CHANNELS; ++channel)
+      publish_channel(channel);
+#endif
+#endif
     return local_processed;
   }
 
@@ -1506,6 +1860,116 @@ public:
       std::cout << "Worker " << worker_id << " pinned to CPU " << cpu
                 << std::endl;
     }
+
+#ifdef SPATIAL_DIRECT_NIC_WORKERS
+    if (nr_capture_threads > 0) {
+      const int stride = nr_capture_threads;
+      uint64_t my_read = static_cast<uint64_t>(worker_id);
+      while (running.load(std::memory_order_acquire)) {
+        const uint64_t claim =
+            per_thread_claim[worker_id].linear.load(std::memory_order_acquire);
+        if (claim <= my_read) {
+          _mm_pause();
+          continue;
+        }
+        // WorkRange uses equal start/end for an empty task. Never dispatch a
+        // full lap of this NIC's ring, which has the same start/end indices.
+        const int available = static_cast<int>(std::min(
+            (claim - my_read) / static_cast<uint64_t>(stride),
+            static_cast<uint64_t>(std::min(
+                256, static_cast<int>(RING_BUFFER_SIZE / stride) - 1))));
+        const int start = static_cast<int>(my_read % RING_BUFFER_SIZE);
+        int committed = 0;
+        int index = start;
+        while (committed < available &&
+               d_packet_data[index]->committed.load(std::memory_order_acquire)) {
+          ++committed;
+          index = (index + stride) % RING_BUFFER_SIZE;
+        }
+        if (!committed) {
+          _mm_pause();
+          continue;
+        }
+#ifdef SPATIAL_DIRECT_BATCH_TARGET
+        // Fast copies can catch the producer after only a handful of packets,
+        // turning a nominal 256-packet task into millions of tiny tasks. Let
+        // committed packets accumulate, bounded so a quiet NIC cannot hold up
+        // buffer completion or shutdown. Do not take completion_mutex here.
+        const auto batch_deadline = std::chrono::steady_clock::now() +
+            std::chrono::microseconds(SPATIAL_DIRECT_BATCH_WAIT_US);
+        while (committed < SPATIAL_DIRECT_BATCH_TARGET &&
+               running.load(std::memory_order_acquire) &&
+               !completion_requested.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < batch_deadline) {
+          const uint64_t next_claim = per_thread_claim[worker_id].linear.load(
+              std::memory_order_acquire);
+          const int next_available = static_cast<int>(std::min(
+              (next_claim - my_read) / static_cast<uint64_t>(stride),
+              static_cast<uint64_t>(std::min(
+                  256, static_cast<int>(RING_BUFFER_SIZE / stride) - 1))));
+          while (committed < next_available &&
+                 d_packet_data[index]->committed.load(std::memory_order_acquire)) {
+            ++committed;
+            index = (index + stride) % RING_BUFFER_SIZE;
+          }
+          _mm_pause();
+        }
+#endif
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+        const uint64_t completion_pause_start =
+            completion_requested.load(std::memory_order_acquire)
+                ? timing_now_ns() : 0;
+#endif
+        while (completion_requested.load(std::memory_order_acquire) &&
+               running.load(std::memory_order_acquire))
+          _mm_pause();
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+        if (completion_pause_start) {
+          const uint64_t pause_end = timing_now_ns();
+          timing_worker_completion_pause[worker_id].record(
+              pause_end - completion_pause_start);
+#ifdef SPATIAL_INGEST_TRACE
+          if (pause_end - completion_pause_start >= 100000)
+            ingest_trace.record(1 + worker_id, spatial::IngestTrace::WorkerPause,
+                                completion_pause_start, pause_end, committed);
+#endif
+        }
+#endif
+        if (!running.load(std::memory_order_acquire)) break;
+        const WorkRange task{start,
+                             (start + committed * stride) %
+                                 static_cast<int>(RING_BUFFER_SIZE),
+                             stride};
+        uint64_t count;
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+        const uint64_t worker_batch_start = timing_now_ns();
+#endif
+        {
+          std::shared_lock<std::shared_mutex> lock(completion_mutex);
+          count = process_work_range(task);
+        }
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+        const uint64_t batch_end = timing_now_ns();
+        timing_worker_batch[worker_id].record(batch_end - worker_batch_start);
+#ifdef SPATIAL_INGEST_TRACE
+        if (batch_end - worker_batch_start >= 200000)
+          ingest_trace.record(1 + worker_id, spatial::IngestTrace::WorkerBatch,
+                              worker_batch_start, batch_end, committed, count);
+#endif
+#endif
+        if (count)
+          packets_processed.fetch_add(count, std::memory_order_relaxed);
+        my_read += static_cast<uint64_t>(committed) * stride;
+        per_thread_read_linear[worker_id].linear.store(
+            my_read, std::memory_order_release);
+#ifdef SPATIAL_DIAGNOSTICS
+        diagnostic_processor_dispatches.fetch_add(1, std::memory_order_relaxed);
+#endif
+      }
+      workers_alive.fetch_sub(1, std::memory_order_acq_rel);
+      return;
+    }
+#endif
 
     if (use_worker_mailboxes) {
       auto &mailbox = worker_mailboxes[worker_id];
@@ -1559,6 +2023,9 @@ public:
   }
 
   __attribute__((hot)) void handle_buffer_completion(bool force_flush = false) {
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+    const uint64_t completion_check_start = timing_now_ns();
+#endif
 
     if (pipeline_ == nullptr) [[unlikely]] {
       throw std::logic_error(
@@ -1577,6 +2044,9 @@ public:
     // INFO_LOG("Checking buffer completion...");
     std::vector<int> buffers_complete;
     check_buffer_completion(buffers_complete);
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+    timing_completion_check.record(timing_now_ns() - completion_check_start);
+#endif
 
     if (force_flush && buffers_complete.empty()) {
       buffers_complete.push_back(current_buffer);
@@ -1588,6 +2058,11 @@ public:
 
     int current_buf = buffers_complete[0];
     for (int i = 0; i < buffers_complete.size(); ++i) {
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+      const uint64_t handoff_start = timing_now_ns();
+      timing_handoff_start_ns[current_buf].store(handoff_start,
+                                                 std::memory_order_relaxed);
+#endif
       INFO_LOG("pipeline feeding {}", current_buf);
       auto &buffer = buffers[current_buf];
 
@@ -1605,7 +2080,13 @@ public:
 #endif
       cpu_start = clock::now();
       // INFO_LOG("Zeroing missing packets...");
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+      const uint64_t zero_missing_start = timing_now_ns();
+#endif
       d_samples[current_buf]->zero_missing_packets();
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+      timing_zero_missing.record(timing_now_ns() - zero_missing_start);
+#endif
 #ifdef SPATIAL_DIAGNOSTICS
       for (size_t channel = 0; channel < T::NR_FPGA_CHANNELS; ++channel) {
         for (size_t packet = 0; packet < NR_PACKETS_FOR_CORRELATION;
@@ -1660,8 +2141,15 @@ public:
       cpu_start = clock::now();
       current_buf = advance_to_next_buffer();
       cpu_end = clock::now();
-      if (current_buf < 0)
+      if (current_buf < 0) {
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+        timing_buffer_handoff.record(timing_now_ns() - handoff_start);
+#endif
         return;
+      }
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+      timing_buffer_handoff.record(timing_now_ns() - handoff_start);
+#endif
     }
     // DEBUG_LOG("CPU time for advancing to next buffer: {} us",
     //           std::chrono::duration_cast<std::chrono::microseconds>(cpu_end
@@ -1698,7 +2186,14 @@ public:
       const int buffer_index =
           pipeline_q_buf_[h % PIPELINE_Q_CAP];
       pipeline_q_head_.v.store(h + 1, std::memory_order_release);
+#ifdef SPATIAL_INGEST_TRACE
+      const uint64_t submit_start = spatial::IngestTrace::now_ns();
+#endif
       pipeline_->execute_pipeline(d_samples[buffer_index]);
+#ifdef SPATIAL_INGEST_TRACE
+      ingest_trace.record(9, spatial::IngestTrace::PipelineSubmit,
+                          submit_start, spatial::IngestTrace::now_ns(), buffer_index);
+#endif
       pipeline_runs_queued += 1;
     }
     std::cout << "Pipeline feeder exiting!\n";
@@ -1798,16 +2293,37 @@ public:
   }
 
   void *packet_ring_base() const override {
+#ifdef SPATIAL_PER_NIC_RING
+    return static_cast<void *>(d_packet_data_nic_pools[0]);
+#else
     return static_cast<void *>(d_packet_data_pool);
+#endif
   }
   size_t packet_ring_bytes() const override {
+#ifdef SPATIAL_PER_NIC_RING
+    return sizeof(typename T::PacketEntryType) *
+           (RING_BUFFER_SIZE / T::NR_FPGA_SOURCES);
+#else
     return sizeof(typename T::PacketEntryType) * RING_BUFFER_SIZE;
+#endif
+  }
+  void *packet_ring_base_for_thread(int thread_id) const override {
+#ifdef SPATIAL_PER_NIC_RING
+    if (thread_id < 0 || thread_id >= T::NR_FPGA_SOURCES)
+      throw std::out_of_range("NIC ring thread id out of range");
+    return static_cast<void *>(d_packet_data_nic_pools[thread_id]);
+#else
+    return packet_ring_base();
+#endif
+  }
+  size_t packet_ring_bytes_for_thread(int) const override {
+    return packet_ring_bytes();
   }
   size_t packet_ring_slot_stride() const override {
     return sizeof(typename T::PacketEntryType);
   }
   size_t packet_ring_slot_offset() const override {
-    const auto *entry = d_packet_data_pool;
+    const auto *entry = d_packet_data[0];
     return reinterpret_cast<const uint8_t *>(&entry->data) -
            reinterpret_cast<const uint8_t *>(entry);
   }
@@ -1830,16 +2346,36 @@ public:
         return my_linear - per_thread_read_linear[thread_id].linear.load(
                                std::memory_order_acquire) >= RING_BUFFER_SIZE;
       };
+      const bool full_at_entry = read_is_full();
 #ifdef SPATIAL_DIAGNOSTICS
-      if (read_is_full())
+      if (full_at_entry)
         diagnostic_reserve_read_waits[thread_id].fetch_add(
             1, std::memory_order_relaxed);
 #endif
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+      const uint64_t ring_wait_start = full_at_entry ? timing_now_ns() : 0;
+#endif
       while (read_is_full()) {
-        if (!running.load(std::memory_order_acquire))
+        if (!running.load(std::memory_order_acquire)) {
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+          if (ring_wait_start)
+            timing_ring_full[thread_id].record(timing_now_ns() - ring_wait_start);
+#endif
           return reserved;
+        }
         _mm_pause();
       }
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+      if (ring_wait_start) {
+        const uint64_t wait_end = timing_now_ns();
+        timing_ring_full[thread_id].record(wait_end - ring_wait_start);
+#ifdef SPATIAL_INGEST_TRACE
+        if (wait_end - ring_wait_start >= 100000)
+          ingest_trace.record(5 + thread_id, spatial::IngestTrace::ReceiveRingWait,
+                              ring_wait_start, wait_end, RING_BUFFER_SIZE / stride);
+#endif
+      }
+#endif
       const int slot = static_cast<int>(my_linear % RING_BUFFER_SIZE);
       // Fine-grained check: wait until the consumer (or abandon_write_batch)
       // has marked this specific slot as fully processed so we don't
@@ -1869,6 +2405,16 @@ public:
 
 private:
   void cleanup() {
+#ifdef SPATIAL_PER_NIC_RING
+    for (auto *pool : d_packet_data_nic_pools) {
+      if (!pool) continue;
+      using EntryT = typename T::PacketEntryType;
+      for (size_t i = 0; i < RING_BUFFER_SIZE / T::NR_FPGA_SOURCES; ++i)
+        pool[i].~EntryT();
+      std::free(pool);
+    }
+    d_packet_data_nic_pools.fill(nullptr);
+#endif
     if (d_packet_data_pool != nullptr) {
       using EntryT = typename T::PacketEntryType;
       for (size_t i = 0; i < RING_BUFFER_SIZE; ++i) {

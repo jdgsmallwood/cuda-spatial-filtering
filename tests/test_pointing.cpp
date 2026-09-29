@@ -57,10 +57,15 @@ TEST(PointingTest, FineProcessingGridUses32Over27OversamplingConvention) {
 
   EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
                        0, min_coarse, plan, fine, trim),
-                   coarse_center - 0.5 * plan.channel_bandwidth_hz);
+                   coarse_center - 14.0 * plan.channel_bandwidth_hz / 27.0);
   EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
                        kept - 1, min_coarse, plan, fine, trim),
-                   coarse_center + 0.5 * plan.channel_bandwidth_hz);
+                   coarse_center + 13.0 * plan.channel_bandwidth_hz / 27.0);
+  // The GPU tone test puts a +8 fine-bin tone at original bin 24, which is
+  // processing bin 22 after the 2+2 internal trim.
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       22, min_coarse, plan, fine, trim),
+                   coarse_center + 8.0 * plan.channel_bandwidth_hz / 27.0);
   EXPECT_NEAR(processing_channel_to_frequency_hz(
                   1, min_coarse, plan, fine, trim) -
                   processing_channel_to_frequency_hz(

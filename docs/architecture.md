@@ -8,30 +8,30 @@ buffer shapes, or component relationships. See `CLAUDE.md`'s Documentation secti
 ```mermaid
 flowchart LR
     subgraph capture["Packet capture (src/spatial.cpp)"]
-        UDP[KernelSocketPacketCapture]
-        PCAP[PCAPPacketCapture /\nPCAPMultiFPGAPacketCapture]
-        IBV[libibverbs RDMA capture]
+        UDP["KernelSocketPacketCapture"]
+        PCAP["PCAPPacketCapture /<br/>PCAPMultiFPGAPacketCapture"]
+        IBV["libibverbs RDMA capture"]
     end
 
     subgraph reassembly["ProcessorState&lt;T&gt; (spatial.hpp)"]
-        RING[Triple-buffered ring buffer]
-        MISS[Missing-packet tracking]
-        ALIGN[FPGA-to-FPGA delay alignment]
+        RING["Triple-buffered ring buffer"]
+        MISS["Missing-packet tracking"]
+        ALIGN["FPGA-to-FPGA delay alignment"]
     end
 
     subgraph gpu["GPUPipeline&lt;T&gt; (one Lambda*Pipeline variant)"]
-        INGEST[int8 → __half\nscale + gain]
-        CORR[Correlate (TCC)]
-        BEAM[Beamform (ccglib GEMM)]
-        EIG[Eigendecompose (cuSOLVER)\nRFI mitigation]
-        FFT[Spectra / bandpass (cuFFT)]
+        INGEST["int8 → __half<br/>scale + gain"]
+        CORR["Correlate (TCC)"]
+        BEAM["Beamform (ccglib GEMM)"]
+        EIG["Eigendecompose (cuSOLVER)<br/>RFI mitigation"]
+        FFT["Spectra / bandpass (cuFFT)"]
     end
 
     subgraph output["Output writers (output.hpp, writers.hpp)"]
-        HDF5[HDF5Beam/Visibilities/FFT/\nProjectionEigenWriter]
-        PSRDADA[PSRDADABeamWriter]
-        REDIS[RedisEigendata/BeamFFTWriter]
-        FITS[CasaCore / CFITSIO writers]
+        HDF5["HDF5Beam/Visibilities/FFT/<br/>ProjectionEigenWriter"]
+        PSRDADA["PSRDADABeamWriter"]
+        REDIS["RedisEigendata/BeamFFTWriter"]
+        FITS["CasaCore / CFITSIO writers"]
     end
 
     UDP --> RING
@@ -79,20 +79,20 @@ arrives). See `include/spatial/libibverbs.hpp` and the design writeup this imple
 
 ```mermaid
 flowchart LR
-    NIC[NIC: 3-SGE receive] -->|SGE1: header| HDR[CPU pinned header ring]
-    NIC -->|SGE2+SGE3: scales+samples| POOL["GPU landing pool\n(2 halves x POLL_BATCH slots)"]
+    NIC["NIC: 3-SGE receive"] -->|SGE1: header| HDR["CPU pinned header ring"]
+    NIC -->|SGE2+SGE3: scales+samples| POOL["GPU landing pool<br/>(2 halves x POLL_BATCH slots)"]
 
-    HDR --> RESOLVE["resolve_gpu_slot()\n(ProcessorState -- same locate_packet()\narithmetic as the reactive path)"]
+    HDR --> RESOLVE["resolve_gpu_slot()<br/>(ProcessorState -- same locate_packet()<br/>arithmetic as the reactive path)"]
     RESOLVE -->|dst addr| GRAPH
 
-    POOL -->|src addr| GRAPH["CUDA graph replay\n(gpudirect_relocate_kernel)"]
-    GRAPH --> BLOCK["samples_entry / scales\n(GPUPipeline's device buffers --\nthe correlation block itself)"]
+    POOL -->|src addr| GRAPH["CUDA graph replay<br/>(gpudirect_relocate_kernel)"]
+    GRAPH --> BLOCK["samples_entry / scales<br/>(GPUPipeline's device buffers --<br/>the correlation block itself)"]
 
-    GRAPH -.->|cudaEventRecord, gates repost| REPOST[Repost this half's WRs]
+    GRAPH -.->|cudaEventRecord, gates repost| REPOST["Repost this half's WRs"]
     REPOST -.-> NIC
 
-    BLOCK --> ZERO[GPU zero_missing_scales_kernel]
-    ZERO --> INGEST[scale_and_convert_to_half_kernel]
+    BLOCK --> ZERO["GPU zero_missing_scales_kernel"]
+    ZERO --> INGEST["scale_and_convert_to_half_kernel"]
 ```
 
 Key points the diagram doesn't show directly:
@@ -122,15 +122,15 @@ variables and thread it through everything as a template parameter.
 
 ```mermaid
 flowchart TD
-    CFG["LambdaConfig&lt;NR_CHANNELS, NR_FPGA_SOURCES,\nNR_RECEIVERS, NR_PACKETS_FOR_CORRELATION,\nNR_BEAMS, NR_PADDED_RECEIVERS, ...&gt;"]
-    CFG --> PKT["Packet types\nInputPacketSamplesType\nPacketScalesType"]
-    CFG --> VIS["Visibilities\nEigenvalueOutputType\nEigenvectorOutputType"]
+    CFG["LambdaConfig&lt;NR_CHANNELS, NR_FPGA_SOURCES,<br/>NR_RECEIVERS, NR_PACKETS_FOR_CORRELATION,<br/>NR_BEAMS, NR_PADDED_RECEIVERS, ...&gt;"]
+    CFG --> PKT["Packet types<br/>InputPacketSamplesType<br/>PacketScalesType"]
+    CFG --> VIS["Visibilities<br/>EigenvalueOutputType<br/>EigenvectorOutputType"]
     CFG --> BEAMT["BeamOutputType"]
-    CFG --> SPEC["FFTOutputType\nAntennaFFTOutputType"]
+    CFG --> SPEC["FFTOutputType<br/>AntennaFFTOutputType"]
     PKT --> ProcessorState
     VIS --> LambdaGPUPipeline
     BEAMT --> LambdaGPUPipeline
-    SPEC --> "Antenna/BeamformedSpectraPipeline"
+    SPEC --> SPECTRA["Antenna/BeamformedSpectraPipeline"]
 ```
 
 ## 3. `Lambda*Pipeline` variants
@@ -161,7 +161,7 @@ different width.
 | `LambdaCorrBeamOnlyGPUPipeline` | Benchmark-only correlation+beamforming, no FFT output | yes | yes | no | pre-correlation fine channels (disabled path keeps its fused fast-path kernels unchanged) |
 | `LambdaProjectionPipeline` | Accumulates projection matrices for RFI mitigation | yes | no | yes | offline only |
 | `LambdaPulsarFoldPipeline` | Folds beamformed time series for pulsar timing | yes (RFI-mitigate mode only) | yes | varies | no (folding is external, via DSPSR) |
-| `LambdaStarweavePipeline` | Correlation-only: ingest+align+fine-channelize+correlate, visibilities only | yes | no | no | pre-correlation fine channels (no FFT/beamform ever) |
+| `LambdaStarspinPipeline` | Correlation-only: ingest+align+fine-channelize+correlate, visibilities only | yes | no | no | pre-correlation fine channels (no FFT/beamform ever) |
 
 All eight support `NR_FINE_CHANNELS > 1` as of this rollout; the edge-channel trim
 (`NR_FINE_CHANNEL_EDGE_TRIM`) is applied uniformly by the shared `channelizer_output_to_corr_input`/
@@ -187,35 +187,35 @@ channels themselves are now the spectral decomposition).
 
 ```mermaid
 flowchart TD
-    A["ingest_and_scale\n(int8 → __half, scale, gain)"] --> B
+    A["ingest_and_scale<br/>(int8 → __half, scale, gain)"] --> B
 
     subgraph graph_align["enqueue_alignment (graph_align)"]
-        B["packetToPreAlign permutation"] --> C["apply_delays\n(per-FPGA integer delay)"]
-        C --> D["reorder_streams\n(canonical receiver/pol order)"]
+        B["packetToPreAlign permutation"] --> C["apply_delays<br/>(per-FPGA integer delay)"]
+        C --> D["reorder_streams<br/>(canonical receiver/pol order)"]
     end
 
     D --> E{"NR_FINE_CHANNELS > 1?"}
     E -- no --> E1{"has_fine_delays?"}
-    E1 -- yes --> F["apply_fine_delay_correction\nscatter → FFT → phase-mult → IFFT → gather"]
+    E1 -- yes --> F["apply_fine_delay_correction<br/>scatter → FFT → phase-mult → IFFT → gather"]
     E1 -- no --> G
     F --> G
 
     subgraph graph_pre_corr["enqueue_pre_corr (graph_pre_corr)"]
         G["aligned_to_corr_input"] --> H["TCC correlator.launchAsync"]
-        E -- yes --> CH1["reorder_to_filter_input\n(__half → contiguous float2 per coarse channel)"]
-        CH1 --> CH2["FineChannelizer::launchAsync\n(1 gpu-filter Filter per coarse channel)"]
-        CH2 --> CH3["channelizer_output_to_corr_input\n(gather into TCC's correlator_input, padded)"]
+        E -- yes --> CH1["reorder_to_filter_input<br/>(__half → contiguous float2 per coarse channel)"]
+        CH1 --> CH2["FineChannelizer::launchAsync<br/>(1 gpu-filter Filter per coarse channel)"]
+        CH2 --> CH3["channelizer_output_to_corr_input<br/>(gather connected receivers into TCC input)"]
         CH3 --> H
         H --> I["corr_to_trimmed"]
         I --> J["visCorrToDecomp permutation"]
         J --> K["unpack_triangular_baseline_batch"]
     end
 
-    K --> L["cusolverDnXsyevBatched\n(eigendecomposition, eager)"]
+    K --> L["cusolverDnXsyevBatched<br/>(eigendecomposition, eager)"]
 
     subgraph graph_post["enqueue_post_eigen (graph_post)"]
         L --> M["accumulate_visibilities"]
-        H --> N["corr_input_to_col_maj_cons\n(sources from correlator_input, not samples_reordered --\nsame data TCC reads, so beamforming sees fine channels too)"]
+        H --> N["corr_input_to_col_maj_cons<br/>(sources from correlator_input, not samples_reordered --<br/>same data TCC reads, so beamforming sees fine channels too)"]
         N --> O["ccglib GEMM (beamforming)"]
         O --> P["beam_ccglib_to_half_output"]
         P --> Q{"NR_FINE_CHANNELS > 1?"}
@@ -223,30 +223,30 @@ flowchart TD
 
     Q -- no --> R["cufftXtExec (whole-band FFT)"]
     R --> S["detect_and_downsample_fft"]
-    Q -- yes --> V2[/"skipped: fine channels are\nalready the spectral decomposition"/]
+    Q -- yes --> V2["skipped: fine channels are<br/>already the spectral decomposition"]
 
-    M --> T[/"Visibilities → HDF5 / eigen output"/]
-    S --> U[/"Spectra → Redis"/]
-    O --> V[/"Beams → PSRDADA / HDF5\n(widened NR_CHANNELS when channelized)"/]
+    M --> T["Visibilities → HDF5 / eigen output"]
+    S --> U["Spectra → Redis"]
+    O --> V["Beams → PSRDADA / HDF5<br/>(widened NR_CHANNELS when channelized)"]
 ```
 
 ## 5. External library dependencies
 
 ```mermaid
 flowchart LR
-    spatial["spatial (static lib, src/)"] --> tcc["tcc\n(Tensor Core Correlator, NVRTC JIT)"]
-    spatial --> ccglib["ccglib\n(GEMM for beamforming)"]
-    spatial --> cutensor["cuTENSOR\n(axis permutations)"]
-    spatial --> cusolver["cuSOLVER\n(eigendecomposition)"]
-    spatial --> cufft["cuFFT\n(whole-band spectral output, NR_FINE_CHANNELS==1 only)"]
-    spatial --> filter["filter\n(ASTRON gpu-filter PFB, NVRTC JIT --\npre-correlation fine channelization)"]
+    spatial["spatial (static lib, src/)"] --> tcc["tcc<br/>(Tensor Core Correlator, NVRTC JIT)"]
+    spatial --> ccglib["ccglib<br/>(GEMM for beamforming)"]
+    spatial --> cutensor["cuTENSOR<br/>(axis permutations)"]
+    spatial --> cusolver["cuSOLVER<br/>(eigendecomposition)"]
+    spatial --> cufft["cuFFT<br/>(whole-band spectral output, NR_FINE_CHANNELS==1 only)"]
+    spatial --> filter["filter<br/>(ASTRON gpu-filter PFB, NVRTC JIT --<br/>pre-correlation fine channelization)"]
     spatial --> hdf5["HighFive / HDF5"]
     spatial --> casacore["CasaCore / CFITSIO"]
-    tcc --> cudawrappers["cudawrappers\n(cu:: device/stream wrappers)"]
+    tcc --> cudawrappers["cudawrappers<br/>(cu:: device/stream wrappers)"]
     ccglib --> cudawrappers
     filter --> cudawrappers
-    filter --> cufftdx["cuFFTDx / mathdx\n(device-side FFT, fetched via\nlibfilter/CMakeLists.txt)"]
-    filter --> boost["Boost::multi_array\n(host-side FIR tap design)"]
+    filter --> cufftdx["cuFFTDx / mathdx<br/>(device-side FFT, fetched via<br/>libfilter/CMakeLists.txt)"]
+    filter --> boost["Boost::multi_array<br/>(host-side FIR tap design)"]
     apps["apps/* binaries"] --> spatial
     apps --> psrdada["PSRDADA (ring buffers)"]
     apps --> redis["redis-plus-plus"]
@@ -278,11 +278,11 @@ one kernel body:
 flowchart LR
     subgraph filterAndCorrect["one kernel launch: filterAndCorrect"]
         direction LR
-        GMEM_IN[("global memory\n(raw input samples)")] --> S1
-        S1["1. readInputAndDoFIRfiltering\nper-tap FIR convolution"] -->|"shared memory\n(fft_data)"| S2
-        S2["2. doFFT\ncuFFTDx, operates in place\non shared memory"] -->|"shared memory"| S3
-        S3["3. doCorrectionsTransposeAndWriteOutput\nFFT-shift, bandpass weights,\ndelay/phase correction"] --> GMEM_OUT
-        GMEM_OUT[("global memory\n(channelized output)")]
+        GMEM_IN["global memory<br/>(raw input samples)"] --> S1
+        S1["1. readInputAndDoFIRfiltering<br/>per-tap FIR convolution"] -->|"shared memory<br/>(fft_data)"| S2
+        S2["2. doFFT<br/>cuFFTDx, operates in place<br/>on shared memory"] -->|"shared memory"| S3
+        S3["3. doCorrectionsTransposeAndWriteOutput<br/>FFT-shift, bandpass weights,<br/>delay/phase correction"] --> GMEM_OUT
+        GMEM_OUT["global memory<br/>(channelized output)"]
     end
 ```
 
@@ -395,14 +395,12 @@ conclusively pinned down as *the* cause). `FineChannelizer::launchAsync`
 (`pipeline/common.hpp`) now calls the `cu::Stream`-based overload directly as a confirmed,
 reliable workaround — not a guess. Worth reporting upstream to ASTRON if this recurs.
 
-## 7. `LambdaStarweavePipeline` stage detail
+## 7. `LambdaStarspinPipeline` stage detail
 
-The leanest variant — correlate and dump visibilities, nothing else. Modeled on
-`LambdaGPUPipeline`'s ingest/align/channelize/correlate sequence (Section 4), not
-`LambdaCorrBeamOnlyGPUPipeline`'s fused benchmark-only fast path, so per-FPGA delay correction
-and receiver/pol reordering always run before correlation regardless of `NR_FINE_CHANNELS` — the
-`if constexpr (T::NR_FINE_CHANNELS > 1)` branch only changes how `correlator_input` gets
-populated, exactly like `LambdaGPUPipeline`'s equivalent branch.
+The leanest variant correlates and dumps visibilities. For fine-channelized
+Starspin, one kernel reads raw packets, applies scales and gains, selects the
+delayed canonical samples, and writes the PFB input. The non-channelized path
+retains the original half conversion and alignment stages.
 
 Two stages are captured as CUDA graphs (`graph_align`, `graph_corr`) when
 `SPATIAL_DISABLE_CUDA_GRAPH` isn't set. Unlike `LambdaGPUPipeline` there's no
@@ -412,28 +410,29 @@ graph.
 
 ```mermaid
 flowchart TD
-    A["ingest_and_scale\n(int8 → __half, scale, gain)"] --> B
+    A["ingest raw int8 samples and packet scales"] --> B
 
     subgraph graph_align["enqueue_alignment (graph_align)"]
-        B["packetToPreAlign permutation"] --> C["apply_delays\n(per-FPGA integer delay)"]
-        C --> D["reorder_streams\n(canonical receiver/pol order)"]
+        B["fused raw-to-PFB input<br/>(scale, gain, delay, canonical order, half rounding)"]
     end
 
-    D --> E{"NR_FINE_CHANNELS > 1?"}
+    B --> E["36-receiver PFB input"]
 
     subgraph graph_corr["enqueue_corr (graph_corr)"]
-        E -- no --> G["aligned_to_corr_input"]
-        E -- yes --> CH1["reorder_to_filter_input\n(__half → contiguous float2 per coarse channel)"]
-        CH1 --> CH2["FineChannelizer::launchAsync\n(1 gpu-filter Filter per coarse channel)"]
-        CH2 --> CH3["channelizer_output_to_corr_input\n(gather into TCC's correlator_input, padded)"]
-        CH3 --> H
-        G --> H["TCC correlator.launchAsync"]
-        H --> I["corr_to_trimmed"]
+        E --> CH2["FineChannelizer::launchAsync<br/>(one shared gpu-filter instance)"]
+        CH2 --> CH3["channelizer_output_to_corr_input<br/>(gather retained fine channels)"]
+        CH3 --> H["TCC correlator.launchAsync"]
     end
 
-    I --> M["accumulate_visibilities (eager)"]
-    M --> T[/"Visibilities → HDF5"/]
+    H --> M["accumulate_visibilities (eager)"]
+    M --> T["Visibilities → HDF5"]
 ```
+
+Starspin retains all 40 FPGA receiver slots in packet ingest. In the
+four-FPGA/40-coarse-channel production target, the canonical stream map puts
+four disconnected slots last. The fused preparation writes only the first 36
+connected receivers, so the PFB and TCC both process 36 receivers. TCC emits
+666 packed baselines and handles a partial final 32-receiver tile directly.
 
 ---
 

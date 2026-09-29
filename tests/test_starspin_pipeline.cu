@@ -1,4 +1,4 @@
-// Tests for LambdaStarweavePipeline.
+// Tests for LambdaStarspinPipeline.
 //
 // Correlation-only, visibilities-only pipeline: no beamforming, no
 // eigendecomposition/RFI mitigation, no spectral output. Tests drive it through
@@ -46,7 +46,7 @@ constexpr size_t NR_SAMPLES =
 // ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
-class StarweavePipelineTest : public ::testing::Test {
+class StarspinPipelineTest : public ::testing::Test {
 protected:
   void TearDown() override {
     cudaDeviceSynchronize();
@@ -69,17 +69,19 @@ std::complex<int8_t> zero_sample(size_t, size_t, int, int, int, int) {
 // ---------------------------------------------------------------------------
 // Run helper
 // ---------------------------------------------------------------------------
-struct StarweaveRun {
+struct StarspinRun {
   std::shared_ptr<SingleHostMemoryOutput<Config>> output;
-  std::unique_ptr<LambdaStarweavePipeline<Config>> pipeline;
   std::unique_ptr<test_support::SyntheticPipelineRun<Config>> driver;
+  // Destroy the pipeline (and join its reclaimer) before the driver's
+  // ProcessorState, which the reclaimer may still call during shutdown.
+  std::unique_ptr<LambdaStarspinPipeline<Config>> pipeline;
 };
 
 template <typename SampleFn, typename ScaleFn>
-StarweaveRun do_run(SampleFn sample_fn, ScaleFn scale_fn) {
-  StarweaveRun r;
+StarspinRun do_run(SampleFn sample_fn, ScaleFn scale_fn) {
+  StarspinRun r;
   r.output = std::make_shared<SingleHostMemoryOutput<Config>>();
-  r.pipeline = test_support::pipeline_factories::make_starweave_pipeline<Config>(
+  r.pipeline = test_support::pipeline_factories::make_starspin_pipeline<Config>(
       /*num_buffers=*/Config::NR_PACKETS_FOR_CORRELATION);
   r.driver = std::make_unique<test_support::SyntheticPipelineRun<Config>>(
       *r.pipeline, r.output);
@@ -96,7 +98,7 @@ StarweaveRun do_run(SampleFn sample_fn, ScaleFn scale_fn) {
 // ---------------------------------------------------------------------------
 // Exact visibility values
 // ---------------------------------------------------------------------------
-TEST_F(StarweavePipelineTest, VisibilityExactValues) {
+TEST_F(StarspinPipelineTest, VisibilityExactValues) {
   auto r = do_run(constant_sample, constant_scale);
   const auto &vis = *r.output->visibilities;
 
@@ -114,7 +116,7 @@ TEST_F(StarweavePipelineTest, VisibilityExactValues) {
 // ---------------------------------------------------------------------------
 // Physical invariants (finite, autocorrelation PSD / Hermitian)
 // ---------------------------------------------------------------------------
-TEST_F(StarweavePipelineTest, PhysicalInvariants) {
+TEST_F(StarspinPipelineTest, PhysicalInvariants) {
   auto r = do_run(constant_sample, constant_scale);
   test_support::assert_all_finite(*r.output->visibilities, "visibilities");
   test_support::assert_autocorrelation_invariants<Config>(*r.output->visibilities);
@@ -123,7 +125,7 @@ TEST_F(StarweavePipelineTest, PhysicalInvariants) {
 // ---------------------------------------------------------------------------
 // Zero input -> zero output
 // ---------------------------------------------------------------------------
-TEST_F(StarweavePipelineTest, ZeroInputProducesZeroOutput) {
+TEST_F(StarspinPipelineTest, ZeroInputProducesZeroOutput) {
   auto r = do_run(zero_sample, constant_scale);
   const auto &vis = *r.output->visibilities;
 
@@ -141,12 +143,12 @@ TEST_F(StarweavePipelineTest, ZeroInputProducesZeroOutput) {
 // correlator input path must use the real channel stride of the half sample
 // buffer.
 // ---------------------------------------------------------------------------
-TEST_F(StarweavePipelineTest, TwoChannelConfigProducesExpectedOutput) {
+TEST_F(StarspinPipelineTest, TwoChannelConfigProducesExpectedOutput) {
   using Cfg = test_support::SmallTwoChannelConfig;
 
   auto output = std::make_shared<SingleHostMemoryOutput<Cfg>>();
   auto pipeline =
-      test_support::pipeline_factories::make_starweave_pipeline<Cfg>(
+      test_support::pipeline_factories::make_starspin_pipeline<Cfg>(
           Cfg::NR_PACKETS_FOR_CORRELATION);
   test_support::SyntheticPipelineRun<Cfg> driver(*pipeline, output);
 
@@ -170,13 +172,14 @@ TEST_F(StarweavePipelineTest, TwoChannelConfigProducesExpectedOutput) {
         EXPECT_EQ(vis[c][bl][p][p][0], expected_auto_power[c])
             << "ch=" << c << " autocorr rx=" << rx << " pol=" << p;
     }
+  pipeline.reset();
 }
 
 // ---------------------------------------------------------------------------
 // Non-unit ingest scales must survive through the pipeline. With real unit
 // samples, autocorrelation power is N * scale^2.
 // ---------------------------------------------------------------------------
-TEST_F(StarweavePipelineTest, NonUnitScalesAffectVisibilities) {
+TEST_F(StarspinPipelineTest, NonUnitScalesAffectVisibilities) {
   auto r = do_run(
       [](size_t, size_t, int, int, int, int) -> std::complex<int8_t> {
         return {1, 0};
@@ -203,12 +206,12 @@ TEST_F(StarweavePipelineTest, NonUnitScalesAffectVisibilities) {
 // over 2*8=16 time steps, giving autocorrelation power 128 -- exactly double
 // the single-packet value (64), proving accumulation across packets.
 // ---------------------------------------------------------------------------
-TEST_F(StarweavePipelineTest, MultiPacketAccumulatesVisibilityPower) {
+TEST_F(StarspinPipelineTest, MultiPacketAccumulatesVisibilityPower) {
   using Cfg = test_support::SmallTwoPacketConfig;
 
   auto output = std::make_shared<SingleHostMemoryOutput<Cfg>>();
   auto pipeline =
-      test_support::pipeline_factories::make_starweave_pipeline<Cfg>(
+      test_support::pipeline_factories::make_starspin_pipeline<Cfg>(
           Cfg::NR_PACKETS_FOR_CORRELATION);
   test_support::SyntheticPipelineRun<Cfg> driver(*pipeline, output);
 
@@ -232,4 +235,5 @@ TEST_F(StarweavePipelineTest, MultiPacketAccumulatesVisibilityPower) {
           << "autocorr imag must be ~0  rx=" << rx << " pol=" << p;
     }
   }
+  pipeline.reset();
 }

@@ -546,7 +546,8 @@ template <typename T> struct LambdaPipelineIngest {
                                bool dummy_run,
                                cudaEvent_t copy_done_event = nullptr,
                                bool launch_release_callback = true,
-                               cudaEvent_t profile_after_copy = nullptr) {
+                               cudaEvent_t profile_after_copy = nullptr,
+                               bool convert_to_half = true) {
     if (!dummy_run && state == nullptr) {
       throw std::logic_error("State has not been set on GPUPipeline object!");
     }
@@ -594,12 +595,14 @@ template <typename T> struct LambdaPipelineIngest {
 
     // Pre-channelization: operates on the raw FPGA/coarse channel count, not the
     // (possibly fine-channelized) widened T::NR_CHANNELS.
-    scale_and_convert_to_half<T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS,
-                              T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
-                              T::NR_TIME_STEPS_PER_PACKET,
-                              T::NR_PACKETS_FOR_CORRELATION + 2>(
-        (char2 *)d_samples_entry, (int16_t *)d_scales, (float2 *)d_gains,
-        (__half2 *)d_samples_half, stream);
+    if (convert_to_half) {
+      scale_and_convert_to_half<T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS,
+                                T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                                T::NR_TIME_STEPS_PER_PACKET,
+                                T::NR_PACKETS_FOR_CORRELATION + 2>(
+          (char2 *)d_samples_entry, (int16_t *)d_scales, (float2 *)d_gains,
+          (__half2 *)d_samples_half, stream);
+    }
   }
 };
 
@@ -620,12 +623,13 @@ template <typename T> struct LambdaPipelineIngest {
 // Because there's no cross-call state, one Filter object can launch every coarse-channel slice,
 // including concurrent launches from the pipeline's multiple streams. This matters because the
 // Filter constructor NVRTC-compiles its kernel: constructing one identical object per coarse
-// channel needlessly compiled the same kernel 48 times for starweave_4_48.
+// channel needlessly compiled the same kernel 48 times for starspin_4_48.
 //
 // Native per-antenna delay compensation (FilterArgs::delays, applied during channelization in the
 // frequency domain) is intentionally left disabled here -- wiring real delay values through is
 // deferred to the call site that retires the old apply_fine_delay_correction() path.
-template <typename T> struct FineChannelizer {
+template <typename T, size_t NR_FILTER_RECEIVERS = T::NR_RECEIVERS>
+struct FineChannelizer {
   static constexpr size_t NR_FINE = T::NR_FINE_CHANNELS;
   static constexpr size_t NR_COARSE = T::NR_FPGA_CHANNELS;
   static constexpr unsigned NR_TAPS = 16;
@@ -654,7 +658,7 @@ template <typename T> struct FineChannelizer {
   // samples (see reorder_to_filter_input in spatial.cuh). float, not half: gpu-filter's
   // InputSample only implements i16/i8/fp32 in its kernel -- fp16 hits a compile-time #error.
   using FilterInputType =
-      float2[NR_COARSE][T::NR_RECEIVERS][T::NR_POLARIZATIONS]
+      float2[NR_COARSE][NR_FILTER_RECEIVERS][T::NR_POLARIZATIONS]
             [(NR_SAMPLES_PER_FINE_CHANNEL + NR_TAPS - 1) * NR_FINE];
 
   // Per-coarse-channel output: gpu-filter's native layout,
@@ -662,7 +666,7 @@ template <typename T> struct FineChannelizer {
   // CorrelatorInput's trailing [COMPLEX] axis (cuda::std::complex<__half> == __half[2]).
   using FilterOutputType =
       __half2[NR_COARSE][NR_FINE][NR_SAMPLES_PER_FINE_CHANNEL / NR_TIMES_PER_OUTPUT_BLOCK]
-             [T::NR_RECEIVERS][T::NR_POLARIZATIONS][NR_TIMES_PER_OUTPUT_BLOCK];
+             [NR_FILTER_RECEIVERS][T::NR_POLARIZATIONS][NR_TIMES_PER_OUTPUT_BLOCK];
 
   std::unique_ptr<ppf::Filter> filter;
   DevicePtr<float> deripple_gains_;
@@ -671,7 +675,9 @@ template <typename T> struct FineChannelizer {
   const float *deripple_gains() const { return deripple_gains_.get(); }
   const std::string &deripple_response_id() const { return deripple_response_id_; }
 
-  explicit FineChannelizer(CUdevice cu_device) {
+  explicit FineChannelizer(CUdevice cu_device, float output_voltage_scale = 1.0f) {
+    if (!std::isfinite(output_voltage_scale) || output_voltage_scale <= 0.0f)
+      throw std::invalid_argument("Fine-channel output voltage scale must be finite and positive");
     if (!coarse_pfb_deripple_config_path().empty()) {
       auto config = load_coarse_pfb_deripple(
           coarse_pfb_deripple_config_path(), T::NR_FINE_CHANNELS,
@@ -687,7 +693,7 @@ template <typename T> struct FineChannelizer {
     cu::Device device(cu_device);
 
     ppf::FilterArgs args;
-    args.nrReceivers = T::NR_RECEIVERS;
+    args.nrReceivers = NR_FILTER_RECEIVERS;
     args.nrChannels = NR_FINE;
     args.nrSamplesPerChannel = NR_SAMPLES_PER_FINE_CHANNEL;
     args.nrPolarizations = T::NR_POLARIZATIONS;
@@ -698,6 +704,10 @@ template <typename T> struct FineChannelizer {
     args.fft.shift = true;  // ascending-frequency channel order -- confirmed against the kernel
     args.fft.mirror = false;
     args.output.sampleFormat = ppf::FilterArgs::fp16;
+    // gpu-filter applies this in float before narrowing to half. Scaling
+    // downstream of that conversion cannot recover an overflowed sample.
+    if (output_voltage_scale != 1.0f)
+      args.output.scaleFactor = output_voltage_scale;
 
     INFO_LOG("FineChannelizer: constructing one shared gpu-filter instance for {} coarse "
              "channels ({} fine channels each, {} samples/fine-channel, {} taps)",

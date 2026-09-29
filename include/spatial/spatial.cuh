@@ -62,9 +62,11 @@ __global__ void aligned_to_corr_input_kernel(const __half *input,
   constexpr size_t NR_BLOCKS_FOR_CORRELATION =
       NR_PACKETS_FOR_CORRELATION * NR_TIME_STEPS_PER_PACKET /
       NR_TIMES_PER_BLOCK;
+  constexpr size_t NR_CORR_RECEIVERS =
+      NR_RECEIVERS < NR_PADDED_RECEIVERS ? NR_RECEIVERS : NR_PADDED_RECEIVERS;
 
   const size_t total = NR_CHANNELS * NR_PACKETS_FOR_CORRELATION *
-                       NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS *
+                       NR_TIME_STEPS_PER_PACKET * NR_CORR_RECEIVERS *
                        NR_POLARIZATIONS * COMPLEX;
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t stride = blockDim.x * gridDim.x;
@@ -75,8 +77,8 @@ __global__ void aligned_to_corr_input_kernel(const __half *input,
     rem /= COMPLEX;
     const size_t p = rem % NR_POLARIZATIONS;
     rem /= NR_POLARIZATIONS;
-    const size_t receiver = rem % NR_RECEIVERS;
-    rem /= NR_RECEIVERS;
+    const size_t receiver = rem % NR_CORR_RECEIVERS;
+    rem /= NR_CORR_RECEIVERS;
     const size_t sample = rem % (NR_PACKETS_FOR_CORRELATION *
                                  NR_TIME_STEPS_PER_PACKET);
     const size_t c = rem / (NR_PACKETS_FOR_CORRELATION *
@@ -132,7 +134,9 @@ void aligned_to_corr_input(const __half *input, __half *corr_input,
 
   constexpr size_t COMPLEX = 2;
   constexpr size_t total = NR_CHANNELS * NR_PACKETS_FOR_CORRELATION *
-                           NR_TIME_STEPS_PER_PACKET * NR_RECEIVERS *
+                           NR_TIME_STEPS_PER_PACKET *
+                           (NR_RECEIVERS < NR_PADDED_RECEIVERS
+                                ? NR_RECEIVERS : NR_PADDED_RECEIVERS) *
                            NR_POLARIZATIONS * COMPLEX;
   constexpr int threads = 256;
   const int blocks = static_cast<int>((total + threads - 1) / threads);
@@ -140,6 +144,86 @@ void aligned_to_corr_input(const __half *input, __half *corr_input,
       NR_CHANNELS, NR_POLARIZATIONS, NR_RECEIVERS, NR_RECEIVERS_PER_PACKET,
       NR_TIME_STEPS_PER_PACKET, NR_PACKETS_FOR_CORRELATION, NR_PADDED_RECEIVERS,
       NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(input, corr_input);
+}
+
+// Starspin's fine-channel input directly from raw packet samples. The source
+// FPGA determines the delay and the source packet determines the scale. This
+// combines scaling, packet permutation, delay, canonical reorder, and the PFB
+// input conversion without materializing the intermediate half buffers.
+template <size_t NR_CHANNELS, size_t NR_FPGA, size_t NR_RECV_PER_FPGA,
+          size_t NR_RECEIVERS, size_t NR_ACTIVE_RECEIVERS, size_t NR_POL,
+          size_t NR_PACKETS, size_t NR_TIME, size_t NR_FINE, size_t NR_TAPS>
+__global__ void starspin_raw_to_filter_input_kernel(
+    const char2 *__restrict__ raw, const int16_t *__restrict__ scales,
+    const float2 *__restrict__ gains, const int *__restrict__ delays,
+    const int *__restrict__ recv_perm, const int *__restrict__ pol_perm,
+    float2 *__restrict__ filter_input) {
+  constexpr size_t REAL_TIME = NR_PACKETS * NR_TIME;
+  constexpr size_t INPUT_TIME = REAL_TIME + (NR_TAPS - 1) * NR_FINE;
+  constexpr size_t TOTAL = NR_CHANNELS * NR_ACTIVE_RECEIVERS * NR_POL * INPUT_TIME;
+  for (size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < TOTAL; idx += static_cast<size_t>(blockDim.x) * gridDim.x) {
+    size_t rem = idx;
+    const size_t time = rem % INPUT_TIME;
+    rem /= INPUT_TIME;
+    const size_t pol = rem % NR_POL;
+    rem /= NR_POL;
+    const size_t recv = rem % NR_ACTIVE_RECEIVERS;
+    const size_t channel = rem / NR_ACTIVE_RECEIVERS;
+    if (time >= REAL_TIME) {
+      filter_input[idx] = make_float2(0.0f, 0.0f);
+      continue;
+    }
+    const size_t perm_idx = recv * NR_POL + pol;
+    const int src_recv = recv_perm[perm_idx];
+    if (src_recv < 0) {
+      filter_input[idx] = make_float2(0.0f, 0.0f);
+      continue;
+    }
+    const size_t fpga = static_cast<size_t>(src_recv) / NR_RECV_PER_FPGA;
+    const size_t recv_in_fpga = static_cast<size_t>(src_recv) % NR_RECV_PER_FPGA;
+    const size_t src_pol = static_cast<size_t>(pol_perm[perm_idx]);
+    // apply_delays reads from one guard packet plus the FPGA sample offset.
+    const size_t src_time = NR_TIME + time + delays[fpga];
+    const size_t packet = src_time / NR_TIME;
+    const size_t time_in_packet = src_time % NR_TIME;
+    const size_t raw_idx = (((((channel * (NR_PACKETS + 2) + packet) * NR_FPGA +
+                               fpga) * NR_TIME + time_in_packet) *
+                              NR_RECV_PER_FPGA + recv_in_fpga) * NR_POL + src_pol);
+    const size_t scale_idx = (((channel * (NR_PACKETS + 2) + packet) *
+                               NR_RECEIVERS + static_cast<size_t>(src_recv)) *
+                              NR_POL + src_pol);
+    const size_t gain_idx = ((channel * NR_POL + src_pol) * NR_RECEIVERS +
+                             static_cast<size_t>(src_recv));
+    const char2 sample = raw[raw_idx];
+    const int scale = static_cast<int>(scales[scale_idx]);
+    const float2 gain = gains[gain_idx];
+    const float real = static_cast<float>(static_cast<int>(sample.x) * scale);
+    const float imag = static_cast<float>(static_cast<int>(sample.y) * scale);
+    const float gained_real = real * gain.x - imag * gain.y;
+    const float gained_imag = real * gain.y + imag * gain.x;
+    // Match scale_and_convert_to_half followed by reorder_to_filter_input.
+    filter_input[idx] = make_float2(__half2float(__float2half_rn(gained_real)),
+                                    __half2float(__float2half_rn(gained_imag)));
+  }
+}
+
+template <size_t NR_CHANNELS, size_t NR_FPGA, size_t NR_RECV_PER_FPGA,
+          size_t NR_RECEIVERS, size_t NR_ACTIVE_RECEIVERS, size_t NR_POL,
+          size_t NR_PACKETS, size_t NR_TIME, size_t NR_FINE, size_t NR_TAPS>
+void starspin_raw_to_filter_input(
+    const char2 *raw, const int16_t *scales, const float2 *gains,
+    const int *delays, const int *recv_perm, const int *pol_perm,
+    float2 *filter_input, cudaStream_t stream) {
+  constexpr size_t INPUT_TIME = NR_PACKETS * NR_TIME + (NR_TAPS - 1) * NR_FINE;
+  constexpr size_t TOTAL = NR_CHANNELS * NR_ACTIVE_RECEIVERS * NR_POL * INPUT_TIME;
+  constexpr int THREADS = 256;
+  const int blocks = static_cast<int>((TOTAL + THREADS - 1) / THREADS);
+  starspin_raw_to_filter_input_kernel<
+      NR_CHANNELS, NR_FPGA, NR_RECV_PER_FPGA, NR_RECEIVERS,
+      NR_ACTIVE_RECEIVERS, NR_POL, NR_PACKETS, NR_TIME, NR_FINE, NR_TAPS>
+      <<<blocks, THREADS, 0, stream>>>(raw, scales, gains, delays, recv_perm,
+                                       pol_perm, filter_input);
 }
 
 // Gathers samples_reordered (__half[FPGA][PACKET][TIME_IN_PACKET][CHANNEL(coarse)]
@@ -256,8 +340,10 @@ channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
                                         __half *corr_input,
                                         const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_CORR_RECEIVERS =
+      NR_RECEIVERS < NR_PADDED_RECEIVERS ? NR_RECEIVERS : NR_PADDED_RECEIVERS;
   const size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
-                       NR_BLOCKS_FOR_CORRELATION * NR_RECEIVERS *
+                       NR_BLOCKS_FOR_CORRELATION * NR_CORR_RECEIVERS *
                        NR_POLARIZATIONS * NR_TIMES_PER_BLOCK;
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t stride = blockDim.x * gridDim.x;
@@ -268,8 +354,8 @@ channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
     rem /= NR_TIMES_PER_BLOCK;
     const size_t p = rem % NR_POLARIZATIONS;
     rem /= NR_POLARIZATIONS;
-    const size_t receiver = rem % NR_RECEIVERS;
-    rem /= NR_RECEIVERS;
+    const size_t receiver = rem % NR_CORR_RECEIVERS;
+    rem /= NR_CORR_RECEIVERS;
     const size_t block = rem % NR_BLOCKS_FOR_CORRELATION;
     rem /= NR_BLOCKS_FOR_CORRELATION;
     const size_t effective_fine = rem % NR_EFFECTIVE_FINE_CHANNELS;
@@ -320,7 +406,9 @@ void channelizer_output_to_corr_input(const __half2 *filter_output,
                                       const float *deripple_gains = nullptr) {
   constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
   constexpr size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
-                           NR_BLOCKS_FOR_CORRELATION * NR_RECEIVERS *
+                           NR_BLOCKS_FOR_CORRELATION *
+                           (NR_RECEIVERS < NR_PADDED_RECEIVERS
+                                ? NR_RECEIVERS : NR_PADDED_RECEIVERS) *
                            NR_POLARIZATIONS * NR_TIMES_PER_BLOCK;
   constexpr int threads = 256;
   const int blocks = static_cast<int>((total + threads - 1) / threads);

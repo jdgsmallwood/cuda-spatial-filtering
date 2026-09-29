@@ -488,33 +488,38 @@ inline void monitor_app_stats(ProcessorStateBase &state,
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
 #ifdef SPATIAL_DIAGNOSTICS
-    std::cout << "DIAG BufferHandoffs="
-              << state.diagnostic_buffer_handoffs.load(std::memory_order_relaxed)
-              << " BufferReleases="
-              << state.diagnostic_buffer_releases.load(std::memory_order_relaxed)
-              << " EmptyBufferWaits="
-              << state.diagnostic_empty_buffer_waits.load(std::memory_order_relaxed)
-              << " ProcessorDispatches="
-              << state.diagnostic_processor_dispatches.load(std::memory_order_relaxed)
-              << " ClaimReadGap=[";
-    for (int tid = 0; tid < state.nr_capture_threads; ++tid) {
-      if (tid) std::cout << ',';
-      const auto claimed = state.per_thread_claim[tid].linear.load(
-          std::memory_order_relaxed);
-      const auto read = state.per_thread_read_linear[tid].linear.load(
-          std::memory_order_relaxed);
-      std::cout << (claimed - read);
+    if (state.verbose_diagnostics) {
+      std::cout << "DIAG BufferHandoffs="
+                << state.diagnostic_buffer_handoffs.load(std::memory_order_relaxed)
+                << " BufferReleases="
+                << state.diagnostic_buffer_releases.load(std::memory_order_relaxed)
+                << " EmptyBufferWaits="
+                << state.diagnostic_empty_buffer_waits.load(std::memory_order_relaxed)
+                << " ProcessorDispatches="
+                << state.diagnostic_processor_dispatches.load(std::memory_order_relaxed)
+                << " ClaimReadGap=[";
+      for (int tid = 0; tid < state.nr_capture_threads; ++tid) {
+        if (tid) std::cout << ',';
+        const auto claimed = state.per_thread_claim[tid].linear.load(
+            std::memory_order_relaxed);
+        const auto read = state.per_thread_read_linear[tid].linear.load(
+            std::memory_order_relaxed);
+        std::cout << (claimed - read);
+      }
+      std::cout << "]" << std::endl;
+      state.print_extended_diagnostics();
+      std::cout << "DIAG MissingByFpgaIndex=[";
+      for (size_t i = 0; i < state.diagnostic_fpga_count; ++i) {
+        if (i != 0)
+          std::cout << ',';
+        std::cout << state.diagnostic_missing_by_fpga[i].load(
+            std::memory_order_relaxed);
+      }
+      std::cout << "]" << std::endl;
     }
-    std::cout << "]" << std::endl;
-    state.print_extended_diagnostics();
-    std::cout << "DIAG MissingByFpgaIndex=[";
-    for (size_t i = 0; i < state.diagnostic_fpga_count; ++i) {
-      if (i != 0)
-        std::cout << ',';
-      std::cout << state.diagnostic_missing_by_fpga[i].load(
-          std::memory_order_relaxed);
-    }
-    std::cout << "]" << std::endl;
+#endif
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+    state.print_timing_diagnostics();
 #endif
 
     state.running.store((int)running, std::memory_order_release);

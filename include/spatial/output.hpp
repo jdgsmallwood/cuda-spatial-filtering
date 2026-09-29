@@ -6,9 +6,13 @@
 #include <atomic>
 #include <chrono>
 #include <complex.h>
+#include <cstdint>
+#include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <limits>
+#include <sched.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 // forward declarations
@@ -81,6 +85,10 @@ public:
   using FFTOutput = typename T::FFTOutputType;
   BeamOutput *beam_data;
   Visibilities *visibilities;
+#ifdef SPATIAL_THP_OUTPUT_BUFFERS
+  void *visibilities_mapping = nullptr;
+  size_t visibilities_mapping_bytes = 0;
+#endif
   Arrivals *arrivals;
   Eigenvalues *eigenvalues;
   Eigenvectors *eigenvectors;
@@ -150,7 +158,56 @@ public:
 
   SingleHostMemoryOutput() {
     CUDA_CHECK(cudaMallocHost((void **)&beam_data, sizeof(BeamOutput)));
+#ifdef SPATIAL_THP_OUTPUT_BUFFERS
+    // This output receives the integrated visibility D2H copy. Match the
+    // GPU-local transparent-hugepage input layout, with a pinned fallback.
+    cpu_set_t previous_affinity;
+    const bool have_affinity =
+        sched_getaffinity(0, sizeof(previous_affinity), &previous_affinity) == 0;
+    bool restore_affinity = false;
+#ifdef SPATIAL_THP_INPUT_BUFFERS
+    if (have_affinity) {
+      const int cpu = T::PacketFinalDataType::input_buffer_cpu(previous_affinity);
+      if (cpu >= 0) {
+        cpu_set_t target;
+        CPU_ZERO(&target);
+        CPU_SET(cpu, &target);
+        restore_affinity =
+            sched_setaffinity(0, sizeof(target), &target) == 0;
+      }
+    }
+#endif
+    constexpr size_t alignment = 2 * 1024 * 1024;
+    visibilities_mapping_bytes = sizeof(Visibilities) + alignment;
+    visibilities_mapping = mmap(nullptr, visibilities_mapping_bytes,
+                                PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool registered = false;
+    if (visibilities_mapping != MAP_FAILED) {
+      const uintptr_t aligned =
+          (reinterpret_cast<uintptr_t>(visibilities_mapping) + alignment - 1) &
+          ~(uintptr_t(alignment) - 1);
+      visibilities = reinterpret_cast<Visibilities *>(aligned);
+      if (madvise(visibilities, sizeof(Visibilities), MADV_HUGEPAGE) == 0) {
+        std::memset(visibilities, 0, sizeof(Visibilities));
+        registered = cudaHostRegister(visibilities, sizeof(Visibilities),
+                                      cudaHostRegisterDefault) == cudaSuccess;
+      }
+      if (!registered) {
+        cudaGetLastError();
+        munmap(visibilities_mapping, visibilities_mapping_bytes);
+      }
+    }
+    if (!registered) {
+      visibilities_mapping = nullptr;
+      visibilities_mapping_bytes = 0;
+      CUDA_CHECK(cudaMallocHost((void **)&visibilities, sizeof(Visibilities)));
+    }
+    if (restore_affinity)
+      sched_setaffinity(0, sizeof(previous_affinity), &previous_affinity);
+#else
     CUDA_CHECK(cudaMallocHost((void **)&visibilities, sizeof(Visibilities)));
+#endif
     CUDA_CHECK(cudaMallocHost((void **)&arrivals, sizeof(Arrivals)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvalues, sizeof(Eigenvalues)));
     CUDA_CHECK(cudaMallocHost((void **)&eigenvectors, sizeof(Eigenvectors)));
@@ -160,7 +217,16 @@ public:
   };
   ~SingleHostMemoryOutput() {
     CUDA_CHECK(cudaFreeHost(beam_data));
+#ifdef SPATIAL_THP_OUTPUT_BUFFERS
+    if (visibilities_mapping) {
+      CUDA_CHECK(cudaHostUnregister(visibilities));
+      munmap(visibilities_mapping, visibilities_mapping_bytes);
+    } else {
+      CUDA_CHECK(cudaFreeHost(visibilities));
+    }
+#else
     CUDA_CHECK(cudaFreeHost(visibilities));
+#endif
     CUDA_CHECK(cudaFreeHost(arrivals));
     CUDA_CHECK(cudaFreeHost(eigenvalues));
     CUDA_CHECK(cudaFreeHost(eigenvectors));

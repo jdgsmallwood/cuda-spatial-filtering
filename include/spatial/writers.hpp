@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <complex>
 #include <cstdint>
@@ -726,7 +727,12 @@ public:
       const std::unordered_map<int, int> *antenna_map = nullptr,
       const int num_blocks = 100, const int deflate_level = 0,
       const bool zero_negative_antenna_slots = true)
-      : VisibilitiesWriter<T>(num_blocks), file_(file), batch_size_(num_blocks),
+      : VisibilitiesWriter<T>(num_blocks), file_(file),
+        // HDF5 chunks must be smaller than 4 GiB. A bounded chunk also keeps
+        // large-channel Starspin output writes and staging memory manageable.
+        batch_size_(std::min<size_t>(
+            static_cast<size_t>(num_blocks),
+            std::max<size_t>(1, (size_t{256} << 20) / sizeof(T)))),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
         zero_negative_antenna_slots_(zero_negative_antenna_slots) {
@@ -821,6 +827,10 @@ public:
   void flush() override {
     if (buffer_count_ == 0)
       return;
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+    const auto flush_start = std::chrono::steady_clock::now();
+    const size_t flushed_blocks = buffer_count_;
+#endif
     // Use locally tracked size to avoid a getDimensions() HDF5 metadata round-
     // trip on every flush — confirmed safe because only this thread appends.
     const size_t current_size = n_blocks_written_;
@@ -848,6 +858,13 @@ public:
     seq_buffer_.clear();
     missing_buffer_.clear();
     buffer_count_ = 0;
+#ifdef SPATIAL_TIMING_DIAGNOSTICS
+    const auto flush_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - flush_start).count();
+    std::cout << "TIMING VisFlush blocks=" << flushed_blocks
+              << " bytes=" << flushed_blocks * sizeof(T)
+              << " ms=" << flush_ms << std::endl;
+#endif
   }
 
 private:

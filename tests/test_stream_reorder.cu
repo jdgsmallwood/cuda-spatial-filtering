@@ -108,6 +108,101 @@ perm_sample(size_t /*ch*/, size_t fpga, int /*pkt*/, int /*t*/, int r, int /*p*/
 
 static int16_t unity_scale(size_t, size_t, int, int, int) { return 1; }
 
+// Test the actual gather kernel with four independently delayed FPGA lanes.
+// The data changes at every time/channel/receiver/polarization/component,
+// including both packet boundaries and the two look-ahead/look-behind packets.
+TEST(FourFpgaSubpacketDelayTest, SignedOffsetsPreserveEverySampleAxis) {
+  constexpr size_t fpgas = 4, packets = 3, ticks = 64;
+  constexpr size_t channels = 3, receivers = 10, pols = 2, components = 2;
+  constexpr size_t cell = channels * receivers * pols * components;
+  const int delays[fpgas] = {-32, -7, 32, 31};
+  std::vector<uint16_t> input(fpgas * (packets + 2) * ticks * cell);
+  std::vector<uint16_t> output(fpgas * packets * ticks * cell, 0xffff);
+  for (size_t i = 0; i < input.size(); ++i)
+    input[i] = static_cast<uint16_t>((i * 37 + i / 65521) % 30001);
+  __half *din = nullptr, *dout = nullptr;
+  int *ddelay = nullptr;
+  CUDA_CHECK(cudaMalloc(&din, input.size() * sizeof(uint16_t)));
+  CUDA_CHECK(cudaMalloc(&dout, output.size() * sizeof(uint16_t)));
+  CUDA_CHECK(cudaMalloc(&ddelay, sizeof(delays)));
+  CUDA_CHECK(cudaMemcpy(din, input.data(), input.size() * sizeof(uint16_t),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(ddelay, delays, sizeof(delays), cudaMemcpyHostToDevice));
+  apply_delays_launch(din, dout, ddelay, receivers, fpgas, packets, pols,
+                       channels, ticks, nullptr);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpy(output.data(), dout, output.size() * sizeof(uint16_t),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaFree(din));
+  CUDA_CHECK(cudaFree(dout));
+  CUDA_CHECK(cudaFree(ddelay));
+
+  for (size_t f = 0; f < fpgas; ++f)
+    for (size_t t = 0; t < packets * ticks; ++t) {
+      const size_t source_time = static_cast<size_t>(
+          static_cast<int>(t + ticks) + delays[f]);
+      for (size_t k = 0; k < cell; ++k)
+        ASSERT_EQ(output[(f * packets * ticks + t) * cell + k],
+                  input[(f * (packets + 2) * ticks + source_time) * cell + k])
+            << "FPGA=" << f << " time=" << t << " within-time=" << k;
+    }
+}
+
+TEST(FourFpgaUnpackTest, PacketScalesAndComplexGainsFollowHardwareStream) {
+  constexpr size_t channels = 3, packets = 4, fpgas = 4, ticks = 64;
+  constexpr size_t local_receivers = 10, receivers = fpgas * local_receivers;
+  constexpr size_t pols = 2;
+  const size_t count = channels * packets * fpgas * ticks * local_receivers * pols;
+  std::vector<char2> input(count);
+  std::vector<int16_t> scales(channels * packets * receivers * pols);
+  std::vector<float2> gains(channels * pols * receivers);
+  std::vector<__half2> output(count);
+  for (size_t i = 0; i < input.size(); ++i)
+    input[i] = make_char2(static_cast<signed char>(static_cast<int>(i % 101) - 50),
+                         static_cast<signed char>(static_cast<int>((i / 7) % 97) - 48));
+  for (size_t i = 0; i < scales.size(); ++i)
+    scales[i] = static_cast<int16_t>(1 + i % 13);
+  for (size_t i = 0; i < gains.size(); ++i)
+    gains[i] = make_float2(0.125f * (1 + i % 5), -0.125f * (1 + i % 3));
+  char2 *din = nullptr;
+  int16_t *ds = nullptr;
+  float2 *dg = nullptr;
+  __half2 *dout = nullptr;
+  CUDA_CHECK(cudaMalloc(&din, input.size() * sizeof(char2)));
+  CUDA_CHECK(cudaMalloc(&ds, scales.size() * sizeof(int16_t)));
+  CUDA_CHECK(cudaMalloc(&dg, gains.size() * sizeof(float2)));
+  CUDA_CHECK(cudaMalloc(&dout, output.size() * sizeof(__half2)));
+  CUDA_CHECK(cudaMemcpy(din, input.data(), input.size() * sizeof(char2), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(ds, scales.data(), scales.size() * sizeof(int16_t), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dg, gains.data(), gains.size() * sizeof(float2), cudaMemcpyHostToDevice));
+  scale_and_convert_to_half<channels, pols, receivers, local_receivers, ticks, packets>(
+      din, ds, dg, dout, nullptr);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpy(output.data(), dout, output.size() * sizeof(__half2), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaFree(din));
+  CUDA_CHECK(cudaFree(ds));
+  CUDA_CHECK(cudaFree(dg));
+  CUDA_CHECK(cudaFree(dout));
+
+  size_t i = 0;
+  for (size_t c = 0; c < channels; ++c)
+    for (size_t packet = 0; packet < packets; ++packet)
+      for (size_t f = 0; f < fpgas; ++f)
+        for (size_t t = 0; t < ticks; ++t)
+          for (size_t r = 0; r < local_receivers; ++r)
+            for (size_t p = 0; p < pols; ++p, ++i) {
+              const size_t receiver = f * local_receivers + r;
+              const float scale = scales[((c * packets + packet) * receivers + receiver) * pols + p];
+              const float2 gain = gains[(c * pols + p) * receivers + receiver];
+              const std::complex<float> expected =
+                  std::complex<float>(input[i].x, input[i].y) * scale *
+                  std::complex<float>(gain.x, gain.y);
+              const float2 actual = __half22float2(output[i]);
+              ASSERT_EQ(actual.x, __half2float(__float2half(expected.real()))) << "sample=" << i;
+              ASSERT_EQ(actual.y, __half2float(__float2half(expected.imag()))) << "sample=" << i;
+            }
+}
+
 // ---------------------------------------------------------------------------
 // Run helper
 // ---------------------------------------------------------------------------

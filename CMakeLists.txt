@@ -330,7 +330,7 @@ set(NR_OBSERVING_FINE_CHANNELS "32" CACHE STRING "Fine channels per coarse/FPGA 
 set(NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM "2" CACHE STRING "Fine channels dropped from each edge of every coarse channel's fine-channel breakdown before correlation, to discard the FPGA coarse channelizer's own 32/27-oversampling guard-band aliasing (ignored when NR_OBSERVING_FINE_CHANNELS=1).")
 set(NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE "56" CACHE STRING "Number of visibility correlation blocks to integrate")
 set(NR_OBSERVING_PACKET_WORKER_THREADS "3" CACHE STRING "Number of CPU worker threads for packet processing")
-set(NR_OBSERVING_PACKET_BUFFERS "8" CACHE STRING "Number of host packet-assembly buffers used by Starweave")
+set(NR_OBSERVING_PACKET_BUFFERS "8" CACHE STRING "Number of host packet-assembly buffers used by Starspin")
 
 add_compile_definitions(
     NR_OBSERVING_BUFFERS=${NR_OBSERVING_BUFFERS}

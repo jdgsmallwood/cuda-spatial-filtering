@@ -296,9 +296,15 @@ inline QpSetup setup_qp(const std::string &ifname, int port, int num_frames,
   return s;
 }
 
-inline void teardown_qp(QpSetup &s) {
+inline void stop_qp(QpSetup &s) {
   if (s.flow) ibv_destroy_flow(s.flow);
   if (s.qp) ibv_destroy_qp(s.qp);
+  s.flow = nullptr;
+  s.qp = nullptr;
+}
+
+inline void teardown_qp(QpSetup &s) {
+  stop_qp(s);
   if (s.cq) ibv_destroy_cq(s.cq);
   if (s.pd) ibv_dealloc_pd(s.pd);
   if (s.ctx) ibv_close_device(s.ctx);
@@ -381,13 +387,16 @@ public:
 
   ~LibibverbsPacketCapture() override {
     libibverbs_detail::QpSetup s{ctx_, pd_, cq_, qp_, flow_};
-    libibverbs_detail::teardown_qp(s);
+    // Stop DMA first. MRs must be deregistered while their PD and device
+    // context are still alive; closing the context first can crash libibverbs.
+    libibverbs_detail::stop_qp(s);
     if (ring_mr_)
       ibv_dereg_mr(ring_mr_);
     if (header_ring_zc_mr_)
       ibv_dereg_mr(header_ring_zc_mr_);
     if (mr_)
       ibv_dereg_mr(mr_);
+    libibverbs_detail::teardown_qp(s);
     if (cpu_buffer_)
       free(cpu_buffer_);
   }
@@ -397,8 +406,8 @@ public:
   // because the ring does not exist when the capture object is created.
   void arm_zero_copy(ProcessorStateBase &state) override {
     if (zero_copy_) return;
-    void *base = state.packet_ring_base();
-    const size_t bytes = state.packet_ring_bytes();
+    void *base = state.packet_ring_base_for_thread(thread_id_);
+    const size_t bytes = state.packet_ring_bytes_for_thread(thread_id_);
     const size_t stride = state.packet_ring_slot_stride();
     const size_t offset = state.packet_ring_slot_offset();
     if (!base || bytes == 0 || stride == 0 || state.packet_ring_slot_count() == 0)
@@ -484,53 +493,68 @@ public:
     }
     ibv_wc wc[POLL_BATCH];
 #ifdef SPATIAL_DIAGNOSTICS
+    const bool verbose_diagnostics = state.verbose_diagnostics;
     uint64_t empty_polls = 0;
     uint64_t total_polls = 0;
     uint64_t nonzero_polls = 0;
     uint64_t completed_cqes = 0;
     auto last_diag = std::chrono::steady_clock::now();
 #endif
+#ifdef SPATIAL_INGEST_TRACE
+    uint64_t trace_previous_batch_end = 0;
+#endif
 
     while (state.running.load(std::memory_order_acquire)) {
       int n = ibv_poll_cq(cq_, POLL_BATCH, wc);
 #ifdef SPATIAL_DIAGNOSTICS
-      ++total_polls;
-      if (total_polls <= 20) {
-        std::cerr << "ITER ibverbs " << ifname_ << " thread " << thread_id_
-                  << " iter=" << total_polls << " n=" << n << std::endl;
-      }
-      const auto now = std::chrono::steady_clock::now();
-      if (now - last_diag > std::chrono::seconds(2)) {
-        last_diag = now;
-        struct rusage usage {};
-        getrusage(RUSAGE_THREAD, &usage);
-        // Bypass spatial::Logger entirely for this one -- straight to
-        // stderr, which the shell capture already reliably picks up,
-        // in case the shared logger singleton has its own issue.
-        std::cerr << "DIAG ibverbs " << ifname_ << " thread " << thread_id_
-                  << ": " << total_polls << " polls, " << nonzero_polls
-                  << " nonzero, " << empty_polls
-                  << " empty, cqes=" << completed_cqes
-                  << ", voluntary_cs=" << usage.ru_nvcsw
-                  << ", involuntary_cs=" << usage.ru_nivcsw
-                  << ", received=" << state.packets_received.load()
-                  << std::endl;
+      if (verbose_diagnostics) {
+        ++total_polls;
+        if (total_polls <= 20) {
+          std::cerr << "ITER ibverbs " << ifname_ << " thread " << thread_id_
+                    << " iter=" << total_polls << " n=" << n << std::endl;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_diag > std::chrono::seconds(2)) {
+          last_diag = now;
+          struct rusage usage {};
+          getrusage(RUSAGE_THREAD, &usage);
+          // Bypass spatial::Logger entirely for this one -- straight to
+          // stderr, which the shell capture already reliably picks up,
+          // in case the shared logger singleton has its own issue.
+          std::cerr << "DIAG ibverbs " << ifname_ << " thread " << thread_id_
+                    << ": " << total_polls << " polls, " << nonzero_polls
+                    << " nonzero, " << empty_polls
+                    << " empty, cqes=" << completed_cqes
+                    << ", voluntary_cs=" << usage.ru_nvcsw
+                    << ", involuntary_cs=" << usage.ru_nivcsw
+                    << ", received=" << state.packets_received.load()
+                    << std::endl;
+        }
       }
 #endif
       if (n == 0) {
 #ifdef SPATIAL_DIAGNOSTICS
-        ++empty_polls;
+        if (verbose_diagnostics) ++empty_polls;
 #endif
         continue;
       }
 #ifdef SPATIAL_DIAGNOSTICS
-      ++nonzero_polls;
-      completed_cqes += static_cast<uint64_t>(n);
+      if (verbose_diagnostics && n > 0) {
+        ++nonzero_polls;
+        completed_cqes += static_cast<uint64_t>(n);
+      }
 #endif
       if (n < 0) {
         ERROR_LOG("ibv_poll_cq failed on {}", ifname_);
         break;
       }
+#ifdef SPATIAL_INGEST_TRACE
+      const uint64_t trace_batch_start = state.ingest_trace.enabled()
+          ? spatial::IngestTrace::now_ns() : 0;
+      if (trace_previous_batch_end && trace_batch_start - trace_previous_batch_end >= 100000)
+        state.ingest_trace.record(5 + thread_id_, spatial::IngestTrace::ReceiveProgressGap,
+                                  trace_previous_batch_end, trace_batch_start, n);
+#endif
 
       std::unique_lock<std::mutex> legacy_lock(state.producer_mutex,
                                                 std::defer_lock);
@@ -636,6 +660,14 @@ public:
         frame_slot_ptrs_[jframe] = replacement;
         post_direct_recv(jframe, replacement);
       }
+#ifdef SPATIAL_INGEST_TRACE
+      if (trace_batch_start) {
+        trace_previous_batch_end = spatial::IngestTrace::now_ns();
+        if (trace_previous_batch_end - trace_batch_start >= 100000)
+          state.ingest_trace.record(5 + thread_id_, spatial::IngestTrace::ReceiveBatch,
+                                    trace_batch_start, trace_previous_batch_end, n);
+      }
+#endif
     }
     if (zero_copy_) {
       // Outstanding direct receives own uncommitted ring slots. Make them
@@ -797,10 +829,11 @@ public:
 
   ~LibibverbsGpuDirectPacketCapture() override {
     libibverbs_detail::QpSetup s{ctx_, pd_, cq_, qp_, flow_};
-    libibverbs_detail::teardown_qp(s);
+    libibverbs_detail::stop_qp(s);
     if (header_mr_) ibv_dereg_mr(header_mr_);
     if (samples_mr_) ibv_dereg_mr(samples_mr_);
     if (scales_mr_) ibv_dereg_mr(scales_mr_);
+    libibverbs_detail::teardown_qp(s);
     if (graph_exec_) cudaGraphExecDestroy(graph_exec_);
     if (event_[0]) cudaEventDestroy(event_[0]);
     if (event_[1]) cudaEventDestroy(event_[1]);

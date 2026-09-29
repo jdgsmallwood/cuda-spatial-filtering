@@ -16,9 +16,12 @@ environment, requiring real-time adaptive spatial filtering that is computationa
 for CPU-only approaches. Existing GPU correlator frameworks (e.g., xGPU) target standard
 interferometric arrays and do not expose the beamforming, eigendecomposition-based RFI projection,
 or the bespoke LAMBDA FPGA wire-format parsing required for this instrument. This pipeline
-delivers a unified, end-to-end GPU path — from raw FPGA packets to calibrated, RFI-mitigated
-beams and visibilities — sustaining over 4.6 million packets per second with more than 500% real-
-time headroom on the LAMBDA 36-element array.
+provides a GPU path from FPGA packets to calibrated beams and visibilities, with optional RFI
+mitigation. In separate component benchmarks, CPU packet reassembly processed about 4.6 million
+packets/s, while an 8-channel, 4-FPGA GPU correlate-and-beamform benchmark achieved 531% of its
+real-time block rate. These figures do not measure combined pipeline throughput. In a 900-second
+live, 40-channel, 4-FPGA pulsar-fold run, the pipeline received 2,083,384,981 packets (about
+2.31 million packets/s) and sustained about 56.5 blocks/s.
 
 ## Prerequisites
 

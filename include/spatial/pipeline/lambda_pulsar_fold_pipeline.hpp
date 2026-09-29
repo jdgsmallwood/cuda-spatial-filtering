@@ -9,11 +9,13 @@
 // Compact the coarse-major retained fine-channel axis for PSRDADA. With the
 // 32/27 PFB and 28 retained bins, adjacent coarse channels contain two copies
 // of the same boundary-centre frequency. Keep all copies through calibration
-// and beamforming, then omit the first bin of coarse channels 1..N-1 so DSPSR
-// receives the 40*27+1 unique frequencies as one uniform axis.
+// and beamforming. For the 32/27 observing path, omit the first retained bin
+// of every coarse channel (raw gpu-filter bin 2), preserving raw bins 3..29
+// and delivering exactly 27 uniform frequencies per coarse channel to DSPSR.
 template <size_t NR_INPUT_CHANNELS, size_t NR_OUTPUT_CHANNELS,
           size_t NR_EFFECTIVE_FINE_CHANNELS, size_t NR_TIMES,
-          size_t NR_POLS, size_t NR_BEAMS>
+          size_t NR_POLS, size_t NR_BEAMS,
+          bool DROP_FIRST_EACH_COARSE = false>
 __global__ void compact_shared_fine_boundaries_kernel(const float *input,
                                                        float *output) {
   constexpr size_t INNER = NR_POLS * 2;
@@ -27,7 +29,15 @@ __global__ void compact_shared_fine_boundaries_kernel(const float *input,
   const size_t beam_time = output_index / (INNER * NR_OUTPUT_CHANNELS);
 
   size_t input_channel = output_channel;
-  if constexpr (NR_OUTPUT_CHANNELS != NR_INPUT_CHANNELS) {
+  if constexpr (DROP_FIRST_EACH_COARSE) {
+    static_assert(NR_INPUT_CHANNELS % NR_EFFECTIVE_FINE_CHANNELS == 0);
+    static_assert(NR_OUTPUT_CHANNELS ==
+                  NR_INPUT_CHANNELS / NR_EFFECTIVE_FINE_CHANNELS *
+                      (NR_EFFECTIVE_FINE_CHANNELS - 1));
+    const size_t coarse = output_channel / (NR_EFFECTIVE_FINE_CHANNELS - 1);
+    const size_t fine = 1 + output_channel % (NR_EFFECTIVE_FINE_CHANNELS - 1);
+    input_channel = coarse * NR_EFFECTIVE_FINE_CHANNELS + fine;
+  } else if constexpr (NR_OUTPUT_CHANNELS != NR_INPUT_CHANNELS) {
     if (output_channel >= NR_EFFECTIVE_FINE_CHANNELS) {
       const size_t after_first_coarse =
           output_channel - NR_EFFECTIVE_FINE_CHANNELS;
@@ -45,7 +55,8 @@ __global__ void compact_shared_fine_boundaries_kernel(const float *input,
 
 template <size_t NR_INPUT_CHANNELS, size_t NR_OUTPUT_CHANNELS,
           size_t NR_EFFECTIVE_FINE_CHANNELS, size_t NR_TIMES,
-          size_t NR_POLS, size_t NR_BEAMS>
+          size_t NR_POLS, size_t NR_BEAMS,
+          bool DROP_FIRST_EACH_COARSE = false>
 __global__ void detect_intensity_and_compact_shared_fine_boundaries_kernel(
     const float *input, float *output) {
   constexpr size_t N = NR_BEAMS * NR_TIMES * NR_OUTPUT_CHANNELS;
@@ -56,7 +67,15 @@ __global__ void detect_intensity_and_compact_shared_fine_boundaries_kernel(
   const size_t output_channel = output_index % NR_OUTPUT_CHANNELS;
   const size_t beam_time = output_index / NR_OUTPUT_CHANNELS;
   size_t input_channel = output_channel;
-  if constexpr (NR_OUTPUT_CHANNELS != NR_INPUT_CHANNELS) {
+  if constexpr (DROP_FIRST_EACH_COARSE) {
+    static_assert(NR_INPUT_CHANNELS % NR_EFFECTIVE_FINE_CHANNELS == 0);
+    static_assert(NR_OUTPUT_CHANNELS ==
+                  NR_INPUT_CHANNELS / NR_EFFECTIVE_FINE_CHANNELS *
+                      (NR_EFFECTIVE_FINE_CHANNELS - 1));
+    const size_t coarse = output_channel / (NR_EFFECTIVE_FINE_CHANNELS - 1);
+    const size_t fine = 1 + output_channel % (NR_EFFECTIVE_FINE_CHANNELS - 1);
+    input_channel = coarse * NR_EFFECTIVE_FINE_CHANNELS + fine;
+  } else if constexpr (NR_OUTPUT_CHANNELS != NR_INPUT_CHANNELS) {
     if (output_channel >= NR_EFFECTIVE_FINE_CHANNELS) {
       const size_t after_first_coarse =
           output_channel - NR_EFFECTIVE_FINE_CHANNELS;
@@ -163,7 +182,9 @@ private:
   using BeamOutput = float[num_beams][NR_TIME_STEPS_PER_FINE_CHANNEL]
                           [T::NR_CHANNELS][T::NR_POLARIZATIONS][COMPLEX];
   static constexpr size_t NR_DADA_CHANNELS =
-      T::NR_FINE_CHANNELS > 1
+      T::NR_FINE_CHANNELS == 32 && T::NR_FINE_CHANNEL_EDGE_TRIM == 2
+          ? T::NR_FPGA_CHANNELS * (T::NR_EFFECTIVE_FINE_CHANNELS - 1)
+          : T::NR_FINE_CHANNELS > 1
           ? T::NR_FPGA_CHANNELS * (T::NR_EFFECTIVE_FINE_CHANNELS - 1) + 1
           : T::NR_CHANNELS;
   using DadaVoltageOutput =
@@ -433,6 +454,16 @@ private:
   int min_freq_channel;
 
   static constexpr float alpha_32 = 1.0f;
+  // gpu-filter uses a historical 256-channel voltage normalization. Strong
+  // but valid packet samples can therefore overflow its FP16 output even
+  // though unpacked samples fit in half. Leave headroom through the half
+  // buffers and restore physical scaling only in the float outputs. 1/64
+  // is exact in binary and in gpu-filter's six-decimal macro serialization.
+  static constexpr float pfb_voltage_scale =
+      T::NR_FINE_CHANNELS > 1 ? 1.0f / 64.0f : 1.0f;
+  static constexpr float beam_voltage_restore = 1.0f / pfb_voltage_scale;
+  static constexpr float visibility_power_restore =
+      beam_voltage_restore * beam_voltage_restore;
   // a = unpadded baselines
   // b = block
   // c = channel
@@ -835,7 +866,7 @@ public:
       // 8. Rearrange correlator output to baseline-major, then trim padding
       // ------------------------------------------------------------------
       tensor_32.runPermutation(
-          "visCorrToBaseline", alpha_32,
+          "visCorrToBaseline", visibility_power_restore,
           reinterpret_cast<float *>(b.correlator_output.get()),
           reinterpret_cast<float *>(b.visibilities_baseline.get()), b.stream);
 
@@ -987,7 +1018,7 @@ public:
                        (CUdeviceptr)b.samples_consolidated_col_maj.get(),
                        (CUdeviceptr)b.beamformer_output.get());
 
-    tensor_32.runPermutation("beamCCGLIBtoOutput", alpha_32,
+    tensor_32.runPermutation("beamCCGLIBtoOutput", beam_voltage_restore,
                              (float *)b.beamformer_output.get(),
                              (float *)b.beam_output.get(), b.stream);
     if (time_stages)
@@ -1036,7 +1067,8 @@ public:
           detect_intensity_and_compact_shared_fine_boundaries_kernel<
               T::NR_CHANNELS, NR_DADA_CHANNELS,
               T::NR_EFFECTIVE_FINE_CHANNELS, NR_TIME_STEPS_PER_FINE_CHANNEL,
-              T::NR_POLARIZATIONS, num_beams>
+              T::NR_POLARIZATIONS, num_beams,
+              T::NR_FINE_CHANNELS == 32 && T::NR_FINE_CHANNEL_EDGE_TRIM == 2>
               <<<blocks, threads, 0, b.stream>>>(
                   reinterpret_cast<const float *>(b.beam_output.get()),
                   reinterpret_cast<float *>(dada_beam_outputs_[gpu_buffer_index].get()));
@@ -1044,7 +1076,8 @@ public:
           compact_shared_fine_boundaries_kernel<
               T::NR_CHANNELS, NR_DADA_CHANNELS,
               T::NR_EFFECTIVE_FINE_CHANNELS, NR_TIME_STEPS_PER_FINE_CHANNEL,
-              T::NR_POLARIZATIONS, num_beams>
+              T::NR_POLARIZATIONS, num_beams,
+              T::NR_FINE_CHANNELS == 32 && T::NR_FINE_CHANNEL_EDGE_TRIM == 2>
               <<<blocks, threads, 0, b.stream>>>(
                   reinterpret_cast<const float *>(b.beam_output.get()),
                   reinterpret_cast<float *>(dada_beam_outputs_[gpu_buffer_index].get()));
@@ -1303,7 +1336,7 @@ public:
 
       // Publish metadata before the expensive channelizer/JIT warmup below.
       // DSPSR cannot build its coherent-dedispersion plan until it sees this
-      // header (about 50 seconds for 1081 channels on this host). Publishing
+      // header (about 50 seconds for 1080 channels on this host). Publishing
       // on the first live data block instead filled the 64-block ring after
       // only 1.12 seconds and stalled capture while DSPSR was still preparing.
       const uint64_t header_size = ipcbuf_get_bufsz(hdu->header_block);
@@ -1417,7 +1450,8 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
     if constexpr (T::NR_FINE_CHANNELS > 1) {
-      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device);
+      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device,
+                                                       pfb_voltage_scale);
     }
     buffers.reserve(num_buffers);
     dada_beam_outputs_.reserve(num_buffers);

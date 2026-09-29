@@ -1,6 +1,6 @@
-// Exercises pre-correlation fine channelization wired into LambdaStarweavePipeline
+// Exercises pre-correlation fine channelization wired into LambdaStarspinPipeline
 // (the correlation-only, visibilities-only pipeline). Unlike LambdaCorrBeamOnlyGPUPipeline,
-// LambdaStarweavePipeline always runs the same delay/reorder -> (optional channelize) ->
+// LambdaStarspinPipeline always runs the same delay/reorder -> (optional channelize) ->
 // correlate sequence -- NR_FINE_CHANNELS == 1 and > 1 are the same code shape at a different
 // width (see enqueue_corr's if constexpr branch), so this test just confirms both widths
 // satisfy the same physical invariants.
@@ -21,6 +21,7 @@
 #include <cuda_fp16.h>
 #include <gtest/gtest.h>
 #include <memory>
+#include <type_traits>
 #include <vector>
 #include <filesystem>
 #include <fstream>
@@ -36,7 +37,7 @@ static_assert(Config::NR_FINE_CHANNEL_EDGE_TRIM == 1, "test assumes a 1-per-side
 static_assert(Config::NR_CHANNELS == 6,
              "widened channel count should be coarse * (fine - 2*edge_trim)");
 
-class FineChannelizedStarweaveTest : public ::testing::Test {
+class FineChannelizedStarspinTest : public ::testing::Test {
 protected:
   void TearDown() override {
     coarse_pfb_deripple_config_path().clear();
@@ -53,7 +54,7 @@ int16_t constant_scale(size_t, size_t, int, int, int) { return 1; }
 template <typename ConfigT> void run_and_check_physical_invariants() {
   auto output = std::make_shared<SingleHostMemoryOutput<ConfigT>>();
   auto pipeline =
-      test_support::pipeline_factories::make_starweave_pipeline<ConfigT>(
+      test_support::pipeline_factories::make_starspin_pipeline<ConfigT>(
           /*num_buffers=*/ConfigT::NR_PACKETS_FOR_CORRELATION);
   test_support::SyntheticPipelineRun<ConfigT> driver(*pipeline, output);
 
@@ -104,13 +105,13 @@ struct SequenceTrackingOutput : SingleHostMemoryOutput<ConfigT> {
 
 } // namespace
 
-TEST_F(FineChannelizedStarweaveTest, SatisfiesPhysicalInvariants) {
+TEST_F(FineChannelizedStarspinTest, SatisfiesPhysicalInvariants) {
   run_and_check_physical_invariants<Config>();
 }
 
-TEST_F(FineChannelizedStarweaveTest, RuntimeDerippleProducesFiniteVisibilities) {
+TEST_F(FineChannelizedStarspinTest, RuntimeDerippleProducesFiniteVisibilities) {
   const auto path = std::filesystem::temp_directory_path() /
-      ("starweave-deripple-" + std::to_string(getpid()) + ".json");
+      ("starspin-deripple-" + std::to_string(getpid()) + ".json");
   const std::array<float, Config::NR_EFFECTIVE_FINE_CHANNELS> gains{
       1.0f, 1.02f, 1.04f, 1.1f, 1.06f, 0.98f};
   { std::ofstream out(path);
@@ -119,11 +120,11 @@ TEST_F(FineChannelizedStarweaveTest, RuntimeDerippleProducesFiniteVisibilities) 
                           {"fine_channels", Config::NR_FINE_CHANNELS},
                           {"edge_trim", Config::NR_FINE_CHANNEL_EDGE_TRIM},
                           {"normalization", "coarse_bin_centre"},
-                          {"response_id", "synthetic-starweave"},
+                          {"response_id", "synthetic-starspin"},
                           {"voltage_gains", gains}}; }
   coarse_pfb_deripple_config_path() = path.string();
   auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
-  auto pipeline = test_support::pipeline_factories::make_starweave_pipeline<Config>(
+  auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<Config>(
       Config::NR_PACKETS_FOR_CORRELATION);
   test_support::SyntheticPipelineRun<Config> driver(*pipeline, output);
   driver.run(constant_sample, constant_scale);
@@ -142,20 +143,20 @@ TEST_F(FineChannelizedStarweaveTest, RuntimeDerippleProducesFiniteVisibilities) 
 
 // Regression guard: the disabled (non-channelized) path must keep working unmodified
 // alongside the channelizer wiring.
-TEST_F(FineChannelizedStarweaveTest, DisabledConfigSatisfiesPhysicalInvariants) {
+TEST_F(FineChannelizedStarspinTest, DisabledConfigSatisfiesPhysicalInvariants) {
   using UnchannelizedConfig = test_support::SmallSingleFPGAConfig;
   static_assert(UnchannelizedConfig::NR_FINE_CHANNELS == 1);
   run_and_check_physical_invariants<UnchannelizedConfig>();
 }
 
 // Independent CPU oracle for the complete wire-packet -> ProcessorState ->
-// Starweave -> packed-visibility path.  Distinct complex values and scales on
+// Starspin -> packed-visibility path.  Distinct complex values and scales on
 // both FPGA sources make an FPGA-local scale lookup, channel crossover, hand
 // swap, or baseline/conjugation reversal visible in the output.
-TEST_F(FineChannelizedStarweaveTest, FourFpgaComplexVisibilitiesMatchCpuOracle) {
+TEST_F(FineChannelizedStarspinTest, FourFpgaComplexVisibilitiesMatchCpuOracle) {
   using MC = LambdaConfig<2, 4, 8, 8, 2, 2, 1, 1, 32, 32, 1>;
   auto output = std::make_shared<SequenceTrackingOutput<MC>>();
-  auto pipeline = test_support::pipeline_factories::make_starweave_pipeline<MC>(1);
+  auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<MC>(1);
   test_support::SyntheticPipelineRun<MC> driver(
       *pipeline, output, {}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
 
@@ -210,12 +211,12 @@ TEST_F(FineChannelizedStarweaveTest, FourFpgaComplexVisibilitiesMatchCpuOracle) 
 // The production path channelizes each coarse FPGA channel before TCC. Test
 // both axes at once: independent exact tones select different fine bins, while
 // four FPGA sources carry known complex phase and packet-scale relationships.
-TEST_F(FineChannelizedStarweaveTest, FourFpgaFineBinsAndCrossPhases) {
+TEST_F(FineChannelizedStarspinTest, FourFpgaFineBinsAndCrossPhases) {
   using FC = LambdaConfig<2, 4, 128, 8, 2, 2, 1, 1, 32, 32, 1,
                           false, 128, 8, 1>;
   static_assert(FC::NR_CHANNELS == 12);
   auto output = std::make_shared<SingleHostMemoryOutput<FC>>();
-  auto pipeline = test_support::pipeline_factories::make_starweave_pipeline<FC>(1);
+  auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<FC>(1);
   test_support::SyntheticPipelineRun<FC> driver(
       *pipeline, output, {}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
 
@@ -278,4 +279,221 @@ TEST_F(FineChannelizedStarweaveTest, FourFpgaFineBinsAndCrossPhases) {
     }
   }
   pipeline.reset();
+}
+
+TEST_F(FineChannelizedStarspinTest,
+       ThirtySixConnectedReceiversMatchFortyReceiverReference) {
+  using Compact = LambdaConfig<1, 4, 128, 40, 2, 10, 1, 1, 40, 32, 1,
+                               false, 128, 8, 1, 36>;
+  using Reference = LambdaConfig<1, 4, 128, 40, 2, 10, 1, 1, 40, 32, 1,
+                                 false, 128, 8, 1>;
+  auto run = [](auto *config_tag) {
+    using C = std::remove_pointer_t<decltype(config_tag)>;
+    auto output = std::make_shared<SingleHostMemoryOutput<C>>();
+    auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<C>(1);
+    std::vector<int> recv_perm(C::NR_RECEIVERS * C::NR_POLARIZATIONS);
+    std::vector<int> pol_perm(recv_perm.size());
+    for (size_t r = 0; r < C::NR_RECEIVERS; ++r)
+      for (size_t p = 0; p < C::NR_POLARIZATIONS; ++p) {
+        const size_t i = r * C::NR_POLARIZATIONS + p;
+        recv_perm[i] = r < 36 ? static_cast<int>(r) : -1;
+        pol_perm[i] = static_cast<int>(p);
+      }
+    pipeline->set_stream_permutation(recv_perm, pol_perm);
+    test_support::SyntheticPipelineRun<C> driver(
+        *pipeline, output, {}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+    driver.run(constant_sample, constant_scale);
+    cudaDeviceSynchronize();
+    pipeline.reset();
+    return output;
+  };
+
+  auto compact = run(static_cast<Compact *>(nullptr));
+  auto reference = run(static_cast<Reference *>(nullptr));
+  for (size_t c = 0; c < Compact::NR_CHANNELS; ++c)
+    for (size_t b = 0; b < Compact::NR_BASELINES_UNPADDED; ++b)
+      for (size_t p = 0; p < Compact::NR_POLARIZATIONS; ++p)
+        for (size_t q = 0; q < Compact::NR_POLARIZATIONS; ++q)
+          for (size_t z = 0; z < 2; ++z) {
+            const float actual = (*compact->visibilities)[c][b][p][q][z];
+            const float expected = (*reference->visibilities)[c][b][p][q][z];
+            EXPECT_NEAR(actual, expected, 1e-3f)
+                << "channel=" << c << " baseline=" << b
+                << " hands=" << p << q << " component=" << z;
+          }
+}
+
+TEST_F(FineChannelizedStarspinTest,
+       FusedActiveReceiverPreparationMatchesLegacyVisibilities) {
+  using C = LambdaConfig<2, 4, 128, 40, 2, 10, 4, 1, 40, 32, 1,
+                         false, 128, 8, 1, 36>;
+  std::array<std::complex<float>,
+             C::NR_FPGA_CHANNELS * C::NR_POLARIZATIONS * C::NR_RECEIVERS> gains{};
+  for (size_t ch = 0; ch < C::NR_FPGA_CHANNELS; ++ch)
+    for (size_t p = 0; p < C::NR_POLARIZATIONS; ++p)
+      for (size_t r = 0; r < C::NR_RECEIVERS; ++r)
+        gains[(ch * C::NR_POLARIZATIONS + p) * C::NR_RECEIVERS + r] =
+            {0.75f + 0.01f * r + 0.1f * ch,
+             -0.2f + 0.03f * p + 0.002f * r};
+
+  std::vector<int> recv_perm(C::NR_RECEIVERS * C::NR_POLARIZATIONS);
+  std::vector<int> pol_perm(recv_perm.size());
+  for (size_t r = 0; r < C::NR_RECEIVERS; ++r)
+    for (size_t p = 0; p < C::NR_POLARIZATIONS; ++p) {
+      const size_t idx = r * C::NR_POLARIZATIONS + p;
+      recv_perm[idx] = r < C::NR_ACTIVE_RECEIVERS
+                           ? static_cast<int>(C::NR_ACTIVE_RECEIVERS - 1 - r)
+                           : -1;
+      pol_perm[idx] = static_cast<int>(1 - p);
+    }
+
+  auto sample = [](size_t ch, size_t fpga, int packet, int tick, int recv,
+                   int pol) {
+    const int n = static_cast<int>(ch) * 19 + static_cast<int>(fpga) * 13 +
+                  packet * 7 + tick * 3 + recv * 11 + pol * 5;
+    return std::complex<int8_t>{static_cast<int8_t>(n % 31 - 15),
+                                static_cast<int8_t>((n * 7) % 29 - 14)};
+  };
+  auto scale = [](size_t ch, size_t fpga, int packet, int recv, int pol) {
+    const int k = static_cast<int>(ch) * 3 + static_cast<int>(fpga) +
+                  packet + recv + pol + 20;
+    return static_cast<int16_t>(k % 11 == 0 ? 0 :
+                                (k % 3 == 0 ? -1 : 1) * (1 + k % 7));
+  };
+  auto run = [&](auto fused_tag) {
+    constexpr bool Fused = decltype(fused_tag)::value;
+    auto output = std::make_shared<SingleHostMemoryOutput<C>>();
+    auto pipeline = std::make_unique<LambdaStarspinPipeline<C, Fused>>(1);
+    pipeline->set_stream_permutation(recv_perm, pol_perm);
+    pipeline->set_antenna_gains(gains.data());
+    test_support::SyntheticPipelineRun<C> driver(
+        *pipeline, output, {{2, 0, -3, 5}},
+        {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+    driver.run(sample, scale);
+    cudaDeviceSynchronize();
+    std::vector<float> values(sizeof(*output->visibilities) / sizeof(float));
+    std::copy_n(reinterpret_cast<const float *>(output->visibilities),
+                values.size(), values.begin());
+    pipeline.reset();
+    return values;
+  };
+
+  const auto legacy = run(std::false_type{});
+  const auto fused = run(std::true_type{});
+  ASSERT_EQ(fused.size(), legacy.size());
+  for (size_t i = 0; i < fused.size(); ++i)
+    EXPECT_NEAR(fused[i], legacy[i],
+                1e-5f * std::max(1.0f, std::abs(legacy[i]))) << "scalar=" << i;
+}
+
+TEST_F(FineChannelizedStarspinTest,
+       StrongReceptorRemainsFiniteAndPreservesVisibilityScale) {
+  // A 128-fold packet scale fits the initial half buffer, but makes the
+  // unscaled fine PFB exceed the half range. Check both the affected receptor
+  // and an unaffected one after restoration in float.
+  using FC = LambdaConfig<2, 4, 64, 8, 2, 2, 32, 1, 32, 32, 1,
+                          false, 128, 32, 2>;
+  auto run = [&](int strong_scale) {
+    auto output = std::make_shared<SingleHostMemoryOutput<FC>>();
+    auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<FC>(1);
+    test_support::SyntheticPipelineRun<FC> driver(
+        *pipeline, output, {}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+    auto sample = [](size_t ch, size_t fpga, int packet, int tick, int r, int p) {
+      if (p == 1 && (fpga != 1 || r != 0))
+        return std::complex<int8_t>{0, 0};
+      const double phase = 6.283185307179586 * (3 + ch + p) *
+                           (packet * 64 + tick) / 32.0;
+      return std::complex<int8_t>{
+          static_cast<int8_t>(std::lround(100 * std::cos(phase))),
+          static_cast<int8_t>(std::lround(100 * std::sin(phase)))};
+    };
+    auto scale = [&](size_t, size_t, int, int, int p) {
+      return static_cast<int16_t>(p == 1 ? strong_scale : 1);
+    };
+    driver.run(sample, scale);
+    std::vector<float> values(sizeof(*output->visibilities) / sizeof(float));
+    std::copy_n(reinterpret_cast<const float *>(output->visibilities),
+                values.size(), values.begin());
+    pipeline.reset();
+    return values;
+  };
+  const auto reference = run(1);
+  const auto strong = run(128);
+  ASSERT_EQ(reference.size(), strong.size());
+  const size_t strong_auto = test_support::baseline_index(2, 2);
+  const size_t unaffected_auto = test_support::baseline_index(0, 0);
+  double reference_power = 0, strong_power = 0, unaffected_power = 0;
+  const size_t baseline_stride = FC::NR_RECEIVERS * (FC::NR_RECEIVERS + 1) / 2;
+  for (size_t c = 0; c < FC::NR_CHANNELS; ++c) {
+    const size_t channel_base = c * baseline_stride * 8;
+    const size_t strong_index = channel_base + strong_auto * 8 + 3 * 2;
+    const size_t unaffected_index = channel_base + unaffected_auto * 8;
+    reference_power += reference[strong_index];
+    strong_power += strong[strong_index];
+    unaffected_power += strong[unaffected_index];
+  }
+  for (size_t i = 0; i < strong.size(); ++i)
+    ASSERT_TRUE(std::isfinite(strong[i])) << "visibility scalar=" << i;
+  ASSERT_GT(reference_power, 0);
+  EXPECT_GT(strong_power, 65504.0);
+  EXPECT_GT(unaffected_power, 0);
+  EXPECT_NEAR(strong_power / reference_power, 128.0 * 128.0,
+              0.01 * 128.0 * 128.0);
+}
+
+// The FPGA delay JSON contains whole-packet and within-packet offsets.  Exercise
+// the production fine-channelized Starspin path with the actual high-band
+// within-packet remainders, not only the older non-channelized GPU pipeline.
+TEST_F(FineChannelizedStarspinTest, FourFpgaWithinPacketDelaysRestoreBroadbandCoherence) {
+  using FC = LambdaConfig<1, 4, 64, 8, 2, 2, 2, 1, 32, 32, 1,
+                          false, 128, 8, 1>;
+  constexpr std::array<int64_t, 4> injected{22, 0, -20, 9};
+
+  auto run = [&](std::array<int64_t, 4> configured) {
+    auto output = std::make_shared<SingleHostMemoryOutput<FC>>();
+    auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<FC>(1);
+    test_support::SyntheticPipelineRun<FC> driver(
+        *pipeline, output, configured, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+
+    // One deterministic broadband noise realization appears at a different
+    // raw time offset on each FPGA. A pure tone would stay coherent even when
+    // shifted, so it cannot test the integer sample alignment.
+    auto noise = [](int n, int salt) {
+      uint32_t x = static_cast<uint32_t>(n + 4096) * 747796405u +
+                   static_cast<uint32_t>(salt + 1) * 2891336453u;
+      x ^= x >> 16;
+      x *= 2246822519u;
+      x ^= x >> 13;
+      return static_cast<int8_t>(static_cast<int>(x & 15u) - 8);
+    };
+    auto sample = [&](size_t, size_t fpga, int pkt, int time, int, int pol) {
+      const int n = pkt * 64 + time - static_cast<int>(injected[fpga]);
+      return std::complex<int8_t>{noise(n, pol * 2), noise(n, pol * 2 + 1)};
+    };
+    auto scale = [](size_t, size_t, int, int, int) { return int16_t{1}; };
+    driver.run(sample, scale);
+    const auto &vis = *output->visibilities;
+    std::vector<float> coherence;
+    const auto cross = test_support::baseline_index(0, 2);
+    const auto auto0 = test_support::baseline_index(0, 0);
+    const auto auto2 = test_support::baseline_index(2, 2);
+    for (size_t ch = 0; ch < FC::NR_CHANNELS; ++ch) {
+      const float p0 = vis[ch][auto0][0][0][0];
+      const float p2 = vis[ch][auto2][0][0][0];
+      if (p0 > 0.0f && p2 > 0.0f) {
+        const float re = vis[ch][cross][0][0][0];
+        const float im = vis[ch][cross][0][0][1];
+        coherence.push_back(std::hypot(re, im) / std::sqrt(p0 * p2));
+      }
+    }
+    pipeline.reset();
+    EXPECT_GE(coherence.size(), 4u);
+    std::sort(coherence.begin(), coherence.end());
+    return coherence[coherence.size() / 2];
+  };
+
+  const float corrected = run(injected);
+  const float uncorrected = run({0, 0, 0, 0});
+  EXPECT_GT(corrected, 0.90f);
+  EXPECT_LT(uncorrected, 0.60f);
 }

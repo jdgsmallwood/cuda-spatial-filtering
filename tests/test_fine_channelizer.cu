@@ -22,6 +22,8 @@
 #include "support/synthetic_packets.hpp"
 #include "support/test_configs.hpp"
 
+#include "libfilter/FilterBank.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -139,6 +141,9 @@ TEST_F(FineChannelizerPipelineTest, ToneConcentratesInOneFineChannel) {
 
   const size_t peak_channel =
       std::max_element(power.begin(), power.end()) - power.begin();
+  // Positive-frequency k=8 is shifted from raw FFT bin 8 to fine bin 24;
+  // trimming two bins at each edge places it at processing channel 22.
+  EXPECT_EQ(peak_channel, 22u);
   const float peak_power = power[peak_channel];
   ASSERT_GT(peak_power, 0.0f) << "tone should produce nonzero autocorrelation power somewhere";
 
@@ -170,6 +175,116 @@ TEST_F(FineChannelizerPipelineTest, ToneConcentratesInOneFineChannel) {
         << " power vs. peak " << peak_power << " -- expected it to be suppressed";
   }
   ASSERT_GT(far_channels_checked, 0u);
+}
+
+// Compare the actual GPU PFB output with a scalar FIR plus DFT reference. This
+// checks the complex value, bin order, phase, and final zero-padded look-ahead
+// rather than just asking whether a tone produces a spectral peak somewhere.
+TEST(FineChannelizerNumericalTest, MatchesScalarFirDftReference) {
+  using NumericConfig = LambdaConfig<2, 1, 512, 4, 2, 4, 1, 1, 32, 32,
+                                     10000, false, 128, 32, 2>;
+  constexpr size_t ncoarse = NumericConfig::NR_FPGA_CHANNELS;
+  constexpr size_t nf = NumericConfig::NR_FINE_CHANNELS;
+  constexpr size_t nt = FineChannelizer<NumericConfig>::NR_TAPS;
+  constexpr size_t ns = FineChannelizer<NumericConfig>::NR_SAMPLES_PER_FINE_CHANNEL;
+  constexpr size_t ninput = (ns + nt - 1) * nf;
+  constexpr size_t receivers = NumericConfig::NR_RECEIVERS;
+  constexpr size_t pols = NumericConfig::NR_POLARIZATIONS;
+  constexpr double pi = 3.14159265358979323846;
+  constexpr double voltage_scale = 1.0 / 64.0;
+  using Complex = std::complex<double>;
+
+  std::vector<float2> input(ncoarse * receivers * pols * ninput,
+                            make_float2(0, 0));
+  for (size_t coarse = 0; coarse < ncoarse; ++coarse) {
+    for (size_t r = 0; r < receivers; ++r) {
+      for (size_t p = 0; p < pols; ++p) {
+        const size_t base = ((coarse * receivers + r) * pols + p) * ninput;
+        for (size_t t = 0; t < ns * nf; ++t) {
+          const double phase0 = 2 * pi * ((5.0 + 3.0 * coarse) * t / nf +
+                                          0.11 * r + 0.07 * p);
+          const double phase1 = 2 * pi * ((10.35 - 2.0 * coarse) * t / nf -
+                                          0.03 * r + 0.13 * p);
+          const Complex z = std::polar(0.5 + 0.05 * r, phase0) +
+                            std::polar(0.17 + 0.02 * p, phase1);
+          input[base + t] = make_float2(static_cast<float>(z.real()),
+                                        static_cast<float>(z.imag()));
+        }
+      }
+    }
+  }
+
+  float2 *d_input = nullptr;
+  __half2 *d_output = nullptr;
+  const size_t output_count = sizeof(FineChannelizer<NumericConfig>::FilterOutputType) /
+                              sizeof(__half2);
+  ASSERT_EQ(cudaMalloc(&d_input, input.size() * sizeof(float2)), cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&d_output, output_count * sizeof(__half2)), cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float2),
+                       cudaMemcpyHostToDevice), cudaSuccess);
+  CUdevice device;
+  ASSERT_EQ(cuDeviceGet(&device, 0), CUDA_SUCCESS);
+  // Production voltage pipelines scale before conversion to fp16.
+  FineChannelizer<NumericConfig> filter(device, voltage_scale);
+  filter.launchAsync(0, d_input, d_output);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  std::vector<__half2> output(output_count);
+  ASSERT_EQ(cudaMemcpy(output.data(), d_output, output_count * sizeof(__half2),
+                       cudaMemcpyDeviceToHost), cudaSuccess);
+  cudaFree(d_input);
+  cudaFree(d_output);
+
+  FilterBank weights(false, nt, nf, KAISER);
+  double max_abs_error = 0;
+  double sum_squared_error = 0;
+  double sum_squared_signal = 0;
+  size_t checked = 0;
+  for (size_t coarse = 0; coarse < ncoarse; ++coarse) {
+    for (size_t r = 0; r < receivers; ++r) {
+      for (size_t p = 0; p < pols; ++p) {
+        const size_t base = ((coarse * receivers + r) * pols + p) * ninput;
+        for (size_t t = 0; t < ns; ++t) {
+          std::array<Complex, nf> fir{};
+          for (size_t c = 0; c < nf; ++c) {
+            for (size_t tap = 0; tap < nt; ++tap) {
+              const float2 z = input[base + (t + tap) * nf + c];
+              fir[c] += Complex(z.x, z.y) *
+                        static_cast<double>(weights.getWeights()[c][nt - tap - 1]);
+            }
+          }
+          for (size_t c = 0; c < nf; ++c) {
+            Complex expected = 0;
+            const size_t raw_bin = (c + nf / 2) % nf;
+            for (size_t k = 0; k < nf; ++k) {
+              expected += fir[k] * std::polar(1.0, -2.0 * pi * raw_bin * k / nf);
+            }
+            expected *= voltage_scale;
+            const size_t block = t / FineChannelizer<NumericConfig>::NR_TIMES_PER_OUTPUT_BLOCK;
+            const size_t lane = t % FineChannelizer<NumericConfig>::NR_TIMES_PER_OUTPUT_BLOCK;
+            const size_t idx = (((((coarse * nf + c) * (ns / 8) + block) * receivers + r)
+                                 * pols + p) * 8 + lane);
+            const __half2 got_half = output[idx];
+            const Complex got(__half2float(__low2half(got_half)),
+                              __half2float(__high2half(got_half)));
+            const double error = std::abs(got - expected);
+            max_abs_error = std::max(max_abs_error, error);
+            sum_squared_error += error * error;
+            sum_squared_signal += std::norm(expected);
+            ++checked;
+            EXPECT_LE(error, 0.002 + 0.002 * std::abs(expected))
+                << "coarse=" << coarse << " receiver=" << r << " pol=" << p
+                << " time=" << t << " fine_channel=" << c << " got=" << got
+                << " expected=" << expected;
+          }
+        }
+      }
+    }
+  }
+  ASSERT_GT(checked, 0u);
+  const double relative_rms = std::sqrt(sum_squared_error / sum_squared_signal);
+  std::cout << "PFB numerical check: " << checked << " complex samples, max absolute error "
+            << max_abs_error << ", relative RMS error " << relative_rms << '\n';
+  EXPECT_LT(relative_rms, 0.001);
 }
 
 // Direct, low-level test of reorder_to_filter_input's buffer layout -- deliberately bypasses the

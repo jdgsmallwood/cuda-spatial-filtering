@@ -7,7 +7,8 @@
 // ingest/align/channelize/correlate sequence (not LambdaCorrBeamOnlyGPUPipeline,
 // whose disabled path is a fused benchmark-only fast path with no delay/reorder
 // stage), with everything downstream of correlation removed.
-template <typename T> class LambdaStarweavePipeline : public GPUPipeline {
+template <typename T, bool FUSED_FINE_PREPARATION = true>
+class LambdaStarspinPipeline : public GPUPipeline {
 
   static_assert((T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) %
                         T::NR_FINE_CHANNELS ==
@@ -19,30 +20,35 @@ private:
   int num_buffers;
 
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // fp16 pipeline
+  // The fine PFB can exceed the fp16 range even when its input samples fit.
+  // gpu-filter scales in float before converting its output to fp16. Restore
+  // the squared voltage scale after TCC has produced float visibilities.
+  static constexpr float FINE_CHANNEL_VOLTAGE_SCALE = 1.0f / 64.0f;
+  static constexpr float FINE_CHANNEL_VISIBILITY_RESTORE = 64.0f * 64.0f;
   static constexpr int NR_BLOCKS_FOR_CORRELATION =
       (T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
        T::NR_FINE_CHANNELS) /
       NR_TIMES_PER_BLOCK;
   static constexpr int NR_BASELINES =
-      T::NR_PADDED_RECEIVERS * (T::NR_PADDED_RECEIVERS + 1) / 2;
-  static constexpr int NR_UNPADDED_BASELINES =
-      T::NR_RECEIVERS * (T::NR_RECEIVERS + 1) / 2;
+      T::NR_ACTIVE_RECEIVERS * (T::NR_ACTIVE_RECEIVERS + 1) / 2;
   static constexpr int COMPLEX = 2;
   const int NR_CORRELATED_BLOCKS_TO_ACCUMULATE;
 
   inline static const __half alpha = __float2half(1.0f);
 
   using CorrelatorInput =
-      __half[T::NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][T::NR_PADDED_RECEIVERS]
+      __half[T::NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][T::NR_ACTIVE_RECEIVERS]
             [T::NR_POLARIZATIONS][NR_TIMES_PER_BLOCK][COMPLEX];
 
   using CorrelatorOutput =
       float[T::NR_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
            [T::NR_POLARIZATIONS][COMPLEX];
 
-  using TrimmedVisibilities =
-      std::complex<float>[T::NR_CHANNELS][NR_UNPADDED_BASELINES]
-                         [T::NR_POLARIZATIONS][T::NR_POLARIZATIONS];
+  static constexpr bool USE_FUSED_FINE =
+      FUSED_FINE_PREPARATION && T::NR_FINE_CHANNELS > 1;
+  static constexpr size_t NR_FILTER_RECEIVERS =
+      USE_FUSED_FINE ? T::NR_ACTIVE_RECEIVERS : T::NR_RECEIVERS;
+  using StarspinChannelizer = FineChannelizer<T, NR_FILTER_RECEIVERS>;
 
   // C (capital) = NR_FPGA_CHANNELS, raw pre-channelization channel count -- both tensors
   // registered here are pre-channelization (packet -> pre-align bridge), same convention as
@@ -82,15 +88,14 @@ private:
 
     // Fine-channelization scratch (only used when T::NR_FINE_CHANNELS > 1; allocated
     // unconditionally for simplicity, matching LambdaGPUPipeline's convention).
-    DevicePtr<typename FineChannelizer<T>::FilterInputType> channelizer_input;
-    DevicePtr<typename FineChannelizer<T>::FilterOutputType> channelizer_output;
+    DevicePtr<typename StarspinChannelizer::FilterInputType> channelizer_input;
+    DevicePtr<typename StarspinChannelizer::FilterOutputType> channelizer_output;
 
     DevicePtr<CorrelatorInput> correlator_input;
     DevicePtr<CorrelatorOutput> correlator_output;
-    DevicePtr<TrimmedVisibilities> visibilities_trimmed;
 
     // Two static mid-pipeline sections captured as CUDA graphs (see capture_graph) --
-    // alignment (permute + delays + reorder) and channelize+correlate+trim. Unlike
+    // alignment (permute + delays + reorder) and channelize+correlate. Unlike
     // LambdaGPUPipeline there's no eigen/beamform section, so accumulate_visibilities stays
     // eager (cheap, single kernel call) rather than needing a third graph.
     cudaGraphExec_t graph_align = nullptr;
@@ -105,19 +110,22 @@ private:
     explicit PipelineResources(CUdevice /*cu_device*/)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
-          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
-          samples_pre_align(make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_half(make_device_ptr_if<typename T::HalfPacketSamplesType,
+                                          !USE_FUSED_FINE>()),
+          samples_pre_align(make_device_ptr_if<typename T::HalfPacketSamplesType,
+                                               !USE_FUSED_FINE>()),
           samples_aligned(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType,
+                                 !USE_FUSED_FINE>()),
           samples_reordered(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType,
+                                 !USE_FUSED_FINE>()),
           channelizer_input(
-              make_device_ptr<typename FineChannelizer<T>::FilterInputType>()),
+              make_device_ptr<typename StarspinChannelizer::FilterInputType>()),
           channelizer_output(
-              make_device_ptr<typename FineChannelizer<T>::FilterOutputType>()),
+              make_device_ptr<typename StarspinChannelizer::FilterOutputType>()),
           correlator_input(make_device_ptr<CorrelatorInput>()),
-          correlator_output(make_device_ptr<CorrelatorOutput>()),
-          visibilities_trimmed(make_device_ptr<TrimmedVisibilities>()) {
+          correlator_output(make_device_ptr<CorrelatorOutput>()) {
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
           cudaStreamCreateWithFlags(&host_stream, cudaStreamNonBlocking));
@@ -153,7 +161,6 @@ private:
           channelizer_output(std::move(other.channelizer_output)),
           correlator_input(std::move(other.correlator_input)),
           correlator_output(std::move(other.correlator_output)),
-          visibilities_trimmed(std::move(other.visibilities_trimmed)),
           graph_align(other.graph_align), graph_corr(other.graph_corr),
           accumulate_done(other.accumulate_done) {
       other.stream = nullptr;
@@ -176,7 +183,7 @@ private:
     PipelineResources &operator=(const PipelineResources &) = delete;
   };
 
-  TrimmedVisibilities *d_visibilities_accumulator;
+  CorrelatorOutput *d_visibilities_accumulator;
 
   // Recorded on buffers[0].stream after dump_visibilities resets
   // d_visibilities_accumulator. Every buffer's next accumulate_visibilities waits on this,
@@ -184,7 +191,7 @@ private:
   cudaEvent_t visibilities_reset_done = nullptr;
 
   typename T::AntennaGains *d_gains;
-  std::unique_ptr<FineChannelizer<T>> channelizer_;
+  std::unique_ptr<StarspinChannelizer> channelizer_;
   std::vector<PipelineResources> buffers;
   // One H2D completion event per host packet-assembly buffer. A host buffer cannot be handed
   // back to ProcessorState (and therefore cannot be submitted again) until its own event has
@@ -276,7 +283,7 @@ public:
               _mm_pause();
           }
         });
-        INFO_LOG("Starweave ingest created {} per-host-buffer H2D completion events",
+        INFO_LOG("Starspin ingest created {} per-host-buffer H2D completion events",
                  count);
       }
       const int host_buffer_index = packet_data->buffer_index;
@@ -294,7 +301,7 @@ public:
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
-        dummy_run, copy_done_event, dummy_run);
+        dummy_run, copy_done_event, dummy_run, nullptr, !USE_FUSED_FINE);
     if (!dummy_run) {
       host_buffer_release_pending[packet_data->buffer_index].store(
           true, std::memory_order_release);
@@ -318,8 +325,8 @@ public:
     // already satisfied).
     cudaStreamWaitEvent(b.stream, visibilities_reset_done, 0);
     accumulate_visibilities(
-        (float *)b.visibilities_trimmed.get(), (float *)d_visibilities_accumulator,
-        2 * NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS *
+        (float *)b.correlator_output.get(), (float *)d_visibilities_accumulator,
+        2 * NR_BASELINES * T::NR_POLARIZATIONS * T::NR_POLARIZATIONS *
             T::NR_CHANNELS,
         b.stream);
     cudaEventRecord(b.accumulate_done, b.stream);
@@ -341,6 +348,19 @@ public:
   // into canonical antenna-ID order -> samples_reordered. Identical to
   // LambdaGPUPipeline::enqueue_alignment.
   void enqueue_alignment(PipelineResources &b) {
+    if constexpr (USE_FUSED_FINE) {
+      starspin_raw_to_filter_input<
+          T::NR_FPGA_CHANNELS, T::NR_FPGA_SOURCES,
+          T::NR_RECEIVERS_PER_PACKET, T::NR_RECEIVERS,
+          T::NR_ACTIVE_RECEIVERS, T::NR_POLARIZATIONS,
+          T::NR_PACKETS_FOR_CORRELATION, T::NR_TIME_STEPS_PER_PACKET,
+          T::NR_FINE_CHANNELS, StarspinChannelizer::NR_TAPS>(
+          (const char2 *)b.samples_entry.get(),
+          (const int16_t *)b.scales.get(), (const float2 *)d_gains,
+          d_subpacket_delays, d_stream_perm_recv, d_stream_perm_pol,
+          (float2 *)b.channelizer_input.get(), b.stream);
+      return;
+    }
     tensor_16.runPermutation("packetToPreAlign", alpha,
                              (__half *)b.samples_half.get(),
                              (__half *)b.samples_pre_align.get(), b.stream);
@@ -359,24 +379,27 @@ public:
   }
 
   // Part 2: corr_input reformat (fine-channelization, or the plain reshape when disabled) +
-  // TCC + trim. No decomp/eigen permutation -- visibilities output doesn't need the
+  // TCC. No decomp/eigen permutation -- visibilities output doesn't need the
   // unpacked square form cuSOLVER would need.
   void enqueue_corr(PipelineResources &b) {
     if constexpr (T::NR_FINE_CHANNELS > 1) {
-      reorder_to_filter_input<T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
-                              T::NR_RECEIVERS_PER_PACKET, T::NR_TIME_STEPS_PER_PACKET,
-                              T::NR_PACKETS_FOR_CORRELATION, FineChannelizer<T>::NR_TAPS,
-                              T::NR_FINE_CHANNELS>(
-          (__half *)b.samples_reordered.get(),
-          (float2 *)b.channelizer_input.get(), b.stream);
+      if constexpr (!USE_FUSED_FINE) {
+        reorder_to_filter_input<T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS,
+                                T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+                                T::NR_TIME_STEPS_PER_PACKET,
+                                T::NR_PACKETS_FOR_CORRELATION,
+                                StarspinChannelizer::NR_TAPS, T::NR_FINE_CHANNELS>(
+            (__half *)b.samples_reordered.get(),
+            (float2 *)b.channelizer_input.get(), b.stream);
+      }
 
       channelizer_->launchAsync(b.stream, b.channelizer_input.get(),
                                 b.channelizer_output.get());
 
       channelizer_output_to_corr_input<T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS,
                                        T::NR_FINE_CHANNEL_EDGE_TRIM,
-                                       T::NR_POLARIZATIONS, T::NR_RECEIVERS,
-                                       T::NR_PADDED_RECEIVERS,
+                                       T::NR_POLARIZATIONS, NR_FILTER_RECEIVERS,
+                                       T::NR_ACTIVE_RECEIVERS,
                                        NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
           (const __half2 *)b.channelizer_output.get(),
           (__half *)b.correlator_input.get(), b.stream,
@@ -386,7 +409,7 @@ public:
                             T::NR_RECEIVERS_PER_PACKET,
                             T::NR_TIME_STEPS_PER_PACKET,
                             T::NR_PACKETS_FOR_CORRELATION,
-                            T::NR_PADDED_RECEIVERS, NR_TIMES_PER_BLOCK>(
+                            T::NR_ACTIVE_RECEIVERS, NR_TIMES_PER_BLOCK>(
           (__half *)b.samples_reordered.get(), (__half *)b.correlator_input.get(),
           b.stream);
     }
@@ -394,11 +417,11 @@ public:
     correlator.launchAsync((CUstream)b.stream,
                            (CUdeviceptr)b.correlator_output.get(),
                            (CUdeviceptr)b.correlator_input.get());
-
-    corr_to_trimmed((float *)b.correlator_output.get(),
-                    (float *)b.visibilities_trimmed.get(), T::NR_CHANNELS,
-                    NR_BASELINES, NR_UNPADDED_BASELINES,
-                    T::NR_POLARIZATIONS * T::NR_POLARIZATIONS * 2, b.stream);
+    if constexpr (T::NR_FINE_CHANNELS > 1) {
+      scale_visibilities((float *)b.correlator_output.get(),
+                         sizeof(CorrelatorOutput) / sizeof(float),
+                         FINE_CHANNEL_VISIBILITY_RESTORE, b.stream);
+    }
   }
 
   // Capture one section into an instantiated graph. Raw CUDA calls (not CUDA_CHECK,
@@ -438,29 +461,29 @@ public:
     return true;
   }
 
-  LambdaStarweavePipeline(const int num_buffers,
+  LambdaStarspinPipeline(const int num_buffers,
                          int nr_blocks_to_accumulate = T::NR_CORRELATED_BLOCKS_TO_ACCUMULATE)
       : num_buffers(num_buffers),
         NR_CORRELATED_BLOCKS_TO_ACCUMULATE(nr_blocks_to_accumulate),
         tensor_16(extent, CUTENSOR_R_16F, 128),
-        correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
+        correlator(cu::Device(0), tcc::Format::fp16, T::NR_ACTIVE_RECEIVERS,
                    T::NR_CHANNELS,
                    NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
                    T::NR_PADDED_RECEIVERS_PER_BLOCK,
                    TCC_THREAD_BLOCKS_PER_SM) {
-    std::cout << "LambdaStarweavePipeline instantiated with NR_CHANNELS: "
-              << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_PADDED_RECEIVERS
+    std::cout << "LambdaStarspinPipeline instantiated with NR_CHANNELS: "
+              << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_ACTIVE_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS
               << ", NR_SAMPLES_PER_CHANNEL: "
               << NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK << std::endl;
 
     CUDA_CHECK(cudaMalloc((void **)&d_visibilities_accumulator,
-                          sizeof(TrimmedVisibilities)));
+                          sizeof(CorrelatorOutput)));
     // accumulate_visibilities uses atomicAdd, including during constructor warmup.
     // cudaMalloc does not promise zero-filled memory.
     CUDA_CHECK(cudaMemset(d_visibilities_accumulator, 0,
-                          sizeof(TrimmedVisibilities)));
+                          sizeof(CorrelatorOutput)));
     CUDA_CHECK(cudaEventCreateWithFlags(&visibilities_reset_done,
                                         cudaEventDisableTiming));
 
@@ -498,7 +521,8 @@ public:
     cuDeviceGet(&cu_device, 0);
 
     if constexpr (T::NR_FINE_CHANNELS > 1) {
-      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device);
+      channelizer_ = std::make_unique<StarspinChannelizer>(
+          cu_device, FINE_CHANNEL_VOLTAGE_SCALE);
     }
 
     tensor_16.addTensor(modePacket, "packet");
@@ -554,9 +578,9 @@ public:
             b.graph_corr = nullptr;
           }
         }
-        WARN_LOG("CUDA graph capture failed — LambdaStarweavePipeline will run eagerly");
+        WARN_LOG("CUDA graph capture failed — LambdaStarspinPipeline will run eagerly");
       } else {
-        INFO_LOG("CUDA graphs captured for {} LambdaStarweavePipeline buffers",
+        INFO_LOG("CUDA graphs captured for {} LambdaStarspinPipeline buffers",
                  buffers.size());
         execute_pipeline(&warmup_packet, true);
       }
@@ -567,7 +591,7 @@ public:
     visibilities_missing_packets = 0;
   };
 
-  ~LambdaStarweavePipeline() {
+  ~LambdaStarspinPipeline() {
     buffer_reclaimer_running.store(false, std::memory_order_release);
     if (buffer_reclaimer_thread.joinable())
       buffer_reclaimer_thread.join();
@@ -604,7 +628,7 @@ public:
   }
 
   void set_antenna_gains(std::complex<float> *gains) override {
-    std::cout << "setting antenna gains on LambdaStarweavePipeline...\n";
+    std::cout << "setting antenna gains on LambdaStarspinPipeline...\n";
     gains_ = gains;
     CUDA_CHECK(cudaMemcpy(d_gains, gains, sizeof(typename T::AntennaGains),
                           cudaMemcpyDefault));
@@ -657,7 +681,7 @@ public:
       void *landing_pointer =
           output_->get_visibilities_landing_pointer(block_num);
       cudaMemcpyAsync(landing_pointer, d_visibilities_accumulator,
-                      sizeof(TrimmedVisibilities), cudaMemcpyDefault,
+                      sizeof(CorrelatorOutput), cudaMemcpyDefault,
                       buffers[0].stream);
       auto *output_ctx = new OutputTransferCompleteContext{
           .output = this->output_, .block_index = block_num};
@@ -665,7 +689,7 @@ public:
                          output_visibilities_transfer_complete_host_func,
                          output_ctx);
     }
-    cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(TrimmedVisibilities),
+    cudaMemsetAsync(d_visibilities_accumulator, 0, sizeof(CorrelatorOutput),
                     buffers[0].stream);
     num_correlation_units_integrated.store(0);
     cudaEventRecord(visibilities_reset_done, buffers[0].stream);
