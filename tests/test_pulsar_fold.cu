@@ -106,6 +106,9 @@ std::vector<float> run_and_capture_beams(BeamWeightsT<Config> &weights) {
 
   std::vector<float> beams(Pipeline::beam_output_size_bytes() / sizeof(float));
   pipeline->copy_latest_beam_output_to_host(beams.data());
+  // The reclaimer uses the driver's ProcessorState. Join it before that state
+  // goes out of scope; GPU synchronization alone does not stop its CPU thread.
+  pipeline.reset();
   return beams;
 }
 
@@ -200,6 +203,7 @@ TEST_F(PulsarFoldPipelineTest, TrackingWeightsAreAppliedWithoutRFIMitigate) {
 
   std::vector<float> beams(Pipeline::beam_output_size_bytes() / sizeof(float));
   pipeline->copy_latest_beam_output_to_host(beams.data());
+  pipeline.reset(); // join the reclaimer before destroying its ProcessorState
 
   EXPECT_TRUE(all_finite(beams)) << "beam_output contains NaN/Inf";
   EXPECT_TRUE(any_nonzero(beams))

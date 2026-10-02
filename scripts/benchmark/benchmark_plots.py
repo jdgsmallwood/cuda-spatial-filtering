@@ -85,7 +85,7 @@ def _(mo):
         label="Results JSON path (relative to notebook or absolute)",
     )
     build_dir_input = mo.ui.text(
-        value="../../build_apps",
+        value="../../build",
         label="Build directory (used when Run benchmarks is on)",
     )
     duration_slider = mo.ui.slider(

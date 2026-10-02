@@ -62,6 +62,10 @@ int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
   CommonArgs args = parse_common_args(program, argc, argv);
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+  if (!args.pcap_filename.empty() || args.capture_backend == "ibverbs-gpudirect")
+    throw std::runtime_error("decoupled completion requires live CPU-ring capture with one FPGA per NIC");
+#endif
 
   std::signal(SIGINT, signal_handler);
 

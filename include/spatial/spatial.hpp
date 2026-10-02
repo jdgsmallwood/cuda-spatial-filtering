@@ -125,6 +125,10 @@ inline void copy_nt(void *__restrict__ dst, const void *__restrict__ src,
   std::memcpy(dst, src, n);
 }
 
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+#include "spatial/decoupled_ingest.hpp"
+#endif
+
 // Returns the n-th entry of a comma-separated CPU list ("4,5,6"), or -1 if
 // the list is missing/short/garbled.  Used for SPATIAL_WORKER_CPUS.
 inline int nth_cpu_from_list(const char *list, int n) {
@@ -387,6 +391,12 @@ template <typename T, size_t NR_INPUT_BUFFERS = 2,
           size_t RING_BUFFER_SIZE = 1000, int WORKER_COUNT = 3>
 class ProcessorState : public ProcessorStateBase {
 public:
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+  static constexpr size_t DECOUPLED_RING_SIZE = RING_BUFFER_SIZE;
+  friend class spatial::DecoupledIngest<T, NR_INPUT_BUFFERS, WORKER_COUNT>;
+  spatial::DecoupledIngest<T, NR_INPUT_BUFFERS, WORKER_COUNT> decoupled{
+      RING_BUFFER_SIZE / T::NR_FPGA_SOURCES};
+#endif
   size_t input_buffer_count() const override { return NR_INPUT_BUFFERS; }
   struct alignas(64) WorkRange {
     int start;
@@ -978,6 +988,9 @@ public:
       global_max_end_seq[j].store(buffers[NR_INPUT_BUFFERS - 1].end_seq[j],
                                   std::memory_order_release);
     }
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+    decoupled.initialize(*this);
+#endif
   };
 
   // `processed_accum`, when non-null, receives the processed-packet count in a
@@ -1140,6 +1153,10 @@ public:
         0, std::memory_order_relaxed);
     if (handed_off)
       timing_buffer_flight.record(timing_now_ns() - handed_off);
+#endif
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+    decoupled.release(*this, buffer_index);
+    return;
 #endif
     // Zero arrivals before taking the lock. Safe: the GPU just finished with
     // this slot, and no processor thread can claim it as current_buffer until
@@ -1390,7 +1407,13 @@ public:
         throw std::logic_error("direct NIC workers require one worker per capture NIC");
       start_processing_threads();
       std::cout << "Completion polling interval: " << completion_poll_us << " us\n";
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+      std::cout << "Decoupled per-buffer completion enabled (no global worker gate)\n";
+#endif
       while (running.load(std::memory_order_acquire)) {
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+        decoupled.coordinator_step(*this);
+#else
         if (buffer_init_flag.load(std::memory_order_acquire)) {
           // Prevent a stream of new shared locks from starving the window
           // switch. In-flight copies finish before the exclusive lock lands.
@@ -1424,6 +1447,7 @@ public:
                               trace_cpu_start ? spatial::IngestTrace::thread_cpu_ns() - trace_cpu_start : 0);
 #endif
         }
+#endif
         std::this_thread::sleep_for(std::chrono::microseconds(completion_poll_us));
       }
       completion_requested.store(false, std::memory_order_release);
@@ -1863,6 +1887,10 @@ public:
 
 #ifdef SPATIAL_DIRECT_NIC_WORKERS
     if (nr_capture_threads > 0) {
+#ifdef SPATIAL_DECOUPLED_COMPLETION
+      decoupled.run_worker(*this, worker_id);
+      return;
+#endif
       const int stride = nr_capture_threads;
       uint64_t my_read = static_cast<uint64_t>(worker_id);
       while (running.load(std::memory_order_acquire)) {

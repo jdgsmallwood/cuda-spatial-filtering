@@ -84,7 +84,7 @@ foreach(NR_FPGAS 1 2 3 4)
     endforeach()
 endforeach()
 
-foreach(NR_CHANNELS 54 60 64 72 80)
+foreach(NR_CHANNELS 56 64 72 80)
     add_executable(bench_starspin_pipeline_${NR_CHANNELS}_thp
         ${PROJECT_SOURCE_DIR}/apps/bench_starspin_pipeline.cu)
     target_link_libraries(bench_starspin_pipeline_${NR_CHANNELS}_thp PRIVATE gpu_app_common)
@@ -94,12 +94,12 @@ foreach(NR_CHANNELS 54 60 64 72 80)
         SPATIAL_THP_OUTPUT_BUFFERS=1)
 endforeach()
 
-# Starspin grid: all FPGA source counts, with a configurable set of coarse
-# channel counts. The FPGA supports even counts from 8 through 330; select
-# additional counts with -DSTARSPIN_CHANNEL_COUNTS="40;54;..." at configure time.
+# Starspin grid: all FPGA source counts, using multiples of eight channels.
+# The FPGA also supports other even counts from 8 through 330; explicit
+# experimental overrides remain available via STARSPIN_CHANNEL_COUNTS.
 # Keep the default set small so a normal build does not compile hundreds of
 # CUDA specializations.
-set(STARSPIN_CHANNEL_COUNTS "8;16;24;32;40;48;54;60;64;72;80" CACHE STRING
+set(STARSPIN_CHANNEL_COUNTS "8;16;24;32;40;48;56;64;72;80" CACHE STRING
     "Even coarse channel counts (8..330) for Starspin targets")
 foreach(NR_CHANNELS IN LISTS STARSPIN_CHANNEL_COUNTS)
     if(NOT NR_CHANNELS MATCHES "^[0-9]+$")
@@ -158,82 +158,6 @@ foreach(NR_FPGAS 1 2 3 4)
     endforeach()
 endforeach()
 
-# Matched 72-channel live A/B targets: both use the production direct per-NIC
-# path and timing probes; only the second batches NT fences and publishes
-# watermarks for channels touched in that worker batch.
-foreach(_suffix timed timed_opt timed_opt_batched timed_opt_trace timed_opt_trace_isolated)
-    set(_target "starspin_4_72_${_suffix}")
-    add_executable(${_target} ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
-    target_link_libraries(${_target} PRIVATE gpu_app_common)
-    set_target_properties(${_target} PROPERTIES BUILD_RPATH
-        "${SPATIAL_APP_BUILD_RPATH}")
-    target_compile_definitions(${_target} PRIVATE
-        NR_OBSERVING_FPGA_SOURCES=4
-        NR_OBSERVING_CHANNELS=72
-        NR_OBSERVING_ACTIVE_RECEIVERS=36
-        SPATIAL_THP_INPUT_BUFFERS=1
-        SPATIAL_STARSPIN_WORKER_THREADS=4
-        SPATIAL_PROCESSOR_BATCH_SIZE=256
-        SPATIAL_PER_NIC_RING=1
-        SPATIAL_PER_NIC_RING_SLOTS=1536
-        SPATIAL_DIRECT_NIC_WORKERS=1
-        SPATIAL_BATCH_PACKET_WATERMARKS=1
-        SPATIAL_TIMING_DIAGNOSTICS=1)
-    target_compile_options(${_target} PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
-    if(_suffix MATCHES "^timed_opt")
-        target_compile_definitions(${_target} PRIVATE
-            SPATIAL_BATCH_NT_FENCE=1
-            SPATIAL_TOUCHED_WATERMARKS=1)
-    endif()
-    if(_suffix STREQUAL "timed_opt_batched" OR _suffix MATCHES "^timed_opt_trace")
-        target_compile_definitions(${_target} PRIVATE
-            SPATIAL_DIRECT_BATCH_TARGET=192
-            SPATIAL_DIRECT_BATCH_WAIT_US=200)
-    endif()
-    if(_suffix MATCHES "^timed_opt_trace")
-        target_compile_definitions(${_target} PRIVATE SPATIAL_INGEST_TRACE=1)
-    endif()
-    if(_suffix STREQUAL "timed_opt_trace_isolated")
-        target_compile_definitions(${_target} PRIVATE SPATIAL_COORDINATOR_AFFINITY=1)
-    endif()
-endforeach()
-
-# Experimental NUMA-local receive layout: four 4096-slot rings and one
-# packet-copy worker per NIC. Keep a separate executable for live A/B tests.
-foreach(NR_CHANNELS IN LISTS STARSPIN_CHANNEL_COUNTS)
-    if(NR_CHANNELS GREATER_EQUAL 54)
-        set(NIC_TARGET "starspin_4_${NR_CHANNELS}_per_nic")
-        add_executable(${NIC_TARGET} ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
-        target_link_libraries(${NIC_TARGET} PRIVATE gpu_app_common)
-        set_target_properties(${NIC_TARGET} PROPERTIES BUILD_RPATH
-            "${SPATIAL_APP_BUILD_RPATH}")
-        target_compile_definitions(${NIC_TARGET} PRIVATE
-            NR_OBSERVING_FPGA_SOURCES=4
-            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
-            NR_OBSERVING_ACTIVE_RECEIVERS=36
-            SPATIAL_STARSPIN_WORKER_THREADS=4
-            SPATIAL_PROCESSOR_BATCH_SIZE=256
-            SPATIAL_PER_NIC_RING=1
-        )
-
-        set(DIRECT_NIC_TARGET "starspin_4_${NR_CHANNELS}_per_nic_direct")
-        add_executable(${DIRECT_NIC_TARGET} ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
-        target_link_libraries(${DIRECT_NIC_TARGET} PRIVATE gpu_app_common)
-        set_target_properties(${DIRECT_NIC_TARGET} PROPERTIES BUILD_RPATH
-            "${SPATIAL_APP_BUILD_RPATH}")
-        target_compile_definitions(${DIRECT_NIC_TARGET} PRIVATE
-            NR_OBSERVING_FPGA_SOURCES=4
-            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
-            NR_OBSERVING_ACTIVE_RECEIVERS=36
-            SPATIAL_STARSPIN_WORKER_THREADS=4
-            SPATIAL_PROCESSOR_BATCH_SIZE=256
-            SPATIAL_PER_NIC_RING=1
-            SPATIAL_DIRECT_NIC_WORKERS=1
-        )
-    endif()
-endforeach()
-
 # Retained end-to-end CPU ingest benchmark. It executes the normal packet
 # capture and assembly path but releases completed host buffers immediately.
 foreach(NR_CHANNELS IN LISTS STARSPIN_CHANNEL_COUNTS)
@@ -246,70 +170,17 @@ foreach(NR_CHANNELS IN LISTS STARSPIN_CHANNEL_COUNTS)
         NR_OBSERVING_FPGA_SOURCES=4
         NR_OBSERVING_CHANNELS=${NR_CHANNELS}
         NR_OBSERVING_ACTIVE_RECEIVERS=36
-        SPATIAL_CAPTURE_ONLY=1)
+        SPATIAL_CAPTURE_ONLY=1
+        SPATIAL_THP_INPUT_BUFFERS=1)
     if(NR_CHANNELS GREATER_EQUAL 54)
         target_compile_definitions(${CAPTURE_ONLY_TARGET} PRIVATE
-            SPATIAL_STARSPIN_WORKER_THREADS=4
-            SPATIAL_PROCESSOR_BATCH_SIZE=256
-            SPATIAL_PER_NIC_RING=1
-            SPATIAL_DIRECT_NIC_WORKERS=1)
-        set(CAPTURE_ONLY_NATIVE_TARGET "${CAPTURE_ONLY_TARGET}_native")
-        add_executable(${CAPTURE_ONLY_NATIVE_TARGET}
-            ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
-        target_link_libraries(${CAPTURE_ONLY_NATIVE_TARGET} PRIVATE gpu_app_common)
-        set_target_properties(${CAPTURE_ONLY_NATIVE_TARGET} PROPERTIES BUILD_RPATH
-            "${SPATIAL_APP_BUILD_RPATH}")
-        target_compile_definitions(${CAPTURE_ONLY_NATIVE_TARGET} PRIVATE
-            NR_OBSERVING_FPGA_SOURCES=4
-            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
-            NR_OBSERVING_ACTIVE_RECEIVERS=36
-            SPATIAL_CAPTURE_ONLY=1
-            SPATIAL_STARSPIN_WORKER_THREADS=4
-            SPATIAL_PROCESSOR_BATCH_SIZE=256
-            SPATIAL_PER_NIC_RING=1
-            SPATIAL_DIRECT_NIC_WORKERS=1)
-        target_compile_options(${CAPTURE_ONLY_NATIVE_TARGET} PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
-
-        set(CAPTURE_ONLY_SMALL_RING_TARGET
-            "${CAPTURE_ONLY_TARGET}_native_r1536")
-        add_executable(${CAPTURE_ONLY_SMALL_RING_TARGET}
-            ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
-        target_link_libraries(${CAPTURE_ONLY_SMALL_RING_TARGET} PRIVATE gpu_app_common)
-        set_target_properties(${CAPTURE_ONLY_SMALL_RING_TARGET} PROPERTIES BUILD_RPATH
-            "${SPATIAL_APP_BUILD_RPATH}")
-        target_compile_definitions(${CAPTURE_ONLY_SMALL_RING_TARGET} PRIVATE
-            NR_OBSERVING_FPGA_SOURCES=4
-            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
-            NR_OBSERVING_ACTIVE_RECEIVERS=36
-            SPATIAL_CAPTURE_ONLY=1
-            SPATIAL_STARSPIN_WORKER_THREADS=4
-            SPATIAL_PROCESSOR_BATCH_SIZE=256
-            SPATIAL_PER_NIC_RING=1
-            SPATIAL_PER_NIC_RING_SLOTS=1536
-            SPATIAL_DIRECT_NIC_WORKERS=1)
-        target_compile_options(${CAPTURE_ONLY_SMALL_RING_TARGET} PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
-
-        set(CAPTURE_ONLY_BATCH_TARGET
-            "${CAPTURE_ONLY_TARGET}_native_r1536_batch")
-        add_executable(${CAPTURE_ONLY_BATCH_TARGET}
-            ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
-        target_link_libraries(${CAPTURE_ONLY_BATCH_TARGET} PRIVATE gpu_app_common)
-        set_target_properties(${CAPTURE_ONLY_BATCH_TARGET} PROPERTIES BUILD_RPATH
-            "${SPATIAL_APP_BUILD_RPATH}")
-        target_compile_definitions(${CAPTURE_ONLY_BATCH_TARGET} PRIVATE
-            NR_OBSERVING_FPGA_SOURCES=4
-            NR_OBSERVING_CHANNELS=${NR_CHANNELS}
-            NR_OBSERVING_ACTIVE_RECEIVERS=36
-            SPATIAL_CAPTURE_ONLY=1
             SPATIAL_STARSPIN_WORKER_THREADS=4
             SPATIAL_PROCESSOR_BATCH_SIZE=256
             SPATIAL_PER_NIC_RING=1
             SPATIAL_PER_NIC_RING_SLOTS=1536
             SPATIAL_DIRECT_NIC_WORKERS=1
             SPATIAL_BATCH_PACKET_WATERMARKS=1)
-        target_compile_options(${CAPTURE_ONLY_BATCH_TARGET} PRIVATE
+        target_compile_options(${CAPTURE_ONLY_TARGET} PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>)
     elseif(NR_CHANNELS GREATER_EQUAL 48)
         target_compile_definitions(${CAPTURE_ONLY_TARGET} PRIVATE

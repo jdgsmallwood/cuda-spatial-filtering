@@ -18,7 +18,7 @@ isolated per-stage numbers above.
 Example:
 
     python3 scripts/benchmark/run_benchmarks.py \\
-        --build-dir /workspace/build_apps --duration 10 \\
+        --build-dir /workspace/build --duration 10 \\
         --interfaces enp134s0np0,enp175s0np0,enp216s0np0,enp220s0np0
 """
 
@@ -491,7 +491,7 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--build-dir", type=Path, default=REPO_ROOT / "build_apps",
+        "--build-dir", type=Path, default=REPO_ROOT / "build",
         help="CMake build directory containing apps/bench_* binaries"
     )
     parser.add_argument(

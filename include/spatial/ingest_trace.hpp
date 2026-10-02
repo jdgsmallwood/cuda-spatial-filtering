@@ -42,7 +42,7 @@ class IngestTrace {
 public:
   enum Event : uint32_t {
     CompletionCycle = 1, WorkerPause, WorkerBatch, ReceiveRingWait,
-    ReceiveProgressGap, ReceiveBatch, PipelineSubmit
+    ReceiveProgressGap, ReceiveBatch, PipelineSubmit, BufferSeal
   };
   static constexpr size_t LaneCount = 10;
   struct Record {
@@ -91,7 +91,8 @@ public:
         << "# lanes: 0=completion, 1..4=workers, 5..8=receivers, 9=feeder\n"
         << "# events: 1=completion (arg0=lock_acquired_ns,arg1=missing_delta,arg2=thread_cpu_ns), "
            "2=worker_pause, 3=worker_batch (arg0=packets), 4=ring_wait, "
-           "5=receive_progress_gap, 6=receive_batch (arg0=CQEs), 7=pipeline_submit\n";
+           "5=receive_progress_gap, 6=receive_batch (arg0=CQEs), 7=pipeline_submit, "
+           "8=buffer_seal (arg0=window; workers continue on other buffers)\n";
     for (size_t i = 0; i < LaneCount; ++i) {
       const auto &l = lanes_[i];
       out << "# lane=" << i << " tid=" << l.tid << " written=" << l.written

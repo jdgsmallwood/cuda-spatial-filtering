@@ -102,6 +102,13 @@ add_executable(IngestTraceTests test_ingest_trace.cpp)
 target_include_directories(IngestTraceTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(IngestTraceTests PRIVATE GTest::gtest_main)
 
+add_executable(ProcessorDecoupledTests test_direct_nic_workers.cu test_decoupled_ingest.cu)
+target_link_libraries(ProcessorDecoupledTests PRIVATE test_support)
+target_compile_definitions(ProcessorDecoupledTests PRIVATE
+    SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1
+    SPATIAL_DECOUPLED_COMPLETION=1 SPATIAL_TIMING_DIAGNOSTICS=1
+    SPATIAL_INGEST_TRACE=1)
+
 add_executable(
   IbverbsPlacementTests test_ibverbs_placement.cu
 )
@@ -218,6 +225,7 @@ set_target_properties(benchmark_processor PROPERTIES CUDA_ARCHITECTURES "${CMAKE
 
 include(GoogleTest)
 gtest_discover_tests(IngestTraceTests)
+gtest_discover_tests(ProcessorDecoupledTests TEST_PREFIX "Decoupled.")
 gtest_discover_tests(CUDASpatialFilteringTests)
 gtest_discover_tests(CUDASpatialFilteringCPUTests)
 gtest_discover_tests(PipelineTests DISCOVERY_TIMEOUT 60)
@@ -225,6 +233,9 @@ gtest_discover_tests(WriterTests)
 gtest_discover_tests(ProcessorTests)
 gtest_discover_tests(ProcessorDirectNicTests)
 gtest_discover_tests(ProcessorDirectNicBatchTests TEST_PREFIX "Batch.")
+gtest_discover_tests(ProcessorDirectNicBatchOptimizedTests TEST_PREFIX "Optimized.")
+gtest_discover_tests(ProcessorDirectNicBatchOptimizedBatchedTests TEST_PREFIX "OptimizedBatched.")
+gtest_discover_tests(ProcessorDirectNicTraceTests TEST_PREFIX "Trace.")
 gtest_discover_tests(IbverbsPlacementTests)
 gtest_discover_tests(PointingTests)
 gtest_discover_tests(PipelineHarnessSelfTest)

@@ -44,11 +44,11 @@ googletest, redis-plus-plus) are git submodules — run
 ### In the Docker container (standard development environment)
 
 ```bash
-mkdir build_test && cd build_test
+mkdir -p build
 
 # CUTENSOR_ROOT: /opt/conda has the flat include/lib layout find_cutensor.cmake expects
-CUTENSOR_ROOT=/opt/conda cmake -DBUILD_TESTING=ON ..
-cmake --build . -- -j$(nproc)
+CUTENSOR_ROOT=/opt/conda cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build -- -j$(nproc)
 ```
 
 If you see link errors (`arc4random@GLIBC_2.36`, `strlcpy@GLIBC_2.38`, etc.), the conda g++
@@ -57,22 +57,22 @@ is resolving against its bundled older glibc. Add the sysroot flags:
 ```bash
 CUTENSOR_ROOT=/opt/conda cmake -DBUILD_TESTING=ON \
   -DCMAKE_EXE_LINKER_FLAGS="-Wl,--sysroot=/ -L/usr/lib/x86_64-linux-gnu -Wl,-rpath-link,/usr/lib/x86_64-linux-gnu" \
-  ..
+  -S . -B build
 ```
 
 ### On OzStar
 
 ```bash
 module load cuda/12.6.0 gcc/13.3.0 cmake/3.29.3
-mkdir build && cd build
-cmake -DBUILD_TESTING=ON ..
-cmake --build . -- -j$(nproc)
+mkdir -p build
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build -- -j$(nproc)
 ```
 
 ## Running Tests
 
 ```bash
-cd build_test
+cd build
 
 # CUDA_HOME is needed at runtime by any test that constructs a LambdaGPUPipeline
 # (it JIT-compiles TCCorrelator.cu via NVRTC and needs the CUDA toolkit headers)

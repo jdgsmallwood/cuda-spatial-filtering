@@ -27,12 +27,11 @@ CUDA_ROOT="/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux"
 OUTPUT_DIR="${REPO_ROOT}/build/starspin_runs"
 OUTPUT_NAME=""
 BINARY=""
-DELAY_FILE="${REPO_ROOT}/build/starspin_runs/alveo_delays_20260930_timed_ab_reboot.json"
+DELAY_FILE="${REPO_ROOT}/build/starspin_runs/alveo_delays_20261001_colleague.json"
 GAINS_FILE="${BUILD_APPS}/weights.json"
 EIGENVALUE_FILE="${BUILD_APPS}/nr-signal-eigenvalues.json"
 CONFIG_FILE="${REPO_ROOT}/config.json"
 STREAM_MAP="${REPO_ROOT}/stream_antenna_map.json"
-DIAGNOSTIC=false
 APPLY_GAINS=false
 CONFIGURE_FPGA=false
 DRY_RUN=false
@@ -64,7 +63,6 @@ Options:
   -o, --output-dir PATH         HDF5, log, streams CSV, and app.log directory
   -p, --name NAME               Output basename, without .hdf5/.log
       --binary PATH             Override the selected Starspin executable
-      --diagnostic              Use starspin_4_N.diagnostic
       --capture-cpus LIST       Capture-thread CPU list
       --worker-cpus LIST        Packet-worker CPU list
       --pipeline-cpus LIST      Coordinator, GPU feeder, and writer CPU set
@@ -83,7 +81,6 @@ Options:
 Examples:
   $(basename "$0")
   $(basename "$0") --duration 600 --name science_40ch
-  $(basename "$0") --diagnostic --duration 120
   $(basename "$0") --configure-fpga --duration 600
 
 Arguments after -- are passed directly to Starspin.
@@ -115,8 +112,6 @@ while [[ $# -gt 0 ]]; do
       require_value "$@"; OUTPUT_NAME=${2%.hdf5}; shift 2 ;;
     --binary)
       require_value "$@"; BINARY=$2; shift 2 ;;
-    --diagnostic)
-      DIAGNOSTIC=true; shift ;;
     --capture-cpus)
       require_value "$@"; CAPTURE_CPUS=$2; shift 2 ;;
     --worker-cpus)
@@ -165,11 +160,6 @@ command -v taskset >/dev/null || die "taskset is required for pipeline CPU place
 taskset -c "$PIPELINE_CPUS" true >/dev/null || die "invalid or unavailable --pipeline-cpus: $PIPELINE_CPUS"
 if [[ -z "$BINARY" ]]; then
   BINARY="${BUILD_APPS}/starspin_${FPGAS}_${CHANNELS}"
-  if [[ "$DIAGNOSTIC" == true ]]; then
-    BINARY+=".diagnostic"
-  fi
-elif [[ "$DIAGNOSTIC" == true ]]; then
-  die "use either --binary or --diagnostic, not both"
 fi
 
 [[ -x "$BINARY" ]] || die "Starspin binary is missing or not executable: $BINARY (configure with -DSTARSPIN_CHANNEL_COUNTS='${CHANNELS}' and build target starspin_${FPGAS}_${CHANNELS})"
@@ -298,6 +288,7 @@ printf '%s\n' '============================================================'
 printf 'Starspin %s-FPGA capture\n' "$FPGAS"
 printf 'Binary:          %s\n' "$BINARY"
 printf 'Channels:        %d-%d (%d)\n' "$MIN_CHANNEL" "$MAX_CHANNEL" "$CHANNELS"
+printf 'Delay file:      %s\n' "$DELAY_FILE"
 printf 'Duration:        %s seconds\n' "$DURATION"
 printf 'Interfaces:      %s\n' "$INTERFACES"
 printf 'Capture CPUs:    %s\n' "$CAPTURE_CPUS"

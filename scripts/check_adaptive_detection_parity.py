@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -21,6 +23,17 @@ try:
     import h5py  # type: ignore
 except ModuleNotFoundError:
     h5py = None
+
+
+def h5dump_executable() -> str:
+    """Find h5dump alongside the selected Python when PATH omits its bin dir."""
+    executable = shutil.which("h5dump")
+    if executable is not None:
+        return executable
+    bundled = Path(sys.prefix) / "bin" / "h5dump"
+    if bundled.is_file() and os.access(bundled, os.X_OK):
+        return str(bundled)
+    raise FileNotFoundError("h5dump is unavailable on PATH and in the Python environment")
 
 
 def uint16_complex_half_to_complex64(raw: np.ndarray) -> np.ndarray:
@@ -48,12 +61,12 @@ def run_fixture_generator(test_bin: Path, output_path: Path) -> None:
 
 def h5dump_header(path: Path, dataset: str) -> str:
     return subprocess.check_output(
-        ["h5dump", "-H", "-d", f"/{dataset}", str(path)], text=True
+        [h5dump_executable(), "-H", "-d", f"/{dataset}", str(path)], text=True
     )
 
 
 def h5dump_attr(path: Path, attr: str) -> str:
-    return subprocess.check_output(["h5dump", "-a", attr, str(path)], text=True)
+    return subprocess.check_output([h5dump_executable(), "-a", attr, str(path)], text=True)
 
 
 def parse_h5dump_dims(header: str) -> tuple[int, ...]:
@@ -85,7 +98,7 @@ def load_dataset_with_h5dump(path: Path, dataset: str, dtype: np.dtype) -> np.nd
     try:
         subprocess.run(
             [
-                "h5dump",
+                h5dump_executable(),
                 "-d",
                 f"/{dataset}",
                 "-y",

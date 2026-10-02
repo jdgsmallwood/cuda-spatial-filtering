@@ -8,7 +8,7 @@ from pathlib import Path
 
 NAMES = {1: "completion gate", 2: "worker pause", 3: "slow worker batch",
          4: "receive ring wait", 5: "receive progress gap",
-         6: "slow receive batch", 7: "pipeline submission"}
+         6: "slow receive batch", 7: "pipeline submission", 8: "buffer seal acknowledgements"}
 
 
 def summarize(path):

@@ -102,11 +102,11 @@ looping multi-FPGA PCAP replay, as an end-to-end comparison point.
 ## Build
 
 ```bash
-mkdir build_apps && cd build_apps
-CUTENSOR_ROOT=/opt/conda cmake -DBUILD_TESTING=OFF \
+mkdir -p build
+CUTENSOR_ROOT=/opt/conda cmake -DBUILD_TESTING=ON \
   -DCMAKE_EXE_LINKER_FLAGS="-Wl,--sysroot=/ -L/usr/lib/x86_64-linux-gnu -Wl,-rpath-link,/usr/lib/x86_64-linux-gnu -Wl,--allow-shlib-undefined" \
-  ..
-cmake --build . -- -j$(nproc)
+  -S . -B build
+cmake --build build -- -j$(nproc)
 ```
 
 The bench binaries hard-code the three benchmark configs; they do not read
@@ -119,7 +119,7 @@ The bench binaries hard-code the three benchmark configs; they do not read
 export CUDA_HOME=/opt/conda/targets/x86_64-linux   # needed by gpu_benchmark/observe (NVRTC)
 
 python3 scripts/benchmark/run_benchmarks.py \
-    --build-dir /workspace/build_apps --duration 10 \
+    --build-dir /workspace/build --duration 10 \
     --interfaces enp134s0np0,enp175s0np0,enp216s0np0,enp220s0np0
 ```
 
@@ -129,7 +129,7 @@ dict (with git commit + timestamp) for later comparison:
 
 ```bash
 python3 scripts/benchmark/run_benchmarks.py \
-    --build-dir /workspace/build_apps --duration 10 \
+    --build-dir /workspace/build --duration 10 \
     --json-out /tmp/bench_main.json
 ```
 
@@ -168,12 +168,12 @@ Collect a JSON result from both the base branch and the PR branch, then diff:
 ```bash
 # On main / base branch:
 python3 scripts/benchmark/run_benchmarks.py \
-    --build-dir /workspace/build_apps --duration 10 \
+    --build-dir /workspace/build --duration 10 \
     --json-out /tmp/bench_baseline.json
 
 # After switching to PR branch and rebuilding:
 python3 scripts/benchmark/run_benchmarks.py \
-    --build-dir /workspace/build_apps --duration 10 \
+    --build-dir /workspace/build --duration 10 \
     --json-out /tmp/bench_pr.json
 
 # Compare:
@@ -213,7 +213,7 @@ The default interface (`lo`) automatically replays `example_packets.pcapng`
 
 ```bash
 python3 scripts/benchmark/run_benchmarks.py \
-    --build-dir /workspace/build_apps --duration 10 \
+    --build-dir /workspace/build --duration 10 \
     --skip processor gpu writers
 ```
 
@@ -225,7 +225,7 @@ python3 scripts/create_pcap.py \
     --output /tmp/loopback_test.pcap
 
 python3 scripts/benchmark/run_benchmarks.py \
-    --build-dir /workspace/build_apps --duration 10 \
+    --build-dir /workspace/build --duration 10 \
     --interfaces lo --capture-loopback-pcap /tmp/loopback_test.pcap \
     --skip processor gpu writers
 ```

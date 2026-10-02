@@ -1,5 +1,10 @@
 # 72-channel Starspin ingest experiments (2026-09-30)
 
+Historical note (2026-10-02): the `starspin_4_72_timed*` trial target family was
+removed from CMake after these runs. The commands and binary names below record
+the experiments and are not current build instructions. The standard
+`starspin_4_72` target and one `starspin_4_72_capture_only` benchmark remain.
+
 The FPGAs were retuned to channels 160–231 on the already calibrated boot.
 The same production `starspin_4_72` binary, delay file, CPU placement, and
 120-second duration were used for the ring placement comparison. The capture
@@ -248,3 +253,129 @@ tests pass at both 200 and 1000 us with the process launched on CPUs 8–9,
 coordinator explicitly pinned to 7, and workers pinned to 3/4/5/6. All four
 parser/trace unit tests pass. This is synthetic validation, not a live
 throughput result for the isolated coordinator.
+
+### Per-buffer completion decoupling (2026-09-30)
+
+Checkpoint before this change: parent `33c2f8c`, TCC submodule `d71f1b4`.
+The experiment is selected by `SPATIAL_DECOUPLED_COMPLETION` and built as
+`starspin_4_72_timed_opt_trace_decoupled`. The production launcher still
+selects its usual binary unless `--binary` is supplied.
+
+`include/spatial/decoupled_ingest.hpp` replaces the global worker gate with
+a generation and ownership state for each physical host buffer:
+
+1. **Open:** each NIC worker writes its FPGA's samples, scales, and arrivals.
+   Logical packet windows are calculated from an immutable, delay-corrected
+   origin, rather than a shared changing `current_buffer`.
+2. **Closing:** the coordinator requests closure after the existing
+   all-channel/all-FPGA watermark threshold. Workers finish their current
+   batch, fence streaming stores, and acknowledge that buffer's generation.
+   Each worker continues processing other buffers. Idle workers also acknowledge.
+3. **In flight:** after every acknowledgement, the coordinator masks missing
+   samples with zero scales and queues the buffer to the GPU feeder. Workers
+   cannot write the sealed generation.
+4. **Recycled:** the H2D completion callback clears arrival flags and publishes
+   the same physical slot for logical window `old_window + host_buffer_count`.
+   Release order cannot change its logical window assignment.
+
+Each worker owns its deferred-packet heap and receive-ring release decisions.
+Packets spanning adjacent windows remain queued until both destinations exist,
+preserving overlap samples during H2D backpressure. The bounded-skew timeout
+may advance watermarks on a stream jump, but cannot acknowledge a closing
+window while that worker still owns queued packets for it. Genuine exhaustion
+of all host buffers still causes backpressure; decoupling does not create
+unlimited storage or fix an independently slow GPU.
+
+The experiment preserves the 1536 slots per NIC, up-to-256-packet work batches,
+192-packet/200-us accumulation policy, huge-page input allocation, and existing
+affinity controls. It supports live CPU-ring capture with one FPGA per worker;
+PCAP replay and GPUDirect capture are rejected by this experimental executable.
+Trace event 8 records request-to-acknowledgement time per buffer; this is not
+a global worker pause. Worker-copy and receive-wait timing remain available.
+
+`ProcessorDecoupledTests` checks exact sample/scale/overlap data, packet-aligned
+FPGA delays, intentional missing packets, stale writes after seal, a stalled
+completion callback, repeated slot reuse, out-of-order H2D releases, forced
+watermarks, large stream jumps, and shutdown with deferred packets. Its GPU
+test uses the asynchronous feeder and real H2D release callback, executes the
+Starspin GPU pipeline, and compares every visibility component against an
+independent CPU correlation (relative tolerance 2e-5, absolute floor 0.01).
+That small numerical test uses one fine channel; the production 72-channel
+configuration and its fine channelizer still require a live A/B run.
+
+Validation result: all eight tests passed 20 consecutive repetitions with
+the process on CPUs 7–9 and workers on 3/4/5/6 (160 test executions).
+The experimental application built successfully and `run_starspin.sh --dry-run`
+selected CPU-ring ibverbs capture and NUMA ring nodes `0,1,1,1` as expected.
+Logs: `/tmp/starspin_decoupled_final_build.log`,
+`/tmp/starspin_decoupled_repeat.log`, `/tmp/starspin_decoupled_dry_run.log`.
+No FPGA capture or tuning was performed during this implementation turn.
+
+Build and synthetic validation (no FPGA tuning or capture):
+
+```bash
+cmake -S . -B build
+cmake --build build --target ProcessorDecoupledTests \
+  starspin_4_72_timed_opt_trace_decoupled -j4
+env CUDA_HOME=/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux \
+  SPATIAL_WORKER_CPUS=3,4,5,6 build/tests/ProcessorDecoupledTests
+```
+
+Before live use, grant the rebuilt executable its capability:
+
+```bash
+sudo setcap cap_net_raw=ep build/apps/starspin_4_72_timed_opt_trace_decoupled
+```
+
+For the next authorized live session, first verify FPGA boot/delays and retune
+to 72 channels as required by `AGENTS.md`. Then compare this command with the
+baseline `starspin_4_72_timed_opt_trace` under the same conditions:
+
+```bash
+SPATIAL_INGEST_TRACE_FILE="$PWD/build/starspin_runs/decoupled72.csv" \
+scripts/run_starspin.sh --channels 72 --min-channel 176 \
+  --binary "$PWD/build/apps/starspin_4_72_timed_opt_trace_decoupled" \
+  --delay-file /path/to/verified-current-boot-delays.json \
+  --pipeline-cpus 7-9 --duration 300 --name decoupled72
+```
+
+Leave `SPATIAL_COORDINATOR_CPU` unset for the first matched comparison; test
+isolation separately. No live throughput or packet-loss improvement is claimed
+from the synthetic tests.
+
+#### First live decoupled run and system release
+
+`decoupled72_full_20260930` completed 300 seconds at channels 160–231,
+including CPU-ring ibverbs capture, packet assembly, H2D, the production fine
+channelizer and correlator, D2H, and HDF5 writing. It wrote 303 visibility
+blocks with continuous sequence ranges. HDF5 metadata records 5,852,801
+missing packets out of 1,250,058,240 expected: **0.468202%** overall,
+**8.209592%** in the worst block, and 29 blocks above 1% missing. Excluding
+the first block gives 0.466159%, so the remaining loss is not just startup.
+No matched baseline was run: the user requested system release after this run.
+These figures therefore do not establish a controlled A/B improvement.
+
+The final timing counters show no global completion pause/lock wait; the
+maximum receive-ring wait was 3.029 ms and the maximum worker copy batch was
+0.682 ms. Buffer flight reached 38.525 ms; no deferred packets or stuck
+unprocessed packets were reported. GPU telemetry showed Gen 3 x16 in every
+active sample. The application shut down cleanly and both monitoring processes
+were stopped. Only small HDF5 metadata datasets and saved logs were read for
+the final summary; a full visibility-array validation was not performed after
+the stop request. Artifacts are `build/starspin_runs/decoupled72_full_20260930.*`.
+
+Session setup included a fresh four-board reboot (FPGA 3 needed a retry),
+full eight-channel initialization, and six-pair delay calibration. The scale
+anomaly recurred on FPGA 2 ADC stream 14. Before recovery, `stats`, `r`, and
+`rawadcall` were run and all 20 raw ADC channels were saved. Reinitialization
+alone did not clear it; a targeted FPGA 2 reboot did. Final eight-channel
+captures had scale 1 in every inspected scale value on all four boards and
+nonzero samples. See `/data/BLACKMESA_0/lambda/debug_pcaps/fpga2_scale_anomaly_20260930/README.md`.
+The final delay solve had zero closure residual and is
+`build/starspin_runs/alveo_delays_20260930_decoupled_final.json`. Both the local
+and shared Lambda launchers now default to this file; earlier boot-state delay
+files are historical. Readback confirmed 72 channels on all four boards.
+
+**State at user-requested release:** no capture or monitoring remains active;
+FPGAs remain tuned to **160–231 (72 channels)**. No further retuning or baseline
+run was performed after the user's stop instruction.
