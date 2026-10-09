@@ -7,7 +7,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from fine_frequency_axis import (COARSE_WIDTH_HZ, FINE_SPACING_HZ,
                                  processing_frequencies_hz, science_channel_indices,
-                                 science_channel_mask)
+                                 science_channel_mask, unique_processing_frequencies_hz)
 
 
 def test_gpu_tone_bin_and_boundary_copies_have_expected_centres():
@@ -29,3 +29,4 @@ def test_three_low_two_high_trim_is_unique_uniform_and_centered():
     assert 1080 * FINE_SPACING_HZ == 40 * COARSE_WIDTH_HZ
     mask = science_channel_mask(freq)
     np.testing.assert_array_equal(np.flatnonzero(mask), kept)
+    np.testing.assert_array_equal(unique_processing_frequencies_hz(360, 40), selected)

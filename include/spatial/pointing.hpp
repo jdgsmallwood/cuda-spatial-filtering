@@ -65,24 +65,28 @@ inline double channel_to_frequency_hz(int absolute_channel_index,
 // offset. For a complex FFT-shifted N-bin PFB, original bin N/2 is at the
 // coarse centre and raw bin j is (j-N/2) fine-bin spacings away. With 32/27
 // oversampling and a 2+2 internal trim, raw bins 2..29 are retained and
-// adjacent coarse channels share raw 29 / raw 2 at the same frequency. The
-// DADA output selects raw bins 3..29, giving 27 centres per coarse channel.
+// adjacent coarse channels share raw 29 / raw 2 at the same frequency.
+// Starspin additionally trims raw bin 2, retaining bins 3..29 and 27 distinct
+// centres per coarse channel.
 inline double processing_channel_to_frequency_hz(
     size_t processing_channel_index, int min_coarse_channel,
     const FrequencyPlan &plan, size_t nr_fine_channels,
-    size_t fine_channel_edge_trim, double fine_oversample_denominator = 27.0) {
+    size_t fine_channel_edge_trim, double fine_oversample_denominator = 27.0,
+    size_t fine_channel_lower_extra_trim = 0) {
   if (nr_fine_channels <= 1)
     return channel_to_frequency_hz(
         min_coarse_channel + static_cast<int>(processing_channel_index), plan);
 
   const size_t nr_effective_fine_channels =
-      nr_fine_channels - 2 * fine_channel_edge_trim;
+      nr_fine_channels - 2 * fine_channel_edge_trim -
+      fine_channel_lower_extra_trim;
   const size_t coarse_offset =
       processing_channel_index / nr_effective_fine_channels;
   const size_t retained_fine_index =
       processing_channel_index % nr_effective_fine_channels;
   const double offset_in_coarse_channels =
-      (static_cast<double>(retained_fine_index + fine_channel_edge_trim) -
+      (static_cast<double>(retained_fine_index + fine_channel_edge_trim +
+                           fine_channel_lower_extra_trim) -
        static_cast<double>(nr_fine_channels / 2)) /
       fine_oversample_denominator;
 

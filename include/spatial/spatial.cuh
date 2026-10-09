@@ -320,26 +320,31 @@ void reorder_to_filter_input(const __half *input, float2 *filter_input,
 // [TIME_IN_BLOCK] -- gpu-filter's native per-coarse-channel output, bit-identical complex layout
 // to TCC's trailing [COMPLEX] axis since cuda::std::complex<__half> == __half2) directly into
 // TCC's CorrelatorInput (__half[C][BLOCK][PADDED_RECEIVER][POL][TIME_IN_BLOCK][COMPLEX], where
-// C = coarse*NR_EFFECTIVE_FINE_CHANNELS + (fine - NR_EDGE_TRIM)). Padding rows
+// C = coarse*NR_EFFECTIVE_FINE_CHANNELS + (fine - NR_EDGE_TRIM - NR_LOWER_EXTRA_TRIM)). Padding rows
 // (receiver >= NR_RECEIVERS) are left untouched -- corr_input is zeroed once at buffer
 // construction, same convention aligned_to_corr_input_kernel relies on for the non-channelized
 // path.
 //
 // Implements the 32/27-oversampling edge-channel trim: gpu-filter still computes all
 // NR_FINE_CHANNELS fine channels per coarse channel (the PFB can't selectively skip edge
-// channels), but only fine indices in [NR_EDGE_TRIM, NR_FINE_CHANNELS - NR_EDGE_TRIM) are gathered
+// channels), but only fine indices in [NR_EDGE_TRIM + NR_LOWER_EXTRA_TRIM,
+// NR_FINE_CHANNELS - NR_EDGE_TRIM) are gathered
 // into corr_input -- the NR_EDGE_TRIM channels nearest each edge of the coarse channel's passband
 // carry the FPGA coarse channelizer's own guard-band aliasing (see LambdaConfig's
 // NR_FINE_CHANNEL_EDGE_TRIM_T comment in packet_formats.hpp) and are dropped, not just left unused
 // -- NR_CHANNELS itself is sized by the trimmed NR_EFFECTIVE_FINE_CHANNELS count.
+// Starspin uses NR_LOWER_EXTRA_TRIM=1 to discard raw bin 2, which duplicates
+// the previous coarse channel's raw bin 29 in the 32/27 frequency grid.
 template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_PADDED_RECEIVERS,
-          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
+          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK,
+          size_t NR_LOWER_EXTRA_TRIM = 0>
 __global__ void
 channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
                                         __half *corr_input,
                                         const float *deripple_gains = nullptr) {
-  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS =
+      NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM - NR_LOWER_EXTRA_TRIM;
   constexpr size_t NR_CORR_RECEIVERS =
       NR_RECEIVERS < NR_PADDED_RECEIVERS ? NR_RECEIVERS : NR_PADDED_RECEIVERS;
   const size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
@@ -363,7 +368,7 @@ channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
 
     // Map the trimmed/effective fine-channel index back into FineChannelizer's untrimmed output
     // range -- gpu-filter's own output still spans the full [0, NR_FINE_CHANNELS).
-    const size_t fine = effective_fine + NR_EDGE_TRIM;
+    const size_t fine = effective_fine + NR_EDGE_TRIM + NR_LOWER_EXTRA_TRIM;
 
     const size_t src_idx =
         ((((coarse * NR_FINE_CHANNELS + fine) * NR_BLOCKS_FOR_CORRELATION +
@@ -387,7 +392,7 @@ channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
 
     const __half2 sample = filter_output[src_idx];
     if (deripple_gains) {
-      const float gain = deripple_gains[effective_fine];
+      const float gain = deripple_gains[effective_fine + NR_LOWER_EXTRA_TRIM];
       corr_input[dst_idx] = __float2half(__half2float(sample.x) * gain);
       corr_input[dst_idx + 1] = __float2half(__half2float(sample.y) * gain);
     } else {
@@ -400,11 +405,13 @@ channelizer_output_to_corr_input_kernel(const __half2 *filter_output,
 
 template <size_t NR_FPGA_CHANNELS, size_t NR_FINE_CHANNELS, size_t NR_EDGE_TRIM,
           size_t NR_POLARIZATIONS, size_t NR_RECEIVERS, size_t NR_PADDED_RECEIVERS,
-          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK>
+          size_t NR_BLOCKS_FOR_CORRELATION, size_t NR_TIMES_PER_BLOCK,
+          size_t NR_LOWER_EXTRA_TRIM = 0>
 void channelizer_output_to_corr_input(const __half2 *filter_output,
                                       __half *corr_input, cudaStream_t stream,
                                       const float *deripple_gains = nullptr) {
-  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS = NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM;
+  constexpr size_t NR_EFFECTIVE_FINE_CHANNELS =
+      NR_FINE_CHANNELS - 2 * NR_EDGE_TRIM - NR_LOWER_EXTRA_TRIM;
   constexpr size_t total = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS *
                            NR_BLOCKS_FOR_CORRELATION *
                            (NR_RECEIVERS < NR_PADDED_RECEIVERS
@@ -415,7 +422,7 @@ void channelizer_output_to_corr_input(const __half2 *filter_output,
   channelizer_output_to_corr_input_kernel<
       NR_FPGA_CHANNELS, NR_FINE_CHANNELS, NR_EDGE_TRIM, NR_POLARIZATIONS, NR_RECEIVERS,
       NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
-      NR_TIMES_PER_BLOCK><<<blocks, threads, 0, stream>>>(filter_output,
+      NR_TIMES_PER_BLOCK, NR_LOWER_EXTRA_TRIM><<<blocks, threads, 0, stream>>>(filter_output,
                                                           corr_input,
                                                           deripple_gains);
 }

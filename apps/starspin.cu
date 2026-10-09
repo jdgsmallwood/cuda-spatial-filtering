@@ -88,7 +88,7 @@ int main(int argc, char *argv[]) {
   constexpr int nr_lambda_time_steps_per_packet = 64;
   constexpr int nr_lambda_packets_for_correlation =
       NR_OBSERVING_PACKETS_FOR_CORRELATION; // 256
-  constexpr int nr_correlation_blocks_to_integrate =
+  constexpr int default_correlation_blocks_to_integrate =
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
   constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
   constexpr int num_lambda_fine_channel_edge_trim =
@@ -100,9 +100,11 @@ int main(int argc, char *argv[]) {
                    nr_lambda_packets_for_correlation, nr_lambda_beams,
                    nr_lambda_receivers,
                    nr_lambda_padded_receivers_per_block,
-                   nr_correlation_blocks_to_integrate, true, 256,
+                   default_correlation_blocks_to_integrate, true, 256,
                    num_lambda_fine_channels, num_lambda_fine_channel_edge_trim,
-                   nr_lambda_active_receivers>;
+                   nr_lambda_active_receivers, 1>;
+  static_assert(Config::NR_EFFECTIVE_FINE_CHANNELS == 27,
+                "Starspin must keep unique raw fine bins 3..29");
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
@@ -110,6 +112,11 @@ int main(int argc, char *argv[]) {
                              "number of FPGA sources.");
   }
   auto fpga_delays = build_fpga_delay_array<nr_fpga_sources>(args, true);
+  if (args.nr_integration_blocks < 0)
+    throw std::runtime_error("--accumulation-length must be non-negative");
+  const int nr_correlation_blocks_to_integrate =
+      args.nr_integration_blocks > 0 ? args.nr_integration_blocks
+                                     : default_correlation_blocks_to_integrate;
 
   auto gains = get_gains_structure<Config>(args);
   const bool use_canonical = !args.canonical_recv_perm.empty();
@@ -145,6 +152,14 @@ int main(int argc, char *argv[]) {
       args, audit_sidecar_filename(args.output_filename),
       nr_lambda_receivers_per_packet, nr_lambda_polarizations);
   HighFive::File vis_file(args.output_filename, HighFive::File::Truncate);
+  vis_file.createAttribute<int>("correlation_blocks_per_integration",
+                                nr_correlation_blocks_to_integrate);
+  vis_file.createAttribute<int>("fine_channels_per_coarse",
+                                Config::NR_EFFECTIVE_FINE_CHANNELS);
+  vis_file.createAttribute<int>("first_raw_fine_bin",
+                                Config::NR_FINE_CHANNEL_EDGE_TRIM +
+                                    Config::NR_FINE_CHANNEL_LOWER_EXTRA_TRIM);
+  vis_file.createAttribute<int>("fine_fft_channels", Config::NR_FINE_CHANNELS);
   write_hdf5_run_audit(
       vis_file, args, argc, argv, nr_lambda_receivers_per_packet,
       nr_lambda_polarizations);

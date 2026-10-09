@@ -94,6 +94,25 @@ foreach(NR_CHANNELS 56 64 72 80)
         SPATIAL_THP_OUTPUT_BUFFERS=1)
 endforeach()
 
+# Compare the 40-channel Starspin GPU path with 28 and 27 retained fine bins
+# at the same integration cadence, independent of packet capture and HDF5.
+foreach(NR_LOWER_EXTRA_TRIM 0 1)
+    math(EXPR NR_RETAINED_FINE "28 - ${NR_LOWER_EXTRA_TRIM}")
+    add_executable(bench_starspin_pipeline_40_${NR_RETAINED_FINE}
+        ${PROJECT_SOURCE_DIR}/apps/bench_starspin_pipeline.cu)
+    target_link_libraries(bench_starspin_pipeline_40_${NR_RETAINED_FINE}
+        PRIVATE gpu_app_common)
+    target_compile_definitions(bench_starspin_pipeline_40_${NR_RETAINED_FINE} PRIVATE
+        NR_OBSERVING_CHANNELS=40
+        NR_OBSERVING_FINE_CHANNEL_LOWER_EXTRA_TRIM=${NR_LOWER_EXTRA_TRIM}
+        SPATIAL_THP_INPUT_BUFFERS=1
+        SPATIAL_THP_OUTPUT_BUFFERS=1)
+endforeach()
+
+# Focused Starspin HDF5 writer throughput comparison.
+add_executable(bench_starspin_vis_writer ${PROJECT_SOURCE_DIR}/apps/bench_starspin_vis_writer.cu)
+target_link_libraries(bench_starspin_vis_writer PRIVATE gpu_app_common)
+
 # Starspin grid: all FPGA source counts, using multiples of eight channels.
 # The FPGA also supports other even counts from 8 through 330; explicit
 # experimental overrides remain available via STARSPIN_CHANNEL_COUNTS.

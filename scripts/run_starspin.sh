@@ -27,11 +27,15 @@ CUDA_ROOT="/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux"
 OUTPUT_DIR="${REPO_ROOT}/build/starspin_runs"
 OUTPUT_NAME=""
 BINARY=""
+CAPTURE_BACKEND="ibverbs"
 DELAY_FILE="${REPO_ROOT}/build/starspin_runs/alveo_delays_20261001_colleague.json"
+DELAY_FILE_EXPLICIT=false
+AUTO_SINGLE_FPGA_DELAY=false
 GAINS_FILE="${BUILD_APPS}/weights.json"
 EIGENVALUE_FILE="${BUILD_APPS}/nr-signal-eigenvalues.json"
 CONFIG_FILE="${REPO_ROOT}/config.json"
 STREAM_MAP="${REPO_ROOT}/stream_antenna_map.json"
+USE_STREAM_MAP=true
 APPLY_GAINS=false
 CONFIGURE_FPGA=false
 DRY_RUN=false
@@ -48,7 +52,7 @@ Defaults:
   FPGA sources          4 (the first four listed interfaces)
   channel range         176-215
   duration              60 seconds
-  backend               ibverbs, direct into the packet ring
+  backend               ${CAPTURE_BACKEND}, direct into the packet ring
   interfaces            ${INTERFACES}
   capture CPUs          ${CAPTURE_CPUS}
   worker CPUs           ${WORKER_CPUS}
@@ -63,16 +67,19 @@ Options:
   -o, --output-dir PATH         HDF5, log, streams CSV, and app.log directory
   -p, --name NAME               Output basename, without .hdf5/.log
       --binary PATH             Override the selected Starspin executable
+      --capture-backend NAME    kernel or ibverbs (default: ibverbs)
       --capture-cpus LIST       Capture-thread CPU list
       --worker-cpus LIST        Packet-worker CPU list
       --pipeline-cpus LIST      Coordinator, GPU feeder, and writer CPU set
       --ring-numa-nodes LIST    Ring memory NUMA node per selected NIC
       --interfaces LIST         Comma-separated NIC list
       --cuda-home PATH          CUDA toolkit root used by runtime compilation
-      --delay-file PATH         FPGA delay JSON
+      --delay-file PATH         FPGA delay JSON (automatic zero for one FPGA)
       --gains-file PATH         Gain/weight JSON
+      --eigenvalue-file PATH    Eigenvalue-count JSON
       --config-file PATH        Starspin configuration JSON
       --stream-map PATH         Hardware-stream to antenna mapping JSON
+      --no-stream-map           Use Starspin's built-in antenna mapping
       --apply-gains             Apply gains to visibilities
       --configure-fpga          Explicitly tune selected FPGAs before capture
       --dry-run                 Validate and print the command without running
@@ -112,6 +119,8 @@ while [[ $# -gt 0 ]]; do
       require_value "$@"; OUTPUT_NAME=${2%.hdf5}; shift 2 ;;
     --binary)
       require_value "$@"; BINARY=$2; shift 2 ;;
+    --capture-backend)
+      require_value "$@"; CAPTURE_BACKEND=$2; shift 2 ;;
     --capture-cpus)
       require_value "$@"; CAPTURE_CPUS=$2; shift 2 ;;
     --worker-cpus)
@@ -125,13 +134,17 @@ while [[ $# -gt 0 ]]; do
     --cuda-home)
       require_value "$@"; CUDA_ROOT=$2; shift 2 ;;
     --delay-file)
-      require_value "$@"; DELAY_FILE=$2; shift 2 ;;
+      require_value "$@"; DELAY_FILE=$2; DELAY_FILE_EXPLICIT=true; shift 2 ;;
     --gains-file)
       require_value "$@"; GAINS_FILE=$2; shift 2 ;;
+    --eigenvalue-file)
+      require_value "$@"; EIGENVALUE_FILE=$2; shift 2 ;;
     --config-file)
       require_value "$@"; CONFIG_FILE=$2; shift 2 ;;
     --stream-map)
-      require_value "$@"; STREAM_MAP=$2; shift 2 ;;
+      require_value "$@"; STREAM_MAP=$2; USE_STREAM_MAP=true; shift 2 ;;
+    --no-stream-map)
+      USE_STREAM_MAP=false; shift ;;
     --apply-gains)
       APPLY_GAINS=true; shift ;;
     --configure-fpga)
@@ -153,6 +166,11 @@ done
 (( CHANNELS >= 8 && CHANNELS <= 330 && CHANNELS % 2 == 0 )) ||
   die "--channels must be an even integer from 8 to 330"
 [[ "$FPGAS" =~ ^[1-4]$ ]] || die "--fpgas must be 1, 2, 3, or 4"
+if [[ "$FPGAS" == 1 && "$DELAY_FILE_EXPLICIT" == false ]]; then
+  AUTO_SINGLE_FPGA_DELAY=true
+fi
+[[ "$CAPTURE_BACKEND" == kernel || "$CAPTURE_BACKEND" == ibverbs ]] ||
+  die "--capture-backend must be kernel or ibverbs"
 [[ "$MIN_CHANNEL" =~ ^[0-9]+$ ]] || die "--min-channel must be a non-negative integer"
 (( MIN_CHANNEL + CHANNELS <= 512 )) || die "channel window must end at or below 511"
 [[ "$DURATION" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--duration must be non-negative"
@@ -165,15 +183,23 @@ fi
 [[ -x "$BINARY" ]] || die "Starspin binary is missing or not executable: $BINARY (configure with -DSTARSPIN_CHANNEL_COUNTS='${CHANNELS}' and build target starspin_${FPGAS}_${CHANNELS})"
 BINARY=$(realpath -- "$BINARY")
 [[ -d "$CUDA_ROOT" ]] || die "CUDA toolkit directory does not exist: $CUDA_ROOT"
-for input in "$DELAY_FILE" "$GAINS_FILE" "$EIGENVALUE_FILE" "$CONFIG_FILE" "$STREAM_MAP"; do
+for input in "$GAINS_FILE" "$EIGENVALUE_FILE" "$CONFIG_FILE"; do
   [[ -r "$input" ]] || die "required input is not readable: $input"
 done
+if [[ "$AUTO_SINGLE_FPGA_DELAY" == false ]]; then
+  [[ -r "$DELAY_FILE" ]] || die "required input is not readable: $DELAY_FILE"
+  DELAY_FILE=$(realpath -- "$DELAY_FILE")
+fi
+if [[ "$USE_STREAM_MAP" == true ]]; then
+  [[ -r "$STREAM_MAP" ]] || die "required input is not readable: $STREAM_MAP"
+fi
 # Capture runs from its output directory; preserve caller-relative inputs.
-DELAY_FILE=$(realpath -- "$DELAY_FILE")
 GAINS_FILE=$(realpath -- "$GAINS_FILE")
 EIGENVALUE_FILE=$(realpath -- "$EIGENVALUE_FILE")
 CONFIG_FILE=$(realpath -- "$CONFIG_FILE")
-STREAM_MAP=$(realpath -- "$STREAM_MAP")
+if [[ "$USE_STREAM_MAP" == true ]]; then
+  STREAM_MAP=$(realpath -- "$STREAM_MAP")
+fi
 
 IFS=',' read -r -a NIC_ARRAY <<< "$INTERFACES"
 (( ${#NIC_ARRAY[@]} >= FPGAS )) || die "need at least $FPGAS interfaces"
@@ -230,6 +256,13 @@ HDF5_FILE="${OUTPUT_DIR}/${OUTPUT_NAME}.hdf5"
 LOG_FILE="${OUTPUT_DIR}/${OUTPUT_NAME}.log"
 [[ ! -e "$HDF5_FILE" ]] || die "refusing to overwrite existing output: $HDF5_FILE"
 [[ ! -e "$LOG_FILE" ]] || die "refusing to overwrite existing log: $LOG_FILE"
+if [[ "$AUTO_SINGLE_FPGA_DELAY" == true ]]; then
+  # The app parses a JSON delay file even though one source needs no relative delay.
+  DELAY_FILE="${OUTPUT_DIR}/${OUTPUT_NAME}.zero_delays.json"
+  if [[ "$DRY_RUN" == false ]]; then
+    printf '{}\n' > "$DELAY_FILE"
+  fi
+fi
 
 # The measured 40-channel writer produced about 20 GiB in 600 seconds. Add a
 # 25% margin and 2 GiB working reserve. For indefinite runs, only print free
@@ -267,7 +300,7 @@ fi
 
 COMMAND=(
   "$BINARY"
-  --capture-backend ibverbs
+  --capture-backend "$CAPTURE_BACKEND"
   --network-interface "$INTERFACES"
   --min_freq_channel "$MIN_CHANNEL"
   --obs-length "$DURATION"
@@ -275,9 +308,11 @@ COMMAND=(
   --delay-file "$DELAY_FILE"
   --gains "$GAINS_FILE"
   --eigenvalue-num-filename "$EIGENVALUE_FILE"
-  --stream-antenna-map "$STREAM_MAP"
   --vis_output_file "$HDF5_FILE"
 )
+if [[ "$USE_STREAM_MAP" == true ]]; then
+  COMMAND+=(--stream-antenna-map "$STREAM_MAP")
+fi
 if [[ "$APPLY_GAINS" == true ]]; then
   COMMAND+=(--apply-gains-to-vis)
 fi

@@ -1,8 +1,8 @@
-"""Frequency axis for Lambda's complex 32/27 fine channelizer.
+"""Frequency axes for Lambda's complex 32/27 fine channelizer.
 
-The internal GPU axis keeps original FFT-shifted bins 2..29. The science/DADA
-axis keeps original bins 3..29 from every coarse channel: 27 centres per coarse
-channel, exactly one fine-bin spacing between neighbouring output centres.
+Starspin and the science/DADA axis keep original FFT-shifted bins 3..29 from
+every coarse channel: 27 distinct centres per coarse channel. Older Starspin
+captures and the pulsar path keep bins 2..29 internally.
 """
 
 import numpy as np
@@ -18,6 +18,12 @@ def processing_frequencies_hz(min_coarse: int, coarse_channels: int) -> np.ndarr
     raw_bin = np.arange(2, 30, dtype=float)[None, :]
     return (coarse * COARSE_WIDTH_HZ +
             (raw_bin - 16.0) * FINE_SPACING_HZ).ravel()
+
+
+def unique_processing_frequencies_hz(min_coarse: int, coarse_channels: int) -> np.ndarray:
+    """Return Starspin's 27 unique raw bins 3..29 per coarse channel."""
+    return processing_frequencies_hz(min_coarse, coarse_channels)[
+        science_channel_indices(coarse_channels)]
 
 
 def science_channel_indices(coarse_channels: int) -> np.ndarray:

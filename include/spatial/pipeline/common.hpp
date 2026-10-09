@@ -135,7 +135,8 @@ inline BeamWeightsT<T> compute_steering_weights(
     for (size_t chan = 0; chan < T::NR_CHANNELS; ++chan) {
       double frequency_hz = processing_channel_to_frequency_hz(
           chan, min_freq_channel, frequency_plan, T::NR_FINE_CHANNELS,
-          T::NR_FINE_CHANNEL_EDGE_TRIM);
+          T::NR_FINE_CHANNEL_EDGE_TRIM, 27.0,
+          T::NR_FINE_CHANNEL_LOWER_EXTRA_TRIM);
       double phase_scale =
           -2.0 * M_PI * frequency_hz / kSpeedOfLightMetresPerSecond;
 

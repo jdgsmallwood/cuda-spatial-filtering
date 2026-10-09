@@ -30,6 +30,11 @@
 namespace {
 
 using Config = test_support::SmallFineChannelizedCorrBeamConfig;
+using UniqueFineBinsConfig =
+    LambdaConfig<1, 1, 128, 4, 2, 4, 1, 1, 32, 32, 1, false,
+                 128, 8, 1, 4, 1>;
+static_assert(UniqueFineBinsConfig::NR_EFFECTIVE_FINE_CHANNELS == 5,
+              "extra lower trim must remove exactly one duplicate fine bin");
 
 static_assert(Config::NR_FPGA_CHANNELS == 1, "test assumes 1 coarse channel");
 static_assert(Config::NR_FINE_CHANNELS == 8, "test assumes 8 fine channels");
@@ -107,6 +112,10 @@ struct SequenceTrackingOutput : SingleHostMemoryOutput<ConfigT> {
 
 TEST_F(FineChannelizedStarspinTest, SatisfiesPhysicalInvariants) {
   run_and_check_physical_invariants<Config>();
+}
+
+TEST_F(FineChannelizedStarspinTest, UniqueFineBinsSatisfyPhysicalInvariants) {
+  run_and_check_physical_invariants<UniqueFineBinsConfig>();
 }
 
 TEST_F(FineChannelizedStarspinTest, RuntimeDerippleProducesFiniteVisibilities) {
@@ -220,6 +229,19 @@ TEST_F(FineChannelizedStarspinTest, FourFpgaFineBinsAndCrossPhases) {
   test_support::SyntheticPipelineRun<FC> driver(
       *pipeline, output, {}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
 
+  // Swap just two receivers, on different boards. Unlike a global hand swap,
+  // this checks XY/YX placement as well as XX/YY in the fused production path.
+  std::vector<int> recv_perm(FC::NR_RECEIVERS * FC::NR_POLARIZATIONS);
+  std::vector<int> pol_perm(recv_perm.size());
+  for (size_t receiver = 0; receiver < FC::NR_RECEIVERS; ++receiver)
+    for (size_t pol = 0; pol < FC::NR_POLARIZATIONS; ++pol) {
+      const size_t idx = receiver * FC::NR_POLARIZATIONS + pol;
+      recv_perm[idx] = static_cast<int>(receiver);
+      pol_perm[idx] = static_cast<int>(
+          receiver == 3 || receiver == 5 ? 1 - pol : pol);
+    }
+  pipeline->set_stream_permutation(recv_perm, pol_perm);
+
   auto phasor = [](int flat_recv, int pol) {
     switch ((flat_recv + pol) % 4) {
     case 0: return std::complex<int>{1, 0};
@@ -260,9 +282,10 @@ TEST_F(FineChannelizedStarspinTest, FourFpgaFineBinsAndCrossPhases) {
     for (size_t receiver = 0; receiver < FC::NR_RECEIVERS; ++receiver) {
       const size_t baseline = test_support::baseline_index(0, receiver);
       for (size_t pol = 0; pol < FC::NR_POLARIZATIONS; ++pol) {
-        const auto a = phasor(static_cast<int>(receiver), static_cast<int>(pol));
+        const int source_pol = pol_perm[receiver * FC::NR_POLARIZATIONS + pol];
+        const auto a = phasor(static_cast<int>(receiver), source_pol);
         const int receiver_scale =
-            1 + static_cast<int>(receiver / 2) + static_cast<int>(pol);
+            1 + static_cast<int>(receiver / 2) + source_pol;
         const std::complex<float> vj(
             static_cast<float>(a.real() * receiver_scale),
             static_cast<float>(a.imag() * receiver_scale));
@@ -496,4 +519,65 @@ TEST_F(FineChannelizedStarspinTest, FourFpgaWithinPacketDelaysRestoreBroadbandCo
   const float uncorrected = run({0, 0, 0, 0});
   EXPECT_GT(corrected, 0.90f);
   EXPECT_LT(uncorrected, 0.60f);
+}
+
+// A residual sub-sample delay is deliberately *not* corrected by Starspin's
+// integer-delay stage. It must survive as the expected phase slope across fine
+// bins so that a downstream per-fine-channel calibration can remove it. An
+// independent coarse-channel phase step must also survive at the boundary.
+TEST_F(FineChannelizedStarspinTest,
+       FractionalDelayAndCoarsePhaseStepReachFineVisibilitiesWithCorrectSign) {
+  using FC = LambdaConfig<2, 4, 512, 8, 2, 2, 1, 1, 32, 32, 1,
+                          false, 128, 32, 2, 8, 1>;
+  static_assert(FC::NR_EFFECTIVE_FINE_CHANNELS == 27);
+  auto output = std::make_shared<SingleHostMemoryOutput<FC>>();
+  auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<FC>(1);
+  test_support::SyntheticPipelineRun<FC> driver(
+      *pipeline, output, {}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+
+  constexpr double pi = 3.14159265358979323846;
+  constexpr double fractional_samples = 0.35;
+  constexpr std::array<int, 4> tones{-10, -5, 5, 10};
+  constexpr std::array<double, 2> coarse_phase_step{0.4, -0.7};
+  auto sample = [&](size_t coarse, size_t fpga, int packet, int tick,
+                    int, int) {
+    const double n = packet * 512 + tick;
+    std::complex<double> value{0.0, 0.0};
+    for (int k : tones) {
+      const double phase = 2.0 * pi * k *
+          (n - (fpga == 1 ? fractional_samples : 0.0)) / 32.0;
+      value += 20.0 * std::polar(1.0, phase);
+    }
+    if (fpga == 1)
+      value *= std::polar(1.0, coarse_phase_step[coarse]);
+    return std::complex<int8_t>{
+        static_cast<int8_t>(std::lround(value.real())),
+        static_cast<int8_t>(std::lround(value.imag()))};
+  };
+  auto scale = [](size_t, size_t, int, int, int) { return int16_t{1}; };
+  driver.run(sample, scale);
+
+  // The HDF5/TCC baseline convention is E_0 * conj(E_1). For a delayed
+  // second FPGA, its fine-bin phase is -2*pi*k*d/32 + coarse_phase_step,
+  // so the visibility phase has the opposite sign.
+  const size_t cross = test_support::baseline_index(0, 2);
+  for (size_t coarse = 0; coarse < 2; ++coarse) {
+    for (int k : tones) {
+      // Production retains raw shifted FFT bins 3..29, so bin k+16 is
+      // exported at local index k+13.
+      const size_t retained_bin = static_cast<size_t>(k + 13);
+      const size_t channel = coarse * FC::NR_EFFECTIVE_FINE_CHANNELS + retained_bin;
+      const auto &vis = *output->visibilities;
+      const std::complex<float> measured{
+          vis[channel][cross][0][0][0], vis[channel][cross][0][0][1]};
+      ASSERT_GT(std::abs(measured), 1.0f);
+      const double expected = 2.0 * pi * k * fractional_samples / 32.0 -
+                              coarse_phase_step[coarse];
+      const double phase_error = std::arg(measured *
+          std::polar(1.0f, static_cast<float>(-expected)));
+      EXPECT_NEAR(phase_error, 0.0, 0.12)
+          << "coarse=" << coarse << " fine k=" << k;
+    }
+  }
+  pipeline.reset();
 }

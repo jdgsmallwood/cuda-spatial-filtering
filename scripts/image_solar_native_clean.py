@@ -74,16 +74,13 @@ def main():
     args = parser.parse_args()
     iers.conf.auto_download=False; iers.conf.auto_max_age=None
     with np.load(args.validation) as fit:
-        freq=fit['frequencies_hz'];good=fit['joint'];order=fit['antenna_order']
+        freq=fit['frequencies_hz'];good=fit['good'];order=fit['antenna_order']
         selected=fit['selected'];gains=fit['gains'];data=fit['data'][2]
         stamp=Time(fit['times_jd'][2],format='jd')
     report=json.loads(args.report.read_text())
     unique=science_channel_mask(freq)
-    available=np.flatnonzero(good&unique)
-    if not len(available):
-        parser.error('no jointly accepted channels to image')
-    channels=available[np.unique(np.linspace(0,len(available)-1,
-                                              min(args.channels,len(available))).astype(int))]
+    if not np.any(good & unique[:, None]):
+        parser.error('no accepted channels to image')
     site=json.loads(args.config.read_text())['array_location']
     location=EarthLocation.from_geodetic(site['longitude_deg']*u.deg,
         site['latitude_deg']*u.deg,site['height_m']*u.m)
@@ -99,11 +96,14 @@ def main():
     axis=np.linspace(-np.deg2rad(12),np.deg2rad(12),args.pixels)
     planes=[];stats={}
     for pi,pol in enumerate(('XX','YY')):
+        available=np.flatnonzero(good[:,pi]&unique)
+        if not len(available):
+            parser.error(f'no accepted {pol} channels to image')
+        channels=available[np.unique(np.linspace(0,len(available)-1,
+                                                  min(args.channels,len(available))).astype(int))]
         use=selected.copy()
         excluded={item['antenna_id'] for item in report['excluded_receptors']
                   if item['polarization']==pol}
-        # The independent transfer capture identified A30 X as unstable.
-        if pol=='XX': excluded.add(30)
         for ant in excluded:
             ai=np.flatnonzero(order==ant)
             if len(ai): use[ai[0],:]=False;use[:,ai[0]]=False
@@ -124,6 +124,7 @@ def main():
         components,residual,restored,niter,sigma=clean(dirty,psf,axis)
         planes.append((dirty,psf,components,residual,restored))
         stats[pol]={'baselines':len(ii),'channels':len(channels),
+                    'frequency_bounds_mhz':[float(freq[channels[0]]/1e6),float(freq[channels[-1]]/1e6)],
                     'sun_elevation_deg':float(sun.alt.deg),
                     'dirty_peak':float(dirty.max()),
                     'pixel_deg':float(np.rad2deg(axis[1]-axis[0])),
@@ -143,14 +144,16 @@ def main():
             axs[pi,col].plot(0,0,'k+',ms=8)
             axs[pi,col].set_xlabel('Azimuth tangent offset (deg)')
             axs[pi,col].set_ylabel('Altitude tangent offset (deg)')
-    fig.suptitle(f'Sun at {stamp.isot} UTC, {sun.alt.deg:.1f}° elevation | {len(channels)} validated fine channels\n'
+    fig.suptitle(f'Sun at {stamp.isot} UTC, {sun.alt.deg:.1f}° elevation | '
+                 f"{stats['XX']['channels']} XX / {stats['YY']['channels']} YY validated fine channels\n"
                  'Phase-only calibration; 4° Sun-centered CLEAN mask; relative visibility units')
     args.output.parent.mkdir(parents=True,exist_ok=True)
     fig.savefig(args.output,dpi=170)
     plt.close(fig)
     np.savez_compressed(args.output.with_suffix('.npz'),axis_rad=axis,
                         xx=np.asarray(planes[0]),yy=np.asarray(planes[1]),
-                        frequencies_hz=freq[channels],utc=stamp.isot)
+                        frequency_hz_xx=freq[good[:,0]&unique],
+                        frequency_hz_yy=freq[good[:,1]&unique],utc=stamp.isot)
     args.output.with_suffix('.json').write_text(json.dumps(stats,indent=2)+'\n')
     print(json.dumps(stats,indent=2))
 

@@ -448,6 +448,50 @@ TEST(ChannelizerOutputToCorrInputTest, DropsEdgeChannelsAndPacksSurvivors) {
   }
 }
 
+TEST(ChannelizerOutputToCorrInputTest, DropsLowerDuplicateBeforeCorrelation) {
+  constexpr size_t coarse_count = 2, fine_count = 8, edge_trim = 1;
+  constexpr size_t lower_extra_trim = 1;
+  constexpr size_t retained = fine_count - 2 * edge_trim - lower_extra_trim;
+  std::vector<__half2> input(coarse_count * fine_count);
+  for (size_t coarse = 0; coarse < coarse_count; ++coarse)
+    for (size_t fine = 0; fine < fine_count; ++fine) {
+      const float value = static_cast<float>(10 * coarse + fine + 1);
+      input[coarse * fine_count + fine] = __floats2half2_rn(value, -value);
+    }
+  const std::array<float, fine_count - 2 * edge_trim> gains{
+      0.25f, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f};
+  __half2 *device_input = nullptr;
+  __half *device_output = nullptr;
+  float *device_gains = nullptr;
+  ASSERT_EQ(cudaMalloc(&device_input, input.size() * sizeof(__half2)), cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&device_output, coarse_count * retained * 2 * sizeof(__half)),
+            cudaSuccess);
+  ASSERT_EQ(cudaMalloc(&device_gains, gains.size() * sizeof(float)), cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(device_input, input.data(), input.size() * sizeof(__half2),
+                       cudaMemcpyHostToDevice), cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(device_gains, gains.data(), gains.size() * sizeof(float),
+                       cudaMemcpyHostToDevice), cudaSuccess);
+  channelizer_output_to_corr_input<coarse_count, fine_count, edge_trim,
+                                   1, 1, 1, 1, 1, lower_extra_trim>(
+      device_input, device_output, /*stream=*/0, device_gains);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  std::vector<__half> output(coarse_count * retained * 2);
+  ASSERT_EQ(cudaMemcpy(output.data(), device_output, output.size() * sizeof(__half),
+                       cudaMemcpyDeviceToHost), cudaSuccess);
+  cudaFree(device_input);
+  cudaFree(device_output);
+  cudaFree(device_gains);
+  for (size_t coarse = 0; coarse < coarse_count; ++coarse)
+    for (size_t effective = 0; effective < retained; ++effective) {
+      const size_t raw = edge_trim + lower_extra_trim + effective;
+      const float expected = static_cast<float>(10 * coarse + raw + 1) *
+                             gains[effective + lower_extra_trim];
+      EXPECT_FLOAT_EQ(__half2float(output[(coarse * retained + effective) * 2]), expected);
+      EXPECT_FLOAT_EQ(__half2float(output[(coarse * retained + effective) * 2 + 1]),
+                      -expected);
+    }
+}
+
 // Direct, low-level test of channelizer_output_to_col_maj_cons's edge-channel trim and output
 // layout -- same rationale as ChannelizerOutputToCorrInputTest above, for the sibling kernel used
 // by pipelines that beamform directly from channelizer output (LambdaBeamformedSpectraPipeline,

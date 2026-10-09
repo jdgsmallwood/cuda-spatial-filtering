@@ -412,19 +412,28 @@ template <size_t NR_CHANNELS_T, size_t NR_FPGA_SOURCES_T,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET = false,
           size_t FFT_DOWNSAMPLE_FACTOR_T = 128, size_t NR_FINE_CHANNELS_T = 1,
           size_t NR_FINE_CHANNEL_EDGE_TRIM_T = 0,
-          size_t NR_ACTIVE_RECEIVERS_T = NR_RECEIVERS_T>
+          size_t NR_ACTIVE_RECEIVERS_T = NR_RECEIVERS_T,
+          size_t NR_FINE_CHANNEL_LOWER_EXTRA_TRIM_T = 0>
 struct LambdaConfig {
 
   static constexpr size_t NR_FPGA_CHANNELS = NR_CHANNELS_T;
   static constexpr size_t NR_FINE_CHANNELS = NR_FINE_CHANNELS_T;
   static constexpr size_t NR_FINE_CHANNEL_EDGE_TRIM = NR_FINE_CHANNEL_EDGE_TRIM_T;
+  static constexpr size_t NR_FINE_CHANNEL_LOWER_EXTRA_TRIM =
+      NR_FINE_CHANNEL_LOWER_EXTRA_TRIM_T;
   static_assert(NR_FINE_CHANNELS == 1 ||
-                    NR_FINE_CHANNELS > 2 * NR_FINE_CHANNEL_EDGE_TRIM,
-                "NR_FINE_CHANNEL_EDGE_TRIM_T trims more channels than NR_FINE_CHANNELS_T provides");
+                    NR_FINE_CHANNELS >
+                        2 * NR_FINE_CHANNEL_EDGE_TRIM +
+                            NR_FINE_CHANNEL_LOWER_EXTRA_TRIM,
+                "Fine-channel trims remove all available channels");
+  static_assert(NR_FINE_CHANNELS > 1 || NR_FINE_CHANNEL_LOWER_EXTRA_TRIM == 0,
+                "Coarse-only processing cannot trim a fine channel");
   // Number of fine channels per coarse channel that actually survive into NR_CHANNELS/correlation
-  // after channelizer_output_to_corr_input drops NR_FINE_CHANNEL_EDGE_TRIM from each edge.
+  // after channelizer_output_to_corr_input drops the symmetric edge trim and
+  // any additional lower-edge bins (one in Starspin's 32/27 fine grid).
   static constexpr size_t NR_EFFECTIVE_FINE_CHANNELS =
-      (NR_FINE_CHANNELS > 1) ? (NR_FINE_CHANNELS - 2 * NR_FINE_CHANNEL_EDGE_TRIM)
+      (NR_FINE_CHANNELS > 1) ? (NR_FINE_CHANNELS - 2 * NR_FINE_CHANNEL_EDGE_TRIM -
+                               NR_FINE_CHANNEL_LOWER_EXTRA_TRIM)
                              : NR_FINE_CHANNELS;
   // Widened processing/output channel count -- see the template-parameter comment above.
   static constexpr size_t NR_CHANNELS = NR_FPGA_CHANNELS * NR_EFFECTIVE_FINE_CHANNELS;

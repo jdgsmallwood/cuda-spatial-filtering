@@ -10,8 +10,12 @@
 #include <thread>
 #include <vector>
 
+#ifndef NR_OBSERVING_FINE_CHANNEL_LOWER_EXTRA_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_LOWER_EXTRA_TRIM 0
+#endif
 using Config = LambdaConfig<NR_OBSERVING_CHANNELS, 4, 64, 40, 2, 10,
-                            256, 1, 40, 32, 56, true, 256, 32, 2, 36>;
+                            256, 1, 40, 32, 56, true, 256, 32, 2, 36,
+                            NR_OBSERVING_FINE_CHANNEL_LOWER_EXTRA_TRIM>;
 
 struct BenchState : ProcessorStateBase {
   static constexpr int kBuffers = 8;
@@ -31,10 +35,13 @@ struct BenchState : ProcessorStateBase {
 
 int main(int argc, char **argv) {
   const int repeats = argc > 1 ? std::atoi(argv[1]) : 96;
-  if (repeats < 1 || repeats > 1000) return 1;
+  const int integration_blocks = argc > 2 ? std::atoi(argv[2]) : 56;
+  if (repeats < 1 || repeats > 1000 || integration_blocks < 1 ||
+      integration_blocks > 1000)
+    return 1;
   try {
     BenchState state;
-    LambdaStarspinPipeline<Config> pipeline(3, 56);
+    LambdaStarspinPipeline<Config> pipeline(3, integration_blocks);
     pipeline.set_state(&state);
     auto output = std::make_shared<SingleHostMemoryOutput<Config>>();
     pipeline.set_output(output);
@@ -58,6 +65,8 @@ int main(int argc, char **argv) {
     const size_t bytes = packets[0]->get_samples_elements_size() +
                          packets[0]->get_scales_element_size();
     std::cout << "channels=" << NR_OBSERVING_CHANNELS
+              << " fine_bins=" << Config::NR_EFFECTIVE_FINE_CHANNELS
+              << " integration_blocks=" << integration_blocks
               << " input_bytes_per_block=" << bytes
               << " blocks=" << repeats << " seconds=" << elapsed
               << " blocks_per_s=" << repeats / elapsed

@@ -400,7 +400,8 @@ public:
                                        T::NR_FINE_CHANNEL_EDGE_TRIM,
                                        T::NR_POLARIZATIONS, NR_FILTER_RECEIVERS,
                                        T::NR_ACTIVE_RECEIVERS,
-                                       NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK>(
+                                       NR_BLOCKS_FOR_CORRELATION, NR_TIMES_PER_BLOCK,
+                                       T::NR_FINE_CHANNEL_LOWER_EXTRA_TRIM>(
           (const __half2 *)b.channelizer_output.get(),
           (__half *)b.correlator_input.get(), b.stream,
           channelizer_->deripple_gains());

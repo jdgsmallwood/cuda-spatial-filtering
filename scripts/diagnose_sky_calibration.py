@@ -17,7 +17,7 @@ from astropy.utils import iers
 from lambda_commissioning.constants import NARRIBRI, CHANWIDTH, c
 from lambda_commissioning.modelling import calc_sky_model, calc_lmn, _aep_interp, sum_point_sources
 from lambda_commissioning.utils import make_telescope_model, read_hdf5_time_freq
-from fine_frequency_axis import processing_frequencies_hz
+from fine_frequency_axis import processing_frequencies_hz, unique_processing_frequencies_hz
 from lambda_commissioning.vistools import BRIGHT_SOURCE_CATALOG, BRIGHT_SOURCE_ALPHA
 
 FLUX150 = {'Cyg A':10500,'Cas A':13000,'Tau A':1500,'Vir A':1200,
@@ -70,8 +70,14 @@ def main():
         ncoarse=int(capture.attrs['max_channel'])-first+1
     if len(freqs)==ncoarse*28:
         freqs=processing_frequencies_hz(first,ncoarse)
-    channels=np.arange(0,len(freqs)//28,args.coarse_stride)*28+14
-    channels=np.unique(np.r_[channels,len(freqs)-14])
+        fine_per_coarse, center = 28, 14
+    elif len(freqs)==ncoarse*27:
+        freqs=unique_processing_frequencies_hz(first,ncoarse)
+        fine_per_coarse, center = 27, 13
+    else:
+        fine_per_coarse, center = 1, 0
+    channels=np.arange(0,ncoarse,args.coarse_stride)*fine_per_coarse+center
+    channels=np.unique(np.r_[channels,(ncoarse-1)*fine_per_coarse+center])
     n=args.samples
     windows=[np.arange(3,3+n),np.arange(len(times)-n-3,len(times)-3)]
     stamps=Time([np.mean(times[w].jd) for w in windows],format='jd')

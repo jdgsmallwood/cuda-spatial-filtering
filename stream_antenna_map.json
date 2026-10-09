@@ -1,5 +1,5 @@
 {
-  "description": "Maps each FPGA data stream to its antenna and canonical correlator-hand index. 'stream' is the flat index within an FPGA: stream k = receiver_slot (k/2), pol_slot (k%2). 'polarization' is the internal correlator-hand index: 0 and 1. Commissioning evidence currently pairs raw index 0 with physical YY and raw index 1 with physical XX; these physical labels are applied at the calibration/export boundary. Each connected antenna has one entry for each index. Streams with antenna_id=-1 are disconnected. Antennas 8 and 12 have their two hand indices swapped relative to the other connected antennas to match their wiring.",
+  "description": "Maps each FPGA data stream to its antenna and canonical correlator-hand index. 'stream' is the flat index within an FPGA: stream k = receiver_slot (k/2), pol_slot (k%2). 'polarization' is the internal correlator-hand index: 0 and 1. Commissioning evidence currently pairs raw index 0 with physical YY and raw index 1 with physical XX; these physical labels are applied at the calibration/export boundary. Each connected antenna has one entry for each index. Streams with antenna_id=-1 are disconnected. The 2026-10-04 input audit removed the previous reversals for antennas 8 and 12: raw even/odd streams now map to canonical 0/1 for every connected antenna. Earlier captures retain their original mapping in the embedded run audit; analysis must use that captured mapping.",
   "fpgas": {
     "0": {
       "alveo_board": "A0",
@@ -91,12 +91,12 @@
         { "stream":  9, "antenna_id": 27, "polarization": 1 },
         { "stream": 10, "antenna_id": 30, "polarization": 0 },
         { "stream": 11, "antenna_id": 30, "polarization": 1 },
-        { "stream": 12, "antenna_id": 12, "polarization": 1 },
-        { "stream": 13, "antenna_id": 12, "polarization": 0 },
+        { "stream": 12, "antenna_id": 12, "polarization": 0 },
+        { "stream": 13, "antenna_id": 12, "polarization": 1 },
         { "stream": 14, "antenna_id": 22, "polarization": 0 },
         { "stream": 15, "antenna_id": 22, "polarization": 1 },
-        { "stream": 16, "antenna_id":  8, "polarization": 1 },
-        { "stream": 17, "antenna_id":  8, "polarization": 0 },
+        { "stream": 16, "antenna_id":  8, "polarization": 0 },
+        { "stream": 17, "antenna_id":  8, "polarization": 1 },
         { "stream": 18, "antenna_id": 21, "polarization": 0 },
         { "stream": 19, "antenna_id": 21, "polarization": 1 }
       ]

@@ -20,8 +20,13 @@ from scipy.special import j1
 
 from diagnose_sky_calibration import fit_gains, score
 from lambda_commissioning.modelling import calc_sky_model, calc_sun_model, calc_lmn
-from lambda_commissioning.utils import make_telescope_model, read_hdf5_time_freq
-from fine_frequency_axis import processing_frequencies_hz, science_channel_indices
+from lambda_commissioning.capture_timing import timing_pcap_fpga, visibility_clock
+from lambda_commissioning.point_calibration import integration_centres
+from lambda_commissioning.utils import (_LAMBDA_PACKET_DTYPE, get_udp_payload_bytes,
+                                         make_telescope_model, read_hdf5_time_freq)
+from fine_frequency_axis import (processing_frequencies_hz,
+                                 science_channel_indices,
+                                 unique_processing_frequencies_hz)
 from lambda_commissioning.constants import NARRIBRI
 
 
@@ -44,16 +49,58 @@ def solar_model(stamp, frequency_hz, array, location, radius_deg):
     return model*disk
 
 
+def select_parallel_hand(block, antenna_a, antenna_b, swapped, hand):
+    """Select the recorded product for a physical parallel-hand baseline.
+
+    ``block`` is [frequency, baseline, recorded hand, recorded hand, real/imag].
+    Each antenna can independently reverse its two recorded hands. No
+    conjugation or global XX/YY convention change is performed here.
+    """
+    first=np.where(swapped[antenna_a],1-hand,hand)
+    second=np.where(swapped[antenna_b],1-hand,hand)
+    result=np.empty(block.shape[:2],complex)
+    for hp in (0,1):
+        for hq in (0,1):
+            use=(first==hp)&(second==hq)
+            if np.any(use):
+                result[:,use]=(block[:,use,hp,hq,0]
+                               +1j*block[:,use,hp,hq,1])
+    return result
+
+
+def packet_clock_times(capture, timing_pcap, location):
+    """Use the audited FPGA delay snapshot to locate integration centres in UTC."""
+    packet_times, payloads = get_udp_payload_bytes(str(timing_pcap), packets=12000)
+    packets = np.frombuffer(b"".join(payloads), dtype=_LAMBDA_PACKET_DTYPE)
+    if not len(packets):
+        raise ValueError("empty timing PCAP")
+    epochs = np.asarray(packet_times, dtype=float) - packets["seq_no"] * 1.08e-6
+    with h5py.File(capture) as hdf:
+        manifest = json.loads(hdf["audit/run_manifest_json"][()])
+        clock = visibility_clock(manifest, float(np.median(epochs)),
+                                 timing_pcap_fpga(timing_pcap))
+        sequence = hdf["vis_seq_nums"][:]
+    first_start = Time(clock["epoch_unix"] + int(sequence[0, 0]) * 1.08e-6,
+                       format="unix", scale="utc").mjd
+    centres, _ = integration_centres(sequence, first_start)
+    return Time(centres, format="mjd", scale="utc", location=location)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('capture',type=Path)
     p.add_argument('output',type=Path)
     p.add_argument('--antenna-id-swaps',default='')
+    p.add_argument('--swap-pol-antennas',default='',
+                   help='Additional swap of RECORDED hands for these antenna IDs; '
+                        'swapping an ID already reversed by the captured input map undoes that reversal')
     p.add_argument('--samples',type=int,default=30)
     p.add_argument('--exclude-antennas',default='14')
     p.add_argument('--nside',type=int,default=64)
     p.add_argument('--min-baseline',type=float,default=7)
     p.add_argument('--config-file',type=Path,help='Use the exact runtime array location')
+    p.add_argument('--timing-pcap',type=Path,required=True,
+                   help='Single-FPGA timing PCAP from the capture boot; HDF5 mjd_start is only writer construction time')
     p.add_argument('--model',choices=('haslam','sun-point','sun-disk'),default='haslam')
     p.add_argument('--sun-radius-deg',type=float,default=0.27,
                    help='Uniform radio-Sun radius for sun-disk model (default: 0.27 degrees)')
@@ -68,13 +115,20 @@ def main():
         site=json.loads(args.config_file.read_text())['array_location']
         location=EarthLocation.from_geodetic(site['longitude_deg']*u.deg,
             site['latitude_deg']*u.deg,site['height_m']*u.m)
-    times,freqs=read_hdf5_time_freq(str(args.capture));nf=len(freqs);ns=args.samples
+    _,freqs=read_hdf5_time_freq(str(args.capture));nf=len(freqs);ns=args.samples
+    times=packet_clock_times(args.capture,args.timing_pcap,location)
     with h5py.File(args.capture) as capture:
         min_channel=int(capture.attrs['min_channel'])
         coarse_channels=int(capture.attrs['max_channel'])-min_channel+1
+        audit=json.loads(capture['audit/run_manifest_json'][()])
+        captured_hand_swaps=sorted({row['antenna_id'] for row in audit['forward_mapping']
+            if row['antenna_id']>0 and row['raw_polarization']!=row['canonical_polarization']})
     fine_grid=nf==coarse_channels*28
+    unique_fine_grid=nf==coarse_channels*27
     if fine_grid:
         freqs=processing_frequencies_hz(min_channel,coarse_channels)
+    elif unique_fine_grid:
+        freqs=unique_processing_frequencies_hz(min_channel,coarse_channels)
     starts=[3,len(times)//2-ns//2,len(times)-ns-3]
     if starts[1]<starts[0]+ns or starts[2]<starts[1]+ns:
         p.error('capture too short for three independent windows')
@@ -84,6 +138,11 @@ def main():
     for pair in filter(None,args.antenna_id_swaps.split(',')):
         a,b=[int(v)-1 for v in pair.split(':')];order[a],order[b]=order[b],order[a]
     excluded={int(v) for v in args.exclude_antennas.split(',') if v}
+    swapped_hands={int(v) for v in args.swap_pol_antennas.split(',') if v}
+    if any(v<1 or v>36 for v in swapped_hands):
+        p.error('--swap-pol-antennas IDs must be 1..36')
+    print('Hand reversals already applied at capture:',captured_hand_swaps,flush=True)
+    print('Additional recorded-hand reversals:',sorted(swapped_hands),flush=True)
     live=np.array([v+1 not in excluded for v in order])
     raw=np.zeros((3,nf,2,36,36),complex)
     with h5py.File(args.capture) as f:
@@ -91,12 +150,14 @@ def main():
         pairs=f['baseline_antenna_ids'][:]
         good=(pairs>0).all(axis=1)&(pairs<=36).all(axis=1)
         a,b=pairs[good].T-1
+        hand_swapped=np.isin(np.arange(36)+1,list(swapped_hands))
         for wi,win in enumerate(windows):
             v=np.zeros((nf,len(a),2),complex)
             for ti in win:
                 block=f['visibilities'][int(ti)][:,good]
                 for pi,hand in enumerate((1,0)):
-                    v[:,:,pi]+=block[:,:,hand,hand,0]+1j*block[:,:,hand,hand,1]
+                    v[:,:,pi]+=select_parallel_hand(
+                        block,a,b,hand_swapped,hand)
             for pi in range(2):
                 raw[wi,:,pi,a,b]=(v[:,:,pi]/ns).T
                 raw[wi,:,pi,b,a]=(v[:,:,pi].conj()/ns).T
@@ -184,6 +245,9 @@ def main():
     bandwidth=float(np.sum(joint&unique)*(freqs[1]-freqs[0])/1e6)
     report={'capture':str(args.capture),'utc':stamps.isot.tolist(),
         'antenna_id_swaps':args.antenna_id_swaps,
+        'swap_pol_antennas':sorted(swapped_hands),
+        'captured_input_hand_reversals':captured_hand_swaps,
+        'effective_raw_hand_reversals':sorted(set(captured_hand_swaps)^swapped_hands),
         'model':('Haslam + receptor AEP; no duplicate point sources' if args.model=='haslam'
                  else args.model),'sun_radius_deg':args.sun_radius_deg if args.model=='sun-disk' else None,
         'min_baseline_m':args.min_baseline,'excluded_antennas':sorted(excluded),
@@ -218,7 +282,10 @@ def main():
         'unique_frequency_channels':int(unique.sum()),'processing_channels_with_boundary_duplicates':nf,
         'frequency_first_hz':float(freqs[unique][0]),'frequency_last_hz':float(freqs[unique][-1]),
         'channel_mask_required':True,'excluded_antennas':sorted(excluded),
-        'antenna_id_swaps':args.antenna_id_swaps}
+        'antenna_id_swaps':args.antenna_id_swaps,
+        'captured_input_hand_reversals':captured_hand_swaps,
+        'effective_raw_hand_reversals':sorted(set(captured_hand_swaps)^swapped_hands),
+        'swap_pol_antennas':sorted(swapped_hands)}
     (args.output/'native_voltage_gains.json').write_text(json.dumps({'channel_axis':'fine_processing_index',
         'excluded_receptors':physical_excluded,'weights':weights,'provenance':provenance},indent=2)+'\n')
     unique_good=joint[unique]

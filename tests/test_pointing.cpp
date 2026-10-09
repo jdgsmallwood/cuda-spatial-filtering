@@ -80,6 +80,28 @@ TEST(PointingTest, FineProcessingGridUses32Over27OversamplingConvention) {
                        kept, min_coarse, plan, fine, trim));
 }
 
+TEST(PointingTest, ExtraLowerTrimKeepsUniqueFineFrequencies) {
+  FrequencyPlan plan{/*base_frequency_hz=*/0.0,
+                     /*channel_bandwidth_hz=*/781250.0};
+  constexpr size_t retained = 27;
+  const double first_coarse = channel_to_frequency_hz(64, plan);
+  const double next_coarse = channel_to_frequency_hz(65, plan);
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       0, 64, plan, 32, 2, 27.0, 1),
+                   first_coarse - 13.0 * plan.channel_bandwidth_hz / 27.0);
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       retained - 1, 64, plan, 32, 2, 27.0, 1),
+                   first_coarse + 13.0 * plan.channel_bandwidth_hz / 27.0);
+  EXPECT_DOUBLE_EQ(processing_channel_to_frequency_hz(
+                       retained, 64, plan, 32, 2, 27.0, 1),
+                   next_coarse - 13.0 * plan.channel_bandwidth_hz / 27.0);
+  EXPECT_NEAR(processing_channel_to_frequency_hz(
+                  retained, 64, plan, 32, 2, 27.0, 1) -
+                  processing_channel_to_frequency_hz(
+                      retained - 1, 64, plan, 32, 2, 27.0, 1),
+              plan.channel_bandwidth_hz / 27.0, 1e-6);
+}
+
 TEST(PointingTest, ToMjdUtcUnixEpochIs40587) {
   EXPECT_DOUBLE_EQ(to_mjd_utc(std::chrono::system_clock::time_point{}),
                    40587.0);
