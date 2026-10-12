@@ -1,0 +1,38 @@
+#pragma once
+
+#include "spatial/packet_formats.hpp"
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
+namespace test_support {
+// Unmodified 32-packet firmware simulation supplied with the LAMBDA CODIF spec.
+inline std::vector<std::vector<uint8_t>> codif_packets() {
+  const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                    "fixtures/codif_lambda.pcap";
+  std::ifstream file(path, std::ios::binary);
+  uint8_t global[24]{};
+  if (!file.read(reinterpret_cast<char *>(global), sizeof(global)) ||
+      codif::u32(global) != 0xa1b2c3d4 || codif::u32(global + 20) != 1)
+    throw std::runtime_error("Cannot read CODIF Ethernet PCAP fixture");
+  std::vector<std::vector<uint8_t>> packets;
+  uint8_t record[16];
+  while (file.read(reinterpret_cast<char *>(record), sizeof(record))) {
+    const auto size = codif::u32(record + 8);
+    if (size != 2666 || codif::u32(record + 12) != size)
+      throw std::runtime_error("Unexpected CODIF fixture packet length");
+    packets.emplace_back(size);
+    if (!file.read(reinterpret_cast<char *>(packets.back().data()), size))
+      throw std::runtime_error("Truncated CODIF fixture");
+  }
+  if (packets.size() != 32) throw std::runtime_error("Incomplete CODIF fixture");
+  return packets;
+}
+
+inline void codif_u16(uint8_t *p, uint16_t v) {
+  v = htole16(v); std::memcpy(p, &v, sizeof(v));
+}
+inline void codif_u32(uint8_t *p, uint32_t v) {
+  v = htole32(v); std::memcpy(p, &v, sizeof(v));
+}
+} // namespace test_support

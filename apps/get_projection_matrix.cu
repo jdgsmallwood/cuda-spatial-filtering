@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
   ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      args.min_freq_channel, fpga_delays, args.fpga_ids);
+      args.min_freq_channel, fpga_delays, args.fpga_ids, args.packet_format);
 
   HighFive::File output_file_(args.output_filename, HighFive::File::Truncate);
   std::cout << "Creating Projection Writer" << std::endl;

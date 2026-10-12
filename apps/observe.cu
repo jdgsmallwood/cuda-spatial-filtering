@@ -85,7 +85,7 @@ int main(int argc, char *argv[]) {
   ProcessorState<Config, num_packet_buffers, DEFAULT_PACKET_RING_BUFFER_SIZE>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      args.min_freq_channel, fpga_delays, args.fpga_ids);
+      args.min_freq_channel, fpga_delays, args.fpga_ids, args.packet_format);
 
   // const char *beam_filename = "hdf5_trial.hdf5";
   // std::string beam_filename = "/tmp/hdf5_trial.hdf5";

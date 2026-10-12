@@ -162,6 +162,9 @@ inline bool spatial_verbose_diagnostics_enabled() {
 
 class ProcessorStateBase {
 public:
+  explicit ProcessorStateBase(PacketFormat format = PacketFormat::Auto)
+      : packet_format(format) {}
+  const PacketFormat packet_format;
   int current_buffer = 0;
   std::atomic<int> write_index = 0;
   std::atomic<int> read_index = 0;
@@ -461,8 +464,10 @@ public:
   ProcessorState(size_t nr_packets_for_correlation, size_t nr_between_samples,
                  size_t min_freq_channel,
                  std::array<int64_t, T::NR_FPGA_SOURCES> fpga_delays,
-                 std::unordered_map<uint32_t, int> fpga_ids_)
-      : NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
+                 std::unordered_map<uint32_t, int> fpga_ids_,
+                 PacketFormat format = PacketFormat::Auto)
+      : ProcessorStateBase(format),
+        NR_PACKETS_FOR_CORRELATION(nr_packets_for_correlation),
         NR_BETWEEN_SAMPLES(nr_between_samples),
         MIN_FREQ_CHANNEL(min_freq_channel), fpga_delays(fpga_delays) {
 #ifdef SPATIAL_DIAGNOSTICS
@@ -880,10 +885,9 @@ public:
         // Samples (2.5 KB for the default shape, always 64 B-aligned dest):
         // streamed past the cache — the CPU never reads this buffer, the GPU
         // DMAs it.  Scales are 40 B and stride-unaligned; plain memcpy.
-        copy_nt(&samples, pkt.payload->data,
+        copy_nt(&samples, pkt.sample_data(),
                 sizeof(typename T::PacketDataStructure), defer_nt_fence);
-        std::memcpy(&scales, pkt.payload->scales,
-                    sizeof(typename T::PacketScaleStructure));
+        pkt.copy_scales(&scales);
         arrival = true;
         num_copied += 1;
 
@@ -1018,8 +1022,8 @@ public:
     // __attribute__((flatten)) and eliminates the vtable dispatch overhead.
     using ConcreteEntry = typename T::PacketEntryType;
     ProcessedPacket parsed =
-        static_cast<ConcreteEntry *>(pkt)->ConcreteEntry::parse();
-    if (parsed.payload == nullptr) [[unlikely]] {
+        static_cast<ConcreteEntry *>(pkt)->ConcreteEntry::parse(packet_format);
+    if (!parsed.valid()) [[unlikely]] {
       packets_discarded.fetch_add(1, std::memory_order_relaxed);
       return;
     }
@@ -1032,7 +1036,7 @@ public:
     // DEBUG_LOG("First data point...{} + {} i",
     //           parsed.payload->data[0][0][0].real(),
     //           parsed.payload->data[0][0][0].imag());
-    if (parsed.sample_count == 0) [[unlikely]] {
+    if (parsed.sample_count == 0 && !parsed.codif_header) [[unlikely]] {
       throw std::runtime_error(
           "parsed sample count was zero - something has gone wrong!");
     }
@@ -2854,33 +2858,12 @@ public:
             header->caplen <= state.slot_data_capacity()) {
           std::memcpy(write_pointer, data, header->caplen);
 
-          // Extract and potentially modify the sample number
-          // Structure: Ethernet (14) + IP (20) + UDP (8) + CustomHeader
-          // CustomHeader layout: sample_count (8), fpga_id (4), freq_channel
-          // (2), padding (8)
-          const size_t CUSTOM_HEADER_OFFSET = 42; // Ethernet + IP + UDP
-
-          if (header->caplen > CUSTOM_HEADER_OFFSET + sizeof(uint64_t)) {
-            // sample_count is the first field in CustomHeader (uint64_t)
-            uint64_t *sample_count_ptr = reinterpret_cast<uint64_t *>(
-                static_cast<uint8_t *>(write_pointer) + CUSTOM_HEADER_OFFSET);
-
-            uint64_t original_sample = *sample_count_ptr;
-
-            // Track min/max for first loop to calculate range
-            if (first_loop) {
-              min_sample_in_loop =
-                  std::min(min_sample_in_loop, original_sample);
-              max_sample_in_loop =
-                  std::max(max_sample_in_loop, original_sample);
-            }
-
-            // Apply offset for loops after the first
-            if (!first_loop && sample_offset > 0) {
-              *sample_count_ptr = original_sample + sample_offset;
-              DEBUG_LOG("Modified sample count: {} -> {}", original_sample,
-                        *sample_count_ptr);
-            }
+          uint64_t original_sample = 0;
+          if (prepare_replay_packet(static_cast<uint8_t *>(write_pointer),
+                                    header->caplen, sample_offset, original_sample,
+                                    -1, state.packet_format) && first_loop) {
+            min_sample_in_loop = std::min(min_sample_in_loop, original_sample);
+            max_sample_in_loop = std::max(max_sample_in_loop, original_sample);
           }
 
           // Extract IP source address from the raw Ethernet frame so that
@@ -3051,39 +3034,12 @@ public:
               header->caplen <= state.slot_data_capacity()) {
             std::memcpy(write_pointer, data, header->caplen);
 
-            // Extract and potentially modify the sample number
-            // Structure: Ethernet (14) + IP (20) + UDP (8) + CustomHeader
-            // CustomHeader layout: sample_count (8), fpga_id (4), freq_channel
-            // (2), padding (8)
-            const size_t CUSTOM_HEADER_OFFSET = 42; // Ethernet + IP + UDP
-
-            if (header->caplen > CUSTOM_HEADER_OFFSET + sizeof(uint64_t)) {
-              // sample_count is the first field in CustomHeader (uint64_t)
-              uint8_t *custom_header_start =
-                  static_cast<uint8_t *>(write_pointer) + CUSTOM_HEADER_OFFSET;
-              uint64_t *sample_count_ptr =
-                  reinterpret_cast<uint64_t *>(custom_header_start);
-
-              uint32_t *fpga_id_ptr =
-                  reinterpret_cast<uint32_t *>(custom_header_start + 8);
-
-              *fpga_id_ptr = i;
-              uint64_t original_sample = *sample_count_ptr;
-
-              // Track min/max for first loop to calculate range
-              if (first_loop) {
-                min_sample_in_loop =
-                    std::min(min_sample_in_loop, original_sample);
-                max_sample_in_loop =
-                    std::max(max_sample_in_loop, original_sample);
-              }
-
-              // Apply offset for loops after the first
-              if (!first_loop && sample_offset > 0) {
-                *sample_count_ptr = original_sample + sample_offset;
-                DEBUG_LOG("Modified sample count: {} -> {}", original_sample,
-                          *sample_count_ptr);
-              }
+            uint64_t original_sample = 0;
+            if (prepare_replay_packet(static_cast<uint8_t *>(write_pointer),
+                                      header->caplen, sample_offset, original_sample,
+                                      i, state.packet_format) && first_loop) {
+              min_sample_in_loop = std::min(min_sample_in_loop, original_sample);
+              max_sample_in_loop = std::max(max_sample_in_loop, original_sample);
             }
 
             // Extract IP source address from the raw Ethernet frame so that

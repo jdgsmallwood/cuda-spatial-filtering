@@ -1,5 +1,7 @@
 #pragma once
+#include "spatial/codif.hpp"
 #include "spatial/logging.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <complex>
@@ -55,6 +57,40 @@ struct CustomHeader {
 };
 
 #pragma pack(pop)
+
+enum class PacketFormat { Auto, Lambda, Codif };
+
+// PCAP looping and FPGA replication must rewrite the selected wire format.
+inline bool prepare_replay_packet(uint8_t *frame, size_t size, uint64_t offset,
+                                  uint64_t &original_sample, int fpga = -1,
+                                  PacketFormat format = PacketFormat::Auto) {
+  constexpr size_t network_bytes = 42;
+  if (size < network_bytes + sizeof(CustomHeader)) return false;
+  auto *header = frame + network_bytes;
+  if (format == PacketFormat::Codif ||
+      (format == PacketFormat::Auto &&
+       (codif::has_sync(header, size - network_bytes) ||
+        size == network_bytes + codif::header_bytes + codif::data_bytes))) {
+    if (!codif::valid(header, size - network_bytes)) return false;
+    original_sample = codif::sample_count(header);
+    codif::advance(header, offset);
+  } else {
+    if (format == PacketFormat::Lambda &&
+        size == network_bytes + codif::header_bytes + codif::data_bytes)
+      return false;
+    std::memcpy(&original_sample, header, sizeof(original_sample));
+    if (offset > std::numeric_limits<uint64_t>::max() - original_sample)
+      throw std::runtime_error("PCAP replay sample count overflow");
+    const uint64_t sample = original_sample + offset;
+    std::memcpy(header, &sample, sizeof(sample));
+    if (fpga >= 0) {
+      const uint32_t id = fpga;
+      std::memcpy(header + 8, &id, sizeof(id));
+    }
+  }
+  if (fpga >= 0) frame[28] = static_cast<uint8_t>(fpga);
+  return true;
+}
 
 struct FinalPacketData {
   uint64_t start_seq_id;
@@ -274,6 +310,24 @@ struct ProcessedPacket {
   uint32_t fpga_id;
   uint32_t payload_size;
   uint16_t freq_channel;
+  const uint8_t *codif_header = nullptr;
+
+  bool valid() const { return payload != nullptr || codif_header != nullptr; }
+  const void *sample_data() const {
+    return codif_header ? codif_header + codif::header_bytes :
+                          static_cast<const void *>(payload->data);
+  }
+  void copy_scales(void *destination) const {
+    if (!codif_header) {
+      std::memcpy(destination, payload->scales, sizeof(PacketScaleStructure));
+      return;
+    }
+    auto *scales = static_cast<int16_t *>(destination);
+    for (size_t adc = 0; adc < sizeof(PacketScaleStructure) / sizeof(int16_t); ++adc) {
+      const unsigned exponent = (codif_header[46 + adc / 2] >> (4 * (adc % 2))) & 15;
+      scales[adc] = static_cast<int16_t>(1 << (exponent > 8 ? 8 : exponent));
+    }
+  }
 } __attribute__((aligned(64)));
 
 // Packet storage for ring buffer.
@@ -286,12 +340,13 @@ template <typename PacketScaleStructure, typename PacketDataStructure>
 struct PacketEntry {
   // Slot capacity derived from the config instead of the fixed 4 KB
   // BUFFER_SIZE: largest frame this config can produce is a PCAP-replayed
-  // Ethernet frame (42 B eth/ip/udp + CustomHeader + scales + samples).
+  // Ethernet frame with either a legacy LAMBDA or CODIF header.
   // Rounded up to a cache line.  For the default LAMBDA shape this shrinks
   // each slot from ~4.2 KB to ~2.7 KB, cutting the ring's working set by
   // ~35% (see scripts/profiling/ANALYSIS.md #3).
   static constexpr size_t DATA_CAPACITY =
-      (42 + sizeof(CustomHeader) + sizeof(PacketScaleStructure) +
+      (42 + std::max(sizeof(CustomHeader) + sizeof(PacketScaleStructure),
+                     codif::header_bytes) +
        sizeof(PacketDataStructure) + 63) &
       ~static_cast<size_t>(63);
   static_assert(DATA_CAPACITY >= MIN_PCAP_HEADER_SIZE,
@@ -319,6 +374,35 @@ struct PacketEntry {
   parse() = 0;
 };
 
+template <typename PacketScaleStructure, typename PacketDataStructure>
+struct CodifPacketEntry : public PacketEntry<PacketScaleStructure, PacketDataStructure> {
+  using Base = PacketEntry<PacketScaleStructure, PacketDataStructure>;
+  using Parsed = ProcessedPacket<PacketScaleStructure, PacketDataStructure>;
+
+  static Parsed parse_packet(Base &entry, size_t offset) noexcept {
+    if (sizeof(PacketScaleStructure) != 40 || sizeof(PacketDataStructure) != codif::data_bytes ||
+        entry.length < static_cast<int>(offset) || entry.length > Base::DATA_CAPACITY ||
+        !codif::valid(entry.data + offset, entry.length - offset)) {
+      entry.processed.store(true, std::memory_order_relaxed);
+      return {};
+    }
+    const auto *header = entry.data + offset;
+    const uint32_t fpga = (ntohl(entry.sender_addr.sin_addr.s_addr) >> 8) & 255;
+    return Parsed{
+        .sample_count = codif::sample_count(header),
+        .timestamp = entry.timestamp.tv_sec * 1000000ULL + entry.timestamp.tv_usec,
+        .payload = nullptr,
+        .original_packet_processed = &entry.processed,
+        .fpga_id = fpga,
+        .payload_size = static_cast<uint32_t>(codif::data_bytes),
+        .freq_channel = codif::u16(header + 16),
+        .codif_header = header};
+  }
+  Parsed parse() noexcept override {
+    return parse_packet(*this, this->length == codif::header_bytes + codif::data_bytes ? 0 : 42);
+  }
+};
+
 template <typename PacketScaleStructure, typename PacketDataStructure,
           bool OVERWRITE_FPGA_ID_WITH_IP_THIRD_OCTET>
 struct LambdaPacketEntry
@@ -330,6 +414,12 @@ struct LambdaPacketEntry
   __attribute__((hot)) __attribute__((flatten))
   ProcessedPacket<PacketScaleStructure, PacketDataStructure>
   parse() noexcept override {
+    return parse(PacketFormat::Auto);
+  }
+
+  __attribute__((hot)) __attribute__((flatten))
+  ProcessedPacket<PacketScaleStructure, PacketDataStructure>
+  parse(PacketFormat format) noexcept {
 
     const int length = this->length;
     const uint8_t *__restrict__ base = this->data;
@@ -339,11 +429,29 @@ struct LambdaPacketEntry
     constexpr size_t ethernet_header_size =
         sizeof(EthernetHeader) + sizeof(IPHeader) + sizeof(UDPHeader);
     constexpr size_t framed_packet_size = ethernet_header_size + bare_packet_size;
+    constexpr size_t codif_size = codif::header_bytes + codif::data_bytes;
+    if (format == PacketFormat::Codif) {
+      return CodifPacketEntry<PacketScaleStructure, PacketDataStructure>::parse_packet(
+          *this, length == codif_size ? 0 : ethernet_header_size);
+    }
+    if (format == PacketFormat::Auto &&
+        length >= 0 && static_cast<size_t>(length) <= Base::DATA_CAPACITY) {
+      const size_t codif_offset = length == codif_size || codif::has_sync(base, length)
+                                      ? 0 : ethernet_header_size;
+      if (length == codif_size || length == ethernet_header_size + codif_size ||
+          (length >= codif_offset &&
+           codif::has_sync(base + codif_offset, length - codif_offset))) {
+        return CodifPacketEntry<PacketScaleStructure, PacketDataStructure>::parse_packet(*this, codif_offset);
+      }
+    }
     // ibverbs zero-copy lands CustomHeader+payload without Ethernet/IP/UDP;
     // the kernel socket and legacy ibverbs paths land the complete frame.
     // A partial payload must never be parsed: process_packet_data copies the
     // entire samples array and would otherwise read stale ring-slot bytes.
-    if (length < MIN_PCAP_HEADER_SIZE ||
+    if (length < MIN_PCAP_HEADER_SIZE || length > Base::DATA_CAPACITY ||
+        (format == PacketFormat::Lambda &&
+         length != static_cast<int>(bare_packet_size) &&
+         length != static_cast<int>(framed_packet_size)) ||
         (length != static_cast<int>(bare_packet_size) &&
          length < static_cast<int>(framed_packet_size))) [[unlikely]] {
       this->processed.store(true, std::memory_order_relaxed);

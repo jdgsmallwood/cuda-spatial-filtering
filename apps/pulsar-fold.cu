@@ -63,7 +63,7 @@ int main(int argc, char *argv[]) {
   ProcessorState<Config, num_packet_buffers, packet_ring_size>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      args.min_freq_channel, fpga_delays, args.fpga_ids);
+      args.min_freq_channel, fpga_delays, args.fpga_ids, args.packet_format);
 
   // The only production output of this app is the PSRDADA ring.  Keep the
   // Output object non-null (the pipeline uses that as its output-enable bit),
