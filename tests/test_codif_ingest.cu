@@ -31,6 +31,8 @@ static void check_codif_ingest(PacketFormat format) {
         auto *bytes = static_cast<uint8_t *>(destination);
         std::memcpy(bytes, fixture.data(), fixture.size());
         auto *header = bytes + 42;
+        if (format == PacketFormat::Codif)
+          test_support::standard_codif_header(header, fp);
         test_support::codif_u32(header, codif::frames_per_period - 2);
         codif::advance(header, (packet + fp) * 64);
         test_support::codif_u16(header + 16, 110 + ch);

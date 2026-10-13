@@ -160,10 +160,11 @@ TEST_F(FineChannelizedStarspinTest, DisabledConfigSatisfiesPhysicalInvariants) {
 
 // Independent CPU oracle for the complete wire-packet -> ProcessorState ->
 // Starspin -> packed-visibility path.  Distinct complex values and scales on
-// both FPGA sources make an FPGA-local scale lookup, channel crossover, hand
+// all FPGA sources make an FPGA-local scale lookup, channel crossover, hand
 // swap, or baseline/conjugation reversal visible in the output.
-TEST_F(FineChannelizedStarspinTest, FourFpgaComplexVisibilitiesMatchCpuOracle) {
-  using MC = LambdaConfig<2, 4, 8, 8, 2, 2, 1, 1, 32, 32, 1>;
+TEST_F(FineChannelizedStarspinTest, EightCoarseChannelsFourFpgaVisibilitiesMatchCpuOracle) {
+  using MC = LambdaConfig<8, 4, 8, 8, 2, 2, 1, 1, 32, 32, 1>;
+  static_assert(MC::NR_FINE_CHANNELS == 1 && MC::NR_CHANNELS == 8);
   auto output = std::make_shared<SequenceTrackingOutput<MC>>();
   auto pipeline = test_support::pipeline_factories::make_starspin_pipeline<MC>(1);
   test_support::SyntheticPipelineRun<MC> driver(

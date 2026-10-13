@@ -175,6 +175,19 @@ foreach(NR_FPGAS 1 2 3 4)
         endif()
         list(APPEND _STARSPIN_TARGETS ${SW_TARGET})
     endforeach()
+
+    # Eight incoming FPGA channels, with no additional PFB channelization.
+    set(COARSE_TARGET "starspin_${NR_FPGAS}_8_coarse")
+    add_executable(${COARSE_TARGET} ${PROJECT_SOURCE_DIR}/apps/starspin.cu)
+    target_link_libraries(${COARSE_TARGET} PRIVATE gpu_app_common)
+    set_target_properties(${COARSE_TARGET} PROPERTIES BUILD_RPATH
+        "${SPATIAL_APP_BUILD_RPATH}")
+    target_compile_definitions(${COARSE_TARGET} PRIVATE
+        NR_OBSERVING_FPGA_SOURCES=${NR_FPGAS}
+        NR_OBSERVING_CHANNELS=8
+        SPATIAL_STARSPIN_COARSE_ONLY=1
+        SPATIAL_THP_INPUT_BUFFERS=1)
+    list(APPEND _STARSPIN_TARGETS ${COARSE_TARGET})
 endforeach()
 
 # Retained end-to-end CPU ingest benchmark. It executes the normal packet

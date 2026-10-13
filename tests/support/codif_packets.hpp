@@ -35,4 +35,13 @@ inline void codif_u16(uint8_t *p, uint16_t v) {
 inline void codif_u32(uint8_t *p, uint32_t v) {
   v = htole32(v); std::memcpy(p, &v, sizeof(v));
 }
+
+// Derive the October 2026 standard header without altering the old PCAP fixture.
+inline void standard_codif_header(uint8_t *header, uint16_t board) {
+  codif_u16(header + 18, board);
+  codif_u16(header + 20, 0);
+  header[22] = 'A';
+  header[23] = 't';
+  codif_u16(header + 44, 0x03bb);
+}
 } // namespace test_support

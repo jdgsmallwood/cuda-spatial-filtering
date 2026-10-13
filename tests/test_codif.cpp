@@ -14,6 +14,82 @@ static CodifConfig::PacketEntryType captured_packet() {
   return entry;
 }
 
+TEST(CodifPacketTests, StandardMetadataKeepsSamplesScalesAndIpRouting) {
+  for (bool bare : {false, true}) {
+    for (auto format : {PacketFormat::Auto, PacketFormat::Codif}) {
+      auto entry = captured_packet();
+      const auto count = entry.parse().sample_count;
+      const auto samples = std::vector<uint8_t>(entry.data + 106, entry.data + entry.length);
+      test_support::standard_codif_header(entry.data + 42, 2);
+      // Routing remains source-IP based, even if a header disagrees.
+      entry.sender_addr.sin_addr.s_addr = htonl(0x0a00070a);
+      if (bare) {
+        entry.length -= 42;
+        std::memmove(entry.data, entry.data + 42, entry.length);
+      }
+      const auto parsed = entry.parse(format);
+      ASSERT_TRUE(parsed.valid());
+      EXPECT_EQ(parsed.sample_count, count);
+      EXPECT_EQ(parsed.freq_channel, 110);
+      EXPECT_EQ(parsed.fpga_id, 7);
+      EXPECT_EQ(std::memcmp(parsed.sample_data(), samples.data(), samples.size()), 0);
+      CodifConfig::PacketScaleStructure scales;
+      parsed.copy_scales(scales);
+      for (auto &receiver : scales)
+        for (auto scale : receiver) EXPECT_EQ(scale, 128);
+    }
+  }
+}
+
+TEST(CodifPacketTests, ValidatesMetadataLayoutAndAbsoluteThreadRange) {
+  for (auto format : {PacketFormat::Auto, PacketFormat::Codif}) {
+    for (uint16_t id : {0, 0x03bb, 1, 0xbb03, 0xffff}) {
+      auto entry = captured_packet();
+      test_support::codif_u16(entry.data + 42 + 44, id);
+      EXPECT_EQ(entry.parse(format).valid(), id == 0 || id == 0x03bb);
+      if (id != 0 && id != 0x03bb) {
+        uint64_t original = 0;
+        EXPECT_FALSE(prepare_replay_packet(entry.data, entry.length, 64, original, 3, format));
+      }
+    }
+    for (uint16_t channel : {0, 511, 512, 65535}) {
+      auto entry = captured_packet();
+      test_support::standard_codif_header(entry.data + 42, 0);
+      test_support::codif_u16(entry.data + 42 + 16, channel);
+      const auto parsed = entry.parse(format);
+      EXPECT_EQ(parsed.valid(), channel < 512);
+      if (parsed.valid()) EXPECT_EQ(parsed.freq_channel, channel);
+    }
+  }
+}
+
+TEST(CodifPacketTests, StandardReplayKeepsGroupAndSourceIpTogether) {
+  for (auto format : {PacketFormat::Auto, PacketFormat::Codif}) {
+    auto entry = captured_packet();
+    auto *header = entry.data + 42;
+    test_support::standard_codif_header(header, entry.data[28]);
+    test_support::codif_u32(header, codif::frames_per_period - 1);
+    const auto count = entry.parse(format).sample_count;
+    const auto metadata_and_samples = std::vector<uint8_t>(header + 44, entry.data + entry.length);
+    uint64_t original = 0;
+    ASSERT_TRUE(prepare_replay_packet(entry.data, entry.length, 128, original, 3, format));
+    EXPECT_EQ(original, count);
+    EXPECT_EQ(codif::u16(header + 18), 3);
+    EXPECT_EQ(entry.data[28], 3);
+    EXPECT_EQ(codif::u16(header + 20), 0);
+    EXPECT_EQ(header[22], 'A');
+    EXPECT_EQ(header[23], 't');
+    EXPECT_EQ(std::memcmp(header + 44, metadata_and_samples.data(), metadata_and_samples.size()), 0);
+    std::memcpy(&entry.sender_addr.sin_addr.s_addr, entry.data + 26, 4);
+    EXPECT_EQ(entry.parse(format).sample_count, count + 128);
+    EXPECT_EQ(entry.parse(format).fpga_id, 3);
+    // A regular loop advances time without changing board identity.
+    ASSERT_TRUE(prepare_replay_packet(entry.data, entry.length, 64, original, -1, format));
+    EXPECT_EQ(codif::u16(header + 18), 3);
+    EXPECT_EQ(entry.data[28], 3);
+  }
+}
+
 TEST(CodifPacketTests, ParsesSuppliedCaptureWithoutChangingSamples) {
   const auto packets = test_support::codif_packets();
   uint64_t first = 0;

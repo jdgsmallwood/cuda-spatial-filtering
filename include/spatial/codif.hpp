@@ -14,6 +14,7 @@ constexpr size_t data_bytes = 2560;
 constexpr uint64_t frames_per_period = 390625;
 constexpr uint64_t samples_per_period = frames_per_period * 64;
 constexpr uint32_t period_seconds = 27;
+constexpr uint16_t metadata_id = 0x03bb;
 
 inline uint16_t u16(const uint8_t *p) {
   uint16_t v; std::memcpy(&v, p, sizeof(v)); return le16toh(v);
@@ -28,10 +29,13 @@ inline bool has_sync(const uint8_t *p, size_t size) {
   return size >= header_bytes && u32(p + 40) == 0xfeedcafe;
 }
 inline bool valid(const uint8_t *p, size_t size) {
-  // Firmware currently writes the FRAME count into the sample-period field.
+  // LAMBDA specifies the FRAME count here; also accept the CODIF sample count.
   const auto periods = size >= header_bytes ? u64(p + 32) : 0;
   return size >= header_bytes + data_bytes && has_sync(p, size) &&
          p[9] == 8 && (p[10] & 0xf7) == 4 && u16(p + 14) == period_seconds &&
+         u16(p + 16) < 512 &&
+         // Metadata ID zero is used by the original firmware simulation.
+         (u16(p + 44) == metadata_id || u16(p + 44) == 0) &&
          u16(p + 24) == 20 && u16(p + 26) == 5 && u32(p + 28) == 320 &&
          (periods == frames_per_period || periods == samples_per_period) &&
          u32(p) < frames_per_period;

@@ -74,6 +74,10 @@ inline bool prepare_replay_packet(uint8_t *frame, size_t size, uint64_t offset,
     if (!codif::valid(header, size - network_bytes)) return false;
     original_sample = codif::sample_count(header);
     codif::advance(header, offset);
+    if (fpga >= 0 && codif::u16(header + 44) == codif::metadata_id) {
+      const uint16_t group = htole16(static_cast<uint8_t>(fpga));
+      std::memcpy(header + 18, &group, sizeof(group));
+    }
   } else {
     if (format == PacketFormat::Lambda &&
         size == network_bytes + codif::header_bytes + codif::data_bytes)
