@@ -287,7 +287,7 @@ LambdaGpuBenchResult run_lambda_bench(double duration_s, int num_buffers) {
 }
 
 // Phase 0 relocation-vs-real-pipeline check (see
-// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md): the
+// docs/architecture.md): the
 // bench_gpudirect_scatter binary showed a large throughput deficit under a
 // *synthetic* SM-saturating busy kernel. This re-runs the same relocation
 // streams concurrently with the actual LambdaGPUPipeline<T> (the real

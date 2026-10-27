@@ -1,5 +1,5 @@
-# Works with 3.15 and tested through 4.0
-cmake_minimum_required(VERSION 3.15...4.0)
+# FetchContent EXCLUDE_FROM_ALL requires CMake 3.28.
+cmake_minimum_required(VERSION 3.28...4.0)
 
 # Project name and a few useful settings. Other commands can pick up the results
 project(
@@ -46,20 +46,11 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING
         "CUDA architectures to compile for (e.g. 'native', '80', '89', '80;89')")
   endif()
-  #set(CMAKE_CXX_INCLUDE_WHAT_YOU_USE "include-what-you-use")
   # Let's nicely support folders in IDEs
   set_property(GLOBAL PROPERTY USE_FOLDERS ON)
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g -DNDEBUG -fno-omit-frame-pointer" CACHE STRING "Flags used by the C++ compiler during RelWithDebInfo builds." FORCE)
   # Save user choice in another variable
   set(USER_BUILD_TESTING ${BUILD_TESTING})
-if(CMAKE_BUILD_TYPE MATCHES Debug)
-add_library(sanitizer_flags INTERFACE)
-    #target_compile_options(sanitizer_flags INTERFACE 
-    #  -fsanitize=address -fno-omit-frame-pointer -g)
-    #target_link_options(sanitizer_flags INTERFACE -fsanitize=address)
-    # add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
-    #add_link_options(-fsanitize=address)
-endif()
   # Disable testing for dependencies forcibly
   set(BUILD_TESTING OFF CACHE BOOL "Disable tests for dependencies" FORCE)
   find_package(CUDAToolkit REQUIRED)
@@ -68,17 +59,9 @@ endif()
   # since it calls enable_testing, which must be in the
   # main CMakeLists.
   include(CTest)
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(cmake/find_cutensor.cmake)
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+  include(cmake/find_cutensor.cmake)
   include(cmake/FindCFITSIO.cmake)
-
-  # Docs only available if this is the main app
-  find_package(Doxygen)
-  if(Doxygen_FOUND)
-    #add_subdirectory(docs)
-  else()
-    message(STATUS "Doxygen not found, not building docs")
-  endif()
 endif()
 message(STATUS "install prefix ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "install include dir: ${CMAKE_INSTALL_INCLUDEDIR}$")
@@ -94,25 +77,12 @@ set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_SKIP_INSTALL_RULES TRUE)
 FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(json)
-# Accumulator library
-# This is header only, so could be replaced with git submodules or FetchContent
-
-# Formatting library
-#FetchContent_Declare(
-#  fmtlib
-#  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-#  GIT_TAG 5.3.0)
-#FetchContent_MakeAvailable(fmtlib)
-# Adds fmt::fmt
-
-# The compiled library code is here
 add_subdirectory(src)
 
 # The executable code is here
 
 message(STATUS "Including dependencies...")
 message(STATUS "cudawrappers...")
-#add_subdirectory(${PROJECT_SOURCE_DIR}/extern/cudawrappers)
 FetchContent_Declare(
   cudawrappers
   SOURCE_DIR ${PROJECT_SOURCE_DIR}/extern/cudawrappers
@@ -137,13 +107,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(gpu-filter)
 
-# gpu-filter's own libfilter/CMakeLists.txt does
-# target_include_directories(filter PUBLIC $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>) to expose its
-# "libfilter/Foo.h"-style includes -- but CMAKE_SOURCE_DIR is always the top-level project's root
-# (ours, once fetched via FetchContent), not gpu-filter's own root, so that path is wrong here.
-# Same class of bug tcc has (see the target_include_directories(tcc ...) line below); fix it the
-# same way, from outside, using the FetchContent-provided *_SOURCE_DIR variable which is correct
-# regardless of gpu-filter's internal CMAKE_SOURCE_DIR misuse.
+# gpu-filter uses the parent CMAKE_SOURCE_DIR for its public includes; expose its own root.
 target_include_directories(filter PUBLIC ${gpu-filter_SOURCE_DIR})
 
 FetchContent_Declare(
@@ -269,23 +233,14 @@ message(STATUS "HDF5_INCLUDE_DIRS is ${HDF5_INCLUDE_DIRS}")
 message(STATUS "ZLIB_LIBRARIES: ${ZLIB_LIBRARIES}")
 message(STATUS "ZLIB_INCLUDE_DIRS: ${ZLIB_INCLUDE_DIRS}")
 
-#include_directories(${ZLIB_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
-# --------------------------------------------
-# Fetch hiredis (dependency of redis-plus-plus)
-# --------------------------------------------
-FetchContent_Declare(
-    hiredis
-    GIT_REPOSITORY https://github.com/redis/hiredis.git
-    GIT_TAG v1.2.0
-    GIT_SHALLOW TRUE
-    SOURCE_DIR _deps/hiredis
-    OVERRIDE_FIND_PACKAGE
-    EXCLUDE_FROM_ALL
-)
-#FetchContent_MakeAvailable(hiredis)
-
-#find_path(HIREDIS_HEADER hiredis)
-#find_library(HIREDIS_LIB hiredis)
+# Use the installed hiredis library; a fetched build target cannot be imported
+# into redis-plus-plus's isolated CMake feature checks.
+find_path(HIREDIS_HEADER hiredis/hiredis.h REQUIRED)
+find_library(HIREDIS_LIB hiredis REQUIRED)
+add_library(hiredis UNKNOWN IMPORTED)
+set_target_properties(hiredis PROPERTIES
+    IMPORTED_LOCATION "${HIREDIS_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${HIREDIS_HEADER}")
 
 # --------------------------------------------
 # Fetch redis-plus-plus
@@ -293,7 +248,7 @@ FetchContent_Declare(
 FetchContent_Declare(
     redis_plus_plus
     GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
-    GIT_TAG origin/master#1.3.11   # or latest stable
+    GIT_TAG 1.3.11
     GIT_SHALLOW TRUE
     EXCLUDE_FROM_ALL
 )

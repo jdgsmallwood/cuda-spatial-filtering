@@ -1,5 +1,5 @@
 // Relocation correctness test for the GPUDirect ingest path (see
-// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md). Exercises
+// docs/architecture.md). Exercises
 // the real mechanism LibibverbsGpuDirectPacketCapture uses --
 // ProcessorState::resolve_gpu_slot() + gpudirect_relocate_kernel -- against a
 // real ProcessorState + LambdaGPUPipeline (no ibverbs/NIC hardware needed,

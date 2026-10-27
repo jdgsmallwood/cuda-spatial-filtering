@@ -6,9 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-08-12
+### Added
+- Isolated kernel-UDP loopback guide and paced synthetic CODIF sender.
+- Reproducible synthetic fixture with no commissioning samples or timestamps.
+- JOSS paper draft and reviewer guide focused on the Starspin correlator used in LAMBDA commissioning.
+- Offline CODIF replay runner using the existing independent NumPy visibility reference.
+- Python/citation checks and paper-generation workflows.
+- Output conventions, dependency provenance, and explicit submission/release gates.
 
-Initial public release of the LAMBDA GPU Signal Processing Pipeline.
+### Fixed
+- Deployment antenna maps and launcher settings now come from external site configuration; private operational records are no longer part of the public tree.
+- Companion beam pipelines copy packet-arrival metadata before releasing the input buffer, with regression tests for all three affected paths.
+- Core Docker environment no longer depends on an untracked conda environment file.
+- Removed an unused C atomic header incompatible with GCC 11 C++ builds.
+- Propagated the JSON dependency required by public headers to all consumers, including tests.
+- Redis dependency tag, installed hiredis discovery, and minimum CMake requirement match the build configuration.
+- Optional LAMBDA sky-model tests report missing integration dependencies explicitly.
+- Citation metadata uses the supplied authors and no placeholder ORCID or unassigned paper DOI.
+
+
+## 0.1.0 development milestone - 2026-08-12
+
+Historical development milestone of the LAMBDA GPU Signal Processing Pipeline.
+No corresponding public Git tag or GitHub release was present when checked on
+15 October 2026.
 
 ### Added
 
@@ -54,5 +75,4 @@ Initial public release of the LAMBDA GPU Signal Processing Pipeline.
 - 15 test binaries covering packet parsing, GPU kernels, ring-buffer reassembly, beamforming math, pointing, writers, and pulsar folding
 - Shared pipeline test harness (`tests/support/`) with synthetic packet generation and invariant-based assertions
 
-[Unreleased]: https://github.com/jdgsmallwood/cuda-spatial-filtering/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/jdgsmallwood/cuda-spatial-filtering/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jdgsmallwood/cuda-spatial-filtering/commits/main

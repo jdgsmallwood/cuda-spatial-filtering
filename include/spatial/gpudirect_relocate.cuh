@@ -6,7 +6,7 @@
 // (libibverbs.hpp, HAVE_IBVERBS-gated) and its correctness test
 // (tests/test_gpudirect_scatter.cu, which doesn't need real ibverbs
 // hardware/headers to exercise this kernel). See
-// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md.
+// docs/architecture.md.
 //
 // One thread block per packet, plain byte loop -- payload sizes (e.g. 40B
 // scales) aren't guaranteed 16-byte aligned, so this doesn't assume float4

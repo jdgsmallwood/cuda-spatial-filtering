@@ -24,7 +24,7 @@ def _():
     import marimo as mo
     from pathlib import Path
     file_browser = mo.ui.file_browser(
-        initial_path=Path("/home/jay/projects/cuda-spatial-filtering/build/apps"), multiple=True
+        initial_path=Path.cwd(), multiple=True
     )
 
     # Access the selected file path(s):

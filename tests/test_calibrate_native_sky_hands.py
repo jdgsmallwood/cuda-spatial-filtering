@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+pytest.importorskip("lambda_commissioning", reason="optional LAMBDA sky-model integration")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from calibrate_native_sky import select_parallel_hand  # noqa: E402

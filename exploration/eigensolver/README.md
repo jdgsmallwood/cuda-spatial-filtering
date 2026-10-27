@@ -8,7 +8,7 @@ Status: **exploratory, not integrated into the pipeline.** Kept buildable (wired
 
 Benchmarking `LambdaGPUPipeline` with fine channelization on (`NR_FINE_CHANNELS=32`)
 showed a ~2x per-buffer slowdown vs. off, and stage-level timing (see
-`/home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md`'s benchmarking history,
+`docs/architecture.md`'s benchmarking history,
 `apps/bench_gpu.cu --fine-channel-check`) isolated **eigendecomposition
 (`cusolverDnXsyevBatched`) as 80-88% of that added time** -- correlation and
 beamforming barely grow. This directory is the investigation into whether that

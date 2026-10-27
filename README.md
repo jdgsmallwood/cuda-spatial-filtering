@@ -1,54 +1,73 @@
 
-# LAMBDA GPU Signal Processing Pipeline
+# Starspin
 
-[![Build](https://github.com/jdgsmallwood/cuda-spatial-filtering/actions/workflows/build.yml/badge.svg)](https://github.com/jdgsmallwood/cuda-spatial-filtering/actions/workflows/build.yml)
+[![Checks](https://github.com/jdgsmallwood/cuda-spatial-filtering/actions/workflows/checks.yml/badge.svg)](https://github.com/jdgsmallwood/cuda-spatial-filtering/actions/workflows/checks.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
 
-Real-time CUDA C++ signal processing pipeline for the LAMBDA radio-astronomy instrument. Ingests
-UDP/PCAP packet streams from FPGA-based receivers, correlates and beamforms on the GPU via Tensor
-Core Correlator and ccglib, applies adaptive spatial filtering and RFI mitigation via
-eigendecomposition, and writes results to HDF5/PSRDADA/FITS/Redis.
+Starspin is a CUDA C++ correlator used for commissioning the **LAMBDA telescope**.
+It ingests live FPGA packets or recorded PCAP files, aligns antenna voltages,
+optionally applies fine channelization, and writes integrated full-polarization
+visibilities and capture provenance to HDF5.
 
-## Statement of Need
+Start with the [reviewer guide](docs/reviewer-guide.md) for installation and a
+small offline replay with an independent numerical check. See the
+[output format](docs/starspin-output.md), [architecture](docs/architecture.md),
+and [deployment configuration](docs/deployment.md) and [kernel loopback test](docs/kernel-loopback.md) for details.
+The [submission checklist](docs/joss-readiness.md) records remaining release gates.
 
-Low-frequency radio telescopes face an increasingly hostile radio-frequency interference (RFI)
-environment, requiring real-time adaptive spatial filtering that is computationally too demanding
-for CPU-only approaches. Existing GPU correlator frameworks (e.g., xGPU) target standard
-interferometric arrays and do not expose the beamforming, eigendecomposition-based RFI projection,
-or the bespoke LAMBDA FPGA wire-format parsing required for this instrument. This pipeline
-provides a GPU path from FPGA packets to calibrated beams and visibilities, with optional RFI
-mitigation. In separate component benchmarks, CPU packet reassembly processed about 4.6 million
-packets/s, while an 8-channel, 4-FPGA GPU correlate-and-beamform benchmark achieved 531% of its
-real-time block rate. These figures do not measure combined pipeline throughput. In a 900-second
-live, 40-channel, 4-FPGA pulsar-fold run, the pipeline received 2,083,384,981 packets (about
-2.31 million packets/s) and sustained about 56.5 blocks/s.
+## Statement of need
+
+Commissioning a radio telescope requires tracing unexpected correlations back to
+packet loss, stream mapping, delay alignment, channelization, or the instrument.
+Starspin connects LAMBDA's packet formats and calibration inputs to GPU correlation,
+retaining configuration and data-quality metadata alongside the visibilities.
+Recorded-packet replay allows the same processing path to be checked without an
+operating telescope. Starspin uses ASTRON's Tensor-Core Correlator and gpu-filter
+rather than implementing replacement correlation and PFB libraries.
+
+This repository also contains companion beamforming, adaptive spatial-filtering,
+and pulsar applications. Those applications share infrastructure but their outputs
+and performance are distinct from Starspin's correlator-only workflow. GPU kernel
+benchmarks and host-only ingest rates must not be interpreted as end-to-end
+Starspin throughput.
 
 ## Prerequisites
 
 | Dependency | Version | Notes |
 |------------|---------|-------|
 | CUDA | ≥12.6 | cuSOLVER, cuFFT, cuBLAS, cuTENSOR, NVRTC required |
-| cuTENSOR | ≥2.2 | `CUTENSOR_ROOT` must point at a flat `include/lib` layout |
+| cuTENSOR | ≥2.2 | Set `CUTENSOR_ROOT` for a non-standard installation |
 | HDF5 | ≥1.10 | With C bindings |
 | CFITSIO | ≥4.0 | |
-| CasaCore | ≥3.5 | |
-| PSRDADA | any | `$PSRHOME` must point at install prefix |
-| CMake | ≥3.15 | |
+| CasaCore | ≥3.4 | |
+| PSRDADA | pinned in Dockerfile | `$PSRHOME` points at the install prefix |
+| Boost, FFTW3, hiredis | distribution development packages | Required by gpu-filter and Redis output dependencies |
+| CMake | ≥3.28 | FetchContent and cmake_path support |
 
 Dependencies in `extern/` (TCC, ccglib, cudawrappers, spdlog, xtensor, argparse, HighFive,
-googletest, redis-plus-plus) are git submodules — run
+googletest, xtl, libpcap) are git submodules — run
 `git submodule update --init --recursive` if they are missing.
 
 ## Building
 
-### In the Docker container (standard development environment)
+### In the Docker container
+
+Build and launch the core environment (requires NVIDIA Container Toolkit):
+
+```bash
+docker build -t starspin-dev .
+docker run --rm --gpus all -it -v "$PWD":/workspace starspin-dev
+```
+
+The container includes the core correlator dependencies, not DSPSR or PSRCHIVE.
+Use an explicit CUDA architecture; `89` below is for an RTX 4060.
+See the reviewer guide for the current clean-clone status.
 
 ```bash
 mkdir -p build
 
-# CUTENSOR_ROOT: /opt/conda has the flat include/lib layout find_cutensor.cmake expects
-CUTENSOR_ROOT=/opt/conda cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build -- -j$(nproc)
+cmake -S . -B build -DBUILD_TESTING=ON -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build --target starspin_1_8 StarspinTests --parallel 2
 ```
 
 If you see link errors (`arc4random@GLIBC_2.36`, `strlcpy@GLIBC_2.38`, etc.), the conda g++
@@ -112,23 +131,35 @@ cd build
 
 # CUDA_HOME is needed at runtime by any test that constructs a LambdaGPUPipeline
 # (it JIT-compiles TCCorrelator.cu via NVRTC and needs the CUDA toolkit headers)
-export CUDA_HOME=/opt/conda/targets/x86_64-linux
+export CUDA_HOME=/usr/local/cuda
 
-ctest                                      # run everything
-ctest -R ProcessorTests                    # filter by test suite (regex)
+ctest --output-on-failure                   # after building all test targets
+./tests/StarspinTests                      # run the core correlator suite
 ./tests/CorrBeamPipelineTests --gtest_filter='*ExactValues*'  # run gtest binary directly
 ```
+
+Python checks (no GPU required):
+
+```bash
+python3 -m pip install -r requirements-test.txt
+python3 -m pytest -q -ra tests
+```
+
+Tests needing the separate `lambda_commissioning` package explicitly skip when
+it is absent. The Checks badge covers Python and citation checks, not GPU tests.
 
 ## Test Suites
 
 | Binary | Source | What it covers |
 |---|---|---|
+| `StarspinTests` | `test_starspin_pipeline.cu` | Coarse correlation values, channel independence, zero input, and invariants |
+| `FineChannelizedStarspinTests` | `test_fine_channelized_starspin.cu` | Fine-channel correlation, delay signs, receiver mapping and compact receiver configurations |
 | `CUDASpatialFilteringCPUTests` | `test_packet_formats.cpp` | Wire-format packet parsing: Ethernet/IP/UDP/Custom header extraction, short-packet handling, multi-position sample layout, FPGA-ID parsing modes |
 | `ProcessorTests` | `test_processor.cu` | Ring-buffer reassembly: single-packet ingestion, buffer fill/flush, multi-FPGA placement and delay alignment, frequency-range filtering, missing-packet accounting |
 | `PipelineTests` | `test_pipeline.cu` | `LambdaGPUPipeline` GPU kernels: exact-value golden checks for beam/visibility output from `Ex1`, polarization/channel/scale blanking |
 | `CorrBeamPipelineTests` | `test_corr_beam_pipeline.cu` | `LambdaCorrBeamOnlyGPUPipeline`: exact-value beam and visibility checks, physical invariants (autocorrelation non-negativity, Hermitian covariance), zero-weight / zero-input edge cases, multi-channel independence, multi-packet accumulation |
 | `PipelineHarnessSelfTest` | `support/test_harness_selftest.cu` | Validates the shared pipeline test harness reproduces `Ex1` exact values and passes physical invariants end-to-end through the real `ProcessorState → Pipeline → Output` seam |
-| `PulsarFoldTests` | `test_pulsar_fold_pipeline.cu` | `LambdaPulsarFoldPipeline`: beams are non-zero with non-zero weights, zero-weights produce zero output, tracking weights are applied |
+| `PulsarFoldTests` | `test_pulsar_fold.cu` | `LambdaPulsarFoldPipeline`: beams are non-zero with non-zero weights, zero-weights produce zero output, tracking weights are applied |
 | `WriterTests` | `test_writers.cpp` | HDF5 beam/visibility/FFT writer round-trips |
 | `CUDASpatialFilteringTests` | `test_spatial.cpp` | Legacy correlation experiments (mostly disabled) |
 
@@ -138,7 +169,8 @@ See `tests/TESTING.md` for the design principles behind the shared harness in `t
 
 **TCC (Tensor Core Correlator)**
 - Data points per block = 128 / NR_BITS_PER_COMPONENT (e.g. 16 time points/block for 8-bit).
-- `NR_RECEIVERS` must be a multiple of 32; zero-pad if fewer.
+- Receiver padding depends on the target. Fine-channelized Starspin supports partial
+  32-receiver tiles, including the 36-receiver production configuration.
 - `NR_POLARIZATIONS` must be 2; zero-pad if needed.
 
 **ccglib**
@@ -148,3 +180,10 @@ See `tests/TESTING.md` for the design principles behind the shared harness in `t
 **cuTENSOR**
 - Assumes column-major modes. `tensor.cpp` does `std::reverse` on modes/extents so the rest of
   the code can reason in row-major terms.
+
+### Optional live monitoring
+
+[Redis/Grafana monitoring](monitoring/README.md) provides sampled visibility spectra,
+packet statistics, per-core CPU and server/process memory. Enable it with
+`--monitor`; unavailable Redis never blocks correlation. The guide includes a
+localhost-only Compose stack and a synthetic replay demonstration.

@@ -89,7 +89,7 @@ def main() -> None:
     parser.add_argument("--min-channel", type=int, default=176)
     parser.add_argument("--coarse-channels", type=int, default=40)
     parser.add_argument("--retained-fine-channels", type=int, default=28)
-    parser.add_argument("--exclude-antennas", default="14,36")
+    parser.add_argument("--exclude-antennas", default="")
     parser.add_argument(
         "--exclude-receptors",
         default="",

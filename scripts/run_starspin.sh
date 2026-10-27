@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # Human-friendly Starspin launcher for one to four FPGAs.
-#
-# Adapted from /data/BLACKMESA_0/lambda/scripts/correlate_lambda.sh, but kept
-# in this repository deliberately: the commissioning scripts are an external
-# operational dependency and must not be edited for Starspin experiments.
-
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -15,37 +10,39 @@ CHANNELS=40
 FPGAS=4
 MIN_CHANNEL=176
 DURATION=60
-INTERFACES="enp94s0np0,enp134s0np0,enp175s0np0,enp216s0np0"
-CAPTURE_CPUS="1,11,13,15"
-# Correlation input slabs and GPU DMA are on node 0. At 72 channels the
-# host-only path sustained the full packet rate with workers on node 0;
-# placing workers beside the node-1 receive rings lost about 23%.
-WORKER_CPUS="3,4,5,6"
-PIPELINE_CPUS="7-9"
+INTERFACES=""
+CAPTURE_CPUS=""
+WORKER_CPUS=""
+PIPELINE_CPUS=""
 RING_NUMA_OVERRIDE=""
-CUDA_ROOT="/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux"
+CUDA_ROOT="${CUDA_HOME:-/usr/local/cuda}"
 OUTPUT_DIR="${REPO_ROOT}/build/starspin_runs"
 OUTPUT_NAME=""
 BINARY=""
 CAPTURE_BACKEND="ibverbs"
-DELAY_FILE="${REPO_ROOT}/build/starspin_runs/alveo_delays_20261001_colleague.json"
+DELAY_FILE=""
 DELAY_FILE_EXPLICIT=false
 AUTO_SINGLE_FPGA_DELAY=false
 GAINS_FILE="${BUILD_APPS}/weights.json"
 EIGENVALUE_FILE="${BUILD_APPS}/nr-signal-eigenvalues.json"
-CONFIG_FILE="${REPO_ROOT}/config.json"
-STREAM_MAP="${REPO_ROOT}/stream_antenna_map.json"
+CONFIG_FILE=""
+STREAM_MAP=""
 USE_STREAM_MAP=true
 APPLY_GAINS=false
 CONFIGURE_FPGA=false
 DRY_RUN=false
 EXTRA_ARGS=()
+CONFIGURE_SCRIPT=""
+# This is a trusted, operator-owned shell profile, kept outside the source tree.
+if [[ -n "${STARSPIN_SITE_PROFILE:-}" ]]; then
+  source "$STARSPIN_SITE_PROFILE"
+fi
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [-- STARSPIN_OPTIONS...]
 
-Run the Starspin correlator with safe four-FPGA, 40-channel defaults.
+Run Starspin with an external STARSPIN_SITE_PROFILE and boot-matched delays.
 
 Defaults:
   channels              40 (binary starspin_4_40)
@@ -160,6 +157,10 @@ while [[ $# -gt 0 ]]; do
     *)
       die "unknown option '$1' (use --help; use -- before raw Starspin options)" ;;
   esac
+done
+
+for setting in INTERFACES CAPTURE_CPUS WORKER_CPUS PIPELINE_CPUS CONFIG_FILE; do
+  [[ -n "${!setting}" ]] || die "set $setting in STARSPIN_SITE_PROFILE or its command-line override"
 done
 
 [[ "$CHANNELS" =~ ^[0-9]+$ ]] || die "--channels must be an even integer from 8 to 330"
@@ -282,7 +283,7 @@ elif [[ "$CHANNELS" == 54 ]]; then
 fi
 
 if [[ "$CONFIGURE_FPGA" == true ]]; then
-  CONFIGURE_SCRIPT="/data/BLACKMESA_0/lambda/scripts/configure-fpga.sh"
+  [[ -n "$CONFIGURE_SCRIPT" ]] || die "set CONFIGURE_SCRIPT in the external site profile"
   [[ -x "$CONFIGURE_SCRIPT" ]] || die "FPGA configuration script is unavailable: $CONFIGURE_SCRIPT"
   CENTRE_CHANNEL=$((MIN_CHANNEL + CHANNELS / 2))
   FPGA_ID_LIST=$(seq -s, 0 $((FPGAS - 1)))

@@ -25,6 +25,17 @@ template <typename T> class FFTWriter;
 
 class Output {
 public:
+  // Call before ingest can release and clear the input packet's arrival flags.
+  size_t register_beam_data_block_with_arrivals(FinalPacketData &packet) {
+    const size_t block = register_beam_data_block(packet.start_seq_id, packet.end_seq_id);
+    if (block != std::numeric_limits<size_t>::max()) {
+      std::memcpy(get_arrivals_data_landing_pointer(block), packet.get_arrivals_ptr(),
+                  packet.get_arrivals_size());
+      register_arrivals_transfer_complete(block);
+    }
+    return block;
+  }
+
   virtual size_t register_beam_data_block(const size_t start_seq_num,
                                           const size_t end_seq_num) = 0;
   virtual size_t register_visibilities_block(const size_t start_seq_num,

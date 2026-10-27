@@ -21,6 +21,7 @@
 #endif
 
 #include "spatial/common.hpp"
+#include "spatial/starspin_monitor.hpp"
 
 #ifndef NR_OBSERVING_FINE_CHANNELS
 #define NR_OBSERVING_FINE_CHANNELS 1
@@ -68,6 +69,21 @@ public:
 int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
+  bool monitoring = false;
+  std::string monitor_host = "127.0.0.1", monitor_baselines = "0:1";
+  std::string monitor_provenance, monitor_waterfall = "rx0_p0";
+  int monitor_port = 6379;
+  double monitor_interval = 5;
+  program.add_argument("--monitor").default_value(false).implicit_value(true).store_into(monitoring);
+  program.add_argument("--monitor-host").default_value(monitor_host).store_into(monitor_host);
+  program.add_argument("--monitor-port").default_value(monitor_port).scan<'i', int>().store_into(monitor_port);
+  program.add_argument("--monitor-interval").default_value(monitor_interval).scan<'g', double>().store_into(monitor_interval);
+  program.add_argument("--monitor-baselines").default_value(monitor_baselines)
+      .help("Comma-separated packed receiver pairs, e.g. 0:1,0:2 (max 16)").store_into(monitor_baselines);
+  program.add_argument("--monitor-waterfall").default_value(monitor_waterfall)
+      .help("Input spectrum for waterfall, e.g. rx0_p0").store_into(monitor_waterfall);
+  program.add_argument("--monitor-provenance").default_value(std::string())
+      .help("JSON observing record; omitted boot/delay verification is unverified").store_into(monitor_provenance);
   CommonArgs args = parse_common_args(program, argc, argv);
 #ifdef SPATIAL_DECOUPLED_COMPLETION
   if (!args.pcap_filename.empty() || args.capture_backend == "ibverbs-gpudirect")
@@ -171,6 +187,75 @@ int main(int argc, char *argv[]) {
       vis_file, args, argc, argv, nr_lambda_receivers_per_packet,
       nr_lambda_polarizations);
 
+  std::unique_ptr<spatial_monitor::StarspinMonitor> monitor;
+  if (monitoring) {
+    try {
+      using spatial_monitor::Spectrum;
+      constexpr size_t baselines = std::extent<Config::VisibilitiesOutputType, 1>::value;
+      const size_t receivers = static_cast<size_t>((std::sqrt(1 + 8 * baselines) - 1) / 2);
+      std::vector<Spectrum> spectra;
+      json mapping = json::array();
+      auto valid = [&](size_t receiver) {
+        auto found = active_mapping.find(static_cast<int>(receiver));
+        return !use_canonical || (found != active_mapping.end() && found->second >= 0);
+      };
+      for (size_t receiver = 0; receiver < receivers; ++receiver) {
+        auto found = active_mapping.find(static_cast<int>(receiver));
+        mapping.push_back({{"receiver", receiver}, {"antenna", found == active_mapping.end() ? -1 : found->second},
+                           {"valid", valid(receiver)}});
+        for (int pol = 0; pol < 2; ++pol)
+          spectra.push_back({receiver * (receiver + 1) / 2 + receiver, pol,
+                             "rx" + std::to_string(receiver) + "_p" + std::to_string(pol), valid(receiver), true});
+      }
+      std::istringstream pairs(monitor_baselines);
+      std::string pair;
+      size_t pair_count = 0;
+      while (std::getline(pairs, pair, ',')) {
+        if (++pair_count > 16) throw std::invalid_argument("at most 16 monitor baselines");
+        std::istringstream input(pair);
+        int first, second;
+        char separator, extra;
+        if (!(input >> first >> separator >> second) || separator != ':' || (input >> extra) ||
+            first < 0 || second < first || static_cast<size_t>(second) >= receivers)
+          throw std::invalid_argument("monitor baselines require receiver indices 0 <= first <= second < receiver count");
+        for (int pol = 0; pol < 2; ++pol)
+          spectra.push_back({size_t(second * (second + 1) / 2 + first), pol,
+                             "rx" + std::to_string(first) + "_rx" + std::to_string(second) + "_p" + std::to_string(pol),
+                             valid(first) && valid(second), false});
+      }
+      if (std::none_of(spectra.begin(), spectra.end(), [&](const Spectrum &spectrum) {
+            return spectrum.autocorrelation && spectrum.name == monitor_waterfall;
+          })) throw std::invalid_argument("unknown monitor waterfall input");
+      std::vector<double> frequencies;
+      if (!(args.frequency_plan.channel_bandwidth_hz > 0))
+        throw std::invalid_argument("monitor spectra require a positive frequency_plan.channel_bandwidth_hz");
+      for (size_t channel = 0; channel < std::extent<Config::VisibilitiesOutputType, 0>::value; ++channel)
+        frequencies.push_back(processing_channel_to_frequency_hz(channel, args.min_freq_channel,
+            args.frequency_plan, Config::NR_FINE_CHANNELS, Config::NR_FINE_CHANNEL_EDGE_TRIM,
+            27.0, Config::NR_FINE_CHANNEL_LOWER_EXTRA_TRIM));
+      json provenance = {{"boot_verification", "unverified"}, {"delay_closure", "unverified"}};
+      if (!monitor_provenance.empty()) {
+        const auto supplied = json::parse(spatial_monitor::read_text(monitor_provenance));
+        if (!supplied.is_object()) throw std::invalid_argument("monitor provenance must be a JSON object");
+        provenance.update(supplied);
+      }
+      json metadata = {{"observation", provenance}, {"mapping", mapping},
+                       {"delay_file", args.fpga_delay_file}, {"delay_samples", args.fpga_delays}, {"output_file", args.output_filename},
+                       {"min_coarse_channel", args.min_freq_channel},
+                       {"max_coarse_channel", args.min_freq_channel + Config::NR_FPGA_CHANNELS - 1},
+                       {"integration_blocks", nr_correlation_blocks_to_integrate},
+                       {"waterfall_input", monitor_waterfall},
+                       {"power_units", "raw accumulated correlation; band mean, not Jy"},
+                       {"mode", args.pcap_filename.empty() ? "live" : "replay"}};
+      monitor = std::make_unique<spatial_monitor::StarspinMonitor>(monitor_host, monitor_port,
+          monitor_interval, std::move(frequencies), std::move(spectra), metadata);
+      vis_file.createDataSet<std::string>("audit/monitor_provenance_json", HighFive::DataSpace::From(metadata.dump())).write(metadata.dump());
+    } catch (const std::exception &e) {
+      std::cerr << "Monitoring disabled (correlator continues): " << e.what() << '\n';
+      monitor.reset();
+    }
+  }
+
   auto vis_writer =
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
@@ -178,6 +263,10 @@ int main(int argc, char *argv[]) {
           // dataset's channel axis contains fine bins only when channelization is enabled.
           args.min_freq_channel + Config::NR_FPGA_CHANNELS - 1,
       &active_mapping, 100, 0, use_canonical);
+  if (monitor) {
+    vis_writer->monitor_block = [&](const auto &block) { monitor->observe(block); };
+    vis_writer->monitor_written = [&](size_t count) { monitor->written(count); };
+  }
 #ifdef SPATIAL_PER_NIC_RING
   state.use_worker_mailboxes = true;
 #endif
@@ -237,7 +326,22 @@ int main(int argc, char *argv[]) {
   output->start_writer_loop();
 
   std::cout << "Setup completed. Ready to receive!" << std::endl;
-  monitor_app_stats(state, capture, args);
+  monitor_app_stats(state, capture, args, [&] {
+    if (!monitor) return;
+    try {
+      monitor->counters({{"packets_received", state.packets_received.load()},
+                         {"packets_processed", state.packets_processed.load()},
+                         {"packets_missing", state.packets_missing.load()},
+                         {"packets_discarded", state.packets_discarded.load()},
+                         {"packets_future_queued", state.packets_future_queued.load()},
+                         {"packets_stuck", state.packets_stuck_unprocessed.load()},
+                         {"nic_drops", get_total_capture_drops(capture)},
+                         {"pipeline_runs_queued", state.pipeline_runs_queued.load()},
+                         {"pipeline_backlog", state.monitor_pipeline_backlog()}});
+    } catch (const std::exception &e) {
+      std::cerr << "Monitoring counters skipped: " << e.what() << '\n';
+    }
+  });
 
   // Cleanup
   INFO_LOG("\nShutting down...\n");

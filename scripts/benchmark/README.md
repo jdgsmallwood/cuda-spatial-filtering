@@ -120,7 +120,7 @@ export CUDA_HOME=/opt/conda/targets/x86_64-linux   # needed by gpu_benchmark/obs
 
 python3 scripts/benchmark/run_benchmarks.py \
     --build-dir /workspace/build --duration 10 \
-    --interfaces enp134s0np0,enp175s0np0,enp216s0np0,enp220s0np0
+    --interfaces eth0,eth0,eth0,eth0
 ```
 
 Use `--skip <stage> [...]` (choices: `capture`, `processor`, `gpu`, `writers`,

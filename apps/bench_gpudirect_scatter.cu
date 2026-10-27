@@ -1,5 +1,5 @@
 // Phase 0 validation benchmark for the GPUDirect RDMA ingest plan
-// (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md).
+// (see docs/architecture.md).
 //
 // Validates, on real GPU hardware and with no NIC/ibverbs dependency, the two
 // unverified numbers the design leans on:

@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
   argparse::ArgumentParser program("bench_capture");
   program.add_argument("-i", "--interfaces")
       .help("Comma-separated network interfaces to capture on (e.g. "
-            "enp134s0np0,enp175s0np0,enp216s0np0,enp...). Use 'lo' for "
+            "eth0,eth0,eth0,enp...). Use 'lo' for "
             "loopback testing with udp_sender.")
       .default_value(std::string("lo"));
   program.add_argument("-p", "--port")

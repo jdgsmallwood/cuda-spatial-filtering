@@ -1,5 +1,5 @@
 // Differential test for ProcessorState::locate_packet() (spatial.hpp): the
-// GPUDirect ingest path (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md,
+// GPUDirect ingest path (see docs/architecture.md,
 // libibverbs.hpp) uses locate_packet() to predict packet placement instead
 // of the reactive copy_data_to_input_buffer_if_able path. This asserts both
 // resolve to the identical (buffer_index, packet_index) for every packet

@@ -235,8 +235,6 @@ public:
   void execute_pipeline(FinalPacketData *packet_data,
                         const bool dummy_run = false) override {
 
-    const size_t start_seq_num = packet_data->start_seq_id;
-    const size_t end_seq_num = packet_data->end_seq_id;
     if (visibilities_start_seq_num == -1) {
       visibilities_start_seq_num = packet_data->start_seq_id;
     }
@@ -260,6 +258,10 @@ public:
     // is not set yet and packet_data->buffer_index is meaningless, so the
     // release_buffer host func has to skip the release (a hardcoded false
     // here made the warmup segfault in release_buffer_host_func).
+    const size_t block_num = output_ != nullptr && !dummy_run
+        ? output_->register_beam_data_block_with_arrivals(*packet_data)
+        : std::numeric_limits<size_t>::max();
+
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, streams[current_buffer],
         streams[current_buffer], d_samples_entry[current_buffer],
@@ -291,8 +293,6 @@ public:
 
     // Output handling
     if (output_ != nullptr && !dummy_run) {
-      size_t block_num =
-          output_->register_beam_data_block(start_seq_num, end_seq_num);
       // size_t::max means no beam writer is attached (e.g. observe.cu's
       // beam_writer = nullptr): the landing pointers would be nullptr, so
       // skip the beam/arrivals copies entirely.
@@ -308,12 +308,6 @@ public:
         cudaLaunchHostFunc(streams[current_buffer],
                            output_transfer_complete_host_func, output_ctx);
 
-        // memcpy arrivals
-        bool *arrivals_output_pointer =
-            (bool *)output_->get_arrivals_data_landing_pointer(block_num);
-        std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
-                    packet_data->get_arrivals_size());
-        output_->register_arrivals_transfer_complete(block_num);
       }
       num_correlation_units_integrated += 1;
       if (num_correlation_units_integrated >=

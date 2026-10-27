@@ -77,7 +77,7 @@ def main():
     report = {
         "channels": [int(channels[0]), int(channels[-1])],
         "raw_fine_bins": [int(raw_fine_bin[0]), int(raw_fine_bin[-1])],
-        "reference": "FPGA 0 raw stream index 2 (mapped antenna 35/X in the current stream map); arbitrary common phase cancels on baselines",
+        "reference": "Raw reference stream selected by the input calibration; arbitrary common phase cancels on baselines",
         "mean_selected_tooth_offset_hz": mean_offset,
         "formula": "phi(c,f) = wrap(phi_mean_tooth(c) - 2*pi*mean_tooth_offset*tau_local + 2*pi*(f-f_c)*tau_local); voltage correction = exp(-i*phi); baseline correction = C_a*conj(C_b)",
         "local_delay_repeat_median_ns_all_raw_streams": float(np.median(local_repeat_ns)),

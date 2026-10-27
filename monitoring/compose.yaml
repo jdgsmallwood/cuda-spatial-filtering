@@ -1,0 +1,22 @@
+name: starspin-monitor
+services:
+  redis:
+    image: redis:8.2.2
+    command: [redis-server, --maxmemory, 256mb, --maxmemory-policy, noeviction, --save, "", --appendonly, "no"]
+    ports:
+      - "127.0.0.1:${STARSPIN_REDIS_PORT:-6380}:6379"
+    mem_limit: 384m
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:12.2.1
+    ports:
+      - "127.0.0.1:${STARSPIN_GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_PLUGINS_PREINSTALL_SYNC: redis-datasource@2.2.0
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped

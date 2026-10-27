@@ -552,6 +552,10 @@ public:
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], b.stream);
 
+    const size_t block_num = output_ != nullptr && !dummy_run
+        ? output_->register_beam_data_block_with_arrivals(*packet_data)
+        : std::numeric_limits<size_t>::max();
+
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
@@ -635,8 +639,6 @@ public:
 
     // Output handling
     if (output_ != nullptr && !dummy_run) {
-      size_t block_num =
-          output_->register_beam_data_block(start_seq_num, end_seq_num);
       size_t eigenvalue_block_num =
           output_->register_eigendecomposition_data_block(start_seq_num,
                                                           end_seq_num);
@@ -654,11 +656,6 @@ public:
             .output = this->output_, .block_index = block_num};
         cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
                            output_ctx);
-        bool *arrivals_output_pointer =
-            (bool *)output_->get_arrivals_data_landing_pointer(block_num);
-        std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
-                    packet_data->get_arrivals_size());
-        output_->register_arrivals_transfer_complete(block_num);
       }
 
       if (eigenvalue_block_num != std::numeric_limits<size_t>::max()) {

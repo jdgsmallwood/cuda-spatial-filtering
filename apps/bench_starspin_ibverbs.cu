@@ -204,8 +204,7 @@ int main(int argc, char **argv) {
   args.add_argument("--mode").required().help("repost or ring");
   args.add_argument("--layout").default_value(std::string("split"))
       .help("split or whole");
-  args.add_argument("--interfaces").default_value(
-      std::string("enp94s0np0,enp134s0np0,enp175s0np0,enp216s0np0"));
+  args.add_argument("--interfaces").required();
   args.add_argument("--seconds").default_value(15).scan<'i', int>();
   try {
     args.parse_args(argc, argv);

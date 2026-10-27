@@ -46,8 +46,7 @@ def main():
     p.add_argument("cache", type=Path)
     p.add_argument("output", type=Path)
     p.add_argument("--config", type=Path, default=Path("config.json"))
-    p.add_argument("--catalogue", type=Path, default=Path(
-        "/data/BLACKMESA_1/sma075/lambda-commissioning/runs/rfi_cal_400_439_20261003/point_sources.json"))
+    p.add_argument("--catalogue", type=Path, required=True)
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     iers.conf.auto_download = False

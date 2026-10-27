@@ -35,6 +35,7 @@ $<TARGET_OBJECTS:pointing>
 
 target_link_libraries(
     spatial PRIVATE cusolver cuda cudart cublas tcc filter CUDA::cudart ccglib pcap cutensor HighFive::HighFive spdlog::spdlog ${CFITSIO_LIBRARIES} ${CASACORE_LIBRARIES}
+    PUBLIC nlohmann_json::nlohmann_json
 )
 
 
@@ -53,8 +54,3 @@ target_include_directories(
 target_link_directories(spatial PRIVATE ${PSRDADA_ROOT}/lib)
 
 set_target_properties(spatial PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-
-if(CMAKE_BUILD_TYPE MATCHES Debug)
-  #target_link_libraries(spatial PRIVATE sanitizer_flags)
-endif()

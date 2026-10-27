@@ -1,5 +1,5 @@
 // Shared relocation-stream machinery for the Phase 0 GPUDirect ingest
-// validation benchmark (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md).
+// validation benchmark (see docs/architecture.md).
 // Used standalone (synthetic busy kernel) by bench_gpudirect_scatter.cu, and
 // alongside the real LambdaGPUPipeline/LambdaCorrBeamOnlyGPUPipeline workload
 // by bench_gpu.cu, so both a quick synthetic check and a check against the

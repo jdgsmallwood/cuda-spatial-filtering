@@ -1129,3 +1129,24 @@ TEST_F(AdaptivePipelineTest, UnwhitenEigenvectorsIsNopForUniformDiagonal) {
 }
 
 } // namespace
+
+class AdaptiveArrivalOrderingOutput : public AdaptiveTestOutput<AdaptiveConfig> {
+public:
+  void *get_arrivals_data_landing_pointer(size_t block) override {
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    return AdaptiveTestOutput<AdaptiveConfig>::get_arrivals_data_landing_pointer(block);
+  }
+};
+
+TEST_F(AdaptivePipelineTest, PreservesArrivalFlagsBeforeRelease) {
+  auto output = std::make_shared<AdaptiveArrivalOrderingOutput>();
+  auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+  auto pipeline = test_support::pipeline_factories::make_adaptive_beamformed_spectra_pipeline<AdaptiveConfig>(1, &weights);
+  test_support::SyntheticPipelineRun<AdaptiveConfig> driver(*pipeline, output);
+  driver.run(
+      [](size_t, size_t, int, int, int, int) { return std::complex<int8_t>(2, -2); },
+      [](size_t, size_t, int, int, int) { return int16_t{1}; });
+  const auto *flags = reinterpret_cast<const bool *>(output->arrivals);
+  for (size_t i = 0; i < sizeof(*output->arrivals) / sizeof(bool); ++i)
+    EXPECT_TRUE(flags[i]) << "arrival slot " << i;
+}

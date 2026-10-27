@@ -116,7 +116,7 @@ int main(int argc, char *argv[]) {
   argparse::ArgumentParser program("ibverbs_pcap_sender");
   program.add_argument("pcap_filename").help("Path to the .pcap/.pcapng file to replay");
   program.add_argument("-i", "--network-interface")
-      .help("Network interface to send on (e.g. enp216s0np0)")
+      .help("Network interface to send on (e.g. eth0)")
       .required();
   program.add_argument("--loop")
       .help("Replay the file repeatedly instead of stopping at EOF")
