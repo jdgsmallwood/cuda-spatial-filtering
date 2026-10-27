@@ -222,6 +222,7 @@ struct CommonArgs {
   // Fixed sky epoch for deterministic offline replay. Empty means wall UTC.
   std::string steering_utc;
   std::string capture_backend = "kernel";
+  PacketFormat packet_format = PacketFormat::Auto;
   int busy_poll_us = 0;
   json config;
   json gains;
@@ -573,6 +574,13 @@ inline void monitor_app_stats(ProcessorStateBase &state,
 inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
                                     char *argv[]) {
   CommonArgs args;
+  std::string packet_format;
+  program.add_argument("--packet-format")
+      .help("Packet format for the whole run: auto, lambda (legacy), or codif")
+      .choices("auto", "lambda", "codif")
+      .default_value(std::string("auto"))
+      .store_into(packet_format)
+      .nargs(1);
 
   program.add_argument("-c", "--config-file")
       .help("specify a configuration file")
@@ -774,6 +782,12 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
 
   try {
     program.parse_args(argc, argv);
+    args.packet_format = packet_format == "codif" ? PacketFormat::Codif
+                       : packet_format == "lambda" ? PacketFormat::Lambda
+                                                   : PacketFormat::Auto;
+    if (args.packet_format == PacketFormat::Codif &&
+        args.pcap_filename.empty() && args.capture_backend == "ibverbs-gpudirect")
+      throw std::runtime_error("CODIF requires --capture-backend kernel or ibverbs");
     if (!beam_excluded_antennas_csv.empty()) {
       std::stringstream excluded(beam_excluded_antennas_csv);
       std::string token;

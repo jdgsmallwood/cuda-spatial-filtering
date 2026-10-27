@@ -82,9 +82,13 @@ scripts/.venv
 *.uvfits
 *.npy
 *.pcap
+!tests/fixtures/*.pcap
 //*.ms/*
 *.zip
 
 # DSPSR files
 *.ar
 *.zap
+
+# Local reference files and preserved unrelated work
+/.local-work/

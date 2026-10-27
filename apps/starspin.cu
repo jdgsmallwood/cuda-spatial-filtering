@@ -1,5 +1,5 @@
 // Correlation-only observing app: ingest -> delay/reorder -> pre-correlation fine
-// channelization -> TCC correlation -> visibilities, with no beamforming, no
+// channelization (optional) -> TCC correlation -> visibilities, with no beamforming, no
 // eigendecomposition/RFI mitigation, and no spectral (FFT) output. See
 // LambdaStarspinPipeline (include/spatial/pipeline/lambda_starspin_pipeline.hpp).
 //
@@ -11,6 +11,13 @@
 #ifdef SPATIAL_STARSPIN_WORKER_THREADS
 #undef NR_OBSERVING_PACKET_WORKER_THREADS
 #define NR_OBSERVING_PACKET_WORKER_THREADS SPATIAL_STARSPIN_WORKER_THREADS
+#endif
+
+#ifdef SPATIAL_STARSPIN_COARSE_ONLY
+#undef NR_OBSERVING_FINE_CHANNELS
+#define NR_OBSERVING_FINE_CHANNELS 1
+#undef NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM
+#define NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM 0
 #endif
 
 #include "spatial/common.hpp"
@@ -92,7 +99,7 @@ int main(int argc, char *argv[]) {
       NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE; // 56
   constexpr int num_lambda_fine_channels = NR_OBSERVING_FINE_CHANNELS;
   constexpr int num_lambda_fine_channel_edge_trim =
-      NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM;
+      num_lambda_fine_channels > 1 ? NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM : 0;
   using Config =
       LambdaConfig<num_lambda_channels, nr_fpga_sources,
                    nr_lambda_time_steps_per_packet, nr_lambda_receivers,
@@ -102,9 +109,9 @@ int main(int argc, char *argv[]) {
                    nr_lambda_padded_receivers_per_block,
                    default_correlation_blocks_to_integrate, true, 256,
                    num_lambda_fine_channels, num_lambda_fine_channel_edge_trim,
-                   nr_lambda_active_receivers, 1>;
-  static_assert(Config::NR_EFFECTIVE_FINE_CHANNELS == 27,
-                "Starspin must keep unique raw fine bins 3..29");
+                   nr_lambda_active_receivers, (num_lambda_fine_channels > 1 ? 1 : 0)>;
+  static_assert(Config::NR_FINE_CHANNELS == 1 || Config::NR_EFFECTIVE_FINE_CHANNELS == 27,
+                "Channelized Starspin must keep unique raw fine bins 3..29");
 
   if (args.fpga_id_vec.size() != nr_fpga_sources ||
       args.fpga_ids.size() != nr_fpga_sources) {
@@ -141,7 +148,7 @@ int main(int argc, char *argv[]) {
                  NR_OBSERVING_PACKET_WORKER_THREADS>
       state(
       nr_lambda_packets_for_correlation, nr_lambda_time_steps_per_packet,
-      args.min_freq_channel, fpga_delays, args.fpga_ids);
+      args.min_freq_channel, fpga_delays, args.fpga_ids, args.packet_format);
 
   if (!program.is_used("-v")) {
     args.output_filename =
@@ -168,7 +175,7 @@ int main(int argc, char *argv[]) {
       std::make_unique<HDF5VisibilitiesWriter<Config::VisibilitiesOutputType>>(
           vis_file, args.min_freq_channel,
           // HDF5 min/max describe FPGA coarse channels; the visibility
-          // dataset's channel axis contains the post-PFB fine bins.
+          // dataset's channel axis contains fine bins only when channelization is enabled.
           args.min_freq_channel + Config::NR_FPGA_CHANNELS - 1,
       &active_mapping, 100, 0, use_canonical);
 #ifdef SPATIAL_PER_NIC_RING

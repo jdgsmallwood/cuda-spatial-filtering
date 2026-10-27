@@ -69,6 +69,42 @@ cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build -- -j$(nproc)
 ```
 
+### Eight-channel Starspin without fine channelization
+
+Build `starspin_1_8_coarse`, `starspin_2_8_coarse`, `starspin_3_8_coarse`, or
+`starspin_4_8_coarse` for the required FPGA count. For four FPGAs:
+
+```bash
+cmake -S . -B build
+cmake --build build --target starspin_4_8_coarse --parallel 4
+```
+
+Run `build/apps/starspin_4_8_coarse` with the usual capture, delay, mapping and
+packet-format options. These targets correlate the eight incoming FPGA channels
+directly, with no fine PFB, FFT or fine-bin trimming. Delay correction, scaling,
+gains and stream reordering still apply. Internally, `NR_FINE_CHANNELS=1` means
+channelization is disabled; the HDF5 output has eight channels.
+
+### LAMBDA CODIF input
+
+Use `--packet-format codif` for CODIF, `--packet-format lambda` for the original
+packets, or `auto` (the default). CODIF supports kernel capture, ordinary ibverbs
+CPU-ring capture, and PCAP replay; GPUDirect still requires legacy packets.
+
+The October 2026 LAMBDA standard uses metadata ID `0x03BB`, Group ID equal to
+the source IP's third octet, Secondary ID zero, and Station ID `At`. FPGA routing
+continues to use the source IP's third octet. Replicated PCAP replay updates both
+the source IP and Group ID for the new layout. The original simulation capture's
+metadata ID zero and placeholder IDs remain supported; other metadata IDs and
+Thread IDs outside 0–511 are rejected. Station/Secondary IDs and reserved bytes
+are not used for routing or validation.
+
+Samples and scaling are unchanged: 64 time samples of 20 complex signed 8-bit ADC
+values, with per-ADC scale multipliers `2^min(exponent, 8)` from header bytes 46–55
+(low nibble first). Frame counters wrap after 390,625 packets per 27 seconds.
+The header's sample-period field accepts both LAMBDA's documented frame count
+(390,625) and the corresponding sample count (25,000,000).
+
 ## Running Tests
 
 ```bash

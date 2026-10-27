@@ -125,8 +125,8 @@ template <typename T, size_t N, int W> class DecoupledIngest {
       auto &samples = (*data->samples)[ch][d.packet][worker];
       auto &scales = (*data->scales)[ch][d.packet][worker * T::NR_RECEIVERS_PER_PACKET];
       // Definition supplied by spatial.hpp before this template is instantiated.
-      copy_nt(&samples, pkt.payload->data, sizeof(typename T::PacketDataStructure), true);
-      std::memcpy(&scales, pkt.payload->scales, sizeof(typename T::PacketScaleStructure));
+      copy_nt(&samples, pkt.sample_data(), sizeof(typename T::PacketDataStructure), true);
+      pkt.copy_scales(&scales);
       data->arrivals[0][ch][d.packet][worker] = true;
       copied = true;
     }
@@ -141,9 +141,9 @@ template <typename T, size_t N, int W> class DecoupledIngest {
     auto *entry = s.d_packet_data[index];
     if (entry->processed.load(std::memory_order_relaxed)) return false;
     using Entry = typename T::PacketEntryType;
-    pkt = entry->Entry::parse();
+    pkt = entry->Entry::parse(s.packet_format);
     const int ch = static_cast<int>(pkt.freq_channel) - static_cast<int>(s.MIN_FREQ_CHANNEL);
-    if (!pkt.payload || ch < 0 || ch >= static_cast<int>(T::NR_FPGA_CHANNELS)) {
+    if (!pkt.valid() || ch < 0 || ch >= static_cast<int>(T::NR_FPGA_CHANNELS)) {
       entry->processed.store(true, std::memory_order_release);
       s.packets_discarded.fetch_add(1, std::memory_order_relaxed);
       return false;
@@ -154,7 +154,7 @@ template <typename T, size_t N, int W> class DecoupledIngest {
       const auto it = s.fpga_ids.find(pkt.fpga_id);
       if (it != s.fpga_ids.end()) fp = it->second;
     }
-    if (fp != worker || pkt.sample_count == 0 ||
+    if (fp != worker || (pkt.sample_count == 0 && !pkt.codif_header) ||
         pkt.sample_count > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       std::cerr << "Decoupled ingest requires one configured FPGA per NIC worker; invalid packet on worker "
                 << worker << '\n';

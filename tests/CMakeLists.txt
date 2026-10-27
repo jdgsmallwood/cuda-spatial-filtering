@@ -44,7 +44,7 @@ target_link_libraries(PipelineTests
 )
 
 add_executable(
-  CUDASpatialFilteringCPUTests test_packet_formats.cpp test_stream_antenna_map.cpp
+  CUDASpatialFilteringCPUTests test_packet_formats.cpp test_stream_antenna_map.cpp test_codif.cpp
 )
 target_link_libraries(CUDASpatialFilteringCPUTests PRIVATE test_app_common)
 
@@ -59,11 +59,11 @@ add_executable(
 target_link_libraries(RunAuditTests PRIVATE test_app_common)
 set_target_properties(RunAuditTests PROPERTIES CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 add_executable(
-  ProcessorTests test_processor.cu
+  ProcessorTests test_processor.cu test_codif_ingest.cu
 )
 target_link_libraries(ProcessorTests PRIVATE test_app_common)
 
-add_executable(ProcessorDirectNicTests test_direct_nic_workers.cu)
+add_executable(ProcessorDirectNicTests test_direct_nic_workers.cu test_codif_ingest.cu)
 target_link_libraries(ProcessorDirectNicTests PRIVATE test_support)
 target_compile_definitions(ProcessorDirectNicTests PRIVATE
     SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1)
@@ -102,7 +102,7 @@ add_executable(IngestTraceTests test_ingest_trace.cpp)
 target_include_directories(IngestTraceTests PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(IngestTraceTests PRIVATE GTest::gtest_main)
 
-add_executable(ProcessorDecoupledTests test_direct_nic_workers.cu test_decoupled_ingest.cu)
+add_executable(ProcessorDecoupledTests test_direct_nic_workers.cu test_decoupled_ingest.cu test_codif_ingest.cu)
 target_link_libraries(ProcessorDecoupledTests PRIVATE test_support)
 target_compile_definitions(ProcessorDecoupledTests PRIVATE
     SPATIAL_PER_NIC_RING=1 SPATIAL_DIRECT_NIC_WORKERS=1

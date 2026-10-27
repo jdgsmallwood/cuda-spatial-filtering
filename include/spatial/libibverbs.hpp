@@ -945,6 +945,13 @@ public:
           ERROR_LOG("ibverbs WC error on {}: {}", ifname_,
                     ibv_wc_status_str(wc[i].status));
           stage_self_copy(half, slot); // don't relocate; drop in place
+        // shortcut: CODIF needs different DMA offsets and scale expansion; use
+        // CPU-ring capture until this backend supports that wire layout.
+        } else if (wc[i].byte_len != TOTAL_HDR_SIZE + state.gpu_samples_slot_bytes() +
+                                       state.gpu_scales_slot_bytes()) {
+          ERROR_LOG("GPUDirect requires the legacy LAMBDA wire layout; use kernel or ibverbs CPU-ring capture for CODIF (received {} bytes)", wc[i].byte_len);
+          stage_self_copy(half, slot);
+          state.running.store(false, std::memory_order_release);
         } else {
           resolve_and_stage(state, half, slot);
         }
