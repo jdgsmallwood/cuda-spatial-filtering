@@ -88,6 +88,23 @@ cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build -- -j$(nproc)
 ```
 
+### Installing binaries
+
+Build and install all application binaries (including variants and benchmarks):
+
+```bash
+export STARSPIN_DIR=/path/to/starspin
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$STARSPIN_DIR"
+cmake --build build --parallel 2
+cmake --install build
+```
+
+Binaries are installed into `$STARSPIN_DIR/bin`. On a fresh configuration,
+`STARSPIN_DIR` supplies the default install prefix; if unset or empty, the
+project root is used. The explicit prefix above also updates existing build
+caches. Override the destination with `cmake --install build --prefix /other/path`
+(which installs into `/other/path/bin`). Test executables are not installed.
+
 ### Eight-channel Starspin without fine channelization
 
 Build `starspin_1_8_coarse`, `starspin_2_8_coarse`, `starspin_3_8_coarse`, or

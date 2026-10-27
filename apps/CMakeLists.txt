@@ -426,19 +426,11 @@ foreach(_APP IN LISTS _STANDARD_APPS)
     )
 endforeach()
 
-# Install all app binaries to <install-prefix>/bin (defaults to <project-root>/bin).
-set(_OBSERVE_TARGETS)
-foreach(NR_FPGAS 1 2 3 4)
-    foreach(NR_CHANNELS 8 16 24 32 40 48)
-        list(APPEND _OBSERVE_TARGETS "observe_${NR_FPGAS}_${NR_CHANNELS}")
-    endforeach()
+# Include every app variant and benchmark without maintaining a second target list.
+get_property(_APP_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_APP IN LISTS _APP_TARGETS)
+    get_target_property(_APP_TYPE ${_APP} TYPE)
+    if(_APP_TYPE STREQUAL "EXECUTABLE")
+        install(TARGETS ${_APP} RUNTIME DESTINATION bin)
+    endif()
 endforeach()
-
-install(TARGETS
-    ${_OBSERVE_TARGETS}
-    ${_STARSPIN_TARGETS}
-    ${_STANDARD_APPS}
-    pulsar_fold_4_40
-    udp_sender
-    RUNTIME DESTINATION bin
-)

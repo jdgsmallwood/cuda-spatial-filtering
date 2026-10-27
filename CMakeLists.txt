@@ -25,11 +25,15 @@ add_compile_definitions(
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
-  # Default install prefix to the project root so `make install` puts binaries
-  # under <project-root>/bin/ rather than /usr/local/bin.
+  # Use STARSPIN_DIR when set; preserve explicit install-prefix overrides.
   if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}" CACHE PATH
-        "Install prefix (defaults to project root)" FORCE)
+    if(NOT "$ENV{STARSPIN_DIR}" STREQUAL "")
+      set(CMAKE_INSTALL_PREFIX "$ENV{STARSPIN_DIR}" CACHE PATH
+          "Install prefix" FORCE)
+    else()
+      set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}" CACHE PATH
+          "Install prefix" FORCE)
+    endif()
   endif()
 
   # Preserve all non-system library paths (e.g. /opt/conda/lib) in the RPATH
