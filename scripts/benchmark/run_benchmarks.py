@@ -19,7 +19,7 @@ Example:
 
     python3 scripts/benchmark/run_benchmarks.py \\
         --build-dir /workspace/build --duration 10 \\
-        --interfaces enp134s0np0,enp175s0np0,enp216s0np0,enp220s0np0
+        --interfaces eth0,eth0,eth0,eth0
 """
 
 import argparse
@@ -550,7 +550,7 @@ def main():
     obs.add_argument("--observe-channels", type=int, default=8)
     obs.add_argument("--observe-packets", type=int, default=300)
     obs.add_argument("--observe-ifnames",
-                      default="enp216s0np0,enp175s0np0,enp134s0np0,enp000s0np0",
+                      required=True,
                       help="Comma-separated fake/real ifnames, one per FPGA")
 
     args = parser.parse_args()

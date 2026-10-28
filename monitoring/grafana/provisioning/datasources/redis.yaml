@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: Starspin Redis
+    uid: starspin-redis
+    type: redis-datasource
+    access: proxy
+    url: redis://redis:6379
+    isDefault: true
+    editable: false
+    jsonData:
+      client: standalone
+      poolSize: 5
+      timeout: 2
+      pingInterval: 0
+      pipelineWindow: 0

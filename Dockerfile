@@ -1,230 +1,27 @@
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
-
+# Core Starspin build and reviewer environment; pulsar-analysis tools are optional.
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
-
-# Install dependencies and add Kitware's CMake repository
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    apt-transport-https \
-    ca-certificates \
-    gnupg \
-    software-properties-common \
-    wget 
-
-RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | \
-    gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null && \
-    echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ jammy main' | \
-    tee /etc/apt/sources.list.d/kitware.list >/dev/null
-
-RUN echo 'deb [trusted=yes] https://apt.kitware.com/ubuntu/ jammy main' > /etc/apt/sources.list.d/kitware.list
-
-# Install GCC, CMake, and common build tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    autoconf \
-    build-essential \
-    gcc \
-    g++ \
-    cmake \
-    git \
-    ninja-build \
-    python3-pip \
-    flex \
-    bison \
-    linux-tools-common \ 
-    linux-tools-generic \
-    libhdf5-dev \
-    hdf5-tools \
-    valgrind \
-    iwyu \
-    tmux \
-    gdb \
-    libelf-dev \
-    libdw-dev \
-    libaudit-dev \
-    libslang2-dev \
-    libperl-dev \
-    python3-dev \
-    binutils-dev \
-    liblzma-dev \
-    libzstd-dev \
-    libcap-dev \
-    libnuma-dev \
-    libtraceevent-dev \
-    libtracefs-dev \
-    libpfm4-dev \
-    pkg-config \
-    libunwind-dev \
-    less \
-    libcfitsio-dev \
-    casacore-dev \
-    casacore-data \
-    libboost-dev \
-    libnl-3-dev \
-    libnl-genl-3-dev \
-    libnl-route-3-dev \
-    libibverbs-dev \
-    libcurl4-gnutls-dev \
+    ca-certificates git wget build-essential ninja-build python3-pip \
+    autoconf automake libtool pkg-config gfortran flex bison \
+    libhdf5-dev hdf5-tools libcfitsio-dev casacore-dev casacore-data \
+    libboost-dev libhiredis-dev libibverbs-dev libnuma-dev libltdl-dev \
     && rm -rf /var/lib/apt/lists/*
-
-
-# Install cuTENSOR (adjust the version as desired)
-RUN wget https://developer.download.nvidia.com/compute/cutensor/2.2.0/local_installers/cutensor-local-repo-ubuntu2404-2.2.0_1.0-1_amd64.deb
-RUN dpkg -i cutensor-local-repo-ubuntu2404-2.2.0_1.0-1_amd64.deb
-RUN cp /var/cutensor-local-repo-ubuntu2404-2.2.0/cutensor-*-keyring.gpg /usr/share/keyrings/
-RUN apt-get update
-RUN apt-get -y install libcutensor2 libcutensor-dev libcutensor-doc
-   
-RUN wget https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_5/NsightSystems-linux-cli-public-2025.5.1.121-3638078.deb
-RUN    dpkg -i NsightSystems-linux-cli-public-2025.5.1.121-3638078.deb && rm NsightSystems-linux-cli-public-2025.5.1.121-3638078.deb
-
-
-RUN    test -f /usr/share/doc/kitware-archive-keyring/copyright || wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
-RUN    echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ noble main' | tee /etc/apt/sources.list.d/kitware.list >/dev/null
-RUN    apt-get update
-RUN    test -f /usr/share/doc/kitware-archive-keyring/copyright || rm /usr/share/keyrings/kitware-archive-keyring.gpg
-RUN    apt-get install -y kitware-archive-keyring
-RUN    apt-get install -y cmake
-
-# Set default compiler environment variables (optional)
-ENV CC=/usr/bin/gcc
-ENV CXX=/usr/bin/g++
-ENV PATH=/usr/local/bin:$PATH
-ENV PATH=/usr/local/cuda-12/bin:$PATH
-ENV PATH=/usr/local/cuda-12/compute-sanitizer:$PATH
-
-RUN echo "set-option -g prefix C-a" > /etc/tmux.conf && \
-    echo "unbind-key C-b" >> /etc/tmux.conf && \
-    echo "bind-key C-a send-prefix" >> /etc/tmux.conf && \
-    echo "set-option -g status-bg red" >> /etc/tmux.conf
-#RUN echo "alias cmlamd='cmake -DBUILD_TESTING=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CUDA_FLAGS=\"-g -G --ptxas-options=-v\" -DCMAKE_CXX_FLAGS=\"-g -pg\" -DCMAKE_EXE_LINKER_FLAGS=\"-g -pg\" -DCMAKE_BUILD_TYPE=Debug .. && cmake --build .'" >> ~/.bashrc 
-
-# Add cmlamd build command w/ argument possibilities
-RUN echo 'cmlamd() {' >> ~/.bashrc && \
-    echo '  local args="";' >> ~/.bashrc && \
-    echo '  for arg in "$@"; do' >> ~/.bashrc && \
-    echo '    args+=" -D$arg"' >> ~/.bashrc && \
-    echo '  done' >> ~/.bashrc && \
-    echo '  cmake -DBUILD_TESTING=OFF \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_CUDA_FLAGS="-g -G --ptxas-options=-v -O0" \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_CXX_FLAGS="-g -pg -O0" \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_EXE_LINKER_FLAGS="-g -pg" \\' >> ~/.bashrc && \
-    echo '        -DCMAKE_BUILD_TYPE=Debug $args .. && cmake --build .' >> ~/.bashrc && \
-    echo '}' >> ~/.bashrc
-
-ENV     CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
-
-
-# Build Perf
-WORKDIR /tmp
-RUN wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.66.tar.xz && \
-    tar -xf linux-6.6.66.tar.xz && \
-    rm linux-6.6.66.tar.xz
-
-WORKDIR /tmp/linux-6.6.66/tools/perf
-RUN make && make install prefix=/usr/local
-RUN cp /usr/local/bin/perf /usr/bin/perf
-
-ENV CONDA_DIR /opt/conda
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
-    /bin/bash ~/miniconda.sh -b -p /opt/conda && \
-    rm ~/miniconda.sh
-
-# 4. Put Conda on the PATH
-ENV PATH=$CONDA_DIR/bin:$PATH
-
-# 5. Handle the environment.yml
-WORKDIR /tmp
-COPY environment.yml .
-
-RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-
-# Create the environment and clean cache to save space
-RUN conda env update -n base -f environment.yml && \
-    conda clean -afy
-
-# 6. Setup shell to auto-activate on login/entry
-# This grabs the name from the first line of your environment.yml automatically
-RUN echo "source /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
-    echo "conda activate $(head -1 environment.yml | cut -d' ' -f2)" >> ~/.bashrc
-
-# Don't use conda linker
-RUN mv /opt/conda/bin/ld /opt/conda/bin/ld.bak
-
-
-# Create symlinks for math libraries
-RUN  ln -s /lib/x86_64-linux-gnu/libm.so.6 /lib64/libm.so.6 && \
-  ln -s /lib/x86_64-linux-gnu/libmvec.so.1 /lib64/libmvec.so.1 && \
-  ln -s /lib/x86_64-linux-gnu/libc.so.6 /lib64/libc.so.6 && \
-  ln -s /usr/lib/x86_64-linux-gnu/libc_nonshared.a /usr/lib64/libc_nonshared.a
-
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu
-# Ensure subsequent RUN commands use the conda environment
-
-
-RUN git clone https://git.code.sf.net/p/psrdada/code psrdada-code
-RUN git clone git://git.code.sf.net/p/psrchive/code psrchive-code
-RUN git clone --recursive git://git.code.sf.net/p/dspsr/code dspsr-code
-
-
-# Install PSRDADA
-RUN apt-get install -y --no-install-recommends automake libltdl-dev \
-      autoconf-archive  \
-      libtool \
-      gfortran \
-      libyaml-cpp0.8
-ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig"
-WORKDIR psrdada-code
-RUN ./bootstrap
-RUN ./configure --prefix=/usr/local
-RUN make -j$(nproc)
-RUN make install
-
-# Install PSRCHIVE
-WORKDIR ../psrchive-code
-RUN ./bootstrap
-RUN ./configure --prefix=/usr/local
-RUN make -j$(nproc)
-#RUN ./packages/pgplot.csh
-#RUN ./packages/tempo.csh
-#RUN ./configure --prefix=/usr/local
-RUN make -j$(nproc)
-RUN make install
-
-# install DSPSR
-WORKDIR ../dspsr-code
-RUN echo "dada" > backends.list
-RUN ./bootstrap
-RUN ./configure --prefix=/usr/local
-RUN make -j$(nproc)
-RUN make install
-
-
-
-
-
-WORKDIR /tmp
-
-RUN wget https://www.atnf.csiro.au/research/pulsar/psrcat/downloads/psrcat_pkg.tar.gz
-RUN gunzip psrcat_pkg.tar.gz
-RUN tar -xvf psrcat_pkg.tar
-
-WORKDIR psrcat_tar
-RUN make psrcat
-ENV PSRCAT_FILE="/tmp/psrcat_tar/psrcat.db"
-
-WORKDIR /tmp
-
-ENV PATH="/usr/local/bin:/tmp/psrcat_tar/:${PATH}"
-ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
-ENV PSRHOME="/usr/local"
-
-RUN apt update && apt install -y npm
-RUN npm install -g @anthropic-ai/claude-code
-
-
-SHELL ["/bin/bash", "--login", "-c"]
-
-CMD ["/bin/bash", "--login"]
-
-
+RUN python3 -m pip install --no-cache-dir cmake==3.31.6
+RUN wget -4 --timeout=30 --tries=3 --progress=dot:giga https://developer.download.nvidia.com/compute/cutensor/2.2.0/local_installers/cutensor-local-repo-ubuntu2204-2.2.0_1.0-1_amd64.deb \
+    && dpkg -i cutensor-local-repo-ubuntu2204-2.2.0_1.0-1_amd64.deb \
+    && dpkg -i /var/cutensor-local-repo-ubuntu2204-2.2.0/libcutensor*.deb \
+    && rm -rf /var/lib/apt/lists/* cutensor-local-repo-ubuntu2204-2.2.0_1.0-1_amd64.deb
+RUN ln -s /usr/bin/python3 /usr/local/bin/python
+RUN git clone https://git.code.sf.net/p/psrdada/code /tmp/psrdada \
+    && cd /tmp/psrdada && git checkout 151198ea3ec4a3a237f51e6217a5a2d7ff39194e \
+    && ./bootstrap && ./configure --prefix=/usr/local \
+    && make -j2 && make install && ldconfig && rm -rf /tmp/psrdada
+COPY requirements-test.txt /tmp/requirements-test.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements-test.txt
+RUN cp /var/cutensor-local-repo-ubuntu2204-2.2.0/cutensor-*-keyring.gpg /usr/share/keyrings/
+RUN apt-get update && apt-get install -y --no-install-recommends libfftw3-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV PSRHOME=/usr/local CUDA_HOME=/usr/local/cuda
+WORKDIR /workspace
+CMD ["/bin/bash"]

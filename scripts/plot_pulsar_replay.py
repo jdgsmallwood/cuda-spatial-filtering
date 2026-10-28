@@ -28,7 +28,7 @@ def save(name):
 
 def profile(path):
     result = subprocess.run(
-        ["/data/BLACKMESA_1/sma075/psrdada-local/bin/pdv", "-FTt", str(path)],
+        ["pdv", "-FTt", str(path)],
         check=True, capture_output=True, text=True)
     values = []
     for line in result.stdout.splitlines():

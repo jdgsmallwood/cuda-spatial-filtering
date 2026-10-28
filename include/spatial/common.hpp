@@ -154,19 +154,26 @@ inline void pin_current_thread_to_numa_node(int node) {
 
 class AntennaMapRegistry {
 public:
-  AntennaMapRegistry() {
-    // FPGA 0
-    base_maps[0] = {{0, -100}, {1, 35},   {2, -100}, {3, 1},  {4, -100},
-                    {5, 14},   {6, -100}, {7, 36},   {8, 18}, {9, 25}};
-
-    base_maps[1] = {{0, 15}, {1, 16}, {2, 23}, {3, 24}, {4, 26},
-                    {5, 32}, {6, 17}, {7, 33}, {8, 11}, {9, 13}};
-
-    base_maps[2] = {{0, 4},  {1, 6}, {2, 5}, {3, 29}, {4, 10},
-                    {5, 20}, {6, 7}, {7, 9}, {8, 2},  {9, 3}};
-
-    base_maps[3] = {{0, 19}, {1, 28}, {2, 31}, {3, 34}, {4, 27},
-                    {5, 30}, {6, 12}, {7, 22}, {8, 8},  {9, 21}};
+  explicit AntennaMapRegistry(const json &config = json::object()) {
+    if (config.contains("antenna_mapping")) {
+      const auto &maps = config.at("antenna_mapping");
+      if (!maps.is_object() || maps.empty())
+        throw std::runtime_error("antenna_mapping must be a nonempty object");
+      for (const auto &[fpga, mapping] : maps.items()) {
+        int fpga_id;
+        try {
+          fpga_id = std::stoi(fpga);
+        } catch (const std::exception &) {
+          throw std::runtime_error("Invalid antenna_mapping FPGA ID: " + fpga);
+        }
+        if (fpga_id < 0 || std::to_string(fpga_id) != fpga)
+          throw std::runtime_error("Invalid antenna_mapping FPGA ID: " + fpga);
+        if (!mapping.is_array() || mapping.size() != 10)
+          throw std::runtime_error("antenna_mapping requires ten receiver IDs per FPGA");
+        for (int receiver = 0; receiver < 10; ++receiver)
+          base_maps[fpga_id][receiver] = mapping.at(receiver).get<int>();
+      }
+    }
   }
 
   std::unordered_map<int, int>
@@ -177,9 +184,14 @@ public:
       int fpga_id = selected_fpgas[i];
       int stream_offset = i * 10; // 0 for 1st, 10 for 2nd, 20 for 3rd...
 
-      if (base_maps.find(fpga_id) == base_maps.end()) {
-        throw std::runtime_error("Unknown FPGA ID: " + std::to_string(fpga_id));
+      if (base_maps.empty()) {
+        // Without a site map these are logical receiver indices, not physical antenna IDs.
+        for (int receiver = 0; receiver < 10; ++receiver)
+          combined[stream_offset + receiver] = stream_offset + receiver;
+        continue;
       }
+      if (base_maps.find(fpga_id) == base_maps.end())
+        throw std::runtime_error("Missing antenna mapping for FPGA " + std::to_string(fpga_id));
 
       const auto &source_map = base_maps[fpga_id];
       for (const auto &[stream, antenna] : source_map) {
@@ -468,7 +480,8 @@ inline uint32_t get_total_capture_drops(const CaptureContainer &capture) {
 template <typename CaptureContainer>
 inline void monitor_app_stats(ProcessorStateBase &state,
                               const CaptureContainer &capture,
-                              const CommonArgs &args) {
+                              const CommonArgs &args,
+                              const std::function<void()> &monitor = {}) {
   uint64_t last_packets_received = 0;
   int stagnant_intervals = 0;
   const auto start_time = std::chrono::steady_clock::now();
@@ -486,6 +499,7 @@ inline void monitor_app_stats(ProcessorStateBase &state,
               << state.packets_stuck_unprocessed.load()
               << ", NICDrops=" << get_total_capture_drops(capture)
               << std::endl;
+    if (monitor) monitor();
     std::cout << "Pipeline Runs Queued = " << state.pipeline_runs_queued
               << std::endl;
 #ifdef SPATIAL_DIAGNOSTICS
@@ -944,7 +958,7 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       }
     }
 
-    AntennaMapRegistry registry;
+    AntennaMapRegistry registry(args.config);
 
     args.antenna_mapping = registry.get_combined_map(args.fpga_id_vec);
     std::cout << "Antenna mapping is:\n";

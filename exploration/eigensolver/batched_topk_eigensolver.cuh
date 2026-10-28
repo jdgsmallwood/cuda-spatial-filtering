@@ -5,7 +5,7 @@
 // Batched top-K eigensolver for many small, identical-size complex Hermitian
 // matrices -- the shape LambdaGPUPipeline's cuSOLVER call operates in
 // (N=NR_RECEIVERS~40, batch=NR_CHANNELS*NR_POLARIZATIONS^2 up to ~1800). See
-// the investigation in /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md's
+// the investigation in docs/architecture.md's
 // eigendecomposition follow-up: neither cusolverDnXsyevBatched (full N)
 // nor cusolverDnCheevjBatched (batched Jacobi, also full N) nor
 // cusolverDnXsyevdx (unbatched top-K, and crashes for this input shape in

@@ -25,7 +25,6 @@
 #include <poll.h>
 #include <queue>
 #include <shared_mutex>
-#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sched.h>
 #include <sys/time.h>
@@ -186,7 +185,7 @@ public:
   // Atomic: incremented concurrently by every receiver thread.
   std::atomic<uint64_t> packets_received = 0;
   std::atomic<uint64_t> packets_processed = 0;
-  uint64_t packets_missing = 0;
+  std::atomic<uint64_t> packets_missing = 0;
   std::atomic<uint64_t> packets_discarded = 0;
   // Diagnostics for the ring-buffer "reserve" logic: packets deferred to
   // future_packet_queue (waiting for their buffer to roll around), and
@@ -195,7 +194,7 @@ public:
   // poison their ring slot as processed=false).
   std::atomic<uint64_t> packets_future_queued = 0;
   std::atomic<uint64_t> packets_stuck_unprocessed = 0;
-  uint64_t pipeline_runs_queued = 0;
+  std::atomic<uint64_t> pipeline_runs_queued = 0;
 #ifdef SPATIAL_DIAGNOSTICS
   std::atomic<uint64_t> diagnostic_buffer_releases{0};
   std::atomic<uint64_t> diagnostic_buffer_handoffs{0};
@@ -2229,6 +2228,12 @@ public:
       pipeline_runs_queued += 1;
     }
     std::cout << "Pipeline feeder exiting!\n";
+  }
+
+  uint64_t monitor_pipeline_backlog() const {
+    const auto head = pipeline_q_head_.v.load(std::memory_order_acquire);
+    const auto tail = pipeline_q_tail_.v.load(std::memory_order_acquire);
+    return tail >= head ? std::min<uint64_t>(tail - head, PIPELINE_Q_CAP) : 0;
   }
 
   void *get_current_write_pointer() {

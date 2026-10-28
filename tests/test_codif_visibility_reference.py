@@ -14,7 +14,7 @@ from check_codif_visibility_parity import read_pcap
 
 class CodifVisibilityReferenceTests(unittest.TestCase):
     def setUp(self):
-        self.fixture = ROOT / "tests/fixtures/codif_lambda.pcap"
+        self.fixture = ROOT / "tests/fixtures/codif_synthetic.pcap"
 
     def decode(self, data):
         with tempfile.TemporaryDirectory() as directory:
@@ -22,11 +22,15 @@ class CodifVisibilityReferenceTests(unittest.TestCase):
             path.write_bytes(data)
             return read_pcap(path)
 
+    def test_fixture_is_generated_without_observing_data(self):
+        from generate_codif_fixture import fixture_bytes
+        self.assertEqual(self.fixture.read_bytes(), fixture_bytes())
+
     def test_supplied_capture_geometry_and_epoch(self):
         samples, metadata = read_pcap(self.fixture)
         self.assertEqual(samples.shape, (8, 256, 20))
         self.assertEqual(metadata["packets"], 32)
-        self.assertEqual(metadata["first_sample"], 782244644444444)
+        self.assertEqual(metadata["first_sample"], 0)
         self.assertEqual(metadata["first_channel"], 110)
         self.assertEqual(metadata["fpga_id"], 0)
         self.assertEqual(metadata["scale_exponents"], [7])

@@ -35,6 +35,19 @@ target_link_directories(gpu_app_common INTERFACE ${PSRDADA_ROOT}/lib)
 # supply any additional compatibility-library directories at configure time.
 set(SPATIAL_EXTRA_RUNTIME_LIBRARY_DIRS "" CACHE STRING
     "Additional runtime library directories for capability-bearing executables")
+# The pulsar/PSRDADA stack can require GSL 2.7 (libgsl.so.25), while the
+# active build environment may provide a different GSL ABI.  Include the
+# matching DSPSR environment in the embedded RPATH: cap_net_raw executables
+# cannot rely on LD_LIBRARY_PATH at runtime.
+if(DEFINED ENV{CONDA_PREFIX})
+    if(EXISTS "$ENV{CONDA_PREFIX}/lib/libgsl.so.25")
+        list(APPEND SPATIAL_EXTRA_RUNTIME_LIBRARY_DIRS
+            "$ENV{CONDA_PREFIX}/lib")
+    elseif(EXISTS "$ENV{CONDA_PREFIX}/envs/dspsr/lib/libgsl.so.25")
+        list(APPEND SPATIAL_EXTRA_RUNTIME_LIBRARY_DIRS
+            "$ENV{CONDA_PREFIX}/envs/dspsr/lib")
+    endif()
+endif()
 set(SPATIAL_APP_BUILD_RPATH
     ${PSRDADA_ROOT}/lib
     ${CMAKE_BINARY_DIR}/_deps/mathdx-build
@@ -46,6 +59,7 @@ if(DEFINED ENV{CONDA_PREFIX})
         "$ENV{CONDA_PREFIX}/lib"
         "$ENV{CONDA_PREFIX}/targets/x86_64-linux/lib")
 endif()
+set(CMAKE_INSTALL_RPATH "${SPATIAL_APP_BUILD_RPATH}")
 
 target_link_libraries(gpu_app_common INTERFACE
     spatial CUDA::cudart cuda cutensor HighFive::HighFive
@@ -426,19 +440,11 @@ foreach(_APP IN LISTS _STANDARD_APPS)
     )
 endforeach()
 
-# Install all app binaries to <install-prefix>/bin (defaults to <project-root>/bin).
-set(_OBSERVE_TARGETS)
-foreach(NR_FPGAS 1 2 3 4)
-    foreach(NR_CHANNELS 8 16 24 32 40 48)
-        list(APPEND _OBSERVE_TARGETS "observe_${NR_FPGAS}_${NR_CHANNELS}")
-    endforeach()
+# Include every app variant and benchmark without maintaining a second target list.
+get_property(_APP_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_APP IN LISTS _APP_TARGETS)
+    get_target_property(_APP_TYPE ${_APP} TYPE)
+    if(_APP_TYPE STREQUAL "EXECUTABLE")
+        install(TARGETS ${_APP} RUNTIME DESTINATION bin)
+    endif()
 endforeach()
-
-install(TARGETS
-    ${_OBSERVE_TARGETS}
-    ${_STARSPIN_TARGETS}
-    ${_STANDARD_APPS}
-    pulsar_fold_4_40
-    udp_sender
-    RUNTIME DESTINATION bin
-)

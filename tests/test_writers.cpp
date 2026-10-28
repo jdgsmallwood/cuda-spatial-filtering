@@ -465,3 +465,51 @@ TEST(HDF5BeamWriterTest, WritesVisibilitiesMultiBlock) {
   EXPECT_EQ(seqs[2], 20u);
   EXPECT_EQ(seqs[3], 28u);
 }
+
+TEST(RedisWritersTest, UnavailableServerDoesNotBlockConstructionOrOutput) {
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(fd, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
+  socklen_t length = sizeof(address);
+  ASSERT_EQ(getsockname(fd, reinterpret_cast<sockaddr *>(&address), &length), 0);
+  const int port = ntohs(address.sin_port); // reserved, deliberately not listening
+  const auto start = std::chrono::steady_clock::now();
+  {
+    using Values = float[2][2][2][2];
+    using Vectors = std::complex<float>[2][2][2][2][2];
+    RedisEigendataWriter<Values, Vectors> eigen(1, 2, "127.0.0.1", port);
+    EigenBlock<Values, Vectors> block{};
+    for (int i = 0; i < 100; ++i) eigen.process_block(block);
+    using FFT = float[2][2][1][4];
+    RedisBeamFFTWriter<FFT> fft(2, 1, 2, "monitor-test:", 2, 1, "127.0.0.1", port);
+    FFTBlock<FFT> fft_block{};
+    for (int i = 0; i < 100; ++i) fft.process_block(fft_block);
+  }
+  close(fd);
+  EXPECT_LT(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), 2.0);
+}
+
+TEST(HDF5VisibilitiesWriterTest, OptionalMonitoringObservesCompletedAndWrittenBlocks) {
+  const auto filename = make_temp_hdf5_file();
+  HighFive::File file(filename, HighFive::File::Truncate);
+  HDF5VisibilitiesWriter<MockT::VisibilitiesOutputType> writer(file, 0, 0, nullptr, 2);
+  int observed = 0;
+  size_t written = 0;
+  writer.monitor_block = [&](const auto &block) {
+    EXPECT_EQ(block.start_seq_num, 123u);
+    ++observed;
+  };
+  writer.monitor_written = [&](size_t count) { written = count; };
+  VisBlock<MockT::VisibilitiesOutputType> block;
+  std::memset(&block.data, 0, sizeof(block.data));
+  block.start_seq_num = 123;
+  block.num_total_packets = 1;
+  writer.process_block(block);
+  EXPECT_EQ(observed, 1);
+  EXPECT_EQ(written, 0u);
+  writer.flush();
+  EXPECT_EQ(written, 1u);
+}

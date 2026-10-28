@@ -716,21 +716,9 @@ struct FineChannelizer {
     filter = std::make_unique<ppf::Filter>(device, args);
   }
 
-  // Launches one Filter per coarse channel on the given stream. d_filter_input/d_filter_output
-  // must point at FilterInputType/FilterOutputType-shaped device buffers.
-  //
-  // Deliberately calls gpu-filter's cu::Stream-based launchAsync overload with our own
-  // non-owning cu::Stream/cu::DeviceMemory wrappers, NOT its raw CUstream/CUdeviceptr overload
-  // (Filter::launchAsync(CUstream, CUdeviceptr, CUdeviceptr, ...), libfilter/Filter.cc:258-275).
-  // That raw-pointer overload was found, via direct isolated reproduction (bypassing this
-  // project's pipeline entirely -- confirmed with nothing else, not even TCC, involved) to hang
-  // indefinitely inside cuLaunchKernel every time, regardless of CUDA context model (tested both
-  // the implicit runtime-API primary context this whole pipeline already relies on, and a fresh
-  // explicit driver-API context). Manually constructing the same wrapper objects and calling the
-  // cu::Stream-based overload directly (identical underlying stream/buffers, identical
-  // parameters) instead works reliably and returns immediately. The exact mechanism inside
-  // gpu-filter's own wrapping call wasn't isolated further; this is a confirmed, reproducible
-  // workaround, not a guess -- see docs/architecture.md Section 6 for the full evidence trail.
+  // Reuse the filter across coarse channels; buffers have FilterInputType/FilterOutputType shapes.
+  // Non-owning wrappers avoid a hang observed with gpu-filter's raw-pointer overload.
+  // See docs/architecture.md for the compatibility constraint.
   void launchAsync(cudaStream_t stream, void *d_filter_input, void *d_filter_output) {
     constexpr size_t in_bytes_per_channel = sizeof(FilterInputType) / NR_COARSE;
     constexpr size_t out_bytes_per_channel = sizeof(FilterOutputType) / NR_COARSE;

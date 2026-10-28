@@ -107,11 +107,9 @@ Key points the diagram doesn't show directly:
 - **Validated at 32 channels/4-FPGA** against a synthetic busy-kernel proxy and the real
   `LambdaGPUPipeline` (`apps/bench_gpudirect_scatter.cu`, `apps/bench_gpu.cu --relocation-check`) —
   64-channel validation is deferred pending production-scale GPU memory.
-- **Unverified against real ibverbs/GPUDirect hardware**: this environment has no libibverbs-dev
-  install, so `libibverbs.hpp`'s `LibibverbsGpuDirectPacketCapture` itself has never been compiled —
-  everything upstream of the NIC (placement arithmetic, the relocation kernel, `zero_missing_scales`)
-  is tested against real GPU hardware in `tests/test_ibverbs_placement.cu` and
-  `tests/test_gpudirect_scatter.cu`.
+- **Hardware validation remains separate**: the reviewer container includes libibverbs
+  headers and compiles the capture backend, but the offline replay does not exercise NIC DMA.
+  Placement and scatter tests cannot establish end-to-end GPUDirect correctness on a live NIC.
 
 ## 2. `LambdaConfig` — the shape contract
 
@@ -339,11 +337,8 @@ compiling `FilterAndCorrect.cu` at **runtime**, once, in `Filter`'s constructor
 (`Filter.cc:25-127`, `compileModule`): the source is embedded in `libfilter.a` as a linked binary
 blob, and `Filter`'s constructor calls it via NVRTC with every dimension baked in as a `-D`
 preprocessor define (`-DNR_CHANNELS=32 -DNR_RECEIVERS=10 ...`), producing a `cu::Module` (PTX)
-specialized exactly for this pipeline's shapes. This is the same reason `FineChannelizer<T>`
-(`pipeline/common.hpp`) constructs one `Filter` instance per coarse channel up front, in the
-pipeline constructor, rather than lazily: each instance's construction is a real compilation, not
-a cheap object construction (though fast in practice, ~4s observed per instance in this
-container).
+specialized for the pipeline's shapes. `FineChannelizer<T>` constructs one shared
+`Filter` instance up front and reuses it across coarse channels.
 
 ### The sm_70+ requirement
 
@@ -355,45 +350,13 @@ default (a string, not a resolved number, at the point gpu-filter's check runs �
 section of this repo's `CLAUDE.md`); pass an explicit numeric value (e.g.
 `-DCMAKE_CUDA_ARCHITECTURES=89` for an RTX 4060) at configure time to work around it.
 
-**Resolved: a real bug in gpu-filter's raw-pointer `launchAsync` overload, worked around.** The
-first `channelizer_->launchAsync(...)` call (inside `LambdaGPUPipeline`'s eager constructor
-warmup run) was initially observed hanging indefinitely. Investigation went through several wrong
-turns before landing on the real cause — worth recording precisely, since the wrong turns are
-exactly the kind of thing that wastes time again if re-trodden:
+### gpu-filter launch compatibility
 
-- `Filter`'s constructor itself (NVRTC compile via `compileModule`) is fast (~4s observed) — ruled
-  out as the cost center.
-- gpu-filter's kernel, run standalone via its own `FilterTest` with the *exact* parameters this
-  project uses (4 receivers, 32 channels, 16 samples/channel, 16 taps, fp32→fp16), completed in
-  milliseconds — ruled out gpu-filter/cuFFTDx itself and `NR_FINE_CHANNELS` size as factors.
-- A `pthread_cond_wait` blocked for 30+ seconds inside the driver call stack under
-  `cuLaunchKernel`, and `nvidia-smi` showed several GB of GPU memory in use with "no running
-  processes found" from inside the (sandboxed) shell — this was *wrongly* interpreted as an
-  external tenant contending for the GPU. It was actually the user's own normal desktop GPU usage
-  (Xorg, window manager, browser, chat apps), fully accounted for by `nvidia-smi`'s own process
-  list when checked from the right vantage point — not a code issue, but also not evidence of
-  anything abnormal. Lesson: don't infer "external contention" from a memory-accounting mismatch
-  without checking whether it's explained by ordinary, visible processes first.
-- The real isolation came from bypassing the whole pipeline (and even `LambdaGPUPipeline`
-  entirely): a minimal repro constructing just one `ppf::Filter` and calling `launchAsync` — with
-  *nothing* else, not even TCC — reproduced the identical hang. This ruled out any interaction
-  with the rest of the pipeline.
-- Systematically varying that minimal repro (explicit vs. implicit/primary CUDA context; raw
-  `CUstream`/`CUdeviceptr` vs. `cu::Stream`/`cu::DeviceMemory` wrapper objects) isolated the
-  actual variable: **`Filter`'s raw-pointer `launchAsync` overload**
-  (`libfilter/Filter.cc:258-275`, which internally wraps the raw handles into temporaries and
-  calls the `cu::Stream`-based overload) **hangs in `cuLaunchKernel` every time**, regardless of
-  context model. Calling the `cu::Stream`-based overload directly — with the exact same
-  underlying stream and device pointers, just wrapped into non-owning `cu::Stream`/
-  `cu::DeviceMemory` objects by the *caller* instead of internally by `Filter` — works reliably
-  and returns immediately, every time this was tried.
-
-The exact mechanism inside gpu-filter's own wrapping call was not isolated further (a plausible
-suspect: the raw-pointer overload binds temporaries to non-`const` reference parameters on the
-`cu::Stream`-based overload, which is unusual and worth scrutinizing further, but wasn't
-conclusively pinned down as *the* cause). `FineChannelizer::launchAsync`
-(`pipeline/common.hpp`) now calls the `cu::Stream`-based overload directly as a confirmed,
-reliable workaround — not a guess. Worth reporting upstream to ASTRON if this recurs.
+`FineChannelizer::launchAsync` uses the `cu::Stream` overload with non-owning
+stream and memory wrappers. The raw-pointer overload previously hung inside
+`cuLaunchKernel` in a standalone reproducer. The underlying cause was not
+established; retain the working overload unless a regression test demonstrates
+that the alternative is safe.
 
 ## 7. `LambdaStarspinPipeline` stage detail
 
@@ -433,10 +396,3 @@ four-FPGA/40-coarse-channel production target, the canonical stream map puts
 four disconnected slots last. The fused preparation writes only the first 36
 connected receivers, so the PFB and TCC both process 36 receivers. TCC emits
 666 packed baselines and handles a partial final 32-receiver tile directly.
-
----
-
-*Section 4's `LambdaGPUPipeline` diagram and Section 5's dependency graph reflect the
-pre-correlation fine-channelization work as landed. The other 6 `Lambda*Pipeline` variants
-(Section 3) don't yet have their own channelization wiring — see the plan for what's reusable
-(`FineChannelizer<T>`, the `LambdaConfig` split) vs. what each needs to re-derive.*

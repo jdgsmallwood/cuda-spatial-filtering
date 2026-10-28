@@ -29,7 +29,7 @@ public:
                                 const bool dummy_run = false) = 0;
   virtual void dump_visibilities(const uint64_t end_seq_num = 0) = 0;
 
-  // GPUDirect RDMA ingest support (see /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md
+  // GPUDirect RDMA ingest support (see docs/architecture.md
   // and docs/architecture.md's GPUDirect section): the device-resident
   // samples/scales array for one input buffer slot, so a capture backend
   // can relocate packet payloads directly into it instead of via a pinned-host

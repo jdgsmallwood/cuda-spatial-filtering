@@ -76,3 +76,28 @@ TEST(HDF5RunAuditTest, EmbedsManifestAndBidirectionalMappings) {
   fs::remove(config_path);
   fs::remove(deripple_path);
 }
+
+TEST(AntennaMapRegistryTest, UsesExternalMappingAndRejectsIncompleteSites) {
+  const json config = {{"antenna_mapping", {{"7", {9, 8, 7, 6, 5, 4, 3, 2, 1, -1}}}}};
+  AntennaMapRegistry registry(config);
+  const auto mapping = registry.get_combined_map({7});
+  EXPECT_EQ(mapping.at(0), 9);
+  EXPECT_EQ(mapping.at(9), -1);
+  EXPECT_THROW(registry.get_combined_map({8}), std::runtime_error);
+  EXPECT_THROW(AntennaMapRegistry(json{{"antenna_mapping", {{"7", {1, 2}}}}}), std::runtime_error);
+  const auto logical = AntennaMapRegistry().get_combined_map({7, 8});
+  EXPECT_EQ(logical.at(0), 0);
+  EXPECT_EQ(logical.at(19), 19);
+}
+
+TEST(AntennaMapRegistryTest, RejectsMalformedExplicitMaps) {
+  for (const auto &maps : {json(nullptr), json::object(), json::array(), json(7)}) {
+    SCOPED_TRACE(maps.dump());
+    EXPECT_THROW(AntennaMapRegistry(json{{"antenna_mapping", maps}}), std::runtime_error);
+  }
+  for (const auto *key : {"7oops", "", "-1", " 7", "+7", "07", "99999999999999999999"}) {
+    SCOPED_TRACE(key);
+    const json config = {{"antenna_mapping", {{key, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}}}}};
+    EXPECT_THROW(AntennaMapRegistry{config}, std::runtime_error);
+  }
+}

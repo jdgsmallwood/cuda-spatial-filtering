@@ -92,3 +92,11 @@ scripts/.venv
 
 # Local reference files and preserved unrelated work
 /.local-work/
+
+# Generated JOSS draft
+/paper.pdf
+
+# Site files belong outside the public source tree.
+/config.json
+/stream_antenna_map.json
+/site.local.sh

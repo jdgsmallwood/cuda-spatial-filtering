@@ -67,7 +67,6 @@ From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
     export PATH=/usr/local/cuda-12.8/compute-sanitizer:$PATH
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcutensor/12:$LD_LIBRARY_PATH
     #export CUTENSOR_ROOT=/usr/lib/x86_64-linux-gnu/libcutensor
-    export CUTENSOR_ROOT=/home/jsmallwo/libcutensor/lib
 
 %runscript
     exec /bin/bash

@@ -223,7 +223,7 @@ def plot_gpu_comparison(datasets: list[tuple[str, list[dict]]], out_dir: Path):
     """Overlay the CorrBeam channel-sweep and LambdaGPU charts across machines.
 
     `datasets` is a list of (label, gpu_rows) pairs, e.g.
-    [("A100", ozstar_rows), ("RTX 4000", blackmesa_rows)]. Only the 4-FPGA
+    [("A100", accelerator_rows), ("RTX 4000", example-host_rows)]. Only the 4-FPGA
     series is plotted per machine (matching plot_corrbeam_channel_sweep).
     """
     colors = {label: COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
@@ -326,7 +326,7 @@ def plot_processor_comparison(datasets: list[tuple[str, list[dict]]], out_dir: P
     """Overlay the Processor channel-sweep GB/s across machines/CPUs.
 
     `datasets` is a list of (label, processor_rows) pairs, e.g.
-    [("Xeon 4210", blackmesa_rows), ("Ryzen 7 7700", ryzen_rows)]. Only the
+    [("Xeon 4210", example-host_rows), ("Ryzen 7 7700", ryzen_rows)]. Only the
     4-FPGA series is plotted, and the ch=1 baseline/warmup config is dropped
     (matching plot_processor).
     """
@@ -368,11 +368,11 @@ def main():
     ap.add_argument("--compare", nargs="+", metavar="DIR=LABEL",
                     help="Overlay GPU charts from multiple results dirs, e.g. "
                          "--compare ozstar_benchmarks=A100 "
-                         "blackmesa_benchmarks/20260708_101738='RTX 4000'")
+                         "example-host_benchmarks/20260708_101738='RTX 4000'")
     ap.add_argument("--compare-processor", nargs="+", metavar="DIR=LABEL",
                     help="Overlay Processor charts from multiple results dirs, e.g. "
                          "--compare-processor "
-                         "blackmesa_benchmarks/20260708_101738='Xeon 4210' "
+                         "example-host_benchmarks/20260708_101738='Xeon 4210' "
                          "20260708_000926='Ryzen 7 7700'")
     ap.add_argument("--compare-out-dir", default="benchmarking",
                     help="Where to save --compare/--compare-processor figures "

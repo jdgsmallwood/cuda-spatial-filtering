@@ -194,6 +194,9 @@ TEST(CodifPacketTests, FrameAndReferenceEpochRolloversAdvanceBy64Samples) {
 
 TEST(CodifPacketTests, ReplayPreservesMetadataAndAdvancesAcrossPeriod) {
   auto entry = captured_packet();
+  // Exercise legacy metadata explicitly; the public fixture uses standard metadata.
+  test_support::codif_u16(entry.data + 42 + 44, 0);
+  test_support::codif_u16(entry.data + 42 + 18, 0xfeca);
   test_support::codif_u32(entry.data + 42, codif::frames_per_period - 1);
   const auto count = entry.parse().sample_count;
   const auto data = std::vector<uint8_t>(entry.data + 42 + 46, entry.data + entry.length);

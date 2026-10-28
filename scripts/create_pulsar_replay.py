@@ -112,7 +112,7 @@ def main() -> None:
             "unique_frequency_channels": args.coarse_channels * 27,
             "frequency_first_hz": first_hz,
             "frequency_last_hz": last_hz,
-            "excluded_antennas": [14, 36],
+            "excluded_antennas": config.get("beam_excluded_antennas", []),
         },
         "weights": {},
     }

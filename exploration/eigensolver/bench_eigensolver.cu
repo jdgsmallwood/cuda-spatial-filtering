@@ -2,7 +2,7 @@
 // generic 64-bit batched solver) vs. cusolverDnCheevjBatched (candidate, cuSOLVER's
 // purpose-built batched Jacobi eigensolver for many small identical Hermitian
 // matrices -- exactly this problem's shape). See the investigation in
-// /home/ubuntu/.claude/plans/i-want-to-start-breezy-lampson.md's eigendecomposition
+// docs/architecture.md's eigendecomposition
 // follow-up: LambdaGPUPipeline's eigendecomposition dominates the fine-channelization
 // slowdown (~80-88% of the added per-buffer time), so this checks whether a different
 // cuSOLVER API is meaningfully faster at the same matrix size (N=NR_RECEIVERS) and

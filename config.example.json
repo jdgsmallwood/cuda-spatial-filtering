@@ -1,0 +1,5 @@
+{
+  "_comment": "Synthetic loopback example only. Supply measured site coordinates, antenna positions, routing and boot-matched delays for observations.",
+  "frequency_plan": {"base_frequency_hz": 0, "channel_bandwidth_hz": 781250},
+  "network_interfaces": {"0": "lo"}
+}

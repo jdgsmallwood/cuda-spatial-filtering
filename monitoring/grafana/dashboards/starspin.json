@@ -1,0 +1,1288 @@
+{
+  "uid": "starspin-monitor",
+  "title": "Starspin \u2014 live quality and server health",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "editable": false,
+  "tags": [
+    "Starspin"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "run",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "redis-datasource",
+          "uid": "starspin-redis"
+        },
+        "query": "GET starspin:latest",
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "input",
+        "label": "Input",
+        "type": "query",
+        "datasource": {
+          "type": "redis-datasource",
+          "uid": "starspin-redis"
+        },
+        "query": "SMEMBERS starspin:$run:inputs",
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "baseline",
+        "label": "Baseline",
+        "type": "query",
+        "datasource": {
+          "type": "redis-datasource",
+          "uid": "starspin-redis"
+        },
+        "query": "SMEMBERS starspin:$run:baselines",
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Last monitor update \u2014 stale after 15 s at the default cadence",
+      "type": "stat",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:heartbeat_ms",
+          "legend": "heartbeat_ms",
+          "value": "heartbeat_ms"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "textMode": "value"
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 2,
+      "title": "Integration / HDF5 write age (seconds)",
+      "type": "stat",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:integration_age_seconds",
+          "legend": "integration_age_seconds",
+          "value": "integration_age_seconds"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:output_age_seconds",
+          "legend": "output_age_seconds",
+          "value": "output_age_seconds"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 3,
+      "title": "Monitoring skipped updates / Redis failures",
+      "type": "stat",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:monitor_skipped",
+          "legend": "monitor_skipped",
+          "value": "monitor_skipped"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:redis_failures",
+          "legend": "redis_failures",
+          "value": "redis_failures"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 4,
+      "title": "Pipeline backlog",
+      "type": "stat",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:pipeline_backlog",
+          "legend": "pipeline_backlog",
+          "value": "pipeline_backlog"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 20,
+      "title": "Boot / delay verification \u2014 supplied observing record, not inferred from data",
+      "type": "stat",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "command": "json.get",
+          "keyName": "starspin:$run:calibration",
+          "path": "."
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "fields": "",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "value_and_name",
+        "colorMode": "value"
+      },
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 5,
+      "title": "Packet rates",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:packets_received_per_second",
+          "legend": "packets_received_per_second",
+          "value": "packets_received_per_second"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:packets_processed_per_second",
+          "legend": "packets_processed_per_second",
+          "value": "packets_processed_per_second"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 6,
+      "title": "Packet loss / discard rates",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:packets_missing_per_second",
+          "legend": "packets_missing_per_second",
+          "value": "packets_missing_per_second"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:packets_discarded_per_second",
+          "legend": "packets_discarded_per_second",
+          "value": "packets_discarded_per_second"
+        },
+        {
+          "refId": "C",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:nic_drops_per_second",
+          "legend": "nic_drops_per_second",
+          "value": "nic_drops_per_second"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 7,
+      "title": "Per-core busy CPU (%)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.mrange",
+          "filter": "run=$run category=cpu_core_busy",
+          "legend": "metric",
+          "aggregation": "avg",
+          "bucket": 5000,
+          "value": "metric"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 8,
+      "title": "CPU modes (%) / process CPU (100% = one core)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:cpu_user_percent",
+          "legend": "cpu_user_percent",
+          "value": "cpu_user_percent"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:cpu_system_percent",
+          "legend": "cpu_system_percent",
+          "value": "cpu_system_percent"
+        },
+        {
+          "refId": "C",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:cpu_idle_percent",
+          "legend": "cpu_idle_percent",
+          "value": "cpu_idle_percent"
+        },
+        {
+          "refId": "D",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:cpu_iowait_percent",
+          "legend": "cpu_iowait_percent",
+          "value": "cpu_iowait_percent"
+        },
+        {
+          "refId": "E",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:process_cpu_percent",
+          "legend": "process_cpu_percent",
+          "value": "process_cpu_percent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 9,
+      "title": "Server RAM / correlator resident memory",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:MemTotal_bytes",
+          "legend": "MemTotal_bytes",
+          "value": "MemTotal_bytes"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:MemAvailable_bytes",
+          "legend": "MemAvailable_bytes",
+          "value": "MemAvailable_bytes"
+        },
+        {
+          "refId": "C",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:memory_used_bytes",
+          "legend": "memory_used_bytes",
+          "value": "memory_used_bytes"
+        },
+        {
+          "refId": "D",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:process_rss_bytes",
+          "legend": "process_rss_bytes",
+          "value": "process_rss_bytes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 10,
+      "title": "Swap used",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:swap_used_bytes",
+          "legend": "swap_used_bytes",
+          "value": "swap_used_bytes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 11,
+      "title": "Swap traffic",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 24,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:pswpin_bytes_per_second",
+          "legend": "pswpin_bytes_per_second",
+          "value": "pswpin_bytes_per_second"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:pswpout_bytes_per_second",
+          "legend": "pswpout_bytes_per_second",
+          "value": "pswpout_bytes_per_second"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 12,
+      "title": "Input $input power spectrum",
+      "type": "xychart",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "command": "json.get",
+          "keyName": "starspin:$run:spectrum:$input",
+          "path": "."
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false,
+            "show": "lines",
+            "lineWidth": 1,
+            "pointSize": {
+              "fixed": 3
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "frequency_mhz"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:MHz"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "series": [
+          {
+            "name": {
+              "fixed": "power"
+            },
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "frequency_mhz"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "power"
+              }
+            },
+            "frame": {
+              "matcher": {
+                "id": "byIndex",
+                "options": 0
+              }
+            }
+          }
+        ],
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "mapping": "manual"
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "power",
+                "destinationType": "number"
+              }
+            ]
+          }
+        }
+      ],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 13,
+      "title": "Baseline $baseline amplitude",
+      "type": "xychart",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "command": "json.get",
+          "keyName": "starspin:$run:spectrum:$baseline",
+          "path": "."
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false,
+            "show": "lines",
+            "lineWidth": 1,
+            "pointSize": {
+              "fixed": 3
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "frequency_mhz"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:MHz"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "series": [
+          {
+            "name": {
+              "fixed": "amplitude"
+            },
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "frequency_mhz"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "amplitude"
+              }
+            },
+            "frame": {
+              "matcher": {
+                "id": "byIndex",
+                "options": 0
+              }
+            }
+          }
+        ],
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "mapping": "manual"
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "amplitude",
+                "destinationType": "number"
+              }
+            ]
+          }
+        }
+      ],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 14,
+      "title": "Baseline $baseline phase",
+      "type": "xychart",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "command": "json.get",
+          "keyName": "starspin:$run:spectrum:$baseline",
+          "path": "."
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false,
+            "show": "lines",
+            "lineWidth": 1,
+            "pointSize": {
+              "fixed": 3
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "frequency_mhz"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "suffix:MHz"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "series": [
+          {
+            "name": {
+              "fixed": "phase_deg"
+            },
+            "x": {
+              "matcher": {
+                "id": "byName",
+                "options": "frequency_mhz"
+              }
+            },
+            "y": {
+              "matcher": {
+                "id": "byName",
+                "options": "phase_deg"
+              }
+            },
+            "frame": {
+              "matcher": {
+                "id": "byIndex",
+                "options": 0
+              }
+            }
+          }
+        ],
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "mapping": "manual"
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "phase_deg",
+                "destinationType": "number"
+              }
+            ]
+          }
+        }
+      ],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 15,
+      "title": "Input $input band-mean power (raw accumulated units)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:power_$input",
+          "legend": "power_$input",
+          "value": "power_$input"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 16,
+      "title": "Waterfall \u2014 input selected with --monitor-waterfall",
+      "type": "heatmap",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "command": "json.get",
+          "keyName": "starspin:$run:waterfall",
+          "path": "."
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Spectral",
+          "scale": "linear",
+          "steps": 64
+        },
+        "yAxis": {
+          "unit": "suffix:MHz"
+        },
+        "legend": {
+          "show": true
+        },
+        "tooltip": {
+          "show": true
+        }
+      },
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "power",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "frequency_mhz",
+            "rowField": "time",
+            "valueField": "power"
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "time\\frequency_mhz",
+                "destinationType": "time"
+              }
+            ]
+          }
+        }
+      ],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 17,
+      "title": "Completed and written integrations",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:integrations_completed",
+          "legend": "integrations_completed",
+          "value": "integrations_completed"
+        },
+        {
+          "refId": "B",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:integrations_written",
+          "legend": "integrations_written",
+          "value": "integrations_written"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 18,
+      "title": "Missing packets in sampled integration (%)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 58,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "timeSeries",
+          "command": "ts.range",
+          "keyName": "starspin:$run:integration_missing_percent",
+          "legend": "integration_missing_percent",
+          "value": "integration_missing_percent"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "spanNulls": false
+          },
+          "displayName": "${__field.name}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    },
+    {
+      "id": 19,
+      "title": "Observation, calibration and mapping (unverified unless explicitly supplied)",
+      "type": "table",
+      "datasource": {
+        "type": "redis-datasource",
+        "uid": "starspin-redis"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 66,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "command": "json.get",
+          "keyName": "starspin:$run:status",
+          "path": "."
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [],
+      "pluginVersion": "12.2.1"
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}

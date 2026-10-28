@@ -16,9 +16,9 @@
 //   fp16 sample x = (2.0, -2.0) for all (channel, time, receiver, pol)
 //
 //   Visibility:
-//     V[i,j][p][q] = Sum_t conj(x[i,p,t]) * x[j,q,t]
-//                  = NR_TIME_STEPS * conj((2,-2))*(2,-2)
-//                  = 8 * (2+2j)*(2-2j)
+//     V[i,j][p][q] = Sum_t x[i,p,t] * conj(x[j,q,t])
+//                  = NR_TIME_STEPS * (2,-2)*conj((2,-2))
+//                  = 8 * (2-2j)*(2+2j)
 //                  = 8 * (4+4) = 64 + 0j   (same for all i,j,p,q)
 //     NR_TIME_STEPS = NR_PACKETS_FOR_CORRELATION x NR_TIME_STEPS_PER_PACKET
 //                   = 1 x 8 = 8

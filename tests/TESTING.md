@@ -75,11 +75,11 @@ means something that matters to a real run broke.
 - **`pipeline_harness.hpp`** — `SyntheticPipelineRun<Config>` (described above), plus
   `make_unity_beam_weights<Config>()` / `make_unity_antenna_gains<Config>()` ("do nothing to the
   signal" baselines), plus `pipeline_factories::make_*_pipeline<Config>(...)` — small per-variant
-  construction helpers. A single generic factory isn't realistic because the 7 pipeline classes
+  construction helpers. A single generic factory isn't realistic because the pipeline classes
   take genuinely different constructor arguments (e.g. `LambdaGPUPipeline(int, BeamWeightsT<T>*)`
   vs `LambdaAntennaSpectraPipeline(int)` vs `LambdaProjectionPipeline<T, NR_EIG, NR_RUNS>(int)`).
-  `make_gpu_pipeline` and `make_corr_beam_only_pipeline` are implemented; add the rest incrementally
-  as tests for those variants are written.
+  Factories cover the pipeline variants, including Starspin and the pulsar and spectra paths;
+  reuse the matching factory when adding tests.
 - **`assertions.hpp`** — the property/invariant checks themselves:
   `assert_all_finite` (catches NaN/Inf from uninitialized memory, bad FFT plans, eigendecomposition
   blowups, ...), `assert_autocorrelation_invariants` (same-polarization autocorrelations are real
@@ -104,32 +104,31 @@ Correlator stores visibilities in **packed lower-triangular** form —
 per-polarization covariance block `V[baseline(r,r)][p][q]` is square and must still be Hermitian
 PSD, regardless of how the correlator lays out cross-baseline pairs.
 
-## A gotcha this surfaced: a likely latent race on `Output::arrivals`
+## Arrival-mask ownership
 
-An earlier version of the self-test asserted that `Output::arrivals` reflected a fully-arrived
-synthetic buffer (`assert_all_packets_arrived`, since removed). It failed deterministically: the
-array came back all-`false`. Tracing it — `LambdaPipelineIngest::ingest_and_scale`
-(`include/spatial/pipeline.hpp`) queues `release_buffer_host_func` via `cudaLaunchHostFunc` on a
-per-buffer host stream *immediately* on entry; that callback calls `ProcessorState::release_buffer`,
-which `memset`s the very same buffer's `arrivals` array to zero in preparation for reuse — but the
-`std::memcpy` that copies `arrivals` out to `Output` happens ~150 lines later in the same
-`execute_pipeline`, with no synchronization between the two. With small/fast configs (i.e. exactly
-the kind tests use), the async callback reliably wins that race and zeroes the array first.
+`LambdaGPUPipeline`, `LambdaCorrBeamOnlyGPUPipeline`, and
+`LambdaAdaptiveBeamformedSpectraPipeline` reserve their beam output and copy
+arrival flags through `Output::register_beam_data_block_with_arrivals` before
+ingest can schedule input-buffer release. Output writers still wait for the
+beam transfer and any required eigenmode counts before publishing the block.
+No beam writer means no arrival copy; constructor warmup also skips output.
 
-This looks like a genuine pre-existing bug independent of the harness — `Output::arrivals` may be
-unreliable in production too, just masked there by larger configs giving the host thread more of a
-head start. Fixing it is real production-code work and out of scope for the test harness itself;
-it's flagged here so whoever picks it up has the trace already done. (If/when it's fixed,
-`assert_all_packets_arrived`-style precondition checks — "did the synthetic feed actually produce
-a complete buffer before asserting on pipeline output" — would be worth re-adding.)
+The previous ordering copied flags after scheduling release, which clears the
+input array. Regression tests in `PipelineHarnessSelfTest` and
+`AdaptivePipelineTests` synchronize the GPU before obtaining the arrival
+landing pointer, forcing any previously queued release to complete. Both tests
+failed on the old code. Keep these checks when changing buffer ownership.
+
+Starspin reads sequence ranges and missing counts before ingest and uses
+event-polled reclamation. Numerical tests and short replay exercise that path,
+but sustained live-capture and GPUDirect checks still require hardware.
 
 ## A gotcha this surfaced: uninitialized pinned memory across test lifecycles
 
 `LambdaFinalPacketData`'s constructor allocates pinned host memory via `cudaHostAlloc`, which does
-**not** zero-initialize. In production this is harmless — the object is created once at startup and
-the pipeline fills every slot before it's read. In tests, where many `ProcessorState` objects are
-created and destroyed in sequence, the CUDA pinned-memory pool recycles addresses; a subsequent
-allocation at the same address inherits stale bytes from the prior test.
+**not** zero-initialize. The constructor explicitly clears samples, scales, and arrival
+flags so missing or padding slots cannot inherit stale data. This also matters in tests,
+where the CUDA pinned-memory pool can reuse addresses across `ProcessorState` instances.
 
 The symptom: `MultipleFPGAPlacementWithDifferentIDTest` failed non-deterministically when two
 other processor tests ran before it, leaving non-zero values in `samples` slots that should have

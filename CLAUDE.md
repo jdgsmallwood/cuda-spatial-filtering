@@ -215,7 +215,7 @@ Data flow, end to end:
 `include/spatial/common.hpp` is shared app glue: `parse_common_args` (the argparse setup every
 binary uses — config/gains/PCAP/interface/etc. flags → `CommonArgs`), `setup_logger` (async spdlog
 → `app.log`), `get_gains_structure` (loads per-channel/pol/antenna calibration gains from JSON),
-and `AntennaMapRegistry` (hard-coded FPGA-stream → physical-antenna-ID maps for the LAMBDA array).
+and `AntennaMapRegistry` (external config antenna maps, with logical receiver indices when no site map is supplied).
 Logging/error-check macros (`INFO_LOG`, `DEBUG_LOG`, `CUDA_CHECK`, `CUFFT_CHECK`, `CUBLAS_CHECK`,
 `CUSOLVER_CHECK`) live in `include/spatial/logging.hpp`.
 

@@ -17,8 +17,8 @@ RUN_DIR=$(cd -- "$RUN_DIR" && pwd)
 mkfifo "$RUN_DIR/dada.keepalive"
 exec {keepalive_fd}<>"$RUN_DIR/dada.keepalive"
 
-PSRDADA_BIN=/data/BLACKMESA_1/sma075/psrdada-local/bin
-TEMPO2_ROOT=/data/BLACKMESA_1/sma075/psrdada-local/tempo2
+PSRDADA_BIN=${PSRDADA_BIN:?Set PSRDADA_BIN in your external environment}
+TEMPO2_ROOT=${TEMPO2_ROOT:?Set TEMPO2_ROOT in your external environment}
 [[ -f $FIXTURE/pulsar.pcap && -f $FIXTURE/truth.json ]] || { echo "fixture incomplete" >&2; exit 2; }
 readarray -t META < <(python3 - "$FIXTURE/truth.json" <<'PY'
 import json, sys
@@ -46,10 +46,11 @@ fi
 [[ -x $BINARY ]] || { echo "missing binary $BINARY" >&2; exit 2; }
 
 python3 "${SCRIPT_DIR}/validate_fine_beam_gains.py" "$FIXTURE/measured_fine_gains.json" \
-  --stream-map "$REPO_ROOT/stream_antenna_map.json" --min-channel "$MIN_CHANNEL" \
+  --stream-map "${STREAM_MAP:?Set STREAM_MAP to the external wiring JSON}" --min-channel "$MIN_CHANNEL" \
   --coarse-channels "$COARSE_CHANNELS" \
-  --processing-channels "$((COARSE_CHANNELS * 28))" --excluded-antennas 14,36
+  --processing-channels "$((COARSE_CHANNELS * 28))" --excluded-antennas "${BEAM_EXCLUDED_ANTENNAS:-}"
 python3 "${SCRIPT_DIR}/generate_fine_dada_header.py" \
+  --telescope "${TELESCOPE:?Set TELESCOPE in your external site profile}" \
   --output "$RUN_DIR/pulsar.hdr" --source J0534+2200 \
   --min-coarse-channel "$MIN_CHANNEL" --coarse-channels "$COARSE_CHANNELS" \
   $( [[ $MODE == intensity ]] && echo --detected-intensity )
@@ -135,20 +136,20 @@ DSPSR_PID=$!
   cd -- "$RUN_DIR"
   PCAP_ARGS=()
   if [[ ${REPLAY_LOOP_PCAP:-0} == 1 ]]; then PCAP_ARGS+=(--loop); fi
-  env CUDA_HOME=/data/BLACKMESA_1/sma075/miniconda3/targets/x86_64-linux \
+  env CUDA_HOME="${CUDA_HOME:?Set CUDA_HOME}" \
       SPATIAL_CAPTURE_READY_FILE="$RUN_DIR/downstream.ready" \
       "$BINARY" --pcap_file "$FIXTURE/pulsar.pcap" \
       "${PCAP_ARGS[@]}" \
       --capture-backend kernel --network-interface 0,1,2,3 \
       --min_freq_channel "$MIN_CHANNEL" \
       --obs-length "${REPLAY_OBS_LENGTH:-180}" \
-      --config-file "$REPO_ROOT/config.json" \
+      --config-file "${CONFIG_FILE:?Set CONFIG_FILE to the external site JSON}" \
       --delay-file "$FIXTURE/zero_fpga_delays.json" \
       --gains "$FIXTURE/measured_fine_gains.json" \
       --eigenvalue-num-filename "$REPO_ROOT/build/apps/nr-signal-eigenvalues.json" \
-      --stream-antenna-map "$REPO_ROOT/stream_antenna_map.json" \
+      --stream-antenna-map "${STREAM_MAP:?Set STREAM_MAP to the external wiring JSON}" \
       --targets-filename "$REPO_ROOT/config/crab_targets.json" \
-      --steering-utc "$STEERING_UTC" --beam-excluded-antennas 14,36 \
+      --steering-utc "$STEERING_UTC" --beam-excluded-antennas "${BEAM_EXCLUDED_ANTENNAS:-}" \
       --dada-header "$RUN_DIR/pulsar.hdr" --apply-gains-to-vis \
       >"$RUN_DIR/pulsar_fold.log" 2>&1
 ) &

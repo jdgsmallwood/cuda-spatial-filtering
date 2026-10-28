@@ -186,7 +186,7 @@ def check(pcap, visibility, output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pcap", type=Path, default=Path("tests/fixtures/codif_lambda.pcap"))
+    parser.add_argument("--pcap", type=Path, default=Path("tests/fixtures/codif_synthetic.pcap"))
     parser.add_argument("--visibilities", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()

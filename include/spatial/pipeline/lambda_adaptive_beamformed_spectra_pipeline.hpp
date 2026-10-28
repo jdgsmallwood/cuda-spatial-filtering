@@ -599,6 +599,10 @@ public:
     INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
+    const size_t beam_block_num = output_ != nullptr && !dummy_run
+        ? output_->register_beam_data_block_with_arrivals(*packet_data)
+        : std::numeric_limits<size_t>::max();
+
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
@@ -901,8 +905,6 @@ public:
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
 
-      size_t beam_block_num =
-          output_->register_beam_data_block(start_seq_num, end_seq_num);
       if (beam_block_num != std::numeric_limits<size_t>::max()) {
         auto *beam_output_pointer =
             (void *)output_->get_beam_data_landing_pointer(beam_block_num);
@@ -916,11 +918,6 @@ public:
         cudaLaunchHostFunc(b.stream, output_transfer_complete_host_func,
                            beam_output_ctx);
 
-        bool *arrivals_output_pointer =
-            (bool *)output_->get_arrivals_data_landing_pointer(beam_block_num);
-        std::memcpy(arrivals_output_pointer, packet_data->get_arrivals_ptr(),
-                    packet_data->get_arrivals_size());
-        output_->register_arrivals_transfer_complete(beam_block_num);
 
         // Route nulled eigenmode counts into the beam block if the beam writer
         // supports them (get_beam_counts_landing_pointer returns non-null).

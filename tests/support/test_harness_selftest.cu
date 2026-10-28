@@ -123,3 +123,26 @@ TEST_F(PipelineHarnessSelfTest, SatisfiesPhysicalInvariants) {
   test_support::assert_all_finite(*run.output->visibilities, "visibilities");
   test_support::assert_autocorrelation_invariants<Config>(*run.output->visibilities);
 }
+
+// Waiting here forces any already-queued input release to finish before the copy.
+class ArrivalOrderingOutput : public SingleHostMemoryOutput<Config> {
+public:
+  void *get_arrivals_data_landing_pointer(size_t block) override {
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    return SingleHostMemoryOutput<Config>::get_arrivals_data_landing_pointer(block);
+  }
+};
+
+TEST_F(PipelineHarnessSelfTest, BeamPipelinesPreserveArrivalFlagsBeforeRelease) {
+  auto weights = test_support::make_unity_beam_weights<Config>();
+  auto check = [&](auto pipeline) {
+    auto output = std::make_shared<ArrivalOrderingOutput>();
+    test_support::SyntheticPipelineRun<Config> driver(*pipeline, output);
+    driver.run(constant_sample, constant_scale);
+    const auto *flags = reinterpret_cast<const bool *>(output->arrivals);
+    for (size_t i = 0; i < sizeof(*output->arrivals) / sizeof(bool); ++i)
+      EXPECT_TRUE(flags[i]) << "arrival slot " << i;
+  };
+  check(test_support::pipeline_factories::make_gpu_pipeline<Config>(1, &weights));
+  check(test_support::pipeline_factories::make_corr_beam_only_pipeline<Config>(1, &weights));
+}

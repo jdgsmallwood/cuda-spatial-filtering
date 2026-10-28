@@ -33,6 +33,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source", default="J0534+2200")
+    parser.add_argument("--telescope", required=True, help="Observatory identifier from the external site profile")
     parser.add_argument("--min-coarse-channel", type=int, default=176)
     parser.add_argument("--coarse-channels", type=int, default=40)
     parser.add_argument("--fine-channels", type=int, default=32)
@@ -74,7 +75,7 @@ def main() -> None:
         ("HDR_SIZE", str(HEADER_BYTES)),
         ("SOURCE", args.source),
         ("MODE", "PSR"),
-        ("TELESCOPE", "NARRABRI"),
+        ("TELESCOPE", args.telescope),
         # DSPSR's generic 32-bit FloatUnpacker deliberately matches only the
         # machine name "dspsr". LAMBDA is provenance, not an unpacker type.
         ("INSTRUMENT", "dspsr"),

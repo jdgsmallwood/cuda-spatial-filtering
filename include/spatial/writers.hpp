@@ -34,7 +34,8 @@
 #include <casacore/tables/Tables/ScaColDesc.h>
 #include <casacore/tables/Tables/SetupNewTab.h>
 #include <casacore/tables/Tables/TableDesc.h>
-#include <sw/redis++/redis++.h>
+#include "spatial/redis_monitor.hpp"
+#include <functional>
 
 #include <getopt.h>
 #include <math.h>
@@ -801,7 +802,11 @@ public:
     write_baseline_ids();
   }
 
+  std::function<void(const VisBlock<T> &)> monitor_block;
+  std::function<void(size_t)> monitor_written;
+
   void process_block(const VisBlock<T> &block) override {
+    if (monitor_block) monitor_block(block);
     const float *vis_ptr = reinterpret_cast<const float *>(&block.data);
     vis_buffer_.insert(vis_buffer_.end(), vis_ptr, vis_ptr + element_count_);
 
@@ -854,6 +859,7 @@ public:
         .write_raw(missing_buffer_.data());
 
     n_blocks_written_ += buffer_count_;
+    if (monitor_written) monitor_written(n_blocks_written_);
     vis_buffer_.clear();
     seq_buffer_.clear();
     missing_buffer_.clear();
@@ -962,7 +968,9 @@ public:
   // 0 means write all channels every block (original behaviour).
   // Values < NR_CHANNELS enable round-robin to cap per-block Redis payload.
   RedisEigendataWriter(const int channels_per_write = 0,
-                       const int num_blocks = 100)
+                       const int num_blocks = 100,
+                       const std::string &redis_host = "127.0.0.1",
+                       int redis_port = 6379)
       : EigenWriter<TVal, TVec, TCount>(num_blocks),
         val_element_count_(
             sizeof(TVal) /
@@ -970,7 +978,7 @@ public:
         vec_element_count_(
             sizeof(TVec) /
             sizeof(typename std::remove_all_extents<TVec>::type)),
-        redis("tcp://127.0.0.1:6379") {
+        redis(redis_host, redis_port) {
 
     eigen_dims_ = get_array_dims<TVal>();
 
@@ -990,9 +998,12 @@ public:
               << ", channels_per_write: " << channels_per_write_
               << ", num_slots: " << num_slots_ << std::endl;
 
-    create_all_timeseries_keys();
+    redis.setup([this](const auto &create) { create_all_timeseries_keys(create); });
     preallocate_madd_args();
+    redis.start();
   }
+
+  ~RedisEigendataWriter() override { this->stop(); redis.stop(); }
 
   void process_block(const EigenBlock<TVal, TVec, TCount> &block) override {
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1056,7 +1067,7 @@ public:
     }
 
     if (args.size() > 1) {
-      redis.command(args.begin(), args.end());
+      redis.submit({args});
     }
 
     current_slot_ = (current_slot_ + 1) % num_slots_;
@@ -1068,7 +1079,7 @@ private:
   size_t val_element_count_;
   size_t vec_element_count_;
   std::vector<size_t> eigen_dims_;
-  sw::redis::Redis redis;
+  spatial_monitor::RedisPublisher redis;
   int NR_CHANNELS;
   int NR_POLARIZATIONS;
   int NR_RECEIVERS;
@@ -1127,12 +1138,12 @@ private:
     }
   }
 
-  void create_all_timeseries_keys() {
+  void create_all_timeseries_keys(const spatial_monitor::RedisPublisher::Create &create) {
     const int N = NR_RECEIVERS;
     const std::vector<std::string> val_components = {"val"};
     const std::vector<std::string> vec_components = {"re", "im"};
 
-    std::cout << "Starting TimeSeries key pre-creation..." << std::endl;
+    std::cout << "Preparing TimeSeries setup..." << std::endl;
 
     // We only create auto-polarization keys (total pairs = NR_POLARIZATIONS)
     int total_pol_pairs = NR_POLARIZATIONS;
@@ -1159,14 +1170,10 @@ private:
             std::string key = "ts:ch:" + channel_id + ":p:" + pol_pair +
                               ":k:" + k_id + ":" + component;
             std::vector<std::string> args = {
-                "TS.CREATE",    key,      "LABELS",    "channel", channel_id,
+                "TS.CREATE",    key, "RETENTION", "86400000", "DUPLICATE_POLICY", "LAST", "LABELS",    "channel", channel_id,
                 "polarization", pol_pair, "eigen_idx", k_id,      "component",
                 component};
-            try {
-              redis.command(args.begin(), args.end());
-            } catch (const std::exception &e) {
-              ERROR_LOG("Error creating key {}: {}", key, e.what());
-            }
+            create(args);
           }
 
           for (int j_idx = 0; j_idx < N; ++j_idx) {
@@ -1176,22 +1183,18 @@ private:
                                 ":k:" + k_id + ":vec:j:" + j_id + ":" +
                                 component;
               std::vector<std::string> args = {
-                  "TS.CREATE", key,         "LABELS",
+                  "TS.CREATE", key, "RETENTION", "86400000", "DUPLICATE_POLICY", "LAST", "LABELS",
                   "channel",   channel_id,  "polarization",
                   pol_pair,    "eigen_idx", k_id,
                   "vec_idx",   j_id,        "component",
                   component};
-              try {
-                redis.command(args.begin(), args.end());
-              } catch (const std::exception &e) {
-                ERROR_LOG("Error creating key {}: {}", key, e.what());
-              }
+              create(args);
             }
           }
         }
       }
     }
-    std::cout << "TimeSeries key pre-creation complete." << std::endl;
+    std::cout << "TimeSeries setup complete." << std::endl;
   }
 };
 
@@ -1202,11 +1205,13 @@ public:
   // Values < NR_CHANNELS enable round-robin to cap per-block Redis payload.
   RedisBeamFFTWriter(int num_channels, int num_beams, int num_polarizations,
                      std::string prefix = "", const int num_blocks = 100,
-                     const int channels_per_write = 0)
+                     const int channels_per_write = 0,
+                     const std::string &redis_host = "127.0.0.1",
+                     int redis_port = 6379)
       : FFTWriter<T>(num_blocks),
         element_count_(sizeof(T) /
                        sizeof(typename std::remove_all_extents<T>::type)),
-        redis("tcp://127.0.0.1:6379"), NR_CHANNELS(num_channels),
+        redis(redis_host, redis_port), NR_CHANNELS(num_channels),
         NR_BEAMS(num_beams), NR_POLARIZATIONS(num_polarizations),
         prefix(prefix) {
     fft_dims_ = get_array_dims<T>();
@@ -1267,7 +1272,7 @@ public:
               << ", NR_POLARIZATIONS: " << NR_POLARIZATIONS
               << ", channels_per_write: " << channels_per_write_
               << ", num_slots: " << num_slots_ << std::endl;
-    create_all_timeseries_keys();
+    redis.setup([this](const auto &create) { create_all_timeseries_keys(create); });
 
     // Pre-allocate one madd_args vector per slot with keys pre-seeded.
     slot_madd_args_.resize(num_slots_);
@@ -1292,7 +1297,10 @@ public:
         }
       }
     }
+    redis.start();
   }
+
+  ~RedisBeamFFTWriter() override { this->stop(); redis.stop(); }
 
   void process_block(const FFTBlock<T> &block) override {
     long long ts = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1322,14 +1330,7 @@ public:
         }
       }
     }
-    if (redis_available_) {
-      try {
-        redis.command(args.begin(), args.end());
-      } catch (const sw::redis::Error &e) {
-        ERROR_LOG("Redis write failed (disabling further writes): {}", e.what());
-        redis_available_ = false;
-      }
-    }
+    redis.submit({args});
     current_slot_ = (current_slot_ + 1) % num_slots_;
   }
 
@@ -1342,14 +1343,13 @@ private:
            static_cast<size_t>(beam) * NR_FREQS + static_cast<size_t>(f);
   }
   std::string prefix;
-  bool redis_available_ = true;
 
   int channels_per_write_;
   int num_slots_;
   int current_slot_;
   std::vector<std::vector<std::string>> slot_madd_args_;
-  void create_all_timeseries_keys() {
-    std::cout << "Pre-creating FFT TimeSeries keys..." << std::endl;
+  void create_all_timeseries_keys(const spatial_monitor::RedisPublisher::Create &create) {
+    std::cout << "Preparing FFT TimeSeries setup..." << std::endl;
     for (int ch = 0; ch < NR_CHANNELS; ++ch) {
       for (int pol = 0; pol < NR_POLARIZATIONS; ++pol) {
         for (int beam = 0; beam < NR_BEAMS; ++beam) {
@@ -1364,7 +1364,7 @@ private:
             std::vector<std::string> args = {"TS.CREATE",
                                              key,
                                              "RETENTION",
-                                             "60000",
+                                             "60000", "DUPLICATE_POLICY", "LAST",
                                              "LABELS",
                                              "type",
                                              "raw",
@@ -1382,7 +1382,7 @@ private:
             std::vector<std::string> max_args = {"TS.CREATE",
                                                  max_key,
                                                  "RETENTION",
-                                                 "0",
+                                                 "86400000",
                                                  "LABELS",
                                                  "type",
                                                  "aggregated",
@@ -1401,7 +1401,7 @@ private:
                 "TS.CREATE",
                 max_100ms_key,
                 "RETENTION",
-                "0",
+                "86400000",
                 "LABELS",
                 "type",
                 "aggregated",
@@ -1420,25 +1420,21 @@ private:
             std::vector<std::string> rule_100ms_args = {
                 "TS.CREATERULE", key,   max_100ms_key,
                 "AGGREGATION",   "max", "100"};
-            try {
-              redis.command(args.begin(), args.end());
-              redis.command(max_args.begin(), max_args.end());
-              redis.command(max_100ms_args.begin(), max_100ms_args.end());
-              redis.command(rule_args.begin(), rule_args.end());
-              redis.command(rule_100ms_args.begin(), rule_100ms_args.end());
-            } catch (const std::exception &e) {
-              ERROR_LOG("Error creating key {}: {}", key, e.what());
-            }
+            create(args);
+            create(max_args);
+            create(max_100ms_args);
+            create(rule_args);
+            create(rule_100ms_args);
           }
         }
       }
     }
 
-    std::cout << "FFT TimeSeries key creation complete." << std::endl;
+    std::cout << "FFT TimeSeries setup complete." << std::endl;
   };
   size_t element_count_;
   std::vector<size_t> fft_dims_;
-  sw::redis::Redis redis;
+  spatial_monitor::RedisPublisher redis;
   int NR_CHANNELS;
   int NR_POLARIZATIONS;
   int NR_BEAMS;
