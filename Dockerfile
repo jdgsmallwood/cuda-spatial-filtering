@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git wget build-essential ninja-build python3-pip \
     autoconf automake libtool pkg-config gfortran flex bison \
     libhdf5-dev hdf5-tools libcfitsio-dev casacore-dev casacore-data \
-    libboost-dev libhiredis-dev libibverbs-dev libnuma-dev libltdl-dev \
+    libboost-dev nlohmann-json3-dev libhiredis-dev libibverbs-dev libnuma-dev libltdl-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir cmake==3.31.6
 # Debian installs JPL tables outside casacore's runtime search directory.

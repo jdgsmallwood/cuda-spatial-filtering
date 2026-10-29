@@ -3,6 +3,7 @@
 Run integration mode separately with monitoring/check_stack.py.
 """
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -17,14 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def monitor_binary(tmp_path_factory):
+    def unavailable(reason):
+        if os.environ.get("SPATIAL_REQUIRE_MONITOR_TESTS") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
+
     compiler = shutil.which("g++")
     if not compiler:
-        pytest.skip("g++ unavailable")
+        unavailable("g++ unavailable")
     probe = subprocess.run([compiler, "-std=c++17", "-x", "c++", "-fsyntax-only", "-"],
                            input="#include <hiredis/hiredis.h>\n#include <nlohmann/json.hpp>\n", text=True,
                            capture_output=True)
     if probe.returncode:
-        pytest.skip("install libhiredis-dev and nlohmann-json3-dev for monitor checks")
+        unavailable("install libhiredis-dev and nlohmann-json3-dev for monitor checks\n" + probe.stderr)
     binary = tmp_path_factory.mktemp("monitor") / "test-monitor"
     subprocess.run([compiler, "-std=c++17", "-O1", "-pthread", "-I", str(ROOT / "include"),
                     str(ROOT / "tests/test_monitor.cpp"), "-lhiredis", "-o", str(binary)], check=True)

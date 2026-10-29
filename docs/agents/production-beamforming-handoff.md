@@ -155,6 +155,20 @@ perturbed the local benchmark and was not used for performance conclusions.
 
 Completion: stable repeated rates and a stage breakdown with measurement boundaries.
 
+For a targeted synthetic full-app replay (paired output writing included), use
+case selection instead of editing or copying the runner:
+
+```bash
+python3 scripts/benchmark/adaptive_beam.py \
+  build_production_bench/apps/bench_adaptive_beam_4_40 local-results \
+  --fpgas 4 --channels 40 --modes coarse --ranks 2 --skip-visibilities --dry-run
+```
+
+Remove `--dry-run` to execute. The default remains the full 19-case matrix;
+`--weights-only` remains available. Dry runs need no GPU, capture or scientific
+Python dependencies. Before handoff, run monitoring tests in required mode as
+specified in `tests/TESTING.md` so missing headers cannot silently skip checks.
+
 ## 3. Verify the observing session before live comparisons
 
 At the start of every live session, verify FPGA boot state and the delay solution.

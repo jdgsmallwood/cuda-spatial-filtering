@@ -7,14 +7,12 @@ Results measure this replay path, not NIC capacity or stable-storage fsync speed
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 import random
 import subprocess
 import sys
 import tempfile
-
-import h5py
-import numpy as np
 
 
 def main():
@@ -25,22 +23,42 @@ def main():
     parser.add_argument("--channels", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--seconds", type=float, default=5)
-    parser.add_argument("--weights-only", action="store_true", help="Run only the weights-only baseline")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--modes", nargs="+", choices=("weights-only", "coarse", "fine"))
+    selection.add_argument("--weights-only", action="store_true", help="Run only the weights-only baseline")
     parser.add_argument("--gpu-buffers", type=int, help="Override the app's GPU buffer count")
+    parser.add_argument("--ranks", nargs="+", type=int, default=[0, 1, 2, 4])
+    parser.add_argument("--skip-visibilities", action="store_true",
+                        help="Omit the extra covariance-recording runs")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print selected [mode, rank, protected, record_visibilities] cases and exit")
     args = parser.parse_args()
-    if args.repeats < 1 or args.seconds <= 0 or args.channels < 1:
-        parser.error("repeats and seconds must be positive")
+    if args.repeats < 1 or not math.isfinite(args.seconds) or args.seconds <= 0 or args.channels < 1:
+        parser.error("repeats, channels and seconds must be positive; seconds must be finite")
+    if any(rank < 0 for rank in args.ranks):
+        parser.error("ranks must be nonnegative")
+    if args.gpu_buffers is not None and args.gpu_buffers < 1:
+        parser.error("gpu-buffers must be positive")
+    cases = [("weights-only", 0, False, False)]
+    cases += [(mode, rank, protected, False) for mode in ("coarse", "fine")
+              for rank in dict.fromkeys(args.ranks) for protected in (False, True)]
+    cases += [(mode, 2, True, True) for mode in ("coarse", "fine")]
+    modes = {"weights-only"} if args.weights_only else set(args.modes or ("weights-only", "coarse", "fine"))
+    cases = [case for case in cases if case[0] in modes
+             and (case[0] == "weights-only" or case[1] in args.ranks)
+             and not (args.skip_visibilities and case[3])]
+    if not cases:
+        parser.error("selection contains no benchmark cases")
+    if args.dry_run:
+        print(json.dumps(cases))
+        return
+    import h5py
+    import numpy as np
     binary = args.binary.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     results = []
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from generate_codif_fixture import fixture_bytes
-    cases = [("weights-only", 0, False, False)]
-    cases += [(mode, rank, protected, False) for mode in ("coarse", "fine")
-              for rank in (0, 1, 2, 4) for protected in (False, True)]
-    cases += [(mode, 2, True, True) for mode in ("coarse", "fine")]
-    if args.weights_only:
-        cases = cases[:1]
     with tempfile.TemporaryDirectory(prefix="adaptive-benchmark-", dir=args.output) as directory:
         root = Path(directory).resolve()
         (root / "input.pcap").write_bytes(fixture_bytes(frames=1024, channels=args.channels, fpgas=args.fpgas))
@@ -67,7 +85,7 @@ def main():
                     command += ["--gpu-buffers", str(args.gpu_buffers)]
                 name = f"{repeat}-{mode}-r{rank}-p{int(protected)}-vis{int(diagnostic)}"
                 with (args.output / (name + ".log")).open("w+") as log:
-                    process = subprocess.run(command, cwd=root, stdout=log, stderr=subprocess.STDOUT, timeout=180)
+                    process = subprocess.run(command, cwd=root, stdout=log, stderr=subprocess.STDOUT, timeout=max(180, args.seconds + 120))
                     log.seek(0)
                     text = log.read()
                 if process.returncode:
