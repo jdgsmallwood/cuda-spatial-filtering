@@ -1573,6 +1573,38 @@ TEST_F(CudaIsolatedTest, BeamSteeringInactiveWithoutTargetsIsNoOp) {
   CUDA_CHECK(cudaStreamDestroy(stream));
 };
 
+TEST_F(CudaIsolatedTest, FixedRaDecTrackingUpdatesDeviceWeightsWithObservationTime) {
+  const std::unordered_map<int, ENUPosition> positions{
+      {0, {0, 0, 0}}, {1, {25, -10, 1.5}},
+      {2, {0, 0, 0}}, {3, {0, 0, 0}}};
+  const std::unordered_map<int, int> mapping{{0, 0}, {1, 1}, {2, 2}, {3, 3}};
+  BeamSteering<Config> steering(
+      {{"radec", 83.633, 22.014}}, positions, mapping, {100e6, 781250}, 0,
+      {-30.31, 149.55, 240}, 60.0, 1, nullptr, "2026-10-29T02:00:00Z");
+  auto weights = make_device_ptr<BeamWeightsT<Config>>();
+  cudaStream_t stream;
+  CUDA_CHECK(cudaStreamCreate(&stream));
+  steering.register_buffer(weights.get(), stream);
+
+  // Independent Astropy FK5(J2000) -> vacuum AltAz, then exp(-i*2*pi*f*r.s/c)/4.
+  const std::complex<float> expected[] = {
+      {0.24027332f, 0.06905602f}, {-0.06355993f, 0.24178531f}};
+  for (int hour = 0; hour < 2; ++hour) {
+    const uint64_t sequence = 1000 + uint64_t(hour) * 3333333333ULL;
+    ASSERT_TRUE(steering.maybe_refresh_for_block(sequence));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    BeamWeightsT<Config> actual{};
+    CUDA_CHECK(cudaMemcpy(&actual, weights.get(), sizeof(actual), cudaMemcpyDefault));
+    for (size_t pol = 0; pol < Config::NR_POLARIZATIONS; ++pol) {
+      const auto weight = actual.weights[0][pol][0][1];
+      EXPECT_NEAR(__half2float(weight.real()), expected[hour].real(), 0.002);
+      EXPECT_NEAR(__half2float(weight.imag()), expected[hour].imag(), 0.002);
+    }
+    EXPECT_FALSE(steering.maybe_refresh_for_block(sequence + 925926));
+  }
+  CUDA_CHECK(cudaStreamDestroy(stream));
+}
+
 TEST_F(CudaIsolatedTest, BeamSteeringRefreshesAllBuffersInOneCall) {
   // BeamSteering starts "always overdue", so the first maybe_refresh() call
   // recomputes the weights and enqueues the copy onto *every* registered

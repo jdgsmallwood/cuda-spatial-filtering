@@ -586,7 +586,7 @@ inline void monitor_app_stats(ProcessorStateBase &state,
 // Returns true on success; on parse failure the function prints usage to
 // stderr and calls std::exit(1).
 inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
-                                    char *argv[]) {
+                                    char *argv[], bool load_filter_files = true) {
   CommonArgs args;
   std::string packet_format;
   program.add_argument("--packet-format")
@@ -861,9 +861,9 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
         bt.ra_deg = target.value("ra_deg", 0.0);
         bt.dec_deg = target.value("dec_deg", 0.0);
 
-        if (bt.mode != "zenith" && bt.mode != "radec") {
+        if (bt.mode != "zenith" && bt.mode != "radec" && bt.mode != "sun") {
           throw std::runtime_error("Unknown beam target mode '" + bt.mode +
-                                   "' (expected 'radec' or 'zenith')");
+                                   "' (expected 'radec', 'zenith', or 'sun')");
         }
 
         args.beam_targets.push_back(bt);
@@ -876,8 +876,10 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       }
     }
 
-    std::ifstream g(args.gains_filename);
-    args.gains = json::parse(g);
+    if (load_filter_files) {
+      std::ifstream g(args.gains_filename);
+      args.gains = json::parse(g);
+    }
 
     if (args.beam_weights_filename != "") {
       std::ifstream h(args.beam_weights_filename);
@@ -889,13 +891,14 @@ inline CommonArgs parse_common_args(argparse::ArgumentParser &program, int argc,
       args.nr_signal_eigenvectors[i] = 1;
     }
 
-    std::ifstream e(args.nr_signal_eigenvectors_filename);
-    json sig = json::parse(e);
-
-    for (const auto &[key, value] : sig.items()) {
-      args.nr_signal_eigenvectors[std::stoi(key)] = value;
-      std::cout << "setting nr_signal_eigenvectors for channel " << key
-                << " to " << value << std::endl;
+    if (load_filter_files) {
+      std::ifstream e(args.nr_signal_eigenvectors_filename);
+      json sig = json::parse(e);
+      for (const auto &[key, value] : sig.items()) {
+        args.nr_signal_eigenvectors[std::stoi(key)] = value;
+        std::cout << "setting nr_signal_eigenvectors for channel " << key
+                  << " to " << value << std::endl;
+      }
     }
 
     std::cout << args.config.dump(4) << std::endl;

@@ -58,6 +58,32 @@ int main(int argc, char **argv) {
     assert(Clock::now() - start < std::chrono::seconds(5));
     return 0;
   }
+  assert(sampled_monitor_baselines({}).empty());
+  assert(sampled_monitor_baselines({3}).empty());
+  for (size_t receivers : {size_t(2), size_t(4), size_t(10), size_t(40), size_t(64)}) {
+    std::vector<size_t> connected;
+    for (size_t i = 0; i < receivers; ++i) connected.push_back(2 * i + 1);
+    const auto pairs = sampled_monitor_baselines(connected);
+    assert(pairs.size() == std::min(size_t(8), receivers * (receivers - 1) / 2));
+    assert(pairs == sampled_monitor_baselines(connected));
+    assert(pairs.front() == std::make_pair(connected[0], connected[1]));
+    assert(pairs.back() == std::make_pair(connected[receivers - 2], connected.back()));
+    for (size_t i = 0; i < pairs.size(); ++i) {
+      const auto [first, second] = pairs[i];
+      assert(first < second);
+      assert(std::find(connected.begin(), connected.end(), first) != connected.end());
+      assert(std::find(connected.begin(), connected.end(), second) != connected.end());
+      assert(std::find(pairs.begin(), pairs.begin() + i, pairs[i]) == pairs.begin() + i);
+    }
+  }
+  const auto selected = monitor_baseline_pairs(4, "0:1,2:3");
+  assert(selected.size() == 2 && selected[1].first == 2 && selected[1].second == 3);
+  for (const auto &bad : {"", "0:1,", "0:1,,1:2", "-1:0", "1:0", "0:4", "0:1x", "oops"}) {
+    bool rejected = false;
+    try { monitor_baseline_pairs(4, bad); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    assert(rejected);
+  }
   const auto cpus = parse_cpu("cpu 10 2 3 80 5 0 0 0 999 999\ncpu0 1 0 2 7 0 0 0 0\nctxt 123\n");
   assert(cpus.size() == 2);
   const auto delta = cpu_delta({}, cpus.at("cpu"));

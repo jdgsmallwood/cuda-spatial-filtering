@@ -27,12 +27,47 @@ TEST(PointingTest, ZenithDirectionIsStraightUp) {
   EXPECT_DOUBLE_EQ(dc.n, 1.0);
 }
 
+TEST(PointingTest, SolarDirectionMatchesIndependentAstropyReference) {
+  std::tm utc{};
+  utc.tm_year = 2026 - 1900;
+  utc.tm_mon = 9;
+  utc.tm_mday = 29;
+  utc.tm_hour = 2;
+  const auto time = std::chrono::system_clock::from_time_t(timegm(&utc));
+  const auto direction = solar_direction(time, -30.31, 149.55, 240);
+  // Astropy get_sun -> vacuum AltAz; tolerance allows Earth-orientation table age.
+  EXPECT_NEAR(direction.l, -0.0613283348, 1e-4);
+  EXPECT_NEAR(direction.m, 0.2897618432, 1e-4);
+  EXPECT_NEAR(direction.n, 0.9551318807, 1e-4);
+}
+
 TEST(PointingTest, ChannelToFrequencyHzIsLinearInChannelIndex) {
   FrequencyPlan plan{/*base_frequency_hz=*/1.0e9,
                      /*channel_bandwidth_hz=*/1.0e5};
   EXPECT_DOUBLE_EQ(channel_to_frequency_hz(0, plan), 1.0e9);
   EXPECT_DOUBLE_EQ(channel_to_frequency_hz(10, plan), 1.0e9 + 10 * 1.0e5);
   EXPECT_DOUBLE_EQ(channel_to_frequency_hz(-3, plan), 1.0e9 - 3 * 1.0e5);
+}
+
+TEST(PointingTest, FixedRaDecTracksInGeodeticEnuAtTwoEpochs) {
+  std::tm utc{};
+  utc.tm_year = 2026 - 1900;
+  utc.tm_mon = 9;
+  utc.tm_mday = 29;
+  utc.tm_hour = 2;
+  const auto start = std::chrono::system_clock::from_time_t(timegm(&utc));
+  // Astropy 6.1.7: FK5(equinox=J2000) -> vacuum AltAz at this WGS84 site.
+  // Allow table-age differences, but not geocentric/geodetic up confusion.
+  const DirectionCosines expected[] = {
+      {-0.6786956092, 0.0052087770, -0.7344012110},
+      {-0.4915918694, -0.0727635012, -0.8677804485}};
+  for (int hour = 0; hour < 2; ++hour) {
+    const auto actual = topocentric_direction(
+        83.633, 22.014, start + std::chrono::hours(hour), -30.31, 149.55, 240);
+    EXPECT_NEAR(actual.l, expected[hour].l, 1e-4);
+    EXPECT_NEAR(actual.m, expected[hour].m, 1e-4);
+    EXPECT_NEAR(actual.n, expected[hour].n, 1e-4);
+  }
 }
 
 TEST(PointingTest, ProcessingFrequencyWithoutFineChannelsMatchesCoarseGrid) {

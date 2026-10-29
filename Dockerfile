@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libboost-dev libhiredis-dev libibverbs-dev libnuma-dev libltdl-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m pip install --no-cache-dir cmake==3.31.6
+# Debian installs JPL tables outside casacore's runtime search directory.
+RUN for table in DE200 DE405; do \
+      ln -s /usr/share/casacore/data/ephemerides/$table /var/lib/casacore/data/ephemerides/$table; \
+    done
 RUN wget -4 --timeout=30 --tries=3 --progress=dot:giga https://developer.download.nvidia.com/compute/cutensor/2.2.0/local_installers/cutensor-local-repo-ubuntu2204-2.2.0_1.0-1_amd64.deb \
     && dpkg -i cutensor-local-repo-ubuntu2204-2.2.0_1.0-1_amd64.deb \
     && dpkg -i /var/cutensor-local-repo-ubuntu2204-2.2.0/libcutensor*.deb \

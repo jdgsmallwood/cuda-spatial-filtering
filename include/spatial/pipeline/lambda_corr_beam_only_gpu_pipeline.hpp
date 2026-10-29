@@ -249,7 +249,7 @@ public:
     // pipeline_feeder context -- see the BeamSteering<T> comment block
     // (pipeline.hpp above) for why that ordering is what makes this safe
     // without extra synchronization.
-    beam_steering_.maybe_refresh();
+    beam_steering_.maybe_refresh_for_block(packet_data->start_seq_id, dummy_run);
 
     // Record GPU start event
     cudaEventRecord(start_run[benchmark_runs_done], streams[current_buffer]);

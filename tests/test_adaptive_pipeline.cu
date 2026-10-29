@@ -227,6 +227,125 @@ std::complex<int8_t> constant_sample(size_t, size_t, int, int, int, int) {
 }
 int16_t constant_scale(size_t, size_t, int, int, int) { return 1; }
 
+TEST_F(AdaptivePipelineTest, WeightsOnlyProducesTwoIdenticalWeightedVoltageBeams) {
+  auto output = std::make_shared<AdaptiveTestOutput<AdaptiveConfig>>();
+  auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+  BeamSteering<AdaptiveConfig> steering({}, {}, {}, FrequencyPlan{}, 0,
+                                        ArrayLocation{}, 1.0, 1);
+  AdaptiveBeamPipeline<AdaptiveConfig, BeamformingMode::WeightsOnly> pipeline(
+      1, &weights, {{0, 1}}, 0, std::move(steering));
+  test_support::SyntheticPipelineRun<AdaptiveConfig> driver(pipeline, output);
+  driver.run(constant_sample, constant_scale);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  for (int pol = 0; pol < 2; ++pol)
+    for (int beam = 0; beam < 2; ++beam)
+      for (int time = 0; time < 64; ++time) {
+        const auto value = (*output->beam_data)[0][pol][beam][time];
+        EXPECT_NEAR(__half2float(value.real()), 8.0f, 0.01f);
+        EXPECT_NEAR(__half2float(value.imag()), -8.0f, 0.01f);
+      }
+}
+
+TEST_F(AdaptivePipelineTest, RankOneProtectionPreservesSolarVoltagesWithComplexUnequalGains) {
+  auto output = std::make_shared<AdaptiveTestOutput<AdaptiveConfig>>();
+  auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+  BeamSteering<AdaptiveConfig> steering({}, {}, {}, FrequencyPlan{}, 0,
+                                        ArrayLocation{}, 1.0, 1);
+  AdaptiveBeamPipeline<AdaptiveConfig> pipeline(
+      1, &weights, {{0, 3}}, 0, std::move(steering));
+  pipeline.set_protected_signatures({{1, 0}, {0, 2}, {-3, 0}, {0, -4},
+                                     {1, 0}, {0, 2}, {-3, 0}, {0, -4}});
+  test_support::SyntheticPipelineRun<AdaptiveConfig> driver(pipeline, output);
+  driver.run([](size_t, size_t, int, int, int receiver, int) {
+    const std::complex<int8_t> signal[] = {{2, -2}, {4, 4}, {-6, 6}, {-8, -8}};
+    return signal[receiver];
+  }, constant_scale);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  for (int pol = 0; pol < 2; ++pol)
+    for (int beam = 0; beam < 2; ++beam)
+      for (int time = 0; time < 64; ++time) {
+        const auto value = (*output->beam_data)[0][pol][beam][time];
+        EXPECT_NEAR(__half2float(value.real()), -8.0f, 0.05f);
+        EXPECT_NEAR(__half2float(value.imag()), 0.0f, 0.05f);
+      }
+}
+
+TEST_F(AdaptivePipelineTest, UnprotectedRankTwoNullsBothModesWithUnequalReceiverPower) {
+  auto output = std::make_shared<AdaptiveTestOutput<AdaptiveConfig>>();
+  auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+  BeamSteering<AdaptiveConfig> steering({}, {}, {}, FrequencyPlan{}, 0,
+                                        ArrayLocation{}, 1.0, 1);
+  AdaptiveBeamPipeline<AdaptiveConfig> pipeline(
+      1, &weights, {{0, 2}}, 0, std::move(steering));
+  test_support::SyntheticPipelineRun<AdaptiveConfig> driver(pipeline, output);
+  driver.run([](size_t, size_t, int, int time, int receiver, int) {
+    if (time < 32) return std::complex<int8_t>(2, -2);
+    return receiver == 0 ? std::complex<int8_t>(4, 0) : std::complex<int8_t>(0, 0);
+  }, constant_scale);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  for (int p = 0; p < 2; ++p)
+    for (int t = 0; t < 64; ++t) {
+      const auto value = (*output->beam_data)[0][p][1][t];
+      EXPECT_NEAR(__half2float(value.real()), 0.f, 0.03f);
+      EXPECT_NEAR(__half2float(value.imag()), 0.f, 0.03f);
+    }
+}
+
+TEST_F(AdaptivePipelineTest, ProtectedNullingRemovesOrthogonalInterference) {
+  auto output = std::make_shared<AdaptiveTestOutput<AdaptiveConfig>>();
+  auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+  BeamSteering<AdaptiveConfig> steering({}, {}, {}, FrequencyPlan{}, 0,
+                                        ArrayLocation{}, 1.0, 1);
+  AdaptiveBeamPipeline<AdaptiveConfig> pipeline(
+      1, &weights, {{0, 1}}, 0, std::move(steering));
+  pipeline.set_protected_signatures({{1, 0}, {0, 0}, {0, 0}, {0, 0},
+                                     {1, 0}, {0, 0}, {0, 0}, {0, 0}});
+  test_support::SyntheticPipelineRun<AdaptiveConfig> driver(pipeline, output);
+  driver.run([](size_t, size_t, int, int time, int receiver, int) {
+    if (receiver == 0) return std::complex<int8_t>(8, 2);
+    if (receiver == 1) return std::complex<int8_t>(0, time % 2 ? 20 : -20);
+    return std::complex<int8_t>(0, 0);
+  }, constant_scale);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  for (int p = 0; p < 2; ++p)
+    for (int t = 0; t < 64; ++t) {
+      const auto original = (*output->beam_data)[0][p][0][t];
+      const auto filtered = (*output->beam_data)[0][p][1][t];
+      EXPECT_NEAR(__half2float(original.imag()), t % 2 ? 22.f : -18.f, 0.05f);
+      EXPECT_NEAR(__half2float(filtered.real()), 8.f, 0.05f);
+      EXPECT_NEAR(__half2float(filtered.imag()), 2.f, 0.05f);
+    }
+}
+
+TEST_F(AdaptivePipelineTest, ExcludedInputCannotReenterProtectedBeam) {
+  auto output = std::make_shared<AdaptiveTestOutput<AdaptiveConfig>>();
+  auto weights = test_support::make_unity_beam_weights<AdaptiveConfig>();
+  for (int p = 0; p < 2; ++p) weights.weights[0][p][0][1] = {__float2half(0), __float2half(0)};
+  BeamSteering<AdaptiveConfig> steering({}, {}, {}, FrequencyPlan{}, 0,
+                                        ArrayLocation{}, 1.0, 1);
+  AdaptiveBeamPipeline<AdaptiveConfig> pipeline(
+      1, &weights, {{0, 1}}, 0, std::move(steering));
+  pipeline.set_enabled_inputs({1, 0, 1, 1, 1, 0, 1, 1});
+  pipeline.set_protected_signatures({{1, 0}, {0, 0}, {0, 0}, {0, 0},
+                                     {1, 0}, {0, 0}, {0, 0}, {0, 0}});
+  test_support::SyntheticPipelineRun<AdaptiveConfig> driver(pipeline, output);
+  driver.run([](size_t, size_t, int, int time, int receiver, int) {
+    if (receiver == 0) return std::complex<int8_t>(8, 2);
+    if (receiver == 1) return std::complex<int8_t>(time % 2 ? 90 : -90, 0);
+    if (receiver == 2) return std::complex<int8_t>(0, time % 2 ? 20 : -20);
+    return std::complex<int8_t>(0, 0);
+  }, constant_scale);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  for (int p = 0; p < 2; ++p)
+    for (int t = 0; t < 64; ++t) {
+      const auto original = (*output->beam_data)[0][p][0][t];
+      const auto filtered = (*output->beam_data)[0][p][1][t];
+      EXPECT_NEAR(__half2float(original.imag()), t % 2 ? 22.f : -18.f, 0.05f);
+      EXPECT_NEAR(__half2float(filtered.real()), 8.f, 0.05f);
+      EXPECT_NEAR(__half2float(filtered.imag()), 2.f, 0.05f);
+    }
+}
+
 // Time-varying signal: first half all-receivers (2,-2), second half only
 // receiver 0 gets (4,0). Produces a rank-2 covariance so that the mean of
 // non-RFI eigenvalues λ̄ > 0, making shrink != null.

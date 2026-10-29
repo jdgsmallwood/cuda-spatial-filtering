@@ -669,7 +669,7 @@ public:
     // b.weights, and only from this single-threaded pipeline_feeder context
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
-    beam_steering_.maybe_refresh();
+    beam_steering_.maybe_refresh_for_block(packet_data->start_seq_id, dummy_run);
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;

@@ -120,6 +120,39 @@ private:
   double process_seconds_ = 0;
 };
 
+inline std::vector<std::pair<size_t, size_t>> sampled_monitor_baselines(
+    const std::vector<size_t> &receivers) {
+  std::vector<std::pair<size_t, size_t>> pairs;
+  for (size_t second = 1; second < receivers.size(); ++second)
+    for (size_t first = 0; first < second; ++first)
+      pairs.emplace_back(receivers[first], receivers[second]);
+  if (pairs.size() <= 8) return pairs;
+  std::vector<std::pair<size_t, size_t>> sample;
+  for (size_t i = 0; i < 8; ++i)
+    sample.push_back(pairs[i * (pairs.size() - 1) / 7]);
+  return sample;
+}
+
+inline std::vector<std::pair<size_t, size_t>> monitor_baseline_pairs(
+    size_t receivers, const std::string &selection) {
+  std::vector<std::pair<size_t, size_t>> result;
+  std::istringstream pairs(selection);
+  std::string pair;
+  while (std::getline(pairs, pair, ',')) {
+    if (result.size() >= 16) throw std::invalid_argument("at most 16 monitor baselines");
+    std::istringstream input(pair);
+    int first, second;
+    char separator, extra;
+    if (!(input >> first >> separator >> second) || separator != ':' || (input >> extra) ||
+        first < 0 || second < first || static_cast<size_t>(second) >= receivers)
+      throw std::invalid_argument("monitor baselines require receiver indices 0 <= first <= second < receiver count");
+    result.emplace_back(first, second);
+  }
+  if (result.empty() || selection.back() == ',')
+    throw std::invalid_argument("monitor baselines require a nonempty receiver-pair list");
+  return result;
+}
+
 struct Spectrum {
   size_t baseline;
   int pol;

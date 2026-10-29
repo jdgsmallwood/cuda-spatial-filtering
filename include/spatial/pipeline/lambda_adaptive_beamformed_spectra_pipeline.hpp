@@ -1,7 +1,12 @@
 #pragma once
+#include "spatial/pipeline/adaptive_beam_kernels.cuh"
+#include "spatial/pipeline/rank_one_beam_filter.cuh"
 
-template <typename T>
-class LambdaAdaptiveBeamformedSpectraPipeline : public GPUPipeline {
+enum class BeamformingMode { WeightsOnly, Coarse, Fine };
+
+template <typename T, BeamformingMode Mode = BeamformingMode::Fine,
+          bool LegacyVoltageFilter = false>
+class AdaptiveBeamPipeline : public GPUPipeline {
   static_assert((T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) %
                         T::NR_FINE_CHANNELS ==
                     0,
@@ -9,6 +14,13 @@ class LambdaAdaptiveBeamformedSpectraPipeline : public GPUPipeline {
                 "by NR_FINE_CHANNELS");
 
 private:
+  static constexpr bool FUSED_INPUT =
+      !LegacyVoltageFilter && T::NR_FINE_CHANNELS > 1;
+  static constexpr size_t DECOMPOSITION_CHANNELS =
+      Mode == BeamformingMode::Coarse ? T::NR_FPGA_CHANNELS : T::NR_CHANNELS;
+  static constexpr size_t CORRELATION_BLOCKS =
+      T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET /
+      (Mode == BeamformingMode::Coarse ? 1 : T::NR_FINE_CHANNELS) / 8;
   static constexpr int NR_TIMES_PER_BLOCK = 128 / 16; // NR_BITS;
 
   static constexpr int NR_BLOCKS_FOR_CORRELATION =
@@ -28,38 +40,38 @@ private:
   // cuSOLVER batch size: one (NR_RECEIVERS × NR_RECEIVERS) matrix per
   // channel × pol × pol, matching LambdaGPUPipeline exactly.
   static constexpr int CUSOLVER_BATCH_SIZE =
-      T::NR_CHANNELS * T::NR_POLARIZATIONS;
+      DECOMPOSITION_CHANNELS * T::NR_POLARIZATIONS;
   static constexpr int NR_FINE_CHANNELS_TO_REMOVE_EACH_SIDE = 5;
 
   // -------------------------------------------------------------------------
   // Array-type aliases
   // -------------------------------------------------------------------------
   using CorrelatorInput =
-      __half[T::NR_CHANNELS][NR_BLOCKS_FOR_CORRELATION][T::NR_PADDED_RECEIVERS]
+      __half[DECOMPOSITION_CHANNELS][CORRELATION_BLOCKS][T::NR_PADDED_RECEIVERS]
             [T::NR_POLARIZATIONS][NR_TIMES_PER_BLOCK][COMPLEX];
 
   using CorrelatorOutput =
-      float[T::NR_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
+      float[DECOMPOSITION_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
            [T::NR_POLARIZATIONS][COMPLEX];
 
   using Visibilities =
-      std::complex<float>[T::NR_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
+      std::complex<float>[DECOMPOSITION_CHANNELS][NR_BASELINES][T::NR_POLARIZATIONS]
                          [T::NR_POLARIZATIONS];
 
   using TrimmedVisibilities =
-      std::complex<float>[T::NR_CHANNELS][NR_UNPADDED_BASELINES]
+      std::complex<float>[DECOMPOSITION_CHANNELS][NR_UNPADDED_BASELINES]
                          [T::NR_POLARIZATIONS];
 
   // Full NR_RECEIVERS × NR_RECEIVERS matrices (one per channel × pol × pol),
   // laid out as a flat batch for cuSOLVER / cuBLAS.
   // Shape: [CUSOLVER_BATCH_SIZE][NR_RECEIVERS][NR_RECEIVERS]
   using DecompositionVisibilities =
-      std::complex<float>[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
+      std::complex<float>[DECOMPOSITION_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS]
                          [T::NR_RECEIVERS];
 
   // Eigenvalues: one real vector of length NR_RECEIVERS per batch element.
   using Eigenvalues =
-      float[T::NR_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS];
+      float[DECOMPOSITION_CHANNELS][T::NR_POLARIZATIONS][T::NR_RECEIVERS];
 
   using FFTCUFFTInputType =
       float2[T::NR_CHANNELS][T::NR_POLARIZATIONS][2 * T::NR_BEAMS]
@@ -188,33 +200,33 @@ private:
     PipelineResources(CUdevice cu_device, size_t work_size)
         : samples_entry(make_device_ptr<typename T::InputPacketSamplesType>()),
           scales(make_device_ptr<typename T::PacketScalesType>()),
-          samples_half(make_device_ptr<typename T::HalfPacketSamplesType>()),
+          samples_half(make_device_ptr_if<typename T::HalfPacketSamplesType, !FUSED_INPUT>()),
           samples_pre_align(
-              make_device_ptr<typename T::HalfPacketSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketSamplesType, !FUSED_INPUT>()),
           samples_aligned(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType, !FUSED_INPUT>()),
           samples_reordered(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType, !FUSED_INPUT>()),
           samples_consolidated(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType, T::NR_FINE_CHANNELS == 1>()),
           samples_consolidated_col_maj(
               make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
           samples_padding(
-              make_device_ptr<typename T::HalfPacketAlignedSamplesType>()),
+              make_device_ptr_if<typename T::HalfPacketAlignedSamplesType, T::NR_FINE_CHANNELS == 1>()),
           channelizer_input(
               make_device_ptr<typename FineChannelizer<T>::FilterInputType>()),
           channelizer_output(
               make_device_ptr<typename FineChannelizer<T>::FilterOutputType>()),
-          samples_cufft_input(make_device_ptr<FFTCUFFTInputType>()),
+          samples_cufft_input(make_device_ptr_if<FFTCUFFTInputType, T::NR_FINE_CHANNELS == 1>()),
           beam_output(make_device_ptr<BeamOutput>()),
           beam_output_float(make_device_ptr<BeamformerOutput>()),
-          samples_cufft_output(make_device_ptr<FFTCUFFTOutputType>()),
+          samples_cufft_output(make_device_ptr_if<FFTCUFFTOutputType, T::NR_FINE_CHANNELS == 1>()),
           samples_cufft_output_fine_channel(
-              make_device_ptr<FFTCUFFTOutputType>()),
+              make_device_ptr_if<FFTCUFFTOutputType, T::NR_FINE_CHANNELS == 1>()),
           samples_fine_channel_removed(
-              make_device_ptr<FineChannelRemovedType>()),
-          cufft_downsampled_output(make_device_ptr<FFTOutputType>()),
-          cufft_downsampled_input(make_device_ptr<FineChannelRemovedType>()),
+              make_device_ptr_if<FineChannelRemovedType, T::NR_FINE_CHANNELS == 1>()),
+          cufft_downsampled_output(make_device_ptr_if<FFTOutputType, T::NR_FINE_CHANNELS == 1>()),
+          cufft_downsampled_input(make_device_ptr_if<FineChannelRemovedType, T::NR_FINE_CHANNELS == 1>()),
           weights(make_device_ptr<BeamWeights>()),
           weights_permuted(make_device_ptr<BeamWeights>()),
           weights_updated(make_device_ptr<BeamWeights>()),
@@ -222,7 +234,7 @@ private:
           weights_beamformer(make_device_ptr<RFIMitigatedBeamWeights>()),
           beamformer_output(make_device_ptr<BeamformerOutput>()),
           samples_padded(
-              make_device_ptr<typename T::PaddedPacketSamplesType>()),
+              make_device_ptr_if<typename T::PaddedPacketSamplesType, T::NR_FINE_CHANNELS == 1>()),
           correlator_input(make_device_ptr<CorrelatorInput>()),
           correlator_output(make_device_ptr<CorrelatorOutput>()),
           visibilities_baseline(make_device_ptr<Visibilities>()),
@@ -242,6 +254,10 @@ private:
           cusolver_info(
               make_device_ptr<int>(CUSOLVER_BATCH_SIZE * sizeof(int))),
           cufft_work_area(make_device_ptr<void>(work_size)) {
+      // Padding is immutable: the fused gather writes every active receptor,
+      // including disconnected ones, and the correlator only reads this buffer.
+      if constexpr (FUSED_INPUT && Mode == BeamformingMode::Coarse)
+        CUDA_CHECK(cudaMemset(correlator_input.get(), 0, sizeof(CorrelatorInput)));
       // Stream Creation
       CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
       CUDA_CHECK(
@@ -251,16 +267,18 @@ private:
       CUSOLVER_CHECK(cusolverDnCreateParams(&cusolver_params));
       CUSOLVER_CHECK(cusolverDnSetStream(cusolver_handle, stream));
 
-      CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
-          cusolver_handle, cusolver_params, CUSOLVER_EIG_MODE_VECTOR,
-          CUBLAS_FILL_MODE_UPPER, T::NR_RECEIVERS, CUDA_C_32F,
-          reinterpret_cast<void *>(decomp_visibilities.get()), T::NR_RECEIVERS,
-          CUDA_R_32F, reinterpret_cast<void *>(eigenvalues.get()), CUDA_C_32F,
-          &cusolver_work_device_size, &cusolver_work_host_size,
-          CUSOLVER_BATCH_SIZE));
+      if constexpr (Mode != BeamformingMode::WeightsOnly) {
+        CUSOLVER_CHECK(cusolverDnXsyevBatched_bufferSize(
+            cusolver_handle, cusolver_params, CUSOLVER_EIG_MODE_VECTOR,
+            CUBLAS_FILL_MODE_UPPER, T::NR_RECEIVERS, CUDA_C_32F,
+            reinterpret_cast<void *>(decomp_visibilities.get()), T::NR_RECEIVERS,
+            CUDA_R_32F, reinterpret_cast<void *>(eigenvalues.get()), CUDA_C_32F,
+            &cusolver_work_device_size, &cusolver_work_host_size,
+            CUSOLVER_BATCH_SIZE));
 
-      cusolver_work_device = make_device_ptr<void>(cusolver_work_device_size);
-      cusolver_work_host = std::malloc(cusolver_work_host_size);
+        cusolver_work_device = make_device_ptr<void>(cusolver_work_device_size);
+        cusolver_work_host = std::malloc(cusolver_work_host_size);
+      }
 
       const std::complex<float> alpha_ccglib = {1, 0};
       const std::complex<float> beta_ccglib = {0, 0};
@@ -431,6 +449,12 @@ private:
     PipelineResources &operator=(const PipelineResources &) = delete;
   };
 
+  std::vector<std::unique_ptr<RankOneBeamFilter>> protected_filters_;
+  bool track_solar_protection_ = false;
+  bool record_visibilities_ = false;
+  DevicePtr<uint8_t> enabled_inputs_;
+  DevicePtr<unsigned> solver_failures_;
+  uint64_t input_packets_ = 0, missing_input_packets_ = 0, processed_blocks_ = 0;
   int num_buffers;
   std::vector<PipelineResources> buffers;
 
@@ -510,14 +534,15 @@ private:
                                                         't', 'p', 'z'};
   inline static const std::vector<int> modeCorrelatorInput{'c', 'b', 'd',
                                                            'p', 't', 'z'};
-  inline static const std::vector<int> modeVisCorr{'c', 'l', 'p', 'q', 'z'};
-  inline static const std::vector<int> modeVisCorrBaseline{'p', 'q', 'l', 'c',
+  inline static const std::vector<int> modeVisCorr{'k', 'l', 'p', 'q', 'z'};
+  inline static const std::vector<int> modeVisCorrBaseline{'p', 'q', 'l', 'k',
                                                            'z'};
-  inline static const std::vector<int> modeVisCorrBaselineTrimmed{'p', 'a', 'c',
+  inline static const std::vector<int> modeVisCorrBaselineTrimmed{'p', 'a', 'k',
                                                                   'z'};
-  inline static const std::vector<int> modeVisDecomp{'c', 'p', 'a', 'z'};
+  inline static const std::vector<int> modeVisDecomp{'k', 'p', 'a', 'z'};
 
   inline static const std::unordered_map<int, int64_t> extent = {
+      {'k', DECOMPOSITION_CHANNELS},
       {'a', NR_UNPADDED_BASELINES},
       {'b', NR_BLOCKS_FOR_CORRELATION},
       {'c', T::NR_CHANNELS},
@@ -562,7 +587,71 @@ private:
   int fft_missing_packets;
 
 public:
-  ~LambdaAdaptiveBeamformedSpectraPipeline() {
+  uint64_t input_packets() const { return input_packets_; }
+  uint64_t missing_input_packets() const { return missing_input_packets_; }
+  uint64_t processed_blocks() const { return processed_blocks_; }
+  unsigned eigensolver_failures() const {
+    unsigned count = 0;
+    CUDA_CHECK(cudaMemcpy(&count, solver_failures_.get(), sizeof(count), cudaMemcpyDeviceToHost));
+    return count;
+  }
+  uint64_t successful_payload_bytes() const {
+    return (input_packets_ - missing_input_packets_) * T::NR_TIME_STEPS_PER_PACKET *
+           T::NR_RECEIVERS_PER_PACKET * T::NR_POLARIZATIONS * 2;
+  }
+  void set_protected_signatures(const std::vector<std::complex<float>> &signatures) {
+    if (Mode == BeamformingMode::WeightsOnly || shrink_eigenvalues_ || detect_signal_eigenmodes_)
+      throw std::invalid_argument("rank-1 protection requires fixed-rank nulling");
+    if (signatures.size() != CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS)
+      throw std::invalid_argument("solar signature shape does not match decomposition channels");
+    for (int b = 0; b < CUSOLVER_BATCH_SIZE; ++b) {
+      double norm = 0;
+      for (int r = 0; r < T::NR_RECEIVERS; ++r) {
+        const auto z = signatures[b * T::NR_RECEIVERS + r];
+        if (!std::isfinite(z.real()) || !std::isfinite(z.imag()))
+          throw std::invalid_argument("nonfinite solar signature");
+        norm += std::norm(z);
+      }
+      if (!(norm > 0)) throw std::invalid_argument("zero solar signature");
+    }
+    for (const auto &entry : NR_SIGNAL_EIGENVECTORS)
+      if (entry.second < 0 || entry.second >= T::NR_RECEIVERS)
+        throw std::invalid_argument("protected nulling rank must be between 0 and N-1");
+    CUDA_CHECK(cudaDeviceSynchronize());
+    if (!protected_filters_.empty()) {
+      for (auto &filter : protected_filters_) filter->update_signature(signatures);
+      return;
+    }
+    for (auto &b : buffers) {
+      // The full-space workspace is no longer used once protection is enabled.
+      b.cusolver_work_device.reset();
+      std::free(b.cusolver_work_host);
+      b.cusolver_work_host = nullptr;
+      protected_filters_.push_back(std::make_unique<RankOneBeamFilter>(
+          T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, signatures, b.cusolver_handle, b.cusolver_params));
+    }
+  }
+
+  void enable_solar_protection() {
+    set_protected_signatures(beam_steering_.solar_signatures(Mode == BeamformingMode::Coarse));
+    track_solar_protection_ = true;
+  }
+
+  void enable_visibility_recording() {
+    if constexpr (Mode == BeamformingMode::WeightsOnly)
+      throw std::invalid_argument("weights-only has no covariance to record");
+    record_visibilities_ = true;
+  }
+
+  void set_enabled_inputs(const std::vector<uint8_t> &enabled) {
+    if (enabled.size() != CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS)
+      throw std::invalid_argument("input mask has wrong channel/polarization/receiver shape");
+    CUDA_CHECK(cudaDeviceSynchronize());
+    enabled_inputs_ = make_device_ptr<uint8_t>(enabled.size());
+    CUDA_CHECK(cudaMemcpy(enabled_inputs_.get(), enabled.data(), enabled.size(), cudaMemcpyHostToDevice));
+  }
+
+  ~AdaptiveBeamPipeline() {
     if (d_stream_perm_recv) cudaFree(d_stream_perm_recv);
     if (d_stream_perm_pol)  cudaFree(d_stream_perm_pol);
   }
@@ -592,52 +681,75 @@ public:
     // b.weights, and only from this single-threaded pipeline_feeder context
     // -- see the BeamSteering<T> comment block (pipeline.hpp above) for why
     // that ordering is what makes this safe without extra synchronization.
-    beam_steering_.maybe_refresh();
+    if (beam_steering_.maybe_refresh_for_block(packet_data->start_seq_id, dummy_run) && track_solar_protection_)
+      set_protected_signatures(beam_steering_.solar_signatures(Mode == BeamformingMode::Coarse));
 
     const uint64_t start_seq_num = packet_data->start_seq_id;
     const uint64_t end_seq_num = packet_data->end_seq_id;
+    const int missing_packets = dummy_run ? 0 : packet_data->get_num_missing_packets();
+    if (!dummy_run) {
+      input_packets_ += T::NR_FPGA_CHANNELS * T::NR_FPGA_SOURCES * T::NR_PACKETS_FOR_CORRELATION;
+      missing_input_packets_ += missing_packets;
+      ++processed_blocks_;
+    }
     INFO_LOG("Pipeline run started with start_seq {} and end seq {}",
              start_seq_num, end_seq_num);
 
     const size_t beam_block_num = output_ != nullptr && !dummy_run
         ? output_->register_beam_data_block_with_arrivals(*packet_data)
         : std::numeric_limits<size_t>::max();
+    const size_t vis_block_num = record_visibilities_ && output_ && !dummy_run
+        ? output_->register_visibilities_block(
+              start_seq_num, end_seq_num, missing_packets,
+              T::NR_FPGA_CHANNELS * T::NR_FPGA_SOURCES * T::NR_PACKETS_FOR_CORRELATION)
+        : std::numeric_limits<size_t>::max();
 
     LambdaPipelineIngest<T>::ingest_and_scale(
         this->state_, packet_data, b.stream, b.host_stream,
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
-        dummy_run);
+        dummy_run, nullptr, true, nullptr, !FUSED_INPUT);
 
-    tensor_16.runPermutation("packetToPreAlign", alpha,
-                             (__half *)b.samples_half.get(),
-                             (__half *)b.samples_pre_align.get(), b.stream);
-
-    // Pre-channelization: samples_pre_align/samples_aligned/samples_reordered are all
-    // HalfPacketSamplesType-family buffers, shaped by the raw FPGA/coarse channel count.
-    apply_delays_launch((__half *)b.samples_pre_align.get(),
-                        (__half *)b.samples_aligned.get(), d_subpacket_delays,
-                        T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
-                        T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
-                        T::NR_FPGA_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
-
-    reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
-                           T::NR_TIME_STEPS_PER_PACKET, T::NR_FPGA_CHANNELS,
-                           T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
-        (__half *)b.samples_aligned.get(),
-        (__half *)b.samples_reordered.get(),
-        d_stream_perm_recv, d_stream_perm_pol, b.stream);
+    if constexpr (FUSED_INPUT) {
+      starspin_raw_to_filter_input<
+          T::NR_FPGA_CHANNELS, T::NR_FPGA_SOURCES, T::NR_RECEIVERS_PER_PACKET,
+          T::NR_RECEIVERS, T::NR_RECEIVERS, T::NR_POLARIZATIONS,
+          T::NR_PACKETS_FOR_CORRELATION, T::NR_TIME_STEPS_PER_PACKET,
+          T::NR_FINE_CHANNELS, FineChannelizer<T>::NR_TAPS,
+          Mode == BeamformingMode::Coarse ? T::NR_PADDED_RECEIVERS : 0>(
+          (const char2 *)b.samples_entry.get(), (const int16_t *)b.scales.get(),
+          (const float2 *)d_gains, d_subpacket_delays, d_stream_perm_recv,
+          d_stream_perm_pol, (float2 *)b.channelizer_input.get(), b.stream,
+          Mode == BeamformingMode::Coarse ? (__half2 *)b.correlator_input.get() : nullptr);
+    } else {
+      tensor_16.runPermutation("packetToPreAlign", alpha,
+                              (__half *)b.samples_half.get(),
+                              (__half *)b.samples_pre_align.get(), b.stream);
+      apply_delays_launch((__half *)b.samples_pre_align.get(),
+                          (__half *)b.samples_aligned.get(), d_subpacket_delays,
+                          T::NR_RECEIVERS_PER_PACKET, T::NR_FPGA_SOURCES,
+                          T::NR_PACKETS_FOR_CORRELATION, T::NR_POLARIZATIONS,
+                          T::NR_FPGA_CHANNELS, T::NR_TIME_STEPS_PER_PACKET, b.stream);
+      reorder_streams_launch<T::NR_FPGA_SOURCES, T::NR_PACKETS_FOR_CORRELATION,
+                             T::NR_TIME_STEPS_PER_PACKET, T::NR_FPGA_CHANNELS,
+                             T::NR_RECEIVERS_PER_PACKET, T::NR_POLARIZATIONS>(
+          (__half *)b.samples_aligned.get(), (__half *)b.samples_reordered.get(),
+          d_stream_perm_recv, d_stream_perm_pol, b.stream);
+    }
 
     if constexpr (T::NR_FINE_CHANNELS > 1) {
-      reorder_to_filter_input<
-          T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
-          T::NR_RECEIVERS_PER_PACKET, T::NR_TIME_STEPS_PER_PACKET,
-          T::NR_PACKETS_FOR_CORRELATION, FineChannelizer<T>::NR_TAPS,
-          T::NR_FINE_CHANNELS>((__half *)b.samples_reordered.get(),
-                               (float2 *)b.channelizer_input.get(), b.stream);
+      if constexpr (!FUSED_INPUT) {
+        reorder_to_filter_input<
+            T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS, T::NR_RECEIVERS,
+            T::NR_RECEIVERS_PER_PACKET, T::NR_TIME_STEPS_PER_PACKET,
+            T::NR_PACKETS_FOR_CORRELATION, FineChannelizer<T>::NR_TAPS,
+            T::NR_FINE_CHANNELS>((__half *)b.samples_reordered.get(),
+                                 (float2 *)b.channelizer_input.get(), b.stream);
+      }
 
       channelizer_->launchAsync(b.stream, b.channelizer_input.get(),
                                 b.channelizer_output.get());
 
+      if constexpr (Mode == BeamformingMode::Fine) {
       channelizer_output_to_corr_input<
           T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS, T::NR_FINE_CHANNEL_EDGE_TRIM,
           T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_PADDED_RECEIVERS,
@@ -645,6 +757,23 @@ public:
           (const __half2 *)b.channelizer_output.get(),
           (__half *)b.correlator_input.get(), b.stream,
           channelizer_->deripple_gains());
+      } else {
+        channelizer_output_to_col_maj_cons<
+            T::NR_FPGA_CHANNELS, T::NR_FINE_CHANNELS, T::NR_FINE_CHANNEL_EDGE_TRIM,
+            T::NR_POLARIZATIONS, T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+            NR_TIME_STEPS_PER_FINE_CHANNEL, 8>(
+            (const __half2 *)b.channelizer_output.get(),
+            (__half *)b.samples_consolidated_col_maj.get(), b.stream,
+            channelizer_->deripple_gains());
+        if constexpr (Mode == BeamformingMode::Coarse && !FUSED_INPUT) {
+          CUDA_CHECK(cudaMemsetAsync(b.correlator_input.get(), 0, sizeof(CorrelatorInput), b.stream));
+          aligned_to_corr_input<T::NR_FPGA_CHANNELS, T::NR_POLARIZATIONS,
+              T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
+              T::NR_TIME_STEPS_PER_PACKET, T::NR_PACKETS_FOR_CORRELATION,
+              T::NR_PADDED_RECEIVERS, 8>((const __half *)b.samples_reordered.get(),
+                                       (__half *)b.correlator_input.get(), b.stream);
+        }
+      }
     } else {
       tensor_16.runPermutation("alignedToPlanar", alpha,
                                (__half *)b.samples_reordered.get(),
@@ -679,10 +808,24 @@ public:
     // ------------------------------------------------------------------
     // 7. Cross-correlate with tcc::Correlator
     // ------------------------------------------------------------------
+    if constexpr (Mode != BeamformingMode::WeightsOnly) {
     correlator.launchAsync(
         static_cast<CUstream>(b.stream),
         reinterpret_cast<CUdeviceptr>(b.correlator_output.get()),
         reinterpret_cast<CUdeviceptr>(b.correlator_input.get()));
+    if (vis_block_num != std::numeric_limits<size_t>::max()) {
+      // Packed TCC baselines put the physical receiver triangle before padding.
+      constexpr size_t row_bytes = NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
+                                   T::NR_POLARIZATIONS * sizeof(float2);
+      CUDA_CHECK(cudaMemcpy2DAsync(
+          output_->get_visibilities_landing_pointer(vis_block_num), row_bytes,
+          b.correlator_output.get(), sizeof(CorrelatorOutput) / DECOMPOSITION_CHANNELS,
+          row_bytes, DECOMPOSITION_CHANNELS, cudaMemcpyDeviceToHost, b.stream));
+      auto *context = new OutputTransferCompleteContext{
+          .output = output_, .block_index = vis_block_num};
+      CUDA_CHECK(cudaLaunchHostFunc(b.stream,
+          output_visibilities_transfer_complete_host_func, context));
+    }
     // ------------------------------------------------------------------
     // 8. Rearrange correlator output to baseline-major, then trim padding
     // ------------------------------------------------------------------
@@ -711,12 +854,25 @@ public:
     unpack_triangular_baseline_batch_launch<cuComplex>(
         reinterpret_cast<cuComplex *>(b.visibilities_trimmed.get()),
         reinterpret_cast<cuComplex *>(b.decomp_visibilities.get()),
-        T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, T::NR_CHANNELS, b.stream);
+        T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, DECOMPOSITION_CHANNELS, b.stream);
 
+    if (enabled_inputs_) {
+      mask_adaptive_matrix<<<dim3((T::NR_RECEIVERS * T::NR_RECEIVERS + 255) / 256, CUSOLVER_BATCH_SIZE),
+                             256, 0, b.stream>>>(
+          reinterpret_cast<float2 *>(b.decomp_visibilities.get()), enabled_inputs_.get(), T::NR_RECEIVERS);
+      CUDA_CHECK(cudaGetLastError());
+    }
     diagonalWhiten(reinterpret_cast<float2 *>(b.decomp_visibilities.get()),
                    reinterpret_cast<float *>(b.d_whitening_diag.get()),
                    T::NR_RECEIVERS, CUSOLVER_BATCH_SIZE, b.stream);
 
+    if (!protected_filters_.empty()) {
+      protected_filters_[current_buffer]->run(
+          reinterpret_cast<cuComplex *>(b.decomp_visibilities.get()),
+          reinterpret_cast<const float *>(b.d_whitening_diag.get()), b.d_fixed_detected_counts.get(),
+          reinterpret_cast<__half2 *>(b.projection_matrix.get()), b.stream,
+          b.cublas_handle, b.cusolver_handle, b.cusolver_params, solver_failures_.get());
+    } else {
     CUSOLVER_CHECK(cusolverDnXsyevBatched(
         b.cusolver_handle, b.cusolver_params, cusolver_jobz, cusolver_uplo,
         T::NR_RECEIVERS, CUDA_C_32F,
@@ -756,14 +912,23 @@ public:
       }
 
       if (!shrink_eigenvalues_) {
-        unwhitenEigenvectors(
-            reinterpret_cast<float2 *>(b.decomp_visibilities.get()),
-            reinterpret_cast<const float *>(b.d_whitening_diag.get()),
-            N, CUSOLVER_BATCH_SIZE, b.stream);
-        buildIdentityMinusProjectionFromEigenvectors(
-            reinterpret_cast<const float2 *>(b.decomp_visibilities.get()),
-            counts_ptr, reinterpret_cast<__half2 *>(b.projection_matrix.get()),
-            N, CUSOLVER_BATCH_SIZE, b.stream);
+        if constexpr (!LegacyVoltageFilter) {
+          voltage_filter_from_modes<<<dim3((N * N + 255) / 256, CUSOLVER_BATCH_SIZE),
+                                      256, 0, b.stream>>>(
+              V_base, reinterpret_cast<const float *>(b.d_whitening_diag.get()), counts_ptr,
+              reinterpret_cast<__half2 *>(b.projection_matrix.get()), N, N,
+              b.cusolver_info.get(), solver_failures_.get());
+          CUDA_CHECK(cudaGetLastError());
+        } else {
+          unwhitenEigenvectors(
+              reinterpret_cast<float2 *>(b.decomp_visibilities.get()),
+              reinterpret_cast<const float *>(b.d_whitening_diag.get()),
+              N, CUSOLVER_BATCH_SIZE, b.stream);
+          buildIdentityMinusProjectionFromEigenvectors(
+              reinterpret_cast<const float2 *>(b.decomp_visibilities.get()),
+              counts_ptr, reinterpret_cast<__half2 *>(b.projection_matrix.get()),
+              N, CUSOLVER_BATCH_SIZE, b.stream);
+        }
       } else {
         // --- Shrink path: M = V_scaled * V^H, projection_matrix = M (fp16) ---
         computeShrinkScaleFactors(
@@ -797,10 +962,23 @@ public:
       }
     }
 
+    }
+
     // conjugateMatrix((__half2 *)b.projection_matrix.get(),
     //                 T::NR_RECEIVERS * T::NR_RECEIVERS * T::NR_CHANNELS *
     //                     T::NR_POLARIZATIONS,
     //                 b.stream);
+
+    }
+
+    if constexpr (Mode != BeamformingMode::WeightsOnly) {
+      if (enabled_inputs_) {
+        mask_adaptive_matrix<<<dim3((T::NR_RECEIVERS * T::NR_RECEIVERS + 255) / 256, CUSOLVER_BATCH_SIZE),
+                               256, 0, b.stream>>>(
+            reinterpret_cast<__half2 *>(b.projection_matrix.get()), enabled_inputs_.get(), T::NR_RECEIVERS);
+        CUDA_CHECK(cudaGetLastError());
+      }
+    }
 
     // Slot 0 of weights_rfi_mitigated holds the original (un-projected) beam
     // weights. It was initialised once in the constructor, but
@@ -815,7 +993,15 @@ public:
                              (__half *)b.weights.get(),
                              (__half *)b.weights_rfi_mitigated.get(), b.stream);
 
-    {
+    if constexpr (Mode == BeamformingMode::WeightsOnly) {
+      CUDA_CHECK(cudaMemcpyAsync(b.weights_updated.get(), b.weights.get(),
+                                 sizeof(BeamWeights), cudaMemcpyDeviceToDevice, b.stream));
+    } else if constexpr (Mode == BeamformingMode::Coarse) {
+      apply_coarse_beam_filter<T><<<(T::NR_CHANNELS * T::NR_POLARIZATIONS * T::NR_BEAMS * T::NR_RECEIVERS + 255) / 256, 256, 0, b.stream>>>(
+          (const __half2 *)b.weights.get(), (const __half2 *)b.projection_matrix.get(),
+          (__half2 *)b.weights_updated.get());
+      CUDA_CHECK(cudaGetLastError());
+    } else {
       b.gemm_weight_projection_handle->Run(
           (CUdeviceptr)b.weights.get(), (CUdeviceptr)b.projection_matrix.get(),
           (CUdeviceptr)b.weights_updated.get());
@@ -834,7 +1020,7 @@ public:
                              (__half *)b.weights_rfi_mitigated.get(),
                              (__half *)b.weights_beamformer.get(), b.stream);
 
-    if constexpr (T::NR_FINE_CHANNELS > 1) {
+    if constexpr (T::NR_FINE_CHANNELS > 1 && Mode == BeamformingMode::Fine) {
       corr_input_to_col_maj_cons<T::NR_CHANNELS, T::NR_POLARIZATIONS,
                                  T::NR_RECEIVERS, T::NR_RECEIVERS_PER_PACKET,
                                  T::NR_PADDED_RECEIVERS, NR_BLOCKS_FOR_CORRELATION,
@@ -960,8 +1146,9 @@ public:
                            fft_output_ctx);
       }
 
-      size_t eig_block_num = output_->register_eigendecomposition_data_block(
-          start_seq_num, end_seq_num);
+      size_t eig_block_num = Mode == BeamformingMode::WeightsOnly || !protected_filters_.empty()
+          ? std::numeric_limits<size_t>::max()
+          : output_->register_eigendecomposition_data_block(start_seq_num, end_seq_num);
 
       if (eig_block_num != std::numeric_limits<size_t>::max()) {
         void *eigval_ptr =
@@ -1060,19 +1247,20 @@ public:
     }
     std::fflush(stdout);
   }
-  LambdaAdaptiveBeamformedSpectraPipeline(
+  AdaptiveBeamPipeline(
       const int num_buffers, BeamWeightsT<T> *h_weights,
       const std::unordered_map<int, int> nr_signal_eigenvectors,
       const int min_freq_channel, BeamSteering<T> beam_steering,
       bool shrink_eigenvalues = false, bool detect_signal_eigenmodes = false,
       float detection_threshold_delta = 3.0f,
-      double eigenmode_stats_interval_seconds = 10.0)
+      double eigenmode_stats_interval_seconds = 10.0,
+      float fine_channel_voltage_scale = 1.0f)
 
       : num_buffers(num_buffers), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
-                   T::NR_CHANNELS,
-                   NR_BLOCKS_FOR_CORRELATION * NR_TIMES_PER_BLOCK,
+                   DECOMPOSITION_CHANNELS,
+                   CORRELATION_BLOCKS * NR_TIMES_PER_BLOCK,
                    T::NR_POLARIZATIONS, std::nullopt,
                    T::NR_PADDED_RECEIVERS_PER_BLOCK, TCC_THREAD_BLOCKS_PER_SM),
         tensor_16(extent, CUTENSOR_R_16F, 128),
@@ -1083,6 +1271,8 @@ public:
         detect_signal_eigenmodes_(detect_signal_eigenmodes),
         detection_threshold_delta_(detection_threshold_delta),
         eigenmode_stats_interval_seconds_(eigenmode_stats_interval_seconds) {
+    solver_failures_ = make_device_ptr<unsigned>();
+    CUDA_CHECK(cudaMemset(solver_failures_.get(), 0, sizeof(unsigned)));
     std::cout << "Beamformed Spectra instantiated with NR_CHANNELS: "
               << T::NR_CHANNELS << ", NR_RECEIVERS: " << T::NR_RECEIVERS
               << ", NR_POLARIZATIONS: " << T::NR_POLARIZATIONS
@@ -1206,11 +1396,11 @@ public:
     CUdevice cu_device;
     cuDeviceGet(&cu_device, 0);
     if constexpr (T::NR_FINE_CHANNELS > 1) {
-      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device);
+      channelizer_ = std::make_unique<FineChannelizer<T>>(cu_device, fine_channel_voltage_scale);
     }
     buffers.reserve(num_buffers);
     std::vector<int32_t> fixed_detected_counts(CUSOLVER_BATCH_SIZE, 0);
-    for (int channel = 0; channel < T::NR_CHANNELS; ++channel) {
+    for (int channel = 0; channel < DECOMPOSITION_CHANNELS; ++channel) {
       const auto it = NR_SIGNAL_EIGENVECTORS.find(min_freq_channel + channel);
       const int fixed_k = (it != NR_SIGNAL_EIGENVECTORS.end()) ? it->second : 0;
       for (int pol = 0; pol < T::NR_POLARIZATIONS; ++pol) {
@@ -1273,3 +1463,8 @@ public:
                           sizeof(int) * T::NR_FPGA_SOURCES, cudaMemcpyDefault));
   }
 };
+
+// Preserve the existing application and test interface.
+template <typename T>
+using LambdaAdaptiveBeamformedSpectraPipeline =
+    AdaptiveBeamPipeline<T, BeamformingMode::Fine, true>;

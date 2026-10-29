@@ -4,10 +4,12 @@ from pathlib import Path
 import struct
 
 
-def fixture_bytes():
+def fixture_bytes(frames=4, channels=8, fpgas=1):
+    if frames < 1 or channels < 1 or not 1 <= fpgas <= 4:
+        raise ValueError("invalid synthetic capture dimensions")
     result = bytearray(struct.pack('<IHHIIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
-    for frame in range(4):
-        for channel in range(110, 118):
+    for frame in range(frames):
+        for channel in range(110, 110 + channels):
             header = bytearray(64)
             struct.pack_into('<II', header, 0, frame, 0)
             header[9:11] = bytes([8, 4])
@@ -32,8 +34,17 @@ def fixture_bytes():
             struct.pack_into('!H', ip, 10, (~checksum) & 0xffff)
             ethernet = bytes.fromhex('0200000000020200000000010800')
             packet = ethernet + ip + udp + header + data
-            result.extend(struct.pack('<IIII', 0, 0, len(packet), len(packet)))
-            result.extend(packet)
+            for fpga in range(fpgas):
+                replica = bytearray(packet)
+                struct.pack_into('<H', replica, 42 + 18, fpga)
+                replica[28] = fpga
+                struct.pack_into('!H', replica, 24, 0)
+                checksum = sum(struct.unpack('!10H', replica[14:34]))
+                while checksum >> 16:
+                    checksum = (checksum & 0xffff) + (checksum >> 16)
+                struct.pack_into('!H', replica, 24, (~checksum) & 0xffff)
+                result.extend(struct.pack('<IIII', 0, 0, len(replica), len(replica)))
+                result.extend(replica)
     return bytes(result)
 
 

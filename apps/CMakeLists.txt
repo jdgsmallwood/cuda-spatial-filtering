@@ -1,5 +1,17 @@
 set(NUMBER_BEAMS 1 CACHE STRING "Number of beams to correlate while benchmarking")
 
+add_executable(adaptive_beam adaptive-beam.cu)
+target_link_libraries(adaptive_beam PRIVATE gpu_app_common)
+target_compile_definitions(adaptive_beam PRIVATE SPATIAL_THP_INPUT_BUFFERS=1)
+
+# Full-array local comparison with bounded memory on an 8 GB GPU.
+add_executable(bench_adaptive_beam_4_40 adaptive-beam.cu)
+target_link_libraries(bench_adaptive_beam_4_40 PRIVATE gpu_app_common)
+target_compile_definitions(bench_adaptive_beam_4_40 PRIVATE
+    NR_OBSERVING_FPGA_SOURCES=4 NR_OBSERVING_CHANNELS=40
+    NR_OBSERVING_PADDED_RECEIVERS=64 SPATIAL_ADAPTIVE_BUFFERS=1
+    SPATIAL_THP_INPUT_BUFFERS=1)
+
 add_library(gpu_app_common INTERFACE)
 
 message(STATUS "PSRDADA_ROOT is ${PSRDADA_ROOT}")
@@ -123,6 +135,11 @@ foreach(NR_LOWER_EXTRA_TRIM 0 1)
         SPATIAL_THP_OUTPUT_BUFFERS=1)
 endforeach()
 
+# Isolate weights-only GPU work from packet parsing and voltage writing.
+add_executable(bench_weights_pipeline_40 ${PROJECT_SOURCE_DIR}/apps/bench_weights_pipeline.cu)
+target_link_libraries(bench_weights_pipeline_40 PRIVATE gpu_app_common)
+target_compile_definitions(bench_weights_pipeline_40 PRIVATE
+    NR_OBSERVING_CHANNELS=40 SPATIAL_THP_INPUT_BUFFERS=1)
 # Focused Starspin HDF5 writer throughput comparison.
 add_executable(bench_starspin_vis_writer ${PROJECT_SOURCE_DIR}/apps/bench_starspin_vis_writer.cu)
 target_link_libraries(bench_starspin_vis_writer PRIVATE gpu_app_common)
@@ -429,7 +446,7 @@ target_link_libraries(bench_gpudirect_scatter PRIVATE spdlog::spdlog argparse CU
 # per-target definitions in the observe grid above.
 set(_STANDARD_APPS
     gpu_benchmark fft_antenna_spectra beamformed_bandpass
-    get_projection_matrix adaptive_beamformed_bandpass
+    get_projection_matrix adaptive_beamformed_bandpass adaptive_beam
     pulsar_fold bench_capture bench_processor bench_writers bench_gpu
 )
 foreach(_APP IN LISTS _STANDARD_APPS)
