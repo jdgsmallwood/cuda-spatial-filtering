@@ -1,6 +1,7 @@
 #pragma once
 #include "spatial/pipeline/adaptive_beam_kernels.cuh"
 #include "spatial/pipeline/rank_one_beam_filter.cuh"
+#include <cstdlib>
 
 enum class BeamformingMode { WeightsOnly, Coarse, Fine };
 
@@ -457,6 +458,9 @@ private:
   uint64_t input_packets_ = 0, missing_input_packets_ = 0, processed_blocks_ = 0;
   int num_buffers;
   std::vector<PipelineResources> buffers;
+  std::vector<cudaGraphExec_t> compute_graphs_;
+  std::vector<bool> compute_graph_capture_attempted_;
+  bool capture_compute_during_warmup_ = false;
 
   cusolverEigMode_t cusolver_jobz = CUSOLVER_EIG_MODE_VECTOR;
   cublasFillMode_t cusolver_uplo = CUBLAS_FILL_MODE_UPPER;
@@ -586,7 +590,90 @@ private:
       T::NR_CHANNELS * T::NR_PACKETS_FOR_CORRELATION * T::NR_FPGA_SOURCES;
   int fft_missing_packets;
 
+  bool cuda_graphs_enabled() const {
+    return FUSED_INPUT && std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr &&
+        (Mode == BeamformingMode::WeightsOnly ||
+         std::getenv("SPATIAL_ENABLE_ADAPTIVE_CUDA_GRAPH") != nullptr);
+  }
+
+  void invalidate_cuda_graphs() {
+    for (size_t i = 0; i < compute_graphs_.size(); ++i) {
+      if (compute_graphs_[i]) {
+        CUDA_CHECK(cudaStreamSynchronize(buffers[i].stream));
+        CUDA_CHECK(cudaGraphExecDestroy(compute_graphs_[i]));
+        compute_graphs_[i] = nullptr;
+      }
+      compute_graph_capture_attempted_[i] = false;
+    }
+  }
+
+  template <typename EnqueueFn>
+  static bool capture_compute_graph(cudaStream_t stream, EnqueueFn &&enqueue,
+                                    cudaGraphExec_t &exec_out) {
+    if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) !=
+        cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
+    bool enqueue_ok = true;
+    try {
+      enqueue();
+    } catch (...) {
+      enqueue_ok = false;
+    }
+    cudaGraph_t graph = nullptr;
+    const cudaError_t end_err = cudaStreamEndCapture(stream, &graph);
+    if (!enqueue_ok || end_err != cudaSuccess || graph == nullptr) {
+      if (graph) cudaGraphDestroy(graph);
+      cudaGetLastError();
+      return false;
+    }
+    cudaGraphExec_t exec = nullptr;
+    const cudaError_t instantiate_err = cudaGraphInstantiateWithFlags(&exec, graph, 0);
+    cudaGraphDestroy(graph);
+    if (instantiate_err != cudaSuccess || exec == nullptr) {
+      cudaGetLastError();
+      return false;
+    }
+    exec_out = exec;
+    return true;
+  }
+
 public:
+  size_t cuda_graph_count() const {
+    return std::count_if(compute_graphs_.begin(), compute_graphs_.end(),
+                         [](cudaGraphExec_t g) { return g != nullptr; });
+  }
+
+  // Call after masks/protection are configured, before starting capture threads.
+  // Library warmup, graph creation and instantiation are outside measured work.
+  void prepare_cuda_graphs() {
+    const bool required = std::getenv("SPATIAL_REQUIRE_CUDA_GRAPH") != nullptr;
+    if (cuda_graphs_enabled() && cuda_graph_count() != size_t(num_buffers)) {
+      invalidate_cuda_graphs();
+      typename T::PacketFinalDataType packet;
+      std::memset(packet.samples, 0, packet.get_samples_elements_size());
+      std::memset(packet.scales, 0, packet.get_scales_element_size());
+      std::memset(packet.arrivals, 0, packet.get_arrivals_size());
+      const int saved_buffer = current_buffer;
+      for (int i = 0; i < num_buffers; ++i) {
+        current_buffer = i;
+        execute_pipeline(&packet, true);
+      }
+      CUDA_CHECK(cudaDeviceSynchronize());
+      capture_compute_during_warmup_ = true;
+      for (int i = 0; i < num_buffers; ++i) {
+        current_buffer = i;
+        execute_pipeline(&packet, true);
+      }
+      capture_compute_during_warmup_ = false;
+      current_buffer = saved_buffer;
+      CUDA_CHECK(cudaDeviceSynchronize());
+    }
+    if (required && (!cuda_graphs_enabled() || cuda_graph_count() != size_t(num_buffers)))
+      throw std::runtime_error("required CUDA graphs were not captured for every GPU buffer");
+  }
+
   uint64_t input_packets() const { return input_packets_; }
   uint64_t missing_input_packets() const { return missing_input_packets_; }
   uint64_t processed_blocks() const { return processed_blocks_; }
@@ -622,6 +709,7 @@ public:
       for (auto &filter : protected_filters_) filter->update_signature(signatures);
       return;
     }
+    invalidate_cuda_graphs();
     for (auto &b : buffers) {
       // The full-space workspace is no longer used once protection is enabled.
       b.cusolver_work_device.reset();
@@ -647,11 +735,14 @@ public:
     if (enabled.size() != CUSOLVER_BATCH_SIZE * T::NR_RECEIVERS)
       throw std::invalid_argument("input mask has wrong channel/polarization/receiver shape");
     CUDA_CHECK(cudaDeviceSynchronize());
+    invalidate_cuda_graphs();
     enabled_inputs_ = make_device_ptr<uint8_t>(enabled.size());
     CUDA_CHECK(cudaMemcpy(enabled_inputs_.get(), enabled.data(), enabled.size(), cudaMemcpyHostToDevice));
   }
 
   ~AdaptiveBeamPipeline() {
+    for (auto graph : compute_graphs_)
+      if (graph) cudaGraphExecDestroy(graph);
     if (d_stream_perm_recv) cudaFree(d_stream_perm_recv);
     if (d_stream_perm_pol)  cudaFree(d_stream_perm_pol);
   }
@@ -709,6 +800,10 @@ public:
         b.samples_entry.get(), b.scales.get(), d_gains, b.samples_half.get(),
         dummy_run, nullptr, true, nullptr, !FUSED_INPUT);
 
+    // Compute has stable device pointers for each buffer after configuration.
+    // Keep ingest and output callbacks outside the graph: their host pointers
+    // and block numbers change for every packet.
+    auto enqueue_compute = [&]() {
     if constexpr (FUSED_INPUT) {
       starspin_raw_to_filter_input<
           T::NR_FPGA_CHANNELS, T::NR_FPGA_SOURCES, T::NR_RECEIVERS_PER_PACKET,
@@ -813,19 +908,6 @@ public:
         static_cast<CUstream>(b.stream),
         reinterpret_cast<CUdeviceptr>(b.correlator_output.get()),
         reinterpret_cast<CUdeviceptr>(b.correlator_input.get()));
-    if (vis_block_num != std::numeric_limits<size_t>::max()) {
-      // Packed TCC baselines put the physical receiver triangle before padding.
-      constexpr size_t row_bytes = NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
-                                   T::NR_POLARIZATIONS * sizeof(float2);
-      CUDA_CHECK(cudaMemcpy2DAsync(
-          output_->get_visibilities_landing_pointer(vis_block_num), row_bytes,
-          b.correlator_output.get(), sizeof(CorrelatorOutput) / DECOMPOSITION_CHANNELS,
-          row_bytes, DECOMPOSITION_CHANNELS, cudaMemcpyDeviceToHost, b.stream));
-      auto *context = new OutputTransferCompleteContext{
-          .output = output_, .block_index = vis_block_num};
-      CUDA_CHECK(cudaLaunchHostFunc(b.stream,
-          output_visibilities_transfer_complete_host_func, context));
-    }
     // ------------------------------------------------------------------
     // 8. Rearrange correlator output to baseline-major, then trim padding
     // ------------------------------------------------------------------
@@ -1087,7 +1169,43 @@ public:
           T::NR_PACKETS_FOR_CORRELATION, b.stream);
     }
 
+    };
+
+    if constexpr (FUSED_INPUT) {
+      if ((!dummy_run || capture_compute_during_warmup_) && cuda_graphs_enabled()) {
+        auto &graph = compute_graphs_[current_buffer];
+        if (capture_compute_during_warmup_ && !compute_graph_capture_attempted_[current_buffer]) {
+          compute_graph_capture_attempted_[current_buffer] = true;
+          if (capture_compute_graph(b.stream, enqueue_compute, graph))
+            INFO_LOG("Captured compute CUDA graph for GPU buffer {}", current_buffer);
+          else
+            WARN_LOG("CUDA graph capture failed for GPU buffer {}; using eager execution", current_buffer);
+        }
+        if (graph)
+          CUDA_CHECK(cudaGraphLaunch(graph, b.stream));
+        else
+          enqueue_compute();
+      } else {
+        enqueue_compute();
+      }
+    } else {
+      enqueue_compute();
+    }
+
     if (output_ != nullptr && !dummy_run) {
+      if (vis_block_num != std::numeric_limits<size_t>::max()) {
+        // Packed TCC baselines put the physical receiver triangle before padding.
+        constexpr size_t row_bytes = NR_UNPADDED_BASELINES * T::NR_POLARIZATIONS *
+                                     T::NR_POLARIZATIONS * sizeof(float2);
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            output_->get_visibilities_landing_pointer(vis_block_num), row_bytes,
+            b.correlator_output.get(), sizeof(CorrelatorOutput) / DECOMPOSITION_CHANNELS,
+            row_bytes, DECOMPOSITION_CHANNELS, cudaMemcpyDeviceToHost, b.stream));
+        auto *context = new OutputTransferCompleteContext{
+            .output = output_, .block_index = vis_block_num};
+        CUDA_CHECK(cudaLaunchHostFunc(b.stream,
+            output_visibilities_transfer_complete_host_func, context));
+      }
       // -1, -1 is required but not used. Interface allows for single channel /
       // pol to be passed but this implementation does not use it.
 
@@ -1256,7 +1374,8 @@ public:
       double eigenmode_stats_interval_seconds = 10.0,
       float fine_channel_voltage_scale = 1.0f)
 
-      : num_buffers(num_buffers), h_weights(h_weights),
+      : num_buffers(num_buffers), compute_graphs_(num_buffers, nullptr),
+        compute_graph_capture_attempted_(num_buffers, false), h_weights(h_weights),
         beam_steering_(std::move(beam_steering)),
         correlator(cu::Device(0), tcc::Format::fp16, T::NR_PADDED_RECEIVERS,
                    DECOMPOSITION_CHANNELS,
@@ -1449,8 +1568,28 @@ public:
     std::memset(warmup_packet.scales, 0,
                 warmup_packet.get_scales_element_size());
     std::memset(warmup_packet.arrivals, 0, warmup_packet.get_arrivals_size());
-    execute_pipeline(&warmup_packet, true);
+    // Each buffer has its own GEMM handle and stream. Exercise them all before
+    // the first real packet can attempt CUDA stream capture.
+    for (int i = 0; i < num_buffers; ++i) {
+      current_buffer = i;
+      execute_pipeline(&warmup_packet, true);
+    }
+    current_buffer = 0;
     cudaDeviceSynchronize();
+    if constexpr (Mode == BeamformingMode::WeightsOnly && FUSED_INPUT) {
+      // Build the fixed per-buffer graphs after JIT/library warmup, before
+      // ingest begins. Capture and instantiation must not delay a live packet.
+      if (std::getenv("SPATIAL_DISABLE_CUDA_GRAPH") == nullptr) {
+        capture_compute_during_warmup_ = true;
+        for (int i = 0; i < num_buffers; ++i) {
+          current_buffer = i;
+          execute_pipeline(&warmup_packet, true);
+        }
+        current_buffer = 0;
+        capture_compute_during_warmup_ = false;
+        cudaDeviceSynchronize();
+      }
+    }
   };
 
   void dump_visibilities(const uint64_t end_seq_num = 0) override {

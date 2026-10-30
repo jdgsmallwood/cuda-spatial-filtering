@@ -1,0 +1,2 @@
+# Unified patches contain a context prefix on otherwise blank lines.
+patches/tcc/*.patch whitespace=-blank-at-eol

@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -93,6 +94,9 @@ def main():
                 line = next(line for line in text.splitlines() if line.startswith("ADAPTIVE_BENCHMARK "))
                 row = json.loads(line.split(" ", 1)[1])
                 with h5py.File(beam) as file:
+                    row["captured_cuda_graphs"] = int(file.attrs.get("captured_cuda_graphs", 0))
+                    if os.environ.get("SPATIAL_REQUIRE_CUDA_GRAPH") is not None and row["captured_cuda_graphs"] != row["gpu_buffers"]:
+                        raise RuntimeError("required graphs were not captured for every GPU buffer")
                     arrivals = file["arrivals"][:]
                     if arrivals.shape[1] != args.channels or arrivals.shape[-1] != args.fpgas:
                         raise RuntimeError("Benchmark dimensions do not match the executable")

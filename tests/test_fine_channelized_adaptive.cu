@@ -397,3 +397,71 @@ TEST_F(FineChannelizedAdaptiveTest, CoarseAndFineRemoveInterferenceAndRetainSour
     EXPECT_LT(after_error, before_error * 1e-5);
   }
 }
+
+// Public pipeline seam: graph execution must consume fresh input and preserve
+// protected/unprotected beam voltages, not merely complete without CUDA errors.
+TEST_F(FineChannelizedAdaptiveTest, AdaptiveGraphsMatchEagerVoltages) {
+  struct EnvRestore {
+    std::string name, value;
+    bool present;
+    EnvRestore(const char *n) : name(n), present(std::getenv(n) != nullptr) {
+      if (present) value = std::getenv(n);
+    }
+    ~EnvRestore() { if (present) setenv(name.c_str(), value.c_str(), 1); else unsetenv(name.c_str()); }
+  } restore_enable("SPATIAL_ENABLE_ADAPTIVE_CUDA_GRAPH"),
+    restore_disable("SPATIAL_DISABLE_CUDA_GRAPH");
+  setenv("SPATIAL_ENABLE_ADAPTIVE_CUDA_GRAPH", "1", 1);
+  auto check = [&](auto mode_tag, bool protect) {
+    constexpr auto mode = decltype(mode_tag)::value;
+    std::vector<float> reference;
+    for (bool graph : {false, true}) {
+      if (graph) unsetenv("SPATIAL_DISABLE_CUDA_GRAPH");
+      else setenv("SPATIAL_DISABLE_CUDA_GRAPH", "1", 1);
+      auto output = std::make_shared<AdaptiveFineChannelTestOutput<Config>>();
+      auto weights = test_support::make_unity_beam_weights<Config>();
+      BeamSteering<Config> steering({}, {}, {}, FrequencyPlan{}, 0, ArrayLocation{}, 1, 1);
+      constexpr size_t channels = mode == BeamformingMode::Coarse ? Config::NR_FPGA_CHANNELS : Config::NR_CHANNELS;
+      std::unordered_map<int, int> ranks;
+      for (size_t c = 0; c < channels; ++c) ranks[c] = 1;
+      AdaptiveBeamPipeline<Config, mode> pipeline(1, &weights, ranks, 0, std::move(steering));
+      std::vector<std::complex<float>> signature(channels * 2 * Config::NR_RECEIVERS, {1, 0});
+      if (protect) pipeline.set_protected_signatures(signature);
+      test_support::SyntheticPipelineRun<Config> driver(pipeline, output);
+      pipeline.prepare_cuda_graphs();
+      ASSERT_EQ(pipeline.cuda_graph_count(), graph ? 1u : 0u);
+      // Replacing a mask changes a captured pointer and must invalidate it.
+      pipeline.set_enabled_inputs(std::vector<uint8_t>(channels * 2 * Config::NR_RECEIVERS, 1));
+      ASSERT_EQ(pipeline.cuda_graph_count(), 0u);
+      pipeline.prepare_cuda_graphs();
+      ASSERT_EQ(pipeline.cuda_graph_count(), graph ? 1u : 0u);
+      if (protect) {
+        for (size_t i = 0; i < signature.size(); ++i) signature[i] = {float(1 + i % 3), float(i % 2)};
+        pipeline.set_protected_signatures(signature);
+      }
+      int delay[] = {3};
+      pipeline.set_subpacket_delays(delay);
+      pipeline.set_stream_permutation({3,3,2,2,1,1,0,0}, {1,0,1,0,1,0,1,0});
+      for (int frame = 0; frame < 2; ++frame) {
+        driver.run([frame](size_t, size_t, int packet, int time, int receiver, int pol) {
+          return std::complex<int8_t>((time + receiver * 3 + packet + frame * 7) % 17 - 8,
+                                     (time * 2 + pol + receiver + frame * 5) % 13 - 6);
+        }, constant_scale, 1000 + frame * Config::NR_PACKETS_FOR_CORRELATION * Config::NR_TIME_STEPS_PER_PACKET);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const auto *data = reinterpret_cast<const __half *>(output->beam_data);
+        const size_t count = sizeof(typename AdaptiveFineChannelTestOutput<Config>::BeamOut) / sizeof(__half);
+        for (size_t i = 0; i < count; ++i) {
+          const float value = __half2float(data[i]);
+          ASSERT_TRUE(std::isfinite(value));
+          if (!graph) reference.push_back(value);
+          else EXPECT_NEAR(value, reference[frame * count + i], 0.002f * std::max(1.f, std::abs(reference[frame * count + i])));
+        }
+      }
+      EXPECT_EQ(pipeline.eigensolver_failures(), 0u);
+      EXPECT_GE(pipeline.processed_blocks(), 2u);
+    }
+  };
+  for (bool protect : {false, true}) {
+    check(std::integral_constant<BeamformingMode, BeamformingMode::Coarse>{}, protect);
+    check(std::integral_constant<BeamformingMode, BeamformingMode::Fine>{}, protect);
+  }
+}

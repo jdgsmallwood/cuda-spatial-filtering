@@ -1,0 +1,66 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2d785b0..7ca1f2a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -23,6 +23,18 @@ endif()
+ 
+ find_package(CUDAToolkit REQUIRED)
+ 
++# CMake knows the header location even when libnvrtc lives elsewhere.
++set(TCC_CUDA_INCLUDE_DIR)
++foreach(_cuda_inc_dir IN LISTS CUDAToolkit_INCLUDE_DIRS)
++  if(EXISTS "${_cuda_inc_dir}/cuda.h")
++    set(TCC_CUDA_INCLUDE_DIR "${_cuda_inc_dir}")
++    break()
++  endif()
++endforeach()
++if(NOT TCC_CUDA_INCLUDE_DIR)
++  message(WARNING "Could not locate cuda.h in CUDAToolkit_INCLUDE_DIRS; NVRTC will fall back on runtime auto-detection")
++endif()
++
+ include(FetchContent)
+ set(CUDAWRAPPERS_COMPONENTS cu nvrtc)
+ if (${BUILD_WITH_PMT})
+@@ -53,7 +65,7 @@ if(${BUILD_WITH_PMT})
+   install(TARGETS pmt COMPONENT pmt)
+ endif()
+ 
+-include_directories(${CMAKE_BINARY_DIR})
++include_directories(${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+ configure_file(cmake/TCC-Config.h.in "${CMAKE_CURRENT_BINARY_DIR}/TCC-Config.h")
+ 
+ # Set up libtcc
+diff --git a/cmake/TCC-Config.h.in b/cmake/TCC-Config.h.in
+index 1b04b4a..47d0131 100644
+--- a/cmake/TCC-Config.h.in
++++ b/cmake/TCC-Config.h.in
+@@ -2,3 +2,4 @@
+ #cmakedefine BUILD_NVML_PMT
+ #cmakedefine BUILD_TEGRA_PMT
+ #cmakedefine BUILD_POWERSENSOR3_PMT
++#cmakedefine TCC_CUDA_INCLUDE_DIR "@TCC_CUDA_INCLUDE_DIR@"
+diff --git a/libtcc/Correlator.cc b/libtcc/Correlator.cc
+index 9e8d374..92cc482 100644
+--- a/libtcc/Correlator.cc
++++ b/libtcc/Correlator.cc
+@@ -3,6 +3,8 @@
+ #include <filesystem>
+ #include <iostream>
+ 
++#include "TCC-Config.h"
++
+ #define GNU_SOURCE
+ #include <link.h>
+ 
+@@ -13,6 +15,11 @@ namespace tcc {
+ 
+ std::string Correlator::findNVRTCincludePath() const
+ {
++#ifdef TCC_CUDA_INCLUDE_DIR
++  if (std::filesystem::exists(std::string(TCC_CUDA_INCLUDE_DIR) + "/cuda.h"))
++    return TCC_CUDA_INCLUDE_DIR;
++#endif
++
+   std::string path;
+ 
+ const char* cuda_home_env = std::getenv("CUDA_HOME");

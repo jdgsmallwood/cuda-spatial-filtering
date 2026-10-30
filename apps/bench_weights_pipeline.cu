@@ -5,6 +5,8 @@
 #include "spatial/spatial.hpp"
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <cuda_profiler_api.h>
 #include <iostream>
 #include <fstream>
 #include <cstdio>
@@ -55,6 +57,7 @@ int run(int repeats, int gpu_buffers, bool protected_source) {
       pipeline.set_protected_signatures(std::vector<std::complex<float>>(
           channels * Config::NR_POLARIZATIONS * Config::NR_RECEIVERS, {1.f, 0.f}));
     }
+    pipeline.prepare_cuda_graphs();
     pipeline.set_state(&state);
     std::vector<std::unique_ptr<Config::PacketFinalDataType>> packets;
     for (int i = 0; i < BenchState::kBuffers; ++i) {
@@ -95,6 +98,8 @@ int run(int repeats, int gpu_buffers, bool protected_source) {
     std::cout << "overlapping_vma_anon_huge_kib=" << huge_kib << '\n';
     pipeline.execute_pipeline(packets[0].get(), true);
     CUDA_CHECK(cudaDeviceSynchronize());
+    const bool profile_range = std::getenv("SPATIAL_BENCH_PROFILE_RANGE") != nullptr;
+    if (profile_range) CUDA_CHECK(cudaProfilerStart());
     const auto begin = std::chrono::steady_clock::now();
     for (int n = 0; n < repeats; ++n) {
       const int i = n % BenchState::kBuffers;
@@ -103,14 +108,17 @@ int run(int repeats, int gpu_buffers, bool protected_source) {
       pipeline.execute_pipeline(packets[i].get());
     }
     CUDA_CHECK(cudaDeviceSynchronize());
+    const auto end = std::chrono::steady_clock::now();
+    if (profile_range) CUDA_CHECK(cudaProfilerStop());
     const double elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - begin).count();
+        end - begin).count();
     const size_t bytes = size_t(Config::NR_FPGA_CHANNELS) * Config::NR_FPGA_SOURCES * Config::NR_PACKETS_FOR_CORRELATION * Config::NR_TIME_STEPS_PER_PACKET * Config::NR_RECEIVERS_PER_PACKET * Config::NR_POLARIZATIONS * 2;
     if (pipeline.eigensolver_failures()) throw std::runtime_error("eigensolver failure invalidates run");
     std::cout << "mode=" << (Mode == BeamformingMode::WeightsOnly ? "weights-only" : Mode == BeamformingMode::Coarse ? "coarse" : "fine")
               << " protected=" << protected_source << " channels=" << NR_OBSERVING_CHANNELS
               << " fine_bins=" << Config::NR_EFFECTIVE_FINE_CHANNELS
               << " gpu_buffers=" << gpu_buffers
+              << " captured_graphs=" << pipeline.cuda_graph_count()
               << " input_bytes_per_block=" << bytes
               << " blocks=" << repeats << " seconds=" << elapsed
               << " blocks_per_s=" << repeats / elapsed

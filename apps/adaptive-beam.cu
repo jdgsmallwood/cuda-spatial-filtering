@@ -227,6 +227,8 @@ int run_beam(CommonArgs args, const std::string &calibration, bool protect_sun,
   if (use_canonical)
     pipeline.set_stream_permutation(args.canonical_recv_perm,
                                     args.canonical_pol_perm);
+  pipeline.prepare_cuda_graphs();
+  beam_file.createAttribute<unsigned long long>("captured_cuda_graphs", pipeline.cuda_graph_count());
   std::cout << "Initializing packet capture...\n";
   auto capture = make_packet_captures(args, 512 * 1024 * 1024);
   if (args.pcap_filename.empty())

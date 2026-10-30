@@ -36,6 +36,8 @@ def test_full_array_replay_fits_and_writes_finite_voltages(tmp_path, mode, prote
     with h5py.File(tmp_path / "beam.h5") as output:
         assert output.attrs["eigensolver_failures"] == 0
         assert output.attrs["gpu_buffers"] == buffers
+        if os.environ.get("SPATIAL_REQUIRE_CUDA_GRAPH") is not None:
+            assert output.attrs["captured_cuda_graphs"] == buffers
         beam = output["beam_data"][:1].view(np.float16)
         assert beam.shape == (1, 1120, 2, 2, 512, 2)
         assert np.isfinite(beam).all()
