@@ -462,6 +462,7 @@ get_property(_APP_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_APP IN LISTS _APP_TARGETS)
     get_target_property(_APP_TYPE ${_APP} TYPE)
     if(_APP_TYPE STREQUAL "EXECUTABLE")
-        install(TARGETS ${_APP} RUNTIME DESTINATION bin)
+        # Install whichever apps were built without requiring every variant.
+        install(TARGETS ${_APP} RUNTIME DESTINATION bin COMPONENT observing OPTIONAL)
     endif()
 endforeach()
