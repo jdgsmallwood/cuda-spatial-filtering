@@ -1,0 +1,8 @@
+{
+  "source": "adaptive-graphs-benchmark-summary.zip",
+  "archive_sha256": "1c043c5ae21e1f58b95b2cf7fee1466e426cfdcb743c2e109e727f23a6ad33e6",
+  "selection": "gpu_buffers == 2",
+  "trials": 30,
+  "graph_trials": 15,
+  "trials_sha256": "99259003b38659af54e0f64629fa144b082eef041249ff1f25808406b7225922"
+}

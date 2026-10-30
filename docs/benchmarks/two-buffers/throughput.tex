@@ -1,0 +1,18 @@
+% Requires booktabs
+\begin{table*}
+\centering
+\small
+\caption{Two GPU buffers for every method. Median [minimum, maximum] of three 192-block trials; rates include H2D transfers and GPU compute, excluding packet parsing and output writing. Adaptive nulling rank is two; protected denotes rank-one spatial protection. Ranges are observed extrema, not confidence intervals.}
+\label{tab:beam-two-buffers}
+\begin{tabular}{lrrr}
+\toprule
+Configuration & Eager GB/s [min, max] & Graphs GB/s [min, max] & Change \\
+\midrule
+Weights only & 11.863 [11.860, 11.871] & 11.872 [11.611, 11.896] & +0.08\% \\
+Coarse, unprotected & 9.477 [9.477, 9.481] & 9.508 [9.496, 9.520] & +0.33\% \\
+Coarse, protected & 9.379 [9.372, 9.380] & 9.407 [9.403, 9.410] & +0.30\% \\
+Fine, unprotected & 3.875 [3.871, 3.876] & 3.871 [3.871, 3.879] & -0.10\% \\
+Fine, protected & 3.725 [3.717, 3.726] & 3.718 [3.711, 3.721] & -0.19\% \\
+\bottomrule
+\end{tabular}
+\end{table*}
