@@ -81,7 +81,12 @@ set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_SKIP_INSTALL_RULES TRUE)
 FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(json)
+# The root install script includes src/cmake_install.cmake even though src has
+# no install targets. Generate that empty script while keeping external
+# dependencies' install rules suppressed.
+set(CMAKE_SKIP_INSTALL_RULES FALSE)
 add_subdirectory(src)
+set(CMAKE_SKIP_INSTALL_RULES TRUE)
 
 # The executable code is here
 
@@ -312,5 +317,5 @@ if((CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME OR MODERN_CMAKE_BUILD_TESTING)
    AND BUILD_TESTING)
    enable_testing()
   add_subdirectory(tests)
-  add_subdirectory(${PROJECT_SOURCE_DIR}/extern/googletest)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/extern/googletest EXCLUDE_FROM_ALL)
 endif()
