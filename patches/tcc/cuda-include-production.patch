@@ -1,0 +1,66 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 902d1ba..4b6e117 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -22,6 +22,18 @@ endif()
+ 
+ find_package(CUDAToolkit REQUIRED)
+ 
++# CMake knows the header location even when libnvrtc lives elsewhere.
++set(TCC_CUDA_INCLUDE_DIR)
++foreach(_cuda_inc_dir IN LISTS CUDAToolkit_INCLUDE_DIRS)
++  if(EXISTS "${_cuda_inc_dir}/cuda.h")
++    set(TCC_CUDA_INCLUDE_DIR "${_cuda_inc_dir}")
++    break()
++  endif()
++endforeach()
++if(NOT TCC_CUDA_INCLUDE_DIR)
++  message(WARNING "Could not locate cuda.h in CUDAToolkit_INCLUDE_DIRS; NVRTC will fall back on runtime auto-detection")
++endif()
++
+ include(FetchContent)
+ 
+ set(CUDAWRAPPERS_COMPONENTS cu nvrtc)
+@@ -62,7 +74,7 @@ if(${TCC_BUILD_WITH_PMT})
+   install(TARGETS pmt COMPONENT pmt)
+ endif()
+ 
+-include_directories(${CMAKE_BINARY_DIR} "${huge-page-allocator_SOURCE_DIR}/include")
++include_directories(${CMAKE_BINARY_DIR} ${CMAKE_CURRENT_BINARY_DIR} "${huge-page-allocator_SOURCE_DIR}/include")
+ configure_file(cmake/TCC-Config.h.in "${CMAKE_CURRENT_BINARY_DIR}/TCC-Config.h")
+ 
+ # Set up libtcc
+diff --git a/cmake/TCC-Config.h.in b/cmake/TCC-Config.h.in
+index 1b04b4a..47d0131 100644
+--- a/cmake/TCC-Config.h.in
++++ b/cmake/TCC-Config.h.in
+@@ -2,3 +2,4 @@
+ #cmakedefine BUILD_NVML_PMT
+ #cmakedefine BUILD_TEGRA_PMT
+ #cmakedefine BUILD_POWERSENSOR3_PMT
++#cmakedefine TCC_CUDA_INCLUDE_DIR "@TCC_CUDA_INCLUDE_DIR@"
+diff --git a/libtcc/Correlator.cc b/libtcc/Correlator.cc
+index 87d328c..6288823 100644
+--- a/libtcc/Correlator.cc
++++ b/libtcc/Correlator.cc
+@@ -3,6 +3,8 @@
+ #include <filesystem>
+ #include <iostream>
+ 
++#include "TCC-Config.h"
++
+ #define GNU_SOURCE
+ #include <link.h>
+ 
+@@ -13,6 +15,11 @@ namespace tcc {
+ 
+ std::string Correlator::findNVRTCincludePath() const
+ {
++#ifdef TCC_CUDA_INCLUDE_DIR
++  if (std::filesystem::exists(std::string(TCC_CUDA_INCLUDE_DIR) + "/cuda.h"))
++    return TCC_CUDA_INCLUDE_DIR;
++#endif
++
+   std::string path;
+ 
+   if (dl_iterate_phdr([] (struct dl_phdr_info *info, size_t, void *arg) -> int

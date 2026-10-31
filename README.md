@@ -105,6 +105,18 @@ project root is used. The explicit prefix above also updates existing build
 caches. Override the destination with `cmake --install build --prefix /other/path`
 (which installs into `/other/path/bin`). Test executables are not installed.
 
+To install only the application binaries built for an observing run, use the
+`observing` component from the `apps` build directory. Unbuilt app variants
+are skipped, and this avoids unrelated dependency install rules:
+
+```bash
+cmake --build build --target starspin_4_40 pulsar_fold_intensity_4_40 starspin_4_8_coarse --parallel 4
+cmake --install build/apps --component observing --prefix "$STARSPIN_DIR"
+```
+
+For ibverbs capture, grant `cap_net_raw=ep` to each installed binary after
+installing it. Reinstalling a binary removes its previous file capability.
+
 ### Eight-channel Starspin without fine channelization
 
 Build `starspin_1_8_coarse`, `starspin_2_8_coarse`, `starspin_3_8_coarse`, or

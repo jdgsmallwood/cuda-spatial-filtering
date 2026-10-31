@@ -152,12 +152,13 @@ void aligned_to_corr_input(const __half *input, __half *corr_input,
 // input conversion without materializing the intermediate half buffers.
 template <size_t NR_CHANNELS, size_t NR_FPGA, size_t NR_RECV_PER_FPGA,
           size_t NR_RECEIVERS, size_t NR_ACTIVE_RECEIVERS, size_t NR_POL,
-          size_t NR_PACKETS, size_t NR_TIME, size_t NR_FINE, size_t NR_TAPS>
+          size_t NR_PACKETS, size_t NR_TIME, size_t NR_FINE, size_t NR_TAPS,
+          size_t NR_CORR_RECEIVERS = 0>
 __global__ void starspin_raw_to_filter_input_kernel(
     const char2 *__restrict__ raw, const int16_t *__restrict__ scales,
     const float2 *__restrict__ gains, const int *__restrict__ delays,
     const int *__restrict__ recv_perm, const int *__restrict__ pol_perm,
-    float2 *__restrict__ filter_input) {
+    float2 *__restrict__ filter_input, __half2 *__restrict__ corr_input) {
   constexpr size_t REAL_TIME = NR_PACKETS * NR_TIME;
   constexpr size_t INPUT_TIME = REAL_TIME + (NR_TAPS - 1) * NR_FINE;
   constexpr size_t TOTAL = NR_CHANNELS * NR_ACTIVE_RECEIVERS * NR_POL * INPUT_TIME;
@@ -178,6 +179,11 @@ __global__ void starspin_raw_to_filter_input_kernel(
     const int src_recv = recv_perm[perm_idx];
     if (src_recv < 0) {
       filter_input[idx] = make_float2(0.0f, 0.0f);
+      if constexpr (NR_CORR_RECEIVERS > 0) {
+        const size_t corr_idx = ((((channel * (REAL_TIME / 8) + time / 8) *
+            NR_CORR_RECEIVERS + recv) * NR_POL + pol) * 8 + time % 8);
+        corr_input[corr_idx] = __floats2half2_rn(0.f, 0.f);
+      }
       continue;
     }
     const size_t fpga = static_cast<size_t>(src_recv) / NR_RECV_PER_FPGA;
@@ -205,25 +211,33 @@ __global__ void starspin_raw_to_filter_input_kernel(
     // Match scale_and_convert_to_half followed by reorder_to_filter_input.
     filter_input[idx] = make_float2(__half2float(__float2half_rn(gained_real)),
                                     __half2float(__float2half_rn(gained_imag)));
+    if constexpr (NR_CORR_RECEIVERS > 0) {
+      const size_t corr_idx = ((((channel * (REAL_TIME / 8) + time / 8) *
+          NR_CORR_RECEIVERS + recv) * NR_POL + pol) * 8 + time % 8);
+      corr_input[corr_idx] = __floats2half2_rn(gained_real, gained_imag);
+    }
   }
 }
 
 template <size_t NR_CHANNELS, size_t NR_FPGA, size_t NR_RECV_PER_FPGA,
           size_t NR_RECEIVERS, size_t NR_ACTIVE_RECEIVERS, size_t NR_POL,
-          size_t NR_PACKETS, size_t NR_TIME, size_t NR_FINE, size_t NR_TAPS>
+          size_t NR_PACKETS, size_t NR_TIME, size_t NR_FINE, size_t NR_TAPS,
+          size_t NR_CORR_RECEIVERS = 0>
 void starspin_raw_to_filter_input(
     const char2 *raw, const int16_t *scales, const float2 *gains,
     const int *delays, const int *recv_perm, const int *pol_perm,
-    float2 *filter_input, cudaStream_t stream) {
+    float2 *filter_input, cudaStream_t stream, __half2 *corr_input = nullptr) {
+  static_assert(NR_CORR_RECEIVERS == 0 || NR_CORR_RECEIVERS >= NR_ACTIVE_RECEIVERS);
+  static_assert(NR_CORR_RECEIVERS == 0 || (NR_PACKETS * NR_TIME) % 8 == 0);
   constexpr size_t INPUT_TIME = NR_PACKETS * NR_TIME + (NR_TAPS - 1) * NR_FINE;
   constexpr size_t TOTAL = NR_CHANNELS * NR_ACTIVE_RECEIVERS * NR_POL * INPUT_TIME;
   constexpr int THREADS = 256;
   const int blocks = static_cast<int>((TOTAL + THREADS - 1) / THREADS);
   starspin_raw_to_filter_input_kernel<
       NR_CHANNELS, NR_FPGA, NR_RECV_PER_FPGA, NR_RECEIVERS,
-      NR_ACTIVE_RECEIVERS, NR_POL, NR_PACKETS, NR_TIME, NR_FINE, NR_TAPS>
+      NR_ACTIVE_RECEIVERS, NR_POL, NR_PACKETS, NR_TIME, NR_FINE, NR_TAPS, NR_CORR_RECEIVERS>
       <<<blocks, THREADS, 0, stream>>>(raw, scales, gains, delays, recv_perm,
-                                       pol_perm, filter_input);
+                                       pol_perm, filter_input, corr_input);
 }
 
 // Gathers samples_reordered (__half[FPGA][PACKET][TIME_IN_PACKET][CHANNEL(coarse)]

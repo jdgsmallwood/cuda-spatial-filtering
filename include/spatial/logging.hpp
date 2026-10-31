@@ -23,6 +23,7 @@
     cusolverStatus_t err_ = (err);                                             \
     if (err_ != CUSOLVER_STATUS_SUCCESS) {                                     \
       printf("cusolver error %d at %s:%d\n", err_, __FILE__, __LINE__);        \
+      std::exit(EXIT_FAILURE);                                                 \
     }                                                                          \
   } while (0);
 

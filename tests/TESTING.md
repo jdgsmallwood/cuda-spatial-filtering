@@ -147,3 +147,26 @@ match production assumptions and eliminates the cross-test dependency.
 4. Assert on `*output-><field>` using the helpers in `assertions.hpp` — reach for invariant checks
    first; only write exact-value goldens if the variant's math is genuinely hand-derivable (as
    `LambdaGPUPipeline`'s is).
+
+## Required monitoring checks
+
+The CPU monitor tests need `g++`, `libhiredis-dev` and `nlohmann-json3-dev`.
+The repository Dockerfile and Python CI job install these dependencies. Older
+validation images may lack the JSON header even though CMake fetched a copy for
+application builds. The standalone pytest compiler probe uses system headers.
+
+For release/handoff validation, use:
+
+```bash
+SPATIAL_REQUIRE_MONITOR_TESTS=1 python3 -m pytest -q -ra tests/test_monitor.py
+```
+
+Required mode fails on missing prerequisites; ordinary developer runs may skip
+these optional checks, with reasons shown by `-ra`. CI enables required mode.
+
+For older CUDA images, casacore may have DE200/DE405 under
+`/usr/share/casacore/data/ephemerides` while looking under
+`/var/lib/casacore/data/ephemerides`. Inspect both directories first. The runtime
+lookup must point to the installed table, not the reverse. Rebuild the repository
+Dockerfile for the persistent fix; avoid treating a startup ephemeris failure as
+a pipeline numerical failure.

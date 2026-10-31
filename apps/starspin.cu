@@ -70,7 +70,7 @@ int main(int argc, char *argv[]) {
   std::cout << "Starting....\n";
   argparse::ArgumentParser program("pipeline");
   bool monitoring = false;
-  std::string monitor_host = "127.0.0.1", monitor_baselines = "0:1";
+  std::string monitor_host = "127.0.0.1", monitor_baselines = "sampled";
   std::string monitor_provenance, monitor_waterfall = "rx0_p0";
   int monitor_port = 6379;
   double monitor_interval = 5;
@@ -79,12 +79,12 @@ int main(int argc, char *argv[]) {
   program.add_argument("--monitor-port").default_value(monitor_port).scan<'i', int>().store_into(monitor_port);
   program.add_argument("--monitor-interval").default_value(monitor_interval).scan<'g', double>().store_into(monitor_interval);
   program.add_argument("--monitor-baselines").default_value(monitor_baselines)
-      .help("Comma-separated packed receiver pairs, e.g. 0:1,0:2 (max 16)").store_into(monitor_baselines);
+      .help("sampled: up to 8 fixed receiver pairs (default), or up to 16 pairs, e.g. 0:1,0:2").store_into(monitor_baselines);
   program.add_argument("--monitor-waterfall").default_value(monitor_waterfall)
       .help("Input spectrum for waterfall, e.g. rx0_p0").store_into(monitor_waterfall);
   program.add_argument("--monitor-provenance").default_value(std::string())
       .help("JSON observing record; omitted boot/delay verification is unverified").store_into(monitor_provenance);
-  CommonArgs args = parse_common_args(program, argc, argv);
+  CommonArgs args = parse_common_args(program, argc, argv, false);
 #ifdef SPATIAL_DECOUPLED_COMPLETION
   if (!args.pcap_filename.empty() || args.capture_backend == "ibverbs-gpudirect")
     throw std::runtime_error("decoupled completion requires live CPU-ring capture with one FPGA per NIC");
@@ -207,17 +207,13 @@ int main(int argc, char *argv[]) {
           spectra.push_back({receiver * (receiver + 1) / 2 + receiver, pol,
                              "rx" + std::to_string(receiver) + "_p" + std::to_string(pol), valid(receiver), true});
       }
-      std::istringstream pairs(monitor_baselines);
-      std::string pair;
-      size_t pair_count = 0;
-      while (std::getline(pairs, pair, ',')) {
-        if (++pair_count > 16) throw std::invalid_argument("at most 16 monitor baselines");
-        std::istringstream input(pair);
-        int first, second;
-        char separator, extra;
-        if (!(input >> first >> separator >> second) || separator != ':' || (input >> extra) ||
-            first < 0 || second < first || static_cast<size_t>(second) >= receivers)
-          throw std::invalid_argument("monitor baselines require receiver indices 0 <= first <= second < receiver count");
+      std::vector<size_t> connected_receivers;
+      for (size_t receiver = 0; receiver < receivers; ++receiver)
+        if (valid(receiver)) connected_receivers.push_back(receiver);
+      const auto pairs = monitor_baselines == "sampled"
+          ? spatial_monitor::sampled_monitor_baselines(connected_receivers)
+          : spatial_monitor::monitor_baseline_pairs(receivers, monitor_baselines);
+      for (const auto &[first, second] : pairs) {
         for (int pol = 0; pol < 2; ++pol)
           spectra.push_back({size_t(second * (second + 1) / 2 + first), pol,
                              "rx" + std::to_string(first) + "_rx" + std::to_string(second) + "_p" + std::to_string(pol),

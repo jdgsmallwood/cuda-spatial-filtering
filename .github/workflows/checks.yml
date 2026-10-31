@@ -18,6 +18,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y g++ libhiredis-dev nlohmann-json3-dev
       - run: python -m pip install -r requirements-test.txt
       - run: python -m pytest -q -ra tests
+        env:
+          SPATIAL_REQUIRE_MONITOR_TESTS: "1"
   difx-compatibility:
     runs-on: ubuntu-24.04
     steps:

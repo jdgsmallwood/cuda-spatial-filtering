@@ -313,7 +313,7 @@ int main(int argc, char *argv[]) {
       args.beam_targets, args.antenna_positions, active_mapping,
       args.frequency_plan, args.min_freq_channel, args.array_location,
       args.steering_update_interval_seconds, num_buffers,
-      fold_calibration_into_steering ? &calibration_gains : nullptr);
+      fold_calibration_into_steering ? &calibration_gains : nullptr, args.steering_utc);
 
   std::cout << "Initializing pipeline...\n";
   LambdaBeamformedSpectraPipeline<Config> pipeline(num_buffers, &projected,

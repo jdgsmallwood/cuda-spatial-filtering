@@ -29,7 +29,8 @@ topocentric_direction(double ra_deg, double dec_deg,
 
   MDirection target(Quantity(ra_deg, "deg"), Quantity(dec_deg, "deg"),
                     MDirection::J2000);
-  MDirection::Ref azel_ref(MDirection::AZEL, frame);
+  // Antenna ENU uses the WGS84 surface normal, not geocentric up.
+  MDirection::Ref azel_ref(MDirection::AZELGEO, frame);
   MDirection azel = MDirection::Convert(target, azel_ref)();
 
   Vector<Double> azel_rad = azel.getAngle("rad").getValue();
@@ -43,4 +44,19 @@ topocentric_direction(double ra_deg, double dec_deg,
   dc.m = std::cos(az) * std::cos(el);
   dc.n = std::sin(el);
   return dc;
+}
+
+DirectionCosines solar_direction(std::chrono::system_clock::time_point utc_time,
+                                 double latitude_deg, double longitude_deg, double height_m) {
+  using namespace casacore;
+  MPosition site(MVPosition(Quantity(height_m, "m"), Quantity(longitude_deg, "deg"),
+                            Quantity(latitude_deg, "deg")), MPosition::WGS84);
+  MEpoch epoch(Quantity(to_mjd_utc(utc_time), "d"), MEpoch::UTC);
+  MeasFrame frame(epoch, site);
+  MDirection target(MDirection::Ref(MDirection::SUN, frame));
+  // ENU antenna coordinates use geodetic up, as does Astropy AltAz.
+  const auto azel = MDirection::Convert(target, MDirection::Ref(MDirection::AZELGEO, frame))();
+  const auto angles = azel.getAngle("rad").getValue();
+  const double az = angles[0], el = angles[1];
+  return {std::sin(az) * std::cos(el), std::cos(az) * std::cos(el), std::sin(el)};
 }

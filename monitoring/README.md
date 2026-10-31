@@ -47,7 +47,7 @@ images and install Redis datasource 2.2.0.
 | `--monitor-host` | `127.0.0.1` | Numeric IPv4/IPv6 address; DNS is excluded from the shutdown path |
 | `--monitor-port` | `6379` | Use `6380` for the supplied Compose stack |
 | `--monitor-interval` | `5` | Seconds between samples; finite, at least one second |
-| `--monitor-baselines` | `0:1` | Up to 16 comma-separated receiver pairs `i:j`, with `i <= j` |
+| `--monitor-baselines` | `sampled` | Up to 8 fixed cross-receiver pairs; or up to 16 comma-separated pairs `i:j`, with `i <= j` |
 | `--monitor-waterfall` | `rx0_p0` | Input whose recent spectral history is retained |
 | `--monitor-provenance` | unset | JSON observing record; unspecified verification is `unverified` |
 
@@ -56,7 +56,15 @@ correlator running; ordinary command-line syntax errors still fail parsing. A va
 Starspin's configuration is required to label spectra. Physical antenna IDs
 and receiver mapping are shown in the observation table. Baseline selections
 use **output receiver indices**, not physical antenna numbers. Both parallel
-polarisation products are published for each selected pair.
+polarisation products are published for each selected pair. The Baseline dropdown
+lists every pair/product published by the run. The default selects up to eight
+pairs evenly spaced through the triangular pair list of connected output receivers,
+with both parallel products (up to 16 spectra). This is an index-based sample,
+not a selection by physical baseline length. It stays fixed for the run and
+updates at the normal monitor interval; input power monitoring is unchanged.
+Use `--monitor-baselines 0:1,0:2` to choose specific pairs.
+Rebuild and restart Starspin, then
+refresh Grafana to use the new default; retained runs keep their original selection.
 
 Power spectra and band-mean power are raw accumulated correlations, not Jy,
 not normalized by integration duration, and not corrected for missing packets.

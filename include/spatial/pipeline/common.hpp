@@ -119,7 +119,10 @@ inline BeamWeightsT<T> compute_steering_weights(
     DirectionCosines dc =
         (target.mode == "zenith")
             ? zenith_direction()
-            : topocentric_direction(target.ra_deg, target.dec_deg, utc_time,
+            : target.mode == "sun"
+                ? solar_direction(utc_time, array_location.latitude_deg,
+                                  array_location.longitude_deg, array_location.height_m)
+                : topocentric_direction(target.ra_deg, target.dec_deg, utc_time,
                                     array_location.latitude_deg,
                                     array_location.longitude_deg,
                                     array_location.height_m);
@@ -268,6 +271,61 @@ template <typename T> struct BeamSteering {
     }
   }
 
+  void advance_replay_time(double seconds) {
+    if (!capture_epoch_) capture_epoch_ = fixed_time_;
+    if (capture_epoch_)
+      fixed_time_ = *capture_epoch_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(
+          std::chrono::duration<double>(seconds));
+  }
+
+  bool maybe_refresh_for_block(uint64_t start_sequence, bool dummy_run = false) {
+    if (fixed_time_ && !dummy_run) {
+      const double sample_rate = frequency_plan_.channel_bandwidth_hz * 32.0 / 27.0;
+      if (!(sample_rate > 0) || !std::isfinite(sample_rate))
+        throw std::invalid_argument("Replay steering requires a valid frequency plan");
+      if (!first_sequence_) first_sequence_ = start_sequence;
+      if (start_sequence < *first_sequence_)
+        throw std::invalid_argument("Replay sequence precedes the steering epoch");
+      advance_replay_time((double(start_sequence - *first_sequence_) +
+          0.5 * T::NR_PACKETS_FOR_CORRELATION * T::NR_TIME_STEPS_PER_PACKET) / sample_rate);
+    }
+    return maybe_refresh();
+  }
+
+  std::vector<std::complex<float>> solar_signatures(bool coarse) const {
+    if (targets_.empty() || targets_[0].mode != "sun")
+      throw std::invalid_argument("solar protection requires a Sun-tracking beam");
+    const auto dc = solar_direction(last_update_, array_location_.latitude_deg,
+                                   array_location_.longitude_deg, array_location_.height_m);
+    const size_t channels = coarse ? T::NR_FPGA_CHANNELS : T::NR_CHANNELS;
+    std::vector<std::complex<float>> signatures(channels * T::NR_POLARIZATIONS * T::NR_RECEIVERS);
+    for (size_t c = 0; c < channels; ++c) {
+      const size_t fine = coarse && T::NR_FINE_CHANNELS > 1
+          ? c * T::NR_EFFECTIVE_FINE_CHANNELS + T::NR_FINE_CHANNELS / 2 -
+                T::NR_FINE_CHANNEL_EDGE_TRIM - T::NR_FINE_CHANNEL_LOWER_EXTRA_TRIM : c;
+      const double frequency = coarse
+          ? channel_to_frequency_hz(min_freq_channel_ + c, frequency_plan_)
+          : processing_channel_to_frequency_hz(c, min_freq_channel_, frequency_plan_,
+                T::NR_FINE_CHANNELS, T::NR_FINE_CHANNEL_EDGE_TRIM, 27.0,
+                T::NR_FINE_CHANNEL_LOWER_EXTRA_TRIM);
+      for (size_t r = 0; r < T::NR_RECEIVERS; ++r) {
+        const auto antenna = antenna_mapping_.at(r);
+        if (antenna < 0) continue;
+        const auto &position = antenna_positions_.at(antenna);
+        const double phase = 2 * M_PI * frequency / kSpeedOfLightMetresPerSecond *
+            (dc.l * position.east + dc.m * position.north + dc.n * position.up);
+        for (size_t p = 0; p < T::NR_POLARIZATIONS; ++p) {
+          const auto inverse_gain = calibration_gains_ ? (*calibration_gains_)[fine][p][r]
+                                                       : std::complex<float>(1, 0);
+          if (std::norm(inverse_gain) == 0) continue;
+          signatures[(c * T::NR_POLARIZATIONS + p) * T::NR_RECEIVERS + r] =
+              std::complex<float>(std::cos(phase), std::sin(phase)) / inverse_gain;
+        }
+      }
+    }
+    return signatures;
+  }
+
   // True once real targets have been supplied (vs. permanently inert).
   bool active() const { return !targets_.empty(); }
 
@@ -341,6 +399,8 @@ private:
   std::chrono::duration<double> update_interval_;
   const typename T::FineAntennaGains *calibration_gains_;
   std::optional<std::chrono::system_clock::time_point> fixed_time_;
+  std::optional<uint64_t> first_sequence_;
+  std::optional<std::chrono::system_clock::time_point> capture_epoch_;
 
   std::vector<RegisteredBuffer> buffers_;
   BeamWeights current_weights_{};
@@ -356,7 +416,7 @@ template <typename T> using DevicePtr = std::unique_ptr<T, CudaDeleter<T>>;
 
 template <typename T> DevicePtr<T> make_device_ptr(size_t size = sizeof(T)) {
   T *ptr = nullptr;
-  cudaMalloc((void **)&ptr, size);
+  CUDA_CHECK(cudaMalloc((void **)&ptr, size));
   return DevicePtr<T>(ptr);
 }
 

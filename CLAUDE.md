@@ -1,5 +1,20 @@
 # CLAUDE.md
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use a single-context layout: root `GLOSSARY.md` and `docs/adr/`.
+See `docs/agents/domain.md`.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is
@@ -13,6 +28,10 @@ analysis of captured PCAP and HDF5 data, and a Textual TUI in `ui/` for configur
 builds.
 
 ## Build & test
+
+For adaptive beamforming deployment and benchmarks, read
+`docs/agents/production-beamforming-handoff.md`. For test prerequisites and
+required monitoring checks, read `tests/TESTING.md`.
 
 Requires CUDA, cuTENSOR, HDF5, CFITSIO, CasaCore, and PSRDADA (`$PSRHOME` env var must point at a
 PSRDADA install). Dependencies in `extern/` are git submodules — run
@@ -146,7 +165,7 @@ Build options that shape the generated code (set with `-D...`, see top-level `CM
 `NR_OBSERVING_PACKETS_FOR_CORRELATION`, `NR_OBSERVING_CORRELATION_BLOCKS_TO_INTEGRATE`,
 `NR_OBSERVING_FINE_CHANNELS`, `NR_OBSERVING_FINE_CHANNEL_EDGE_TRIM`, `NUMBER_BEAMS`. These become
 `add_compile_definitions` and feed directly into the `LambdaConfig` template instantiations in each
-app's `main()`. They only apply to the `apps` subdirectory build (skipped when `BUILD_TESTING=ON`).
+app's `main()`. They apply to application targets; `BUILD_TESTING=ON` additionally builds tests and does not exclude apps.
 `NR_OBSERVING_FINE_CHANNELS` (default 32) is the pre-correlation PFB channelizer's fine-channel
 count per coarse/FPGA channel, via ASTRON's `gpu-filter` (see `docs/architecture.md` Section 6) —
 `1` disables channelization entirely, reproducing pre-channelization behaviour exactly.

@@ -49,7 +49,7 @@ struct FrequencyPlan {
 // periodically to follow sidereal motion); "zenith" is straight up and
 // time-invariant.
 struct BeamTarget {
-  std::string mode = "zenith"; // "radec" or "zenith"
+  std::string mode = "zenith"; // "radec", "zenith", or "sun"
   double ra_deg = 0.0;
   double dec_deg = 0.0;
 };
@@ -120,7 +120,8 @@ inline DirectionCosines zenith_direction() {
 
 // Converts a J2000 RA/Dec to topocentric direction cosines for an observer at
 // the given WGS84 site and UTC time, via casacore's MeasFrame/MeasConvert
-// (J2000 -> AzEl, folding in precession/nutation/aberration/sidereal time --
+// (J2000 -> geodetic AzEl, matching the antenna ENU frame and folding in
+// precession/nutation/aberration/sidereal time --
 // why this must be re-evaluated periodically to keep a beam on-target).
 // Defined in src/pointing.cpp; see the header comment for why.
 DirectionCosines
@@ -128,3 +129,6 @@ topocentric_direction(double ra_deg, double dec_deg,
                       std::chrono::system_clock::time_point utc_time,
                       double latitude_deg, double longitude_deg,
                       double height_m);
+
+DirectionCosines solar_direction(std::chrono::system_clock::time_point utc_time,
+                                 double latitude_deg, double longitude_deg, double height_m);
